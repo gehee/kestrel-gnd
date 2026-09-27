@@ -1,0 +1,12 @@
+[Unit]
+Description=Kestrel Joystick GPIO-to-uinput Mapper
+Before=kestrel-gnd.service
+
+[Service]
+ExecStart=/usr/bin/kestrel-gpio-joystick
+Restart=always
+RestartSec=1
+User=root
+
+[Install]
+WantedBy=multi-user.target

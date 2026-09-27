@@ -1,0 +1,17 @@
+[Unit]
+Description=Kestrel Ground Station OSD
+After=local-fs.target network.target
+
+[Service]
+ExecStart=/usr/bin/kestrel-gnd
+WorkingDirectory=/etc/kestrel
+Restart=on-failure
+RestartSec=3
+User=root
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=kestrel-gnd
+
+[Install]
+WantedBy=multi-user.target

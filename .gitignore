@@ -1,0 +1,27 @@
+sysroot-rk3588/
+build-arm64/
+
+v_rawl_rx
+v_rawl_rx.yaml
+cmake_install.cmake
+CMakeCache.txt
+vrr_test
+wlink
+.vscode
+CMakeFiles
+Makefile
+._.DS_Store
+vdec_test
+build
+.claude
+
+# Dev/test media — not shipped (runtime uses /etc/kestrel/background.* from the overlay)
+background.mp4
+background_1080p30.mp4
+background_1080p60.mp4
+background.png
+village.png
+village_1080p_60fps.mp4
+village_1440p_60fps.mp4
+samples/
+fonts/*.raw

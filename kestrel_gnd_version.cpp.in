@@ -1,0 +1,12 @@
+// Generated at build time by cmake/stamp_version.cmake - do not edit.
+//
+// `extern` is required: a const object at namespace scope has internal linkage
+// in C++, so without it these definitions would not satisfy the declarations
+// in kestrel_gnd_config.h.
+extern const char kestrel_gnd_version[];
+extern const char kestrel_gnd_build_time[];
+extern const char kestrel_gnd_git_hash[];
+
+const char kestrel_gnd_version[]    = "@PROJECT_VERSION@";
+const char kestrel_gnd_build_time[] = "@KESTREL_GND_BUILD_TIME@";
+const char kestrel_gnd_git_hash[]   = "@KESTREL_GND_GIT_HASH@";

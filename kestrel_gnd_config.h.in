@@ -1,0 +1,15 @@
+#pragma once
+// The version stamp is defined in a generated translation unit that is rebuilt
+// on every build (kestrel_gnd_version.cpp.in), so it tracks the working tree
+// instead of the moment the build directory was configured.
+//
+// These are extern symbols rather than macros on purpose: regenerating the
+// stamp then costs one tiny recompile and a relink, where macros would rebuild
+// every translation unit that prints the version - including osd.cpp.
+extern const char kestrel_gnd_version[];
+extern const char kestrel_gnd_build_time[];
+extern const char kestrel_gnd_git_hash[];
+
+#define KESTREL_GND_VERSION    kestrel_gnd_version
+#define KESTREL_GND_BUILD_TIME kestrel_gnd_build_time
+#define KESTREL_GND_GIT_HASH   kestrel_gnd_git_hash
