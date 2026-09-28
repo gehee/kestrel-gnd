@@ -696,6 +696,8 @@ typedef struct MP4E_mux_tag
     int enable_fragmentation; // flag, indicating streaming-friendly 'fragmentation' mode
     int fragments_count;      // # of fragments in 'fragmentation' mode
     uint64_t fragment_time;   // fpvOS: decode time of the next fragment (sum of durations so far)
+    int frag_track;           // fpvOS: track of the picture held in pending_sample, -1 if none
+    int frag_duration, frag_kind;
 
 } MP4E_mux_t;
 
@@ -820,6 +822,7 @@ MP4E_mux_t *MP4E_open(int sequential_mode_flag, int enable_fragmentation, void *
     mux->enable_fragmentation = enable_fragmentation;
     mux->fragments_count = 0;
     mux->fragment_time = 0;
+    mux->frag_track = -1;
     mux->write_callback = write_callback;
     mux->token = token;
     mux->text_comment = NULL;
@@ -1098,6 +1101,42 @@ static int mp4e_write_mdat_box(MP4E_mux_t *mux, uint32_t size)
 /**
 *   Add new sample to specified track
 */
+/*
+*   fpvOS: write the fragment held in the track's pending_sample, if any.
+*/
+static int mp4e_flush_fragment(MP4E_mux_t *mux)
+{
+    track_t *tr;
+    int duration = mux->frag_duration, data_bytes;
+    if (mux->frag_track < 0)
+        return MP4E_STATUS_OK;
+    tr = ((track_t*)mux->tracks.data) + mux->frag_track;
+    data_bytes = tr->pending_sample.bytes;
+    #if MP4D_TFDT_SUPPORT
+    // fpvOS: the running sum of the durations actually given, not
+    // fragments * this duration - DVR samples carry their real arrival
+    // times, and the constant-rate assumption put every later fragment
+    // at the wrong time.
+    uint64_t timestamp = mux->fragment_time;
+    mux->fragment_time += (uint64_t)duration;
+    #endif
+    if (!mux->fragments_count++)
+        ERR(mp4e_flush_index(mux)); // write file headers before 1st sample
+    // write MOOF + MDAT + sample data
+    #if MP4D_TFDT_SUPPORT
+    ERR(mp4e_write_fragment_header(mux, mux->frag_track, data_bytes, duration, mux->frag_kind, timestamp));
+    #else
+    ERR(mp4e_write_fragment_header(mux, mux->frag_track, data_bytes, duration, mux->frag_kind));
+    #endif
+    // write MDAT box for each sample
+    ERR(mp4e_write_mdat_box(mux, data_bytes + 8));
+    ERR(mux->write_callback(mux->write_pos, tr->pending_sample.data, data_bytes, mux->token));
+    mux->write_pos += data_bytes;
+    tr->pending_sample.bytes = 0;
+    mux->frag_track = -1;
+    return MP4E_STATUS_OK;
+}
+
 int MP4E_put_sample(MP4E_mux_t *mux, int track_num, const void *data, int data_bytes, int duration, int kind)
 {
     track_t *tr;
@@ -1106,26 +1145,25 @@ int MP4E_put_sample(MP4E_mux_t *mux, int track_num, const void *data, int data_b
     tr = ((track_t*)mux->tracks.data) + track_num;
     if (mux->enable_fragmentation)
     {
-        #if MP4D_TFDT_SUPPORT
-        // fpvOS: the running sum of the durations actually given, not
-        // fragments * this duration - DVR samples carry their real arrival
-        // times, and the constant-rate assumption put every later fragment
-        // at the wrong time.
-        uint64_t timestamp = mux->fragment_time;
-        mux->fragment_time += (uint64_t)duration;
-        #endif
-        if (!mux->fragments_count++)
-            ERR(mp4e_flush_index(mux)); // write file headers before 1st sample
-        // write MOOF + MDAT + sample data
-        #if MP4D_TFDT_SUPPORT
-        ERR(mp4e_write_fragment_header(mux, track_num, data_bytes, duration, kind, timestamp));
-        #else
-        ERR(mp4e_write_fragment_header(mux, track_num, data_bytes, duration, kind));
-        #endif
-        // write MDAT box for each sample
-        ERR(mp4e_write_mdat_box(mux, data_bytes + 8));
-        ERR(mux->write_callback(mux->write_pos, data, data_bytes, mux->token));
-        mux->write_pos += data_bytes;
+        // fpvOS: a picture sent as several slices arrives as one sample and
+        // then continuations. Each used to become a fragment of its own, with
+        // the whole picture's duration: a 2-slice stream came out twice as
+        // long, and players took every slice for a separate picture. The
+        // picture is held until its next sample starts, then written as one
+        // fragment - as the non-fragmented index already merges them.
+        if (kind == MP4E_SAMPLE_CONTINUATION)
+        {
+            if (mux->frag_track != track_num)
+                return MP4E_STATUS_BAD_ARGUMENTS; // no picture to continue
+            return minimp4_vector_put(&tr->pending_sample, data, data_bytes)
+                ? MP4E_STATUS_OK : MP4E_STATUS_NO_MEMORY;
+        }
+        ERR(mp4e_flush_fragment(mux));
+        if (!minimp4_vector_put(&tr->pending_sample, data, data_bytes))
+            return MP4E_STATUS_NO_MEMORY;
+        mux->frag_track = track_num;
+        mux->frag_duration = duration;
+        mux->frag_kind = kind;
         return MP4E_STATUS_OK;
     }
 
@@ -1753,6 +1791,8 @@ int MP4E_close(MP4E_mux_t *mux)
         return MP4E_STATUS_BAD_ARGUMENTS;
     if (!mux->enable_fragmentation)
         err = mp4e_flush_index(mux);
+    else
+        err = mp4e_flush_fragment(mux); // fpvOS: the last picture
     if (mux->text_comment)
         free(mux->text_comment);
     ntracks = mux->tracks.bytes / sizeof(track_t);
