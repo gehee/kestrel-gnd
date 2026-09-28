@@ -5,11 +5,13 @@
 
 namespace sky {
 
+// The 120 fps entries are labelled 100: 120 is the value stock sends on the
+// wire and what the menu matches against, but the air unit does not support 120.
 const VideoMode kFpvModes[] = {
-    { "720P60",   1280,  720,  60 },
-    { "720P120",  1280,  720, 120 },
-    { "1080P60",  1920, 1080,  60 },
-    { "1080P120", 1920, 1080, 120 },
+    { "720p60",   1280,  720,  60 },
+    { "720p100",  1280,  720, 120 },
+    { "1080p60",  1920, 1080,  60 },
+    { "1080p100", 1920, 1080, 120 },
 };
 const int kFpvModeCount = (int)(sizeof(kFpvModes) / sizeof(kFpvModes[0]));
 

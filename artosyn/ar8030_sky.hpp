@@ -85,7 +85,8 @@ struct VideoMode {
 extern const VideoMode kFpvModes[];
 extern const int       kFpvModeCount;
 
-// Index of the mode stock boots into (1080P120), used as the menu default.
+// Index of the mode stock boots into (1080p100, sent as 120), used as the menu
+// default.
 int default_fpv_mode_index();
 
 // The subset of the SET_CONFIG (cmd 0x10) body we understand and want to
