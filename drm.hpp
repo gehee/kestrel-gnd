@@ -2,6 +2,7 @@
 #define DRM_DEVICE_H  // Define DRM_DEVICE_H
 
 #include <atomic>
+#include <string>
 #include <vector>
 #include <deque>
 #include <condition_variable>
@@ -206,6 +207,9 @@ public:
 public:
     int drm_fd = -1;
     struct modeset_output *output_list = nullptr;
+    // The ID (utils/screen_id.h) of the screen this was set up for, "" if it
+    // had none. A different one plugged in later restarts kestrel-gnd.
+    std::string display_id;
     // Video variables
 	uint32_t video_frm_width;
 	uint32_t video_frm_height;

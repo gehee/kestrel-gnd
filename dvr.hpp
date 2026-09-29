@@ -22,9 +22,12 @@ extern "C" {
 #include <libswscale/swscale.h>
 }
 
+#include <atomic>
 #include <chrono>
+#include <deque>
 #include <iomanip>
 #include <sstream>
+#include <thread>
 
 // How often a screen recording captures the screen, from dvr_screen_fps
 // (default 30, at most 60), on a capture thread of its own. Each capture is an
@@ -33,10 +36,44 @@ extern "C" {
 // a little more cost to the live picture.
 int dvr_screen_capture_fps();
 
+// What REC records when the settings do not say (dvr_screen, dvr_screen_fps):
+// the screen - video and HUD as the pilot sees them - 60 times a second.
+constexpr bool kDvrScreenDefault    = true;
+constexpr int  kDvrScreenFpsDefault = 60;
+
 enum DvrFormat {
     RAW,
     MP4,
     FMP4
+};
+
+// The DVR's file writes, on a thread of their own.
+//
+// The muxer writes each picture as it is handed one, on the thread that takes
+// the pictures. Writing there meant the once-a-second fsync - which puts the
+// recording on the card, so a power cut loses a second at most - held that
+// thread for as long as the card took, 50 to 250 ms on the DVR partition. A
+// screen recording captures into a few buffers only, and with none coming
+// back the captures in between were dropped: the recording froze for a few
+// frames every second. Here the muxer's writes are only queued; this thread
+// writes them, in order, and does the syncing.
+class DvrWriter {
+    public:
+        explicit DvrWriter(int fd);
+        ~DvrWriter();       // writes out everything queued, then syncs
+        // Queue a write; 1 once any write has failed, as minimp4 expects.
+        int write(int64_t offset, const void* buf, size_t size);
+    private:
+        void run();
+        struct Chunk { int64_t offset; std::vector<uint8_t> data; };
+        const int fd_;
+        std::mutex m_;
+        std::condition_variable work_, room_;
+        std::deque<Chunk> q_;
+        size_t queued_ = 0;     // bytes in q_
+        bool done_ = false;
+        std::atomic<bool> failed_{false};
+        std::thread t_;
 };
 
 class DVR {
@@ -44,6 +81,7 @@ class DVR {
         volatile bool *should_stop;
         
         FILE *dvr_file;
+        std::unique_ptr<DvrWriter> writer;   // the muxer's writes to dvr_file
         DvrFormat format;
 
         MP4E_mux_t *mux;
@@ -105,7 +143,7 @@ class DVR {
             // Both modes write through minimp4 now, so both need the FILE*.
             // This used to be guarded by !record_screen because screen
             // recording went through ffmpeg's avio_open instead; with the MPP
-            // encoder the muxer's write_callback fwrite()s to this handle and a
+            // encoder the muxer writes to this file (through a DvrWriter) and a
             // null one segfaults inside DVR::init().
             if ((dvr_file = fopen(filename.c_str(), "w")) == NULL) {
                 printf("ERROR: unable to open %s\n", filename.c_str());

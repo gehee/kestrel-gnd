@@ -20,7 +20,6 @@ extern "C" {
 }
 
 #include "webstream.hpp"
-#include "wifi_ap.hpp"
 #include "main.hpp"
 #include "drm.hpp"
 #include "osd.hpp"
@@ -38,6 +37,7 @@ extern "C" {
 #define MODULE_TAG "kestrel-gnd"
 #include "kestrel_gnd_config.h"
 #include "settings.hpp"
+#include "utils/screen_id.h"
 
 using namespace std;
 
@@ -77,6 +77,30 @@ static void force_exit(int signum)
 // test the DVR remotely just watched the app die.
 static volatile sig_atomic_t g_rec_toggle = 0;
 static void rec_toggle_handler(int) { g_rec_toggle = 1; }
+// A restart, for a setting that is only read at start - the screen mode: the
+// display is set up once. The ordinary shutdown runs, so a recording is
+// stopped and finalized and the radio's sockets are closed, and main() then
+// execs the same binary where it would have returned. Should that shutdown
+// hang, the alarm that would force an exit re-execs instead: a restart must
+// never end with no app on the screen. Everything here is async-signal-safe.
+static volatile sig_atomic_t g_restart = 0;
+static char** g_main_argv = nullptr;
+static void reexec_now(int)
+{
+	for (int fd = 3; fd < 1024; fd++) close(fd);
+	execv("/proc/self/exe", g_main_argv);
+	_exit(91);
+}
+void kestrel_request_restart()
+{
+	if (stop_requested) return;
+	g_restart = 1;
+	stop_requested = 1;
+	signal_stop = true;
+	signal(SIGALRM, reexec_now);
+	alarm(5);
+}
+
 void sig_handler(int signum)
 {
 	if (stop_requested) force_exit(signum);   // second Ctrl-C: go now
@@ -376,7 +400,7 @@ void printHelp() {
     "    --ar8030-chan-manual    - Pin the AR8030 to --ar8030-freq instead of scanning\n"
     "    --ar8030-ap-index N     - Use bb_mac_addr_N from user_cfg.json as the AP (default 0)\n"
     "    --ar8030-pair           - Enter AR8030 pairing mode for ~30s at startup\n"
-    "    --ar8030-power DBM      - AR8030 TX power in dBm (default 24, as stock)\n"
+    "    --ar8030-power DBM      - AR8030 TX power in dBm (default 11, i.e. 25mW)\n"
     "    --ar8030-mode [C:]WxH@F - Retune the camera, e.g. 1920x1080@60 (default: leave as-is)\n"
     "    --ar8030-freq KHZ       - AR8030 link frequency in kHz (default 5740000)\n"
     "    --ar8030-bw N           - AR8030 bandwidth index (default 0)\n"
@@ -405,6 +429,7 @@ static void segv_bt(int sig){
 
 int main(int argc, char **argv)
 {
+	g_main_argv = argv;   // for a restart (kestrel_request_restart)
 	// Line-buffer stdout. It is a terminal only when someone is watching by
 	// hand; in service it is redirected to a file, where glibc switches to full
 	// buffering and the log then trails reality by up to a buffer. That is
@@ -429,7 +454,35 @@ int main(int argc, char **argv)
 	uint16_t mode_width = 0;
 	uint16_t mode_height = 0;
 	uint32_t mode_vrefresh = 0;
-	std::string screen_mode_str = Settings::getInstance().getString("screen_mode", "");
+	// The display mode belongs to the screen: screen_mode_<ID>, by the ID in
+	// its EDID (utils/screen_id.h), and unset means Auto - the highest refresh
+	// it offers. screen_mode is for a screen with no ID, and --screen-mode.
+	// A mode picked in SYSTEM > Screen Mode is only on trial the first time:
+	// screen_mode_try names the screen and the mode, and is read and removed
+	// here, so a mode that leaves the screen black is gone at the next start
+	// even if nobody could see the prompt to reject it (see OSD, confirm).
+	char screen_id_buf[16] = "";
+	const bool have_screen_id = screen_id(screen_id_buf, sizeof(screen_id_buf));
+	const std::string screen_key = have_screen_id ? std::string("screen_mode_") + screen_id_buf
+	                                              : std::string("screen_mode");
+	std::string screen_mode_str = Settings::getInstance().getString(screen_key, "");
+	std::string screen_mode_trial;       // on trial this run, "" for none
+	{
+		const std::string t = Settings::getInstance().getString("screen_mode_try", "");
+		if (!t.empty()) {
+			Settings::getInstance().remove("screen_mode_try");
+			const size_t sp = t.find(' ');
+			const std::string id = sp == std::string::npos ? "" : t.substr(0, sp);
+			const std::string mode = sp == std::string::npos ? "" : t.substr(sp + 1);
+			if (!mode.empty() && id == (have_screen_id ? screen_id_buf : "-")) {
+				screen_mode_trial = mode;
+				screen_mode_str = (mode == "auto") ? "" : mode;
+			}
+		}
+	}
+	printf("display: screen %s, mode %s%s\n", have_screen_id ? screen_id_buf : "(no EDID ID)",
+	       screen_mode_str.empty() ? "auto" : screen_mode_str.c_str(),
+	       screen_mode_trial.empty() ? "" : " (on trial)");
 	if (!screen_mode_str.empty()) {
 		// Parsing: 1920x1080@60
 		try {
@@ -462,7 +515,7 @@ int main(int argc, char **argv)
 
 	std::string dvr_filename = Settings::getInstance().getString("dvr", "");
 	int dvr_framerate = Settings::getInstance().getInt("dvr_framerate", 0);
-	bool dvr_screen = Settings::getInstance().getBool("dvr_screen", false);
+	bool dvr_screen = Settings::getInstance().getBool("dvr_screen", kDvrScreenDefault);
 	
 	// Fragmented MP4 by default: every frame goes out as a self-contained
 	// fragment behind a header written up front, so a recording cut short -
@@ -475,7 +528,9 @@ int main(int argc, char **argv)
 	if (dvr_format_str == "mp4") dvr_format = DvrFormat::MP4;
 	else if (dvr_format_str == "raw") dvr_format = DvrFormat::RAW;
 	
-	Ar8030Source::chan_auto = Settings::getInstance().getBool("chan_hop", true);
+	// The channel is the air unit's to decide: the goggle always starts by
+	// searching for it (chan_auto), and a channel picked in the menu lasts
+	// for the session. Only --ar8030-chan-manual starts it pinned.
 	// Decode was flag-gated because it was being isolated while chasing the
 	// decode freeze; for normal use it belongs on. Settings-backed so a bare
 	// "kestrel-gnd" works on hardware where the config says ar8030: 1.
@@ -484,7 +539,7 @@ int main(int argc, char **argv)
 	int ar8030_port = Settings::getInstance().getInt("ar8030_port", 3);
 	// mW, in stock's encoding (N = hold, N+1 = auto capped at N). See
 	// kArPwrLevels in common.hpp for the levels this board accepts.
-	Ar8030Source::tx_power_mw = Settings::getInstance().getInt("tx_power_mw", 500);
+	Ar8030Source::tx_power_mw = Settings::getInstance().getInt("tx_power_mw", kArPwrDefaultMw);
 	Ar8030Source::tx_power_dbm = kArPwrLevels[ar_pwr_index(Ar8030Source::tx_power_mw)].dbm;
 	// 0 = off. See drain_msp_socket(): an unserved port wedges bring-up.
 	Ar8030Source::msp_bb_port = Settings::getInstance().getInt("msp_bb_port", 2);
@@ -677,6 +732,7 @@ int main(int argc, char **argv)
 
 	__OnArgument("--ar8030-chan-manual") {
 		Ar8030Source::chan_auto = false;
+		Ar8030Source::chan_manual_cli = true;
 		continue;
 	}
 
@@ -856,6 +912,7 @@ int main(int argc, char **argv)
 	std::shared_ptr<DrmDevice> dev;
 	if (!simulation_mode) {
 		dev = std::make_shared<DrmDevice>();
+		dev->display_id = screen_id_buf;   // a different screen plugged in restarts us
 		dev->init(mode_width, mode_height, mode_vrefresh, video_zpos, osd_zpos, enable_vrr);
 
 	}
@@ -880,6 +937,9 @@ int main(int argc, char **argv)
 			osd = std::make_shared<OSD>(dev, osd_refresh_frequency_ms, &signal_stop, console_stats);
 			osd->set_ui_scale(ui_scale);
 			osd->set_decoder_name(decoder_name);
+			osd->set_screen(screen_id_buf, screen_key);
+			if (!screen_mode_trial.empty())
+				osd->begin_screen_mode_confirm(screen_mode_trial);
 			if (dvr_screen && dvr) {
 				osd->set_dvr(dvr, true);
 			}
@@ -918,7 +978,7 @@ int main(int argc, char **argv)
     // created on first boot (S35dvrpart).
     DvrRecorder::instance().set_writeback(dev.get());
     DvrRecorder::instance().set_screen_mode(
-        Settings::getInstance().getBool("dvr_screen", false));
+        Settings::getInstance().getBool("dvr_screen", kDvrScreenDefault));
     DvrRecorder::instance().configure(
         codec, dvr_framerate > 0 ? dvr_framerate : 60, dvr_format, &signal_stop,
         Settings::getInstance().getString("dvr_dir", "/media/dvr"));
@@ -926,11 +986,6 @@ int main(int argc, char **argv)
     // Live video in a browser: http://<goggle>/ on the USB link or WiFi.
     if (Settings::getInstance().getBool("web_stream", true))
         WebStream::instance().start(Settings::getInstance().getInt("web_port", 80), codec);
-
-    // SYSTEM > WiFi AP, remembered across boots. Left running when kestrel
-    // exits: a restart must not drop a phone that is watching.
-    if (wifi_ap_menu_enabled() && Settings::getInstance().getBool("wifi_ap", false))
-        wifi_ap_set(true);
 
 
     if (osd) {
@@ -1056,6 +1111,13 @@ int main(int argc, char **argv)
 	////////////////////////////////////////////// DRM CLEANUP;
 	if (dev) dev->cleanup();
 
+	if (g_restart) {
+		alarm(0);                          // it would outlive the exec
+		unsetenv("KESTREL_BB_ATTEMPT");    // a fresh start, not a watchdog retry
+		printf("kestrel-gnd: restarting\n");
+		fflush(nullptr);
+		reexec_now(0);
+	}
 	printf("kestrel-gnd done.\n");
 	return 0;
 }

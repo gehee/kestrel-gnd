@@ -11,6 +11,7 @@
 #include <unistd.h>
 #include <xf86drm.h>
 #include <algorithm>
+#include <chrono>
 #include <iomanip>
 #include <cmath>
 #include <GLES2/gl2.h>
@@ -444,7 +445,7 @@ OSD::OSD(std::shared_ptr<DrmDevice> dev_, int refresh_frequency_ms_, volatile bo
     // loaded from settings, so the menu could read OFF while DvrRecorder (which
     // main() does initialise from the same key) was in screen mode - two views
     // of one setting, silently disagreeing.
-    dvr_screen = Settings::getInstance().getBool("dvr_screen", false);
+    dvr_screen = Settings::getInstance().getBool("dvr_screen", kDvrScreenDefault);
     menu_brightness = Settings::getInstance().getInt("brightness", 50);
     if (dev) dev->set_display_property("brightness", menu_brightness);
     menu_dvr_source = dvr_source_now();
@@ -543,7 +544,7 @@ OSD::OSD(std::shared_ptr<DrmDevice> dev_, int refresh_frequency_ms_, volatile bo
     menu_hud_style = hud_style;
     menu_volt_mode = volt_mode;
     menu_demo_mode = demo_mode;
-    menu_wifi_ap = Settings::getInstance().getBool("wifi_ap", false) ? 1 : 0;
+    menu_wifi_ap = wifi_ap_on() ? 1 : 0;   // off after boot; see wifi_ap.hpp
     menu_show_latency_graph = show_latency_graph;
     menu_show_all_adapters = true;
     menu_bg_video = bg_video_enabled;
@@ -2422,9 +2423,22 @@ void OSD::render_gl() {
                 + osd_vars.decoding_latency_avg + osd_vars.display_latency_avg;
         if (lat_max < lat_avg) lat_max = lat_avg;
     }
+    // A screen mode on trial that nobody kept: back to the screen's kept mode.
+    if (screen_confirm_ && screen_confirm_left_s() <= 0) {
+        screen_confirm_ = false;
+        printf("menu: screen mode %s not kept - restarting in the previous one\n",
+               screen_confirm_mode_.c_str());
+        kestrel_request_restart();
+    }
     if (menu_open_at_start) {
         menu_open = true;
         menu_open_at_start = false;
+        if (screen_confirm_) {           // straight onto the question
+            menu_first_open_ = false;
+            menu_tab = kTabSystem;
+            menu_index = 3;
+            menu_focus = 1;
+        }
         if (menu_first_open_) {          // --menu with no tab named
             menu_first_open_ = false;
             menu_tab = kTabSystem;
@@ -4757,9 +4771,92 @@ void OSD::menu_action_status(int tab, int i, char* hint, size_t hcap,
 // And how they must sit: an element is recognised by its glyphs, so one that
 // overlaps a neighbour can lose them - a voltage whose V was blanked by the
 // next element's padding stayed on screen as a bare figure under the canopy.
+// SYSTEM > Screen Mode's choices: the modes the connector in use advertises,
+// progressive only (interlaced ones do not composite here), each size and
+// rate once, largest and fastest first. Read without probing the connector -
+// a probe re-reads the EDID - and kept once there is a list.
+const std::vector<OSD::ScreenModeOpt>& OSD::screen_modes() {
+    if (!screen_modes_.empty() || !dev || !dev->output_list || dev->drm_fd < 0) return screen_modes_;
+    drmModeConnector* c = drmModeGetConnectorCurrent(dev->drm_fd, dev->output_list->connector.id);
+    if (!c) return screen_modes_;
+    for (int i = 0; i < c->count_modes; i++) {
+        const drmModeModeInfo& m = c->modes[i];
+        if (m.flags & DRM_MODE_FLAG_INTERLACE) continue;
+        const ScreenModeOpt o{m.hdisplay, m.vdisplay, (int)m.vrefresh};
+        if (std::none_of(screen_modes_.begin(), screen_modes_.end(), [&](const ScreenModeOpt& x) {
+                return x.w == o.w && x.h == o.h && x.hz == o.hz; }))
+            screen_modes_.push_back(o);
+    }
+    drmModeFreeConnector(c);
+    std::sort(screen_modes_.begin(), screen_modes_.end(), [](const ScreenModeOpt& a, const ScreenModeOpt& b) {
+        return a.w * a.h != b.w * b.h ? a.w * a.h > b.w * b.h : a.hz > b.hz; });
+    return screen_modes_;
+}
+
+// screen_mode as a menu index: 0 when unset (Auto). A mode the screen does not
+// advertise - set by hand, or from another display - reads as the mode the
+// display was actually given, which is what kestrel fell back to.
+int OSD::screen_mode_saved() {
+    const std::vector<ScreenModeOpt>& modes = screen_modes();
+    unsigned w, h, hz;
+    const std::string s = screen_confirm_
+        ? (screen_confirm_mode_ == "auto" ? std::string() : screen_confirm_mode_)
+        : Settings::getInstance().getString(screen_key_, "");
+    if (sscanf(s.c_str(), "%ux%u@%u", &w, &h, &hz) != 3) return 0;
+    for (size_t i = 0; i < modes.size(); i++)
+        if (modes[i].w == (int)w && modes[i].h == (int)h && modes[i].hz == (int)hz) return (int)i + 1;
+    if (dev && dev->output_list)
+        for (size_t i = 0; i < modes.size(); i++)
+            if (modes[i].w == dev->output_list->mode.hdisplay && modes[i].h == dev->output_list->mode.vdisplay &&
+                modes[i].hz == (int)dev->output_list->mode.vrefresh)
+                return (int)i + 1;
+    return 0;
+}
+
+void OSD::begin_screen_mode_confirm(const std::string& mode) {
+    pthread_mutex_lock(&osd_mutex);
+    screen_confirm_ = true;
+    screen_confirm_mode_ = mode;
+    // Long enough to find the button once the picture is back; short enough
+    // that a black screen is not a long wait.
+    screen_confirm_deadline_ms_ = (uint64_t)(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count()) + 15000;
+    menu_open_at_start = true;
+    render_requested = true;
+    pthread_cond_signal(&osd_cond);
+    pthread_mutex_unlock(&osd_mutex);
+}
+
+int OSD::screen_confirm_left_s() {
+    const uint64_t now = (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    return now >= screen_confirm_deadline_ms_ ? 0 : (int)((screen_confirm_deadline_ms_ - now + 999) / 1000);
+}
+
+int OSD::screen_mode_menu() {
+    if (menu_screen_mode < 0) menu_screen_mode = screen_mode_saved();
+    return menu_screen_mode;
+}
+
+std::string OSD::screen_mode_label(int idx) {
+    const std::vector<ScreenModeOpt>& modes = screen_modes();
+    if (idx <= 0 || idx > (int)modes.size()) return "Auto";
+    char b[32];
+    snprintf(b, sizeof(b), "%dx%d @ %d Hz", modes[idx - 1].w, modes[idx - 1].h, modes[idx - 1].hz);
+    return b;
+}
+
 // The WiFi board's internal antenna cannot hold a link for the video stream,
 // and the radio sits next to the RC link: say so on the row, on or off.
 const char* OSD::menu_help_warning(int tab, int i) {
+    if (tab == kTabSystem && i == 3 && screen_confirm_) {
+        static char ask[96];
+        snprintf(ask, sizeof(ask), "Keep this mode? Enter keeps it - going back in %d s.",
+                 screen_confirm_left_s());
+        return ask;
+    }
+    if (tab == kTabSystem && i == 3 && menu_dirty[kTabSystem][3])
+        return "Enter tries it: the app restarts, then asks whether to keep it.";
     if (tab == kTabSystem && i == 5)
         return "Warning: Before enabling, plug an external antenna to the wifi uFL connector.";
     return nullptr;
@@ -4781,6 +4878,16 @@ const char* OSD::menu_help_text(int tab, int i, const char* fallback) {
         default: return "Records the FPV stream as the air unit sends it: full quality, no HUD.\n"
                         "No impact on the FPV feed's latency.";
         }
+    }
+    if (tab == kTabSystem && i == 3) {
+        if (menu_dirty[kTabSystem][3] || screen_confirm_) return "";   // the warning says it
+        static std::string mode;
+        char now[64] = "--";
+        if (dev && dev->output_list)
+            snprintf(now, sizeof(now), "%dx%d @ %d Hz", dev->output_list->mode.hdisplay,
+                     dev->output_list->mode.vdisplay, dev->output_list->mode.vrefresh);
+        mode = std::string("Showing ") + now + ". Auto picks the highest refresh the screen offers.";
+        return mode.c_str();
     }
     if (tab == kTabSystem && i == 5) {
         // While a change is pending, the "Pending: OFF -> ON" line says it
@@ -4915,13 +5022,14 @@ std::vector<OSD::MenuItem> OSD::menu_items(int tab) const {
             {"Build", 0},
             {"Version", 0},
             {"Decoder", 0},
-            {"Display", 0},
+            // Help is built live by menu_help_text: the mode in use.
+            {"Screen Mode", 1, ""},
             // Was on the HUD tab: it drives a simulated flight over the
             // whole screen for testing, not a HUD drawing setting.
             {"Demo Mode", 1, "Drive the HUD from a simulated flight."}
         };
         // Help is built live by menu_help_text: name, password, channel.
-        if (wifi_ap_menu_enabled()) items.push_back({"WiFi AP", 1, ""});
+        items.push_back({"WiFi AP", 1, ""});
     }
     return items;
 }
@@ -5330,7 +5438,11 @@ void OSD::menu_apply_change(int tab, int index, int dir) {
             menu_dvr_source = menu_step(menu_dvr_source, dir, 3);
         }
     } else if (menu_tab == kTabSystem) {
-        if (menu_index == 4) {
+        if (menu_index == 3) {
+            // Only stages the choice: the display is set up once, at start,
+            // so Enter saves it and restarts kestrel (below).
+            menu_screen_mode = menu_step(screen_mode_menu(), dir, (int)screen_modes().size() + 1);
+        } else if (menu_index == 4) {
             menu_demo_mode = menu_step(menu_demo_mode ? 1 : 0, dir, 2) != 0;
             if (!menu_stepping_) {
                 demo_mode = menu_demo_mode;
@@ -5516,13 +5628,10 @@ void OSD::menu_value_text(int tab, int i, char* val_buf, size_t cap) {
             } else if (i == 2) {
                 sprintf(val_buf, "%s", decoder_name.c_str());
             } else if (i == 3) {
-                if (dev && dev->output_list)
-                    sprintf(val_buf, "%dx%d @ %d Hz",
-                            dev->output_list->mode.hdisplay,
-                            dev->output_list->mode.vdisplay,
-                            dev->output_list->mode.vrefresh);
-                else
+                if (screen_modes().empty())
                     sprintf(val_buf, "--");
+                else
+                    sprintf(val_buf, "< %s >", screen_mode_label(screen_mode_menu()).c_str());
             } else if (i == 4) {
                 sprintf(val_buf, "< %s >", menu_demo_mode ? "ON" : "OFF");
             } else if (i == 5) {
@@ -5590,6 +5699,20 @@ void OSD::handle_key(int key) {
     bool do_stop_player  = false;
 
     pthread_mutex_lock(&osd_mutex);
+
+    // A screen mode on trial: Enter, anywhere in the menu, keeps it.
+    if (screen_confirm_ && (key == 13 || key == '\n')) {
+        screen_confirm_ = false;
+        Settings::getInstance().set(screen_key_,
+            screen_confirm_mode_ == "auto" ? std::string() : screen_confirm_mode_);
+        printf("menu: screen mode %s kept for %s\n", screen_confirm_mode_.c_str(),
+               screen_id_.empty() ? "this screen" : screen_id_.c_str());
+        menu_open = false;
+        render_requested = true;
+        pthread_cond_signal(&osd_cond);
+        pthread_mutex_unlock(&osd_mutex);
+        return;
+    }
     
     if (key == 'm' || key == 'M') {
         // In the channel-scan sub-screen, M/Back closes it and returns to the RF
@@ -5606,6 +5729,14 @@ void OSD::handle_key(int key) {
         }
         menu_open = !menu_open;
         if (menu_open) {
+             // SYSTEM > Screen Mode lists what the connector offers at this
+             // open: a display plugged in since brings modes of its own. A
+             // choice staged against the old list goes with it.
+             screen_modes_.clear();
+             menu_screen_mode = -1;
+             menu_dirty[kTabSystem][3] = false;
+             menu_pending_from[kTabSystem][3][0] = '\0';
+             menu_opt_tab_ = -1;
              // Focus opens on the section column (menu_focus = 0, below) so
              // the first press goes somewhere useful, the same on every open
              // - but the row list underneath it must already have a real,
@@ -5652,9 +5783,11 @@ void OSD::handle_key(int key) {
              menu_hud_reactivity = hud_reactivity;
              menu_dvr_source = dvr_source_now();
              // Seed the RF rows from what the radio and the air unit report.
-             menu_ar_power = Settings::getInstance().getInt("tx_power_mw", 500);
+             // This air unit's own (Ar8030Source::load_sky_link), which the
+             // radio is running with.
+             menu_ar_power = Ar8030Source::tx_power_mw;
              menu_ar_standby = air_standby;   // start the row at the air's real state
-             menu_ar_hop = Settings::getInstance().getBool("chan_hop", true);
+             menu_ar_hop = Ar8030Source::chan_auto;
              menu_refresh_options();      // seeded: work out what row 0 shows
         }
         render_requested = true;
@@ -5714,10 +5847,9 @@ void OSD::handle_key(int key) {
                 Ar8030Source::request_rf(Ar8030Source::RF_CHAN, mhz * 1000);
                 // Pinning a channel means manual mode - the radio only honours
                 // BB_SET_CHAN with channel adaptation off. Reflect that in the
-                // Channel Hop row and persist it, else the menu shows "ON"
-                // over a radio that is no longer hopping.
-                menu_ar_hop = false;
-                Settings::getInstance().set("chan_hop", false);
+                // Channel Hop row, else the menu shows "ON" over a radio that
+                // is no longer hopping. Not saved: the next start searches.
+                menu_ar_hop = false;   // for this session: the air unit decides at the next start
                 // Deliberately NOT arming menu_pin_pending here. It is left
                 // over from the removed pin/release confirm, nothing renders it
                 // any more (the banner is dead code), and a non -2 value makes
@@ -5892,12 +6024,10 @@ void OSD::handle_key(int key) {
                             cmd_cb(0x200, 1);   // scan open -> poll fast
                             break;
                         case 1:
-                            cmd_cb(0x311, menu_ar_power);
-                            Settings::getInstance().set("tx_power_mw", menu_ar_power);
+                            cmd_cb(0x311, menu_ar_power);   // saved per air unit there
                             break;
                         case 7:
-                            cmd_cb(0x316, menu_ar_hop ? 1 : 0);
-                            Settings::getInstance().set("chan_hop", menu_ar_hop);
+                            cmd_cb(0x316, menu_ar_hop ? 1 : 0);   // this session only
                             break;
                         case 8:
                             // Force standby on/off (sky cmd 0x23 via the queue that
@@ -5969,9 +6099,23 @@ void OSD::handle_key(int key) {
                     DvrRecorder::instance().set_screen_mode(dvr_screen);
                 }
             } else if (menu_tab == kTabSystem) {
+                if (menu_index == 3 && screen_mode_menu() != screen_mode_saved()) {
+                    // Only a trial: main.cpp applies it at the restart and asks
+                    // (begin_screen_mode_confirm); screen_key_ is written once
+                    // it is kept.
+                    const int m = screen_mode_menu();
+                    char v[32] = "auto";
+                    if (m > 0) {
+                        const ScreenModeOpt& o = screen_modes()[m - 1];
+                        snprintf(v, sizeof(v), "%dx%d@%d", o.w, o.h, o.hz);
+                    }
+                    Settings::getInstance().set("screen_mode_try",
+                        (screen_id_.empty() ? std::string("-") : screen_id_) + " " + v);
+                    printf("menu: screen mode %s on trial - restarting to apply it\n", v);
+                    kestrel_request_restart();
+                }
                 if (menu_index == 5 && wifi_ap_available()) {
-                    Settings::getInstance().set("wifi_ap", menu_wifi_ap != 0);
-                    wifi_ap_set(menu_wifi_ap != 0);
+                    wifi_ap_set(menu_wifi_ap != 0);   // for this session only
                 }
             }
             render_requested = true;

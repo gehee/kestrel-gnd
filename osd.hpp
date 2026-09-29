@@ -319,6 +319,20 @@ class OSD {
         int  demo_mode = 0;
         int  menu_demo_mode = 0;
         int  menu_wifi_ap = 0;     // SYSTEM > WiFi AP (fpvos-wifi)
+        // SYSTEM > Screen Mode: 0 is Auto, then the connector's modes as
+        // screen_modes() lists them. -1 until first read from screen_mode.
+        int  menu_screen_mode = -1;
+        std::string screen_id_, screen_key_ = "screen_mode";
+        bool        screen_confirm_ = false;          // a mode on trial, asking
+        std::string screen_confirm_mode_;             // it: "WxH@R", or "auto"
+        uint64_t    screen_confirm_deadline_ms_ = 0;
+        int         screen_confirm_left_s();
+        struct ScreenModeOpt { int w, h, hz; };
+        std::vector<ScreenModeOpt> screen_modes_;
+        const std::vector<ScreenModeOpt>& screen_modes();
+        int  screen_mode_saved();              // screen_mode's menu index
+        int  screen_mode_menu();               // menu_screen_mode, read in
+        std::string screen_mode_label(int idx);
         // Last sysfs read of this board's SoC temperature, cached by the top
         // status row so the canopy panel does not read thermal_zone0 again.
         float vrx_temp_cached_ = 0.0f;
@@ -795,6 +809,14 @@ class OSD {
         void handle_key(int key);
         void set_ui_scale(float v);
         void set_decoder_name(std::string name) { decoder_name = name; }
+        // The screen in use (utils/screen_id.h, "" if none) and the settings
+        // key its mode is kept under: screen_mode_<ID>, or screen_mode.
+        void set_screen(const std::string& id, const std::string& key) { screen_id_ = id; screen_key_ = key; }
+        // This run's mode is on trial (screen_mode_try, main.cpp): the menu
+        // opens on SYSTEM > Screen Mode to ask whether to keep it. Enter keeps
+        // it; otherwise, or unseen on a black screen, it is dropped and the
+        // app restarts in the screen's kept mode.
+        void begin_screen_mode_confirm(const std::string& mode);
         std::string get_decoder_name() const { return decoder_name; }
         void set_command_callback(std::function<void(int, int)> cb) { cmd_cb = cb; }
         void set_rf_caps(unsigned caps) { rf_caps = caps; }

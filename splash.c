@@ -46,6 +46,8 @@
 #include <sys/select.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
+
+#include "utils/screen_id.h"
 #include <cairo/cairo.h>
 
 static volatile sig_atomic_t g_stop    = 0;
@@ -105,13 +107,19 @@ static void page_flip_handler(int fd, unsigned int frame, unsigned int sec,
 // connector prefers" when screen_mode is unset.
 static void read_gnd_screen_mode(uint16_t* w, uint16_t* h, uint32_t* vr) {
     *w = 0; *h = 0; *vr = 0;
+    // The screen's own entry, screen_mode_<ID>, as main.cpp reads it: unset
+    // is auto. screen_mode is only for a screen with no ID. A mode on trial
+    // (screen_mode_try) is not the splash's business: kestrel-gnd drops it at
+    // start unless it was a restart, and a restart does not show the splash.
+    char id[16], key[40];
+    if (screen_id(id, sizeof(id))) snprintf(key, sizeof(key), "screen_mode_%s:", id);
+    else snprintf(key, sizeof(key), "screen_mode:");
     FILE* f = fopen("/etc/kestrel/kestrel-gnd.yaml", "r");
     if (!f) return;
     char line[128];
     while (fgets(line, sizeof(line), f)) {
-        char* p = strstr(line, "screen_mode:");
-        if (!p) continue;
-        p += strlen("screen_mode:");
+        if (strncmp(line, key, strlen(key)) != 0) continue;
+        char* p = line + strlen(key);
         while (*p == ' ' || *p == '"') p++;
         unsigned pw, ph, pr;
         if (sscanf(p, "%ux%u@%u", &pw, &ph, &pr) == 3) { *w = pw; *h = ph; *vr = pr; }

@@ -187,8 +187,9 @@ int Ar8030Source::bandwidth = -1;
 bool Ar8030Source::do_pair = false;
 int Ar8030Source::ap_index = 0;
 bool Ar8030Source::chan_auto = true;
-int Ar8030Source::tx_power_dbm = 24;
-int Ar8030Source::tx_power_mw  = 500;   // = 24 dBm, what stock boots with
+bool Ar8030Source::chan_manual_cli = false;
+int Ar8030Source::tx_power_mw  = kArPwrDefaultMw;
+int Ar8030Source::tx_power_dbm = kArPwrLevels[ar_pwr_index(kArPwrDefaultMw)].dbm;
 bool Ar8030Source::tx_power_auto = false;
 bool Ar8030Source::skip_handshake = false;
 int Ar8030Source::msp_bb_port = 2;   // the FC stream rides the telemetry socket
@@ -331,6 +332,7 @@ void Ar8030Source::configure_link() {
         if (sout.role == BB_ROLE_DEV && n > 0) {
             int idx = (ap_index >= 0 && ap_index < n) ? ap_index : 0;
             set_sky_key_from_mac(macs[idx].addr);   // per-VTX settings namespace
+            load_sky_link();                        // its TX power
             bb_set_ap_mac_t ap;
             memset(&ap, 0, sizeof(ap));
             ap.mac = macs[idx];
@@ -859,6 +861,22 @@ void Ar8030Source::save_sky_config() {
     st.set(k + "focus",   (int)sky_cfg.focus_en);
 }
 
+// The radio side of the same: the TX power this air unit last ran with. Until
+// it has its own, the goggle-wide tx_power_mw main() loaded stands in. The
+// channel is not kept - the air unit decides it, and the goggle searches.
+void Ar8030Source::load_sky_link() {
+    if (sky_cfg_key.empty()) return;
+    tx_power_mw  = Settings::getInstance().getInt(sky_cfg_key + "_tx_power_mw", tx_power_mw);
+    tx_power_dbm = kArPwrLevels[ar_pwr_index(tx_power_mw)].dbm;
+    printf("ar8030: [%s] restored radio cfg: power=%s\n", sky_cfg_key.c_str(),
+           kArPwrLevels[ar_pwr_index(tx_power_mw)].label);
+}
+
+void Ar8030Source::save_sky_link() {
+    if (sky_cfg_key.empty()) return;
+    Settings::getInstance().set(sky_cfg_key + "_tx_power_mw", tx_power_mw);
+}
+
 // Rebuild one captured SET_CONFIG frame around our live settings. The stock
 // body is the template, so the bytes we have not identified keep stock values;
 // only the known fields and the timestamp change.
@@ -906,14 +924,25 @@ void Ar8030Source::send_air_handshake() {
         // with, so build them from our stored config instead of replaying the
         // capture - otherwise a menu change is undone at the next handshake.
         std::vector<uint8_t> rebuilt;
+        const char *from = "";
         if (data[6] == sky::CMD_SET_CONFIG) {
             rebuilt = build_config_frame(data, len);
             data = rebuilt.data(); len = rebuilt.size();
+            from = "   (video config, from stored settings)";
+        } else if (data[6] == sky::CMD_SET_BB_PWR) {
+            // Stock's two power frames carry its own 500mW Auto. This air
+            // unit's power instead, so a link-up never sets it to anything
+            // else first. Same u16 LE payload as request_setting(CAM_PWR).
+            const int mw = kArPwrLevels[ar_pwr_index(tx_power_mw)].mw;
+            const uint8_t v[2] = { (uint8_t)(mw & 0xFF), (uint8_t)((mw >> 8) & 0xFF) };
+            sky_proto.set_seq(data[3]);
+            rebuilt = sky_proto.build(data[6], v, sizeof(v));
+            data = rebuilt.data(); len = rebuilt.size();
+            from = "   (air power, from stored settings)";
         }
         int w = bb_socket_write(ctrl_sockfd, data, (uint32_t)len, 500);
         printf("ar8030: handshake[%zu] seq=0x%02X len=%zu -> %d%s\n",
-               i, data[3], len, w,
-               rebuilt.empty() ? "" : "   (video config, from stored settings)");
+               i, data[3], len, w, from);
         usleep(250000);  // spread the PA burst: back-to-back TX appears to brown the board out
         if (*should_stop) { printf("ar8030: handshake aborted (stopping)\n"); return; }
     }
@@ -1484,6 +1513,7 @@ void Ar8030Source::apply_pending_rf() {
                 // val is mW in stock's encoding (N, or N+1 for auto capped
                 // at N); apply_tx_power() owns the mapping and both ioctls.
                 apply_tx_power(val);
+                save_sky_link();
                 break;
             }
             case RF_MCS: {
@@ -1515,11 +1545,16 @@ void Ar8030Source::apply_pending_rf() {
                 break;
             }
             case RF_HOP: {
+                if (val) {
+                    printf("ar8030: RF channel hop ON\n");
+                    search_all_channels();          // and undo any pin's work list
+                    break;
+                }
                 bb_set_chan_mode_t m; memset(&m, 0, sizeof(m));
-                m.auto_mode = (uint8_t)(val ? 1 : 0);
-                printf("ar8030: RF channel hop %s -> %d\n", val ? "ON" : "OFF",
+                m.auto_mode = 0;
+                printf("ar8030: RF channel hop OFF -> %d\n",
                        ar_ioctl(dev, BB_SET_CHAN_MODE, &m, NULL));
-                chan_auto = (val != 0);
+                chan_auto = false;
                 break;
             }
             case RF_CHAN: {
@@ -1528,11 +1563,8 @@ void Ar8030Source::apply_pending_rf() {
                 // BB_SET_FREQ is deliberately not used here - stock never calls
                 // it, and on its own it moves nothing (section 31).
                 if (val < 0) {
-                    bb_set_chan_mode_t m; memset(&m, 0, sizeof(m));
-                    m.auto_mode = 1;
-                    printf("ar8030: RF chan mode AUTO -> %d\n",
-                           ar_ioctl(dev, BB_SET_CHAN_MODE, &m, NULL));
-                    chan_auto = true;
+                    printf("ar8030: RF chan mode AUTO\n");
+                    search_all_channels();
                 } else {
                     int rc = set_rf_channel((uint32_t)val, false);
                     printf("ar8030: RF channel -> %u kHz rc=%d\n",
@@ -1863,12 +1895,37 @@ int Ar8030Source::set_rf_channel(uint32_t freq_khz, bool hop_en) {
     // that combination is what wedged the baseband during bring-up testing.
     printf("ar8030:   WARNING ground did not reach %u kHz (now %u kHz); "
            "restoring auto/ACS\n", freq_khz, link_freq_khz());
+    search_all_channels();
+    return -5;
+}
+
+// A pin narrows the ground's work channel list to the one channel
+// (set_rf_channel), and channel adaptation only searches what is on that list:
+// turning auto back on alone left the ground looking at a single channel, and
+// an air unit that had moved - after its own restart, say - was not found
+// until the idle reconnect reopened the radio, about 100 s later.
+int Ar8030Source::search_all_channels() {
+    bb_dev_handle_t *dev = (bb_dev_handle_t *)bb_dev;
+    if (!dev) return -1;
+    uint32_t freqs[128];
+    int n = 0;
+    chan_index_for_freq(0, freqs, &n);          // for the channel count only
+    int rc_wl = -1;
+    if (n > 0) {
+        bb_work_chan_list_t wl;
+        memset(&wl, 0, sizeof(wl));
+        wl.chan_num = (uint8_t)n;
+        for (int i = 0; i < n; i++) wl.chan_idx[i] = (uint8_t)i;
+        rc_wl = ar_ioctl(dev, BB_SET_WORK_CHAN_LIST, &wl, NULL);
+    }
     bb_set_chan_mode_t cm;
     memset(&cm, 0, sizeof(cm));
     cm.auto_mode = 1;
-    ar_ioctl(dev, BB_SET_CHAN_MODE, &cm, NULL);
-    chan_auto = true;
-    return -5;
+    int rc = ar_ioctl(dev, BB_SET_CHAN_MODE, &cm, NULL);
+    printf("ar8030:   searching all %d channels: BB_SET_WORK_CHAN_LIST -> %d, "
+           "BB_SET_CHAN_MODE(auto=1) -> %d\n", n, rc_wl, rc);
+    if (rc == 0) chan_auto = true;
+    return rc;
 }
 
 void Ar8030Source::publish_chan_scan() {
@@ -2866,6 +2923,17 @@ void Ar8030Source::run() {
                 if (ls >= 0 && ls != last_link_state) {
                     printf("ar8030: link state %d -> %d (%s)\n", last_link_state, ls,
                            ls == 2 ? "linked" : ls == 1 ? "connecting" : "not linked");
+                    // A channel pinned from the menu holds only while the link
+                    // does. The air unit decides the channel - after a restart
+                    // it is back on its own - and a ground left fixed on the
+                    // pinned one never finds it: video stayed gone ~100 s, until
+                    // the idle reconnect below happened to reset the mode. So a
+                    // lost link puts the ground back to searching, as at start.
+                    // --ar8030-chan-manual asked to stay fixed, and does.
+                    if (last_link_state == 2 && ls != 2 && !chan_auto && !chan_manual_cli && bb_dev) {
+                        printf("ar8030: link lost on a pinned channel - searching again\n");
+                        search_all_channels();
+                    }
                     if (ls == 2) {
                         // Whatever is still queued belongs to the link that just
                         // ended. Feeding it to the decoder replays history as

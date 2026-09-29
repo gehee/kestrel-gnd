@@ -6,27 +6,87 @@
 #include <time.h>
 #include <atomic>
 #include <thread>
+#include <cerrno>
+#include <cstring>
+#include <pthread.h>
 #include "webstream.hpp"
 #include "utils/time_util.h"
 #include "drm.hpp"
 #include "settings.hpp"
 
+// Queued this far, a write waits for the card: ten seconds of the heaviest
+// recording, far more than a sync ever takes.
+constexpr size_t kWriterMaxQueued = 64u << 20;
+
+DvrWriter::DvrWriter(int fd) : fd_(fd) {
+	t_ = std::thread([this] { run(); });
+}
+
+DvrWriter::~DvrWriter() {
+	{
+		std::lock_guard<std::mutex> lk(m_);
+		done_ = true;
+	}
+	work_.notify_one();
+	t_.join();
+}
+
+int DvrWriter::write(int64_t offset, const void* buf, size_t size) {
+	const uint8_t* p = static_cast<const uint8_t*>(buf);
+	{
+		std::unique_lock<std::mutex> lk(m_);
+		room_.wait(lk, [this] { return queued_ < kWriterMaxQueued || failed_; });
+		q_.push_back({offset, std::vector<uint8_t>(p, p + size)});
+		queued_ += size;
+	}
+	work_.notify_one();
+	return failed_ ? 1 : 0;
+}
+
+void DvrWriter::run() {
+	pthread_setname_np(pthread_self(), "dvr-writer");
+	uint64_t last_sync_us = get_time_us();
+	for (;;) {
+		std::deque<Chunk> batch;
+		bool done;
+		{
+			std::unique_lock<std::mutex> lk(m_);
+			work_.wait_for(lk, std::chrono::milliseconds(250), [this] { return !q_.empty() || done_; });
+			batch.swap(q_);
+			queued_ = 0;
+			done = done_;
+		}
+		room_.notify_all();
+		for (const Chunk& c : batch) {
+			size_t off = 0;
+			while (off < c.data.size() && !failed_) {
+				ssize_t n = pwrite(fd_, c.data.data() + off, c.data.size() - off, (off_t)(c.offset + off));
+				if (n > 0) off += (size_t)n;
+				else if (!(n < 0 && errno == EINTR)) {
+					printf("DVR: write failed: %s\n", n < 0 ? strerror(errno) : "no progress");
+					failed_ = true;
+					room_.notify_all();
+				}
+			}
+		}
+		// Once a second, push what has been written onto the card: until then
+		// it is only in the page cache, and on the exFAT DVR partition even the
+		// file's length is not updated - a power cut would lose all of it. With
+		// fragmented MP4 this bounds the loss to about the last second.
+		const uint64_t now = get_time_us();
+		if (done || now - last_sync_us >= 1000000) {
+			last_sync_us = now;
+			fsync(fd_);
+		}
+		if (done) {
+			std::lock_guard<std::mutex> lk(m_);
+			if (q_.empty()) return;
+		}
+	}
+}
+
 int write_callback(int64_t offset, const void *buffer, size_t size, void *token){
-    FILE *f = (FILE*)token;
-    fseek(f, offset, SEEK_SET);
-    int err = fwrite(buffer, 1, size, f) != size;
-    // Once a second, push what has been written onto the card: until then it
-    // is only in the page cache, and on the exFAT DVR partition even the
-    // file's length is not updated - a power cut would lose all of it. With
-    // fragmented MP4 this bounds the loss to about the last second.
-    static thread_local uint64_t last_sync_us = 0;
-    uint64_t now = get_time_us();
-    if (now - last_sync_us >= 1000000) {
-        last_sync_us = now;
-        fflush(f);
-        fsync(fileno(f));
-    }
-    return err;
+    return static_cast<DvrWriter*>(token)->write(offset, buffer, size);
 }
 
 
@@ -35,7 +95,13 @@ int DVR::init(int frm_width, int frm_height) {
 		if(format == DvrFormat::RAW) {
 			return 0;
 		}
-		mux = MP4E_open(0 /*sequential_mode*/, format == DvrFormat::FMP4, dvr_file, write_callback);
+		writer.reset(new DvrWriter(fileno(dvr_file)));
+		mux = MP4E_open(0 /*sequential_mode*/, format == DvrFormat::FMP4, writer.get(), write_callback);
+		// Fragmented while recording, so a power cut loses a second at most;
+		// plain once stopped, so it plays anywhere - phone browsers will not
+		// play a fragmented file from its URL.
+		if (format == DvrFormat::FMP4)
+			MP4E_set_finalize(mux);
 		if (MP4E_STATUS_OK != mp4_h26x_write_init(&mp4wr, mux, frm_width, frm_height, codec==VideoCodec::H265))
 		{
 			printf("error: mp4_h26x_write_init failed\n");
@@ -95,7 +161,10 @@ int DVR::init(int frm_width, int frm_height) {
 		printf("DVR: output file not open - screen recording disabled\n");
 		return -1;
 	}
-	mux = MP4E_open(0 /*sequential_mode*/, format == DvrFormat::FMP4, dvr_file, write_callback);
+	writer.reset(new DvrWriter(fileno(dvr_file)));
+	mux = MP4E_open(0 /*sequential_mode*/, format == DvrFormat::FMP4, writer.get(), write_callback);
+	if (format == DvrFormat::FMP4)
+		MP4E_set_finalize(mux);     // as in the camera recording
 	if (MP4E_STATUS_OK != mp4_h26x_write_init(&mp4wr, mux, frm_width, frm_height, 0 /*H.264*/)) {
 		printf("DVR: mp4_h26x_write_init failed (screen)\n");
 		mux = NULL;
@@ -245,6 +314,7 @@ void DVR::run_dvr() {
 		// also waits out any capture still being written.
 		if (wb_dev) wb_dev->writeback_deinit();
 		screen_enc.deinit();
+		writer.reset();             // everything written and synced
 		if (dvr_file) {
 			fclose(dvr_file);
 			dvr_file = NULL;
@@ -320,6 +390,7 @@ void DVR::run_dvr() {
 	if (record_screen) {
 		screen_enc.deinit();
 	}
+	writer.reset();                 // everything written and synced
 	if (dvr_file) {
 		fclose(dvr_file);
 		dvr_file = NULL;
@@ -341,7 +412,7 @@ void DVR::enqueueDvrPacket(std::shared_ptr<std::vector<uint8_t>> frame) {
 	cv.notify_one();
 }
 int dvr_screen_capture_fps() {
-	int fps = Settings::getInstance().getInt("dvr_screen_fps", 30);
+	int fps = Settings::getInstance().getInt("dvr_screen_fps", kDvrScreenFpsDefault);
 	return fps < 1 ? 1 : fps > 60 ? 60 : fps;
 }
 
@@ -353,10 +424,14 @@ int dvr_screen_capture_fps() {
 #include <errno.h>
 #include <cstring>
 #include <algorithm>
+#include <sys/resource.h>
+#include <pthread.h>
+#include "dvr_recover.hpp"
 
 namespace {
 
-// Deletes the oldest kestrel_*.mp4 / kestrel_*.h265 recordings in dir until
+// Deletes the oldest fpvOS_*.mp4 / fpvOS_*.h265 recordings in dir - and
+// kestrel_*, what earlier builds named them - until
 // free space clears min_free_bytes, or there is nothing left to delete. Only
 // called from start_locked(), before any recording is open, so there is
 // never a live file among the candidates.
@@ -372,7 +447,7 @@ void purge_oldest_recordings(const std::string& dir, uint64_t min_free_bytes) {
     struct dirent* ent;
     while ((ent = readdir(d)) != nullptr) {
         std::string name = ent->d_name;
-        if (name.rfind("kestrel_", 0) != 0) continue;
+        if (name.rfind("fpvOS_", 0) != 0 && name.rfind("kestrel_", 0) != 0) continue;
         std::string path = dir + "/" + name;
         struct stat fst;
         if (stat(path.c_str(), &fst) != 0 || !S_ISREG(fst.st_mode)) continue;
@@ -410,6 +485,24 @@ void DvrRecorder::configure(VideoCodec codec, int framerate, DvrFormat fmt,
     stop_  = stop_signal;
     dir_   = dir.empty() ? std::string("/media/dvr") : dir;
     configured_ = true;
+
+    // Recordings a power cut or crash left fragmented, and those from before
+    // kestrel finalized them, made playable: once, at start, on a thread of
+    // its own at the lowest priority - a long one takes a while to read.
+    static bool recovering = false;
+    if (!recovering) {
+        recovering = true;
+        const std::string d = dir_;
+        std::thread([d] {
+            pthread_setname_np(pthread_self(), "dvr-recover");
+            setpriority(PRIO_PROCESS, 0, 19);   // this thread only, on Linux
+            struct stat st, parent;
+            if (stat(d.c_str(), &st) != 0 || stat((d + "/..").c_str(), &parent) != 0 ||
+                st.st_dev == parent.st_dev)
+                return;                          // no recordings partition mounted
+            dvr_recover_recordings(d, [] { return DvrRecorder::instance().current_file(); });
+        }).detach();
+    }
 }
 
 void DvrRecorder::set_frame_size(int w, int h) {
@@ -480,10 +573,10 @@ bool DvrRecorder::start_locked() {
     // Keep some headroom on the recordings partition itself so an unattended
     // pile of old footage never runs it to zero.
     purge_oldest_recordings(dir_, 300ull * 1024 * 1024);
-    // DVR::format_timestamped_filename() turns "<dir>/kestrel.mp4" into
-    // "<dir>/kestrel_YYYYMMDD_HHMMSS.mp4".
+    // DVR::format_timestamped_filename() turns "<dir>/fpvOS.mp4" into
+    // "<dir>/fpvOS_YYYYMMDD_HHMMSS.mp4".
     const char* ext = (fmt_ == DvrFormat::RAW) ? ".h265" : ".mp4";
-    std::string base = dir_ + "/kestrel" + ext;
+    std::string base = dir_ + "/fpvOS" + ext;
 
     // Screen recordings are always H.264/MP4 (that is what the VEPU encodes),
     // regardless of what codec the FPV link is using.
@@ -518,8 +611,9 @@ bool DvrRecorder::start_locked() {
     }
 
     running_ = true;
-    file_    = dvr_->path();
-    printf("DVR: recording -> %s\n", file_.c_str());
+    // The name alone: what the gallery lists, serves and asks about.
+    file_    = dvr_->path().substr(dvr_->path().find_last_of('/') + 1);
+    printf("DVR: recording -> %s\n", dvr_->path().c_str());
     return true;
 }
 

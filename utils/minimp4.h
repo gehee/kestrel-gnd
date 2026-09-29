@@ -481,6 +481,30 @@ int MP4E_set_pps(MP4E_mux_t *mux, int track_id, const void *pps, int bytes);
 */
 int MP4E_set_text_comment(MP4E_mux_t *mux, const char *comment);
 
+/**
+*   fpvOS: have a fragmented file made plain by MP4E_close, in place. The
+*   fragments are written as ever while recording - a file cut short is still
+*   a valid fragmented MP4 - and each sample is kept in the index as well
+*   (about 24 bytes a picture). On close the plain index goes after the last
+*   fragment, the fragments become one mdat and the fragmented moov becomes
+*   padding: a file that plays wherever MP4 does, which a fragmented one does
+*   not (a phone browser's player given it as a plain URL).
+*
+*   return error code MP4E_STATUS_*
+*/
+int MP4E_set_finalize(MP4E_mux_t *mux);
+
+/**
+*   fpvOS: the HEVC decoder configuration (hvcC) fields an SPS determines:
+*   the 12 bytes of general profile, tier, compatibility, constraint flags and
+*   level, then the chroma format and bit depths. sps is one NAL unit, header
+*   included, without a start code.
+*
+*   return 1 if the SPS parsed, 0 if not
+*/
+int MP4E_hevc_sps_config(const void *sps, int bytes, unsigned char ptl[12],
+                         int *chroma_format, int *luma_minus8, int *chroma_minus8);
+
 #ifdef __cplusplus
 }
 #endif
@@ -698,6 +722,9 @@ typedef struct MP4E_mux_tag
     uint64_t fragment_time;   // fpvOS: decode time of the next fragment (sum of durations so far)
     int frag_track;           // fpvOS: track of the picture held in pending_sample, -1 if none
     int frag_duration, frag_kind;
+    int finalize;             // fpvOS: MP4E_set_finalize - made plain on close
+    int64_t moov_pos;         // fpvOS: where the fragmented file's moov went,
+    int64_t first_moof_pos;   //   and its first fragment, when finalizing
 
 } MP4E_mux_t;
 
@@ -823,6 +850,9 @@ MP4E_mux_t *MP4E_open(int sequential_mode_flag, int enable_fragmentation, void *
     mux->fragments_count = 0;
     mux->fragment_time = 0;
     mux->frag_track = -1;
+    mux->finalize = 0;
+    mux->moov_pos = 0;
+    mux->first_moof_pos = 0;
     mux->write_callback = write_callback;
     mux->token = token;
     mux->text_comment = NULL;
@@ -945,6 +975,16 @@ static unsigned get_duration(const track_t *tr)
         sum_duration += s[i].duration;
     }
     return sum_duration;
+}
+
+/**
+*   fpvOS: a track's length in its own timescale. A fragmented file's samples
+*   are not kept in the index, so there it is the running decode time - the
+*   file has one track, the DVR's video.
+*/
+static unsigned track_duration(const MP4E_mux_t *mux, const track_t *tr)
+{
+    return mux->enable_fragmentation ? (unsigned)mux->fragment_time : get_duration(tr);
 }
 
 static int write_pending_data(MP4E_mux_t *mux, track_t *tr)
@@ -1121,7 +1161,11 @@ static int mp4e_flush_fragment(MP4E_mux_t *mux)
     mux->fragment_time += (uint64_t)duration;
     #endif
     if (!mux->fragments_count++)
+    {
+        mux->moov_pos = mux->write_pos;
         ERR(mp4e_flush_index(mux)); // write file headers before 1st sample
+        mux->first_moof_pos = mux->write_pos;
+    }
     // write MOOF + MDAT + sample data
     #if MP4D_TFDT_SUPPORT
     ERR(mp4e_write_fragment_header(mux, mux->frag_track, data_bytes, duration, mux->frag_kind, timestamp));
@@ -1130,6 +1174,9 @@ static int mp4e_flush_fragment(MP4E_mux_t *mux)
     #endif
     // write MDAT box for each sample
     ERR(mp4e_write_mdat_box(mux, data_bytes + 8));
+    // fpvOS: the sample for the plain index, at the data about to be written
+    if (mux->finalize && !add_sample_descriptor(mux, tr, data_bytes, duration, mux->frag_kind))
+        return MP4E_STATUS_NO_MEMORY;
     ERR(mux->write_callback(mux->write_pos, tr->pending_sample.data, data_bytes, mux->token));
     mux->write_pos += data_bytes;
     tr->pending_sample.bytes = 0;
@@ -1230,6 +1277,100 @@ int MP4E_set_text_comment(MP4E_mux_t *mux, const char *comment)
 /**
 *   Write file index 'moov' box with all its boxes and indexes
 */
+/**
+*   fpvOS: the fields of the HEVC decoder configuration (hvcC) that come from
+*   the SPS - profile, tier, level, compatibility and constraint flags, chroma
+*   format and bit depths. minimp4 wrote them as constants (level 0, and a
+*   monochrome chroma format), which ffmpeg ignores but a platform decoder
+*   may not.
+*/
+typedef struct
+{
+    unsigned char ptl[12];  // general profile_tier_level, as hvcC carries it
+    int chroma_format, luma_minus8, chroma_minus8;
+} hevc_sps_info_t;
+
+static unsigned hevc_bits(const unsigned char *b, int nbytes, int *pos, int n)
+{
+    unsigned v = 0;
+    while (n-- > 0)
+    {
+        int byte = *pos >> 3;
+        v <<= 1;
+        if (byte < nbytes)
+            v |= (b[byte] >> (7 - (*pos & 7))) & 1;
+        (*pos)++;
+    }
+    return v;
+}
+
+static unsigned hevc_ue(const unsigned char *b, int nbytes, int *pos)
+{
+    int zeros = 0;
+    while (zeros < 31 && *pos < 8*nbytes && !hevc_bits(b, nbytes, pos, 1))
+        zeros++;
+    return (1u << zeros) - 1 + hevc_bits(b, nbytes, pos, zeros);
+}
+
+static int hevc_parse_sps(const unsigned char *nal, int bytes, hevc_sps_info_t *info)
+{
+    // The RBSP without the NAL header and emulation-prevention bytes; what is
+    // read here lies within its first 128 bytes.
+    unsigned char r[128];
+    int n = 0, zeros = 0, i, pos, sub, k, prof[8], lev[8];
+    for (i = 2; i < bytes && n < (int)sizeof(r); i++)
+    {
+        if (zeros >= 2 && nal[i] == 3)
+        {
+            zeros = 0;
+            continue;
+        }
+        zeros = nal[i] ? 0 : zeros + 1;
+        r[n++] = nal[i];
+    }
+    if (n < 13)
+        return 0;
+    sub = (r[0] >> 1) & 7;  // sps_max_sub_layers_minus1
+    memcpy(info->ptl, r + 1, 12);
+    pos = 8*13;
+    if (sub)
+    {
+        for (k = 0; k < sub; k++)
+        {
+            prof[k] = hevc_bits(r, n, &pos, 1);
+            lev[k] = hevc_bits(r, n, &pos, 1);
+        }
+        pos += 2*(8 - sub);
+        for (k = 0; k < sub; k++)
+            pos += (prof[k] ? 88 : 0) + (lev[k] ? 8 : 0);
+    }
+    hevc_ue(r, n, &pos);                        // sps_seq_parameter_set_id
+    info->chroma_format = hevc_ue(r, n, &pos) & 3;
+    if (info->chroma_format == 3)
+        pos++;                                  // separate_colour_plane_flag
+    hevc_ue(r, n, &pos);                        // pic_width_in_luma_samples
+    hevc_ue(r, n, &pos);                        // pic_height_in_luma_samples
+    if (hevc_bits(r, n, &pos, 1))               // conformance_window_flag
+        for (k = 0; k < 4; k++)
+            hevc_ue(r, n, &pos);
+    info->luma_minus8 = hevc_ue(r, n, &pos) & 7;
+    info->chroma_minus8 = hevc_ue(r, n, &pos) & 7;
+    return pos <= 8*n;
+}
+
+int MP4E_hevc_sps_config(const void *sps, int bytes, unsigned char ptl[12],
+                         int *chroma_format, int *luma_minus8, int *chroma_minus8)
+{
+    hevc_sps_info_t info;
+    if (!sps || bytes <= 0 || !hevc_parse_sps((const unsigned char *)sps, bytes, &info))
+        return 0;
+    memcpy(ptl, info.ptl, 12);
+    *chroma_format = info.chroma_format;
+    *luma_minus8 = info.luma_minus8;
+    *chroma_minus8 = info.chroma_minus8;
+    return 1;
+}
+
 static int mp4e_flush_index(MP4E_mux_t *mux)
 {
     unsigned char *stack_base[20]; // atoms nesting stack
@@ -1302,7 +1443,7 @@ static int mp4e_flush_index(MP4E_mux_t *mux)
         if (ntracks)
         {
             track_t *tr = ((track_t*)mux->tracks.data) + 0;    // take 1st track
-            unsigned duration = get_duration(tr);
+            unsigned duration = track_duration(mux, tr);
             duration = (unsigned)(duration * 1LL * MOOV_TIMESCALE / tr->info.time_scale);
             WRITE_4(MOOV_TIMESCALE); // duration
             WRITE_4(duration); // duration
@@ -1332,7 +1473,7 @@ static int mp4e_flush_index(MP4E_mux_t *mux)
     for (ntr = 0; ntr < ntracks; ntr++)
     {
         track_t *tr = ((track_t*)mux->tracks.data) + ntr;
-        unsigned duration = get_duration(tr);
+        unsigned duration = track_duration(mux, tr);
         int samples_count = tr->smpl.bytes / sizeof(sample_t);
         const sample_t *sample = (const sample_t *)tr->smpl.data;
         unsigned handler_type;
@@ -1582,19 +1723,29 @@ static int mp4e_flush_index(MP4E_mux_t *mux)
                             } else
                             {
                                 int numOfVPS  = items_count(&tr->vpps);
+                                // fpvOS: from the (first) SPS; Main, 4:2:0, 8-bit if it will not parse
+                                hevc_sps_info_t sps = { { 1, 0x60, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, 1, 0, 0 };
+                                if (tr->vsps.bytes > 2)
+                                {
+                                    hevc_sps_info_t parsed;
+                                    int len = (tr->vsps.data[0] << 8) | tr->vsps.data[1];
+                                    if (len <= tr->vsps.bytes - 2 && hevc_parse_sps(tr->vsps.data + 2, len, &parsed))
+                                        sps = parsed;
+                                }
                                 ATOM(BOX_hvcC);
-                                // TODO: read actual params from stream
                                 WRITE_1(1);    // configurationVersion
-                                WRITE_1(1);    // Profile Space (2), Tier (1), Profile (5)
-                                WRITE_4(0x60000000); // Profile Compatibility
-                                WRITE_2(0);    // progressive, interlaced, non packed constraint, frame only constraint flags
-                                WRITE_4(0);    // constraint indicator flags
-                                WRITE_1(0);    // level_idc
+                                for (i = 0; i < 12; i++)
+                                {
+                                    // Profile Space (2), Tier (1), Profile (5); Profile Compatibility (32);
+                                    // progressive, interlaced, non packed, frame only and other constraint
+                                    // flags (48); level_idc (8)
+                                    WRITE_1(sps.ptl[i]);
+                                }
                                 WRITE_2(0xf000); // Min Spatial Segmentation
                                 WRITE_1(0xfc); // Parallelism Type
-                                WRITE_1(0xfc); // Chroma Format
-                                WRITE_1(0xf8); // Luma Depth
-                                WRITE_1(0xf8); // Chroma Depth
+                                WRITE_1(0xfc | sps.chroma_format); // Chroma Format
+                                WRITE_1(0xf8 | sps.luma_minus8); // Luma Depth
+                                WRITE_1(0xf8 | sps.chroma_minus8); // Chroma Depth
                                 WRITE_2(0);    // Avg Frame Rate
                                 WRITE_1(3);    // ConstantFrameRate (2), NumTemporalLayers (3), TemporalIdNested (1), LengthSizeMinusOne (2)
 
@@ -1755,7 +1906,8 @@ static int mp4e_flush_index(MP4E_mux_t *mux)
     if (mux->enable_fragmentation)
     {
         track_t *tr = ((track_t*)mux->tracks.data) + 0;
-        uint32_t movie_duration = get_duration(tr);
+        // fpvOS: in the movie's timescale, as mvhd's
+        uint32_t movie_duration = (uint32_t)(track_duration(mux, tr) * 1LL * MOOV_TIMESCALE / tr->info.time_scale);
 
         ATOM(BOX_mvex);
             ATOM_FULL(BOX_mehd, 0);
@@ -1783,6 +1935,48 @@ static int mp4e_flush_index(MP4E_mux_t *mux)
     return err;
 }
 
+int MP4E_set_finalize(MP4E_mux_t *mux)
+{
+    if (!mux || !mux->enable_fragmentation || mux->fragments_count)
+        return MP4E_STATUS_BAD_ARGUMENTS;
+    mux->finalize = 1;
+    return MP4E_STATUS_OK;
+}
+
+/**
+*   fpvOS: MP4E_set_finalize's work, once the last fragment is written. The
+*   order keeps the file playable should it stop part way: the plain index is
+*   written first, after everything, and the fragmented file's boxes are only
+*   then covered over.
+*/
+static int mp4e_finalize(MP4E_mux_t *mux)
+{
+    unsigned char box[16], *p = box;
+    const uint64_t mdat_size = (uint64_t)(mux->write_pos - mux->first_moof_pos);
+    int err;
+
+    // The plain index: the moov minimp4 writes for an unfragmented file.
+    mux->enable_fragmentation = 0;
+    err = mp4e_flush_index(mux);
+    mux->enable_fragmentation = 1;
+    if (err)
+        return err;
+
+    // Every fragment, from the first moof to the end of the last sample, into
+    // one mdat with a 64-bit size - the first moof is far longer than its 16
+    // bytes. The moof and mdat headers inside become bytes no sample points at.
+    WRITE_4(1);
+    WRITE_4(BOX_mdat);
+    WRITE_4((mdat_size >> 32) & 0xffffffff);
+    WRITE_4(mdat_size & 0xffffffff);
+    ERR(mux->write_callback(mux->first_moof_pos, box, p - box, mux->token));
+
+    // The fragmented file's moov, which says there are fragments, into padding.
+    p = box;
+    WRITE_4(BOX_free);
+    return mux->write_callback(mux->moov_pos + 4, box, p - box, mux->token);
+}
+
 int MP4E_close(MP4E_mux_t *mux)
 {
     int err = MP4E_STATUS_OK;
@@ -1792,7 +1986,11 @@ int MP4E_close(MP4E_mux_t *mux)
     if (!mux->enable_fragmentation)
         err = mp4e_flush_index(mux);
     else
+    {
         err = mp4e_flush_fragment(mux); // fpvOS: the last picture
+        if (!err && mux->finalize && mux->fragments_count)
+            err = mp4e_finalize(mux);
+    }
     if (mux->text_comment)
         free(mux->text_comment);
     ntracks = mux->tracks.bytes / sizeof(track_t);

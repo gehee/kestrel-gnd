@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.13.0)
 project(kestrel-gnd VERSION 1.0)
 # The version as people read it, pre-release suffix included. project() only
 # takes numbers, so the label is kept beside it and is what the binary reports.
-set(KESTREL_GND_VERSION_LABEL "2026.09.alpha1")
+set(KESTREL_GND_VERSION_LABEL "2026.09.beta1")
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -13,6 +13,7 @@ set(TARGET kestrel-gnd)
 set(SOURCE_FILES
         drm/drm.c
         utils/copy_utils.c
+        utils/screen_id.c
         utils/scheduling_helper.cpp
         utils/mpp_encoder.cpp
         utils/h264_cfr.cpp
@@ -20,6 +21,7 @@ set(SOURCE_FILES
         queue/Queue.cpp
         queue/Msg.cpp
         dvr.cpp
+        dvr_recover.cpp
         vdec/vdec_ffmpeg.cpp
         renderer.cpp
         drm.cpp
@@ -110,7 +112,7 @@ endif()
 
 # kestrel-splash — tiny standalone DRM/cairo boot splash (no GL/MPP).
 # Links only libdrm + cairo (both already in DEPS).
-add_executable(kestrel-splash splash.c)
+add_executable(kestrel-splash splash.c utils/screen_id.c)
 target_link_libraries(kestrel-splash ${DEPS_LIBRARIES} m)
 
 # kestrel-gpio-joystick — GPIO/ADC joystick → uinput mapper for OSD menu

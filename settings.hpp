@@ -24,6 +24,7 @@ public:
     void set(const std::string& key, int value);
     void set(const std::string& key, bool value);
     void set(const std::string& key, float value);
+    void remove(const std::string& key);   // saves, like set()
 
 private:
     Settings() {}

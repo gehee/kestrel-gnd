@@ -105,6 +105,14 @@ void Settings::set(const std::string& key, const std::string& value) {
     save();
 }
 
+void Settings::remove(const std::string& key) {
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        if (!_settings.erase(key)) return;
+    }
+    save();
+}
+
 void Settings::set(const std::string& key, int value) {
     set(key, std::to_string(value));
 }

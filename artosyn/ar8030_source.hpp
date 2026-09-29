@@ -69,6 +69,7 @@ class Ar8030Source {
         static bool do_pair;
         static int ap_index;   // which bb_mac_addr_N to use as the AP
         static bool chan_auto; // channel adaptation (scan for the AP)
+        static bool chan_manual_cli;   // --ar8030-chan-manual: pinned to freq_khz from the start
         static int tx_power_dbm;
         static int tx_power_mw;   // stock's encoding: N = hold N mW, N+1 = auto capped at N
         static bool tx_power_auto;
@@ -353,6 +354,10 @@ class Ar8030Source {
         void  set_sky_key_from_mac(const uint8_t mac[4]);
         void  load_sky_config();
         void  save_sky_config();
+        // The TX power this air unit last ran with, kept beside its camera
+        // settings. The channel is not kept: the air unit decides it.
+        void  load_sky_link();
+        void  save_sky_link();
         std::vector<uint8_t> build_config_frame(const uint8_t *tmpl, size_t len);
         void apply_pending_settings();
         void apply_pending_rf();
@@ -389,6 +394,9 @@ class Ar8030Source {
         // fpv_bb_set_freq() plus the sky 0x21 it pairs with.
         // Returns 0 on success, negative on failure (frequency not in the radio's table, or an ioctl refused).
         int  set_rf_channel(uint32_t freq_khz, bool hop_en);
+        // Undo a pin: every channel back on the ground's work list, then
+        // channel adaptation on - the ground searches, as at start.
+        int  search_all_channels();
         uint32_t link_freq_khz();   // ground's own TX freq, 0 if unknown
 
         // Index of freq_khz in the radio's channel table, or -1. Also yields

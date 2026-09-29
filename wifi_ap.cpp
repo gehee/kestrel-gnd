@@ -1,5 +1,4 @@
 #include "wifi_ap.hpp"
-#include "settings.hpp"
 
 #include <unistd.h>
 
@@ -20,9 +19,13 @@ static std::atomic<bool> s_want{false};  // what the menu last asked for
 
 bool wifi_ap_available() { return access(kScript, X_OK) == 0; }
 
-bool wifi_ap_menu_enabled() {
-    static const bool on = Settings::getInstance().getBool("wifi_ap_menu", true);
-    return on;
+bool wifi_ap_on() {
+    if (s_busy.load() > 0) return s_want;
+    // fpvos-wifi writes the state file while the access point is up; /run is
+    // cleared at boot, so it is off after every boot.
+    std::string state;
+    { std::ifstream f(kState); std::getline(f, state); }
+    return !state.empty();
 }
 
 void wifi_ap_set(bool on) {

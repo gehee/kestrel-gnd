@@ -6,6 +6,10 @@
 #include <stdint.h>
 #include <cmath>
 
+// Stop the app the ordinary way and start it again in place (main.cpp): for a
+// setting read only at start, such as the screen mode.
+void kestrel_request_restart();
+
 enum class VideoCodec {
     UNKNOWN=0,
     H264,
@@ -144,9 +148,15 @@ static const ar_pwr_level kArPwrLevels[] = {
 };
 static const int kArPwrCount = (int)(sizeof(kArPwrLevels) / sizeof(kArPwrLevels[0]));
 
+// An air unit's TX power until it is given one (tx_power_mw, and each air
+// unit's own sky_<MAC>_tx_power_mw): the lowest level, held. Stock starts at
+// 500mW AUTO; the goggle's own uplink follows the same setting.
+static const int kArPwrDefaultMw = 25;
+
 static inline int ar_pwr_index(int mw) {
     for (int i = 0; i < kArPwrCount; i++) if (kArPwrLevels[i].mw == mw) return i;
-    return 3;   // 500mW, what stock boots with and what we used before
+    for (int i = 0; i < kArPwrCount; i++) if (kArPwrLevels[i].mw == kArPwrDefaultMw) return i;
+    return 0;   // a value no level matches: the default
 }
 
 // The radio reports its current power in dBm; convert to mW for display.

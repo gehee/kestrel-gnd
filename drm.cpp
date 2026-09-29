@@ -7,6 +7,8 @@
 #include <unistd.h>
 
 #include "drm.hpp"
+#include "common.hpp"             // kestrel_request_restart
+#include "utils/screen_id.h"
 #include "utils/time_util.h"
 #include "utils/prof.hpp"
 #include "settings.hpp"
@@ -92,15 +94,37 @@ void DrmDevice::init(uint16_t mode_width, uint16_t mode_height, uint32_t mode_vr
 // Probe the connector and, on a disconnected→connected transition, redo the full
 // modeset (the CRTC is left off after an unplug; page_flip commits carry no
 // ALLOW_MODESET, so without this the screen stays black until an app restart).
-// Assumes the same/equivalent display returns: mode, framebuffers and the GL
-// surface are reused as-is. A different-resolution monitor still needs a restart.
+// That reuses the mode, framebuffers and GL surface as they are, so it is only
+// done for the same screen coming back still offering the mode in use. Any
+// other screen - or one that no longer offers the mode - restarts kestrel-gnd,
+// which sets the display up from scratch in that screen's own mode: sent the
+// old mode, a screen that does not take it just stays black.
 void DrmDevice::check_display_hotplug() {
     drmModeConnector *conn = drmModeGetConnector(drm_fd, output_list->connector.id);
     if (!conn) return;
     bool now_connected = (conn->connection == DRM_MODE_CONNECTED);
+    bool mode_offered = false;
+    for (int i = 0; now_connected && i < conn->count_modes; i++) {
+        const drmModeModeInfo &m = conn->modes[i];
+        if (m.hdisplay == output_list->mode.hdisplay && m.vdisplay == output_list->mode.vdisplay &&
+            m.vrefresh == output_list->mode.vrefresh)
+            mode_offered = true;
+    }
     drmModeFreeConnector(conn);
 
     if (now_connected && !display_connected) {
+        // The probe above re-read the EDID, so sysfs now has the new screen's.
+        char id[16] = "";
+        screen_id(id, sizeof(id));
+        if (display_id != id || !mode_offered) {
+            printf("[drm] display hot-plugged: %s screen %s%s - restarting to set it up\n",
+                   display_id != id ? "a different" : "the same", id[0] ? id : "(no EDID ID)",
+                   mode_offered ? "" : ", which does not offer the mode in use");
+            fflush(stdout);
+            display_connected = now_connected;
+            kestrel_request_restart();
+            return;
+        }
         printf("[drm] display hot-plugged — performing full modeset\n");
         fflush(stdout);
         output_list->initialized = false;        // next commit re-adds connector/crtc props
