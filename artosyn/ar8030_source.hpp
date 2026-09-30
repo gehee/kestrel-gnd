@@ -266,7 +266,7 @@ class Ar8030Source {
         void*              dump_fp = nullptr;
         unsigned long long dump_written = 0;
         // Access-unit assembly for sliced pictures (see emit_nal): the air
-        // unit sends ~4 slice NALs per frame; group them into one packet/PTS.
+        // unit sends each picture as two slice NALs; group them into one packet/PTS.
         std::vector<uint8_t> au_slices;
         int64_t  au_pts = 0;
         uint8_t  au_nal_type = 0;
@@ -302,6 +302,19 @@ class Ar8030Source {
         // au_last - au_first; using the flush-triggering read instead measures
         // first-slice-to-next-picture's-first-slice, i.e. the frame interval.
         uint64_t au_last_recv_us = 0;
+        // End of picture: flush_access_unit() as the picture's last slice
+        // arrives rather than when the next picture's first does.
+        int      ctb_addr_bits = 0;          // slice address width, from the SPS
+        uint8_t  pps_dep_slices[64] = {0};   // dependent_slice_segments_enabled_flag per PPS
+        int      au_max_addr = -1;           // largest slice start in the picture being built
+        int      last_slice_addr = -1;       // learned start of a picture's last slice
+        int      last_addr_cand = -1, last_addr_streak = 0;
+        uint32_t late_slices = 0, late_window_pics = 0;
+        uint64_t late_slices_total = 0;
+        static constexpr int      kLearnRun = 32;
+        static constexpr uint32_t kLateMax  = 4;
+        void     learn_last_slice(int max_addr);
+        void     late_slice();
 
         // Air-clock sync, for the true air->ground video delay.
         // BB_GET_AP_TIME returns the air unit's uptime in ms; the per-frame

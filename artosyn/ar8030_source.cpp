@@ -111,6 +111,65 @@ static int hevc_param_set_id(int type, const uint8_t* p, size_t n) {
     return (int)id;
 }
 
+// How many bits a slice_segment_address takes in pictures of this SPS -
+// Ceil(Log2(PicSizeInCtbsY)) - or 0 if the SPS does not parse. The same walk as
+// hevc_param_set_id, carried on to the coding block sizes.
+static int hevc_sps_addr_bits(const uint8_t* p, size_t n) {
+    Rbsp r(p, n);
+    r.u(4);
+    const uint32_t max_sub = r.u(3);
+    r.u(1);
+    if (max_sub > 6) return 0;
+    r.u(88); r.u(8);
+    uint32_t prof[8] = {0}, lvl[8] = {0};
+    for (uint32_t i = 0; i < max_sub; i++) { prof[i] = r.u(1); lvl[i] = r.u(1); }
+    if (max_sub > 0) for (uint32_t i = max_sub; i < 8; i++) r.u(2);
+    for (uint32_t i = 0; i < max_sub; i++) { if (prof[i]) r.u(88); if (lvl[i]) r.u(8); }
+    r.ue();                                             // sps_seq_parameter_set_id
+    if (r.ue() == 3) r.u(1);                            // chroma_format_idc
+    const uint32_t w = r.ue(), h = r.ue();
+    if (r.u(1)) { r.ue(); r.ue(); r.ue(); r.ue(); }     // conformance window
+    r.ue(); r.ue();                                     // bit depths
+    r.ue();                                             // log2_max_pic_order_cnt_lsb_minus4
+    const uint32_t ordering_all = r.u(1);
+    for (uint32_t i = ordering_all ? 0 : max_sub; i <= max_sub; i++) { r.ue(); r.ue(); r.ue(); }
+    const uint32_t min_cb = r.ue() + 3, diff = r.ue();
+    if (r.bad || w < 16 || h < 16 || w > 8192 || h > 8192 || min_cb + diff < 4 || min_cb + diff > 6) return 0;
+    const uint32_t ctb = 1u << (min_cb + diff);
+    const uint32_t ctbs = ((w + ctb - 1) / ctb) * ((h + ctb - 1) / ctb);
+    int bits = 0;
+    while ((1u << bits) < ctbs) bits++;
+    return bits;
+}
+
+// A PPS's dependent_slice_segments_enabled_flag, with its id in *id; -1 if it
+// does not parse.
+static int hevc_pps_dependent_slices(const uint8_t* p, size_t n, int* id) {
+    Rbsp r(p, n);
+    const uint32_t pps_id = r.ue();
+    r.ue();                                             // pps_seq_parameter_set_id
+    const uint32_t dep = r.u(1);
+    if (r.bad || pps_id > 63) return -1;
+    *id = (int)pps_id;
+    return (int)dep;
+}
+
+// Where in the picture a slice starts, in coding tree blocks (0 for a
+// picture's first slice), or -1 if it cannot be read. p is the slice NAL's
+// payload after its 2-byte header.
+static int hevc_slice_address(int type, const uint8_t* p, size_t n, int addr_bits,
+                              const uint8_t dep_slices[64]) {
+    if (addr_bits <= 0) return -1;
+    Rbsp r(p, n < 32 ? n : 32);
+    if (r.u(1)) return 0;                               // first_slice_segment_in_pic_flag
+    if (type >= 16 && type <= 23) r.u(1);               // no_output_of_prior_pics_flag
+    const uint32_t pps = r.ue();
+    if (r.bad || pps > 63) return -1;
+    if (dep_slices[pps]) r.u(1);                        // dependent_slice_segment_flag
+    const uint32_t addr = r.u(addr_bits);
+    return r.bad ? -1 : (int)addr;
+}
+
 // Every bb_ioctl() in this SDK waits forever. The public entry point hard-codes
 // timeout = -1 (ar8030.c:253), and -1 selects the untimed pthread_cond_wait in
 // bs_send_usbpack_and_wait() rather than the timed one beside it. So a single
@@ -2600,7 +2659,7 @@ void Ar8030Source::emit_nal(const uint8_t* nal, size_t len) {
 
     uint64_t recv_us = now_us();
 
-    // The air unit slices each picture into ~4 slice NALs. Feeding each slice to
+    // The air unit sends each picture as two slice NALs, its two halves. Feeding each slice to
     // MPP as its own packet/PTS corrupts frame + reference assembly (partial
     // "top-only" pictures and an rkvdec timeout/reset storm). Accumulate all the
     // slices of one picture and feed them as a single access unit with one PTS.
@@ -2611,18 +2670,41 @@ void Ar8030Source::emit_nal(const uint8_t* nal, size_t len) {
             uint8_t first_slice = (codec == VideoCodec::H265)
                 ? ((len >= 3) ? ((nal[2] >> 7) & 1) : 1)
                 : 1;  // H.264 (unused for AR8030): one slice == one picture
+            const int addr = (codec == VideoCodec::H265)
+                ? hevc_slice_address(nal_type, nal + 2, len - 2, ctb_addr_bits, pps_dep_slices)
+                : -1;
             if (first_slice && au_open) {
+                // Completed by the next picture's arrival: the fallback, and
+                // how the last slice's start address gets learned.
+                learn_last_slice(au_max_addr);
                 flush_access_unit(recv_us);
+            }
+            if (!first_slice && !au_open) {
+                // A slice for a picture already handed to the decoder early.
+                // Mostly the air unit's stray fragments (28 bytes, reserved
+                // types - they used to be appended to the next picture); a
+                // run of them means the learned end was wrong, so relearn.
+                late_slice();
+                return;
             }
             if (first_slice) {
                 au_pts = frame_pts;
                 au_nal_type = nal_type;   // picture key-ness (IDR vs trailing)
                 au_first_recv_us = recv_us;  // zero point for this picture
+                au_max_addr = 0;
                 frames_seen++;            // count real pictures, not slices
+                if (++late_window_pics >= 64) { late_window_pics = 0; late_slices = 0; }
             }
             au_slices.insert(au_slices.end(), unit.begin(), unit.end());
             au_last_recv_us = recv_us;   // newest slice of this picture
             au_open = true;
+            if (addr > au_max_addr) au_max_addr = addr;
+            // The picture's last slice: decode it now, not when the next
+            // picture's first slice turns up - a frame interval later (10 ms
+            // at 100 fps), which is how long every complete picture used to
+            // wait.
+            if (last_slice_addr > 0 && addr == last_slice_addr)
+                flush_access_unit(recv_us);
         } else {
             // VPS/SPS/PPS are cached and SEI dropped inside the decoder; the
             // cached param sets get prepended to the next IDR automatically.
@@ -2691,6 +2773,20 @@ void Ar8030Source::emit_nal(const uint8_t* nal, size_t len) {
                 dvr_param_sets.push_back(unit);
                 changed = true;
             }
+            // What reading a slice's start address takes (hevc_slice_address).
+            if (codec == VideoCodec::H265 && nal_type == 33) {
+                const int bits = hevc_sps_addr_bits(nal + 2, len - 2);
+                if (bits != ctb_addr_bits) {
+                    printf("ar8030: slice addresses are %d bits in this picture size\n", bits);
+                    ctb_addr_bits = bits;
+                    last_slice_addr = -1;              // a new picture size: learn again
+                    last_addr_cand = -1; last_addr_streak = 0;
+                }
+            } else if (codec == VideoCodec::H265 && nal_type == 34) {
+                int id = -1;
+                const int dep = hevc_pps_dependent_slices(nal + 2, len - 2, &id);
+                if (dep >= 0) pps_dep_slices[id] = (uint8_t)dep;
+            }
             if (changed) {
                 DvrRecorder::instance().set_parameter_sets(dvr_param_sets);
                 WebStream::instance().set_parameter_sets(dvr_param_sets);
@@ -2728,6 +2824,37 @@ void Ar8030Source::emit_nal(const uint8_t* nal, size_t len) {
     update_stats(unit.size());
 
     nal_count++;
+}
+
+// Where a picture's last slice starts, learned from pictures completed by the
+// next one's arrival: the same start address as the last slice of kLearnRun
+// pictures in a row. The air unit cuts every picture the same way - two
+// halves, the second at CTB 255 of 510 at 1080p, IDR or not - so this settles
+// within a second of video; a new picture size (SPS) starts it over.
+void Ar8030Source::learn_last_slice(int max_addr) {
+    if (last_slice_addr > 0 || max_addr <= 0) return;
+    if (max_addr == last_addr_cand) last_addr_streak++;
+    else { last_addr_cand = max_addr; last_addr_streak = 1; }
+    if (last_addr_streak >= kLearnRun) {
+        last_slice_addr = max_addr;
+        printf("ar8030: pictures end with the slice at CTB %d - decoding each as that "
+               "slice arrives\n", last_slice_addr);
+    }
+}
+
+// A slice after its picture was flushed early. The air unit's stray fragments
+// do this about once in 600 pictures; more than a few in 64 pictures means
+// pictures do not end where learned (a mode change), so stop flushing early
+// and learn again.
+void Ar8030Source::late_slice() {
+    late_slices_total++;
+    if (++late_slices > kLateMax && last_slice_addr > 0) {
+        printf("ar8030: %u slices after their picture ended in %u pictures - relearning "
+               "where pictures end\n", late_slices, late_window_pics);
+        last_slice_addr = -1;
+        last_addr_cand = -1; last_addr_streak = 0;
+        late_slices = 0;
+    }
 }
 
 // Feed the accumulated slices of one picture as a single access unit / PTS.

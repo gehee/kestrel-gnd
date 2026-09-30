@@ -4560,7 +4560,7 @@ void OSD::update_stats(int current_framerate, latency_stats stats) {
         printf(BOLDMAGENTA "Network Transport (ms):%s\n", RESET);
         print_latency_dist(osd_vars.proc_latency_values, osd_vars.proc_latency_avg, osd_vars.proc_latency_min, osd_vars.proc_latency_max, MAX_LATENCY_SCALE, GRAPH_BAR_WIDTH, BOLDCYAN);
         
-        printf(BOLDMAGENTA "Ground Reassembly (ms):%s\n", RESET);
+        printf(BOLDMAGENTA "Frame assembly - first slice to decoder (ms):%s\n", RESET);
         print_latency_dist(osd_vars.reassemble_latency_values, osd_vars.reassemble_latency_avg, osd_vars.reassemble_latency_min, osd_vars.reassemble_latency_max, MAX_LATENCY_SCALE, GRAPH_BAR_WIDTH, BOLDMAGENTA);
 
         printf(BOLDMAGENTA "Decoding / RX processing (ms):%s\n", RESET);
