@@ -169,6 +169,7 @@ class Renderer {
     public:
         virtual ~Renderer() { delete decoded_unit_queue; }
         virtual bool render_frame(DecodedUnit *du);
+        uint64_t sensor_offset_us(const DecodedUnit* du);
         virtual void queue_frame(std::shared_ptr<DecodedUnit> du);
         virtual void present_frame(uint32_t fb_id, uint32_t width, uint32_t height, uint64_t pts, uint64_t recv_ts, uint64_t dec_start_ts, uint64_t dec_end_ts, uint32_t tx_age_us);
         void update_stats(DecodedUnit *du, uint64_t display_ts);

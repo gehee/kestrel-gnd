@@ -1,4 +1,5 @@
 #include "vdec_rk.hpp"
+#include "../utils/ltrace.hpp"
 
 #include <assert.h>
 #include <xf86drm.h>
@@ -222,6 +223,23 @@ void VdecRK::run_frame()
 					assert(i!=MAX_FRAMES);
 
                     uint64_t now_us = get_time_us();
+                    if (ltrace::on()) {
+                        // Mean luma of an 8x4 grid, sparsely sampled: enough to
+                        // see a light switched on in front of the camera.
+                        const uint8_t* y = (const uint8_t*)mpp_buffer_get_ptr(buffer);
+                        const uint32_t stride = mpp_frame_get_hor_stride(frame);
+                        uint8_t grid[32];
+                        for (int c = 0; c < 32 && y; c++) {
+                            const uint32_t x0 = (c % 8) * frm_width / 8, y0 = (c / 8) * frm_height / 4;
+                            uint32_t sum = 0;
+                            for (int j = 0; j < 8; j++)
+                                for (int i = 0; i < 8; i++)
+                                    sum += y[(size_t)(y0 + (2 * j + 1) * frm_height / 64) * stride +
+                                             x0 + (2 * i + 1) * frm_width / 128];
+                            grid[c] = (uint8_t)(sum / 64);
+                        }
+                        ltrace::rec(ltrace::kDecOut, now_us, (uint32_t)pts, 0, grid, y ? 32 : 0);
+                    }
                     bool found_stats = false;
                     timing_stats_t t_stats = {};
                     {
@@ -426,6 +444,7 @@ void VdecRK::feed_packet_to_decoder(void* data_p, int data_len, int64_t pts, uin
         };
     }
     
+    const uint64_t put_start_us = get_time_us();
     int attempt = 0;
     while (MPP_OK != (ret = mpi.mpi->decode_put_packet(mpi.ctx, pkt))) {
         attempt++;
@@ -464,6 +483,7 @@ void VdecRK::feed_packet_to_decoder(void* data_p, int data_len, int64_t pts, uin
         usleep(200);
     }
     consec_put_stalls = 0;
+    if (ltrace::on()) ltrace::rec(ltrace::kDecPut, put_start_us, (uint32_t)pts, get_time_us());
     
     if (attempt > 1) {
         printf("VdecRK: decode_put_packet succeeded after attempt=%d, elapsed=%lu ms\n", attempt, get_time_ms() - data_feed_begin);

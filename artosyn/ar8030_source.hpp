@@ -72,6 +72,7 @@ class Ar8030Source {
         static bool chan_manual_cli;   // --ar8030-chan-manual: pinned to freq_khz from the start
         static int tx_power_dbm;
         static int tx_power_mw;   // stock's encoding: N = hold N mW, N+1 = auto capped at N
+        static int panel_latency_us;   // glass-to-glass outside our timestamps, less half a frame
         static bool tx_power_auto;
         void apply_tx_power(int mw); // PA output; stock uses 24
         static bool skip_handshake;
@@ -316,24 +317,26 @@ class Ar8030Source {
         void     learn_last_slice(int max_addr);
         void     late_slice();
 
-        // Air-clock sync, for the true air->ground video delay.
-        // BB_GET_AP_TIME returns the air unit's uptime in ms; the per-frame
-        // video header (see emit_nal) carries a capture timestamp in air-clock
-        // MICROseconds. Polling the former at 1Hz and interpolating with the
-        // local monotonic clock between polls gives an air-clock "now", and
-        // (air_now - frame_capture_ts) is the delay stock displays and the
-        // baseband SDK does not expose.
-        uint64_t ap_time_ms = 0;        // air uptime at the last poll
-        uint64_t ap_local_ms = 0;       // our monotonic clock at that poll
-        float    air_delay_ms = -1.0f;  // EWMA of the delay above the floor
-        // The air capture clock and BB_GET_AP_TIME tick 1:1 but have a
-        // constant, unknown origin offset (~5.8s observed - the camera clock
-        // starts before the baseband's). Absolute air->ground latency is
-        // therefore not recoverable; the best-case observed skew IS the
-        // offset plus the minimum true delay, so subtracting it yields delay
-        // ABOVE THE FLOOR - which still exposes every spike and stall.
-        int64_t  air_skew_floor_us = INT64_MAX;
-        uint64_t air_skew_reset_ms = 0;
+        // Capture -> arrival, per picture. The video header's capture stamp
+        // is the air unit's CLOCK_MONOTONIC in microseconds (checked against
+        // the encoder's PTS in /proc/umap/venc), so arrival - capture is the
+        // true delay plus a constant clock offset. The offset comes out as
+        // the smallest such difference seen lately, which is the offset plus
+        // the fastest a picture ever makes it; that fastest time is a
+        // property of the air pipeline and was measured with both clocks
+        // synced through a host (kAirFloorUs in the .cpp). A window, not an
+        // all-time minimum: the two crystals drift apart by ~7 ppm.
+        static constexpr int kAirWinSlots = 8;          // x 500 ms
+        int64_t  air_win_min[kAirWinSlots];
+        uint64_t air_win_slot[kAirWinSlots] = {};
+        uint64_t cap_us64 = 0;          // last header's stamp, unwrapped
+        uint32_t cap_last32 = 0;
+        uint32_t cap_wraps = 0;
+        bool     cap_valid = false;
+        unsigned hdr_fps = 0;           // from the header, for the calibration
+        uint32_t au_air_us = 0;         // this picture's capture -> arrival
+        float    air_delay_ms = -1.0f;  // EWMA of it, for the stats line
+        uint32_t air_delay_for(uint64_t recv_us);
         uint16_t last_hseq = 0;          // header frame counter, for loss
         bool     hseq_valid = false;
         unsigned long long frames_lost = 0;

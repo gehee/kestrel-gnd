@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 #include "drm.hpp"
+#include "utils/ltrace.hpp"
 #include "common.hpp"             // kestrel_request_restart
 #include "utils/screen_id.h"
 #include "utils/time_util.h"
@@ -175,6 +176,7 @@ void DrmDevice::handle_events() {
             static int complete_count = 0;
             // Use the kernel-provided timestamp for the actual hardware flip event
             uint64_t completion_ts = (uint64_t)sec * 1000000ULL + usec;
+            if (ltrace::on()) ltrace::rec(ltrace::kFlipDone, ltrace::now_us(), self->pending_stats.fb_id, completion_ts);
             
             pthread_mutex_lock(&self->osd_mutex);
             if (self->inflight_osd_fb_id) {
@@ -624,6 +626,7 @@ bool DrmDevice::page_flip(int fb_id, uint64_t recv_ts, uint64_t dec_start_ts, ui
         // The commit returned, so the flip is done. Close out the stats here
         // exactly as the event handler would, and leave nothing pending.
         uint64_t completion_ts = get_time_us();
+        if (ltrace::on()) ltrace::rec(ltrace::kFlipDone, completion_ts, (uint32_t)fb_id, completion_ts);
         flip_pending = false;
         pthread_mutex_lock(&stats_mutex);
         if (pending_stats.recv_ts > 0) {

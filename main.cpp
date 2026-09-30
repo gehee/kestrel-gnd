@@ -25,6 +25,7 @@ extern "C" {
 #include "osd.hpp"
 #include "vdec/vdec_helper.hpp"
 #include "renderer.hpp"
+#include "utils/ltrace.hpp"
 #include "utils/vrx_buttons.hpp"
 #include "artosyn/ar8030_source.hpp"
 #include "artosyn/bb_watchdog.hpp"
@@ -437,6 +438,7 @@ int main(int argc, char **argv)
 	// which point the last line printed is not where the process stopped and
 	// the log actively misleads.
 	setvbuf(stdout, nullptr, _IOLBF, 0);
+	ltrace::start();
 
 	int ret;	
 	int i, j;
@@ -541,6 +543,10 @@ int main(int argc, char **argv)
 	// kArPwrLevels in common.hpp for the levels this board accepts.
 	Ar8030Source::tx_power_mw = Settings::getInstance().getInt("tx_power_mw", kArPwrDefaultMw);
 	Ar8030Source::tx_power_dbm = kArPwrLevels[ar_pwr_index(Ar8030Source::tx_power_mw)].dbm;
+	// The display's share of the glass-to-glass estimate. Measured for the
+	// goggle's own panel; another screen has its own.
+	Ar8030Source::panel_latency_us =
+		(int)(Settings::getInstance().getFloat("panel_latency_ms", 9.8f) * 1000.0f);
 	// 0 = off. See drain_msp_socket(): an unserved port wedges bring-up.
 	Ar8030Source::msp_bb_port = Settings::getInstance().getInt("msp_bb_port", 2);
 	// Standby is dictated by the air unit, not the ground: fpv_sky_standby_mode_thread

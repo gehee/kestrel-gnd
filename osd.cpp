@@ -3388,13 +3388,13 @@ void OSD::render_gl() {
                      r_disp, 0.9f * ldim, 0.2f * ldim, 0.2f * ldim);
 
     current_ly += 0.07f * s;
-    // "gnd" is not decoration: this is arrival-to-scanout, measured from the
-    // hardware flip timestamp against the frame's first-byte arrival. It does
-    // NOT include camera exposure, ISP, encode or RF transit, so it is not
-    // glass-to-glass - those happen before the first byte reaches our socket
-    // and the air unit does not send an absolute reference for them.
+    // With the air delay measured (the AR8030 path: see air_delay_for) this is
+    // a glass-to-glass estimate - capture stamp to the hardware flip, plus
+    // the calibrated exposure wait and panel. Without it, arrival to flip
+    // only, and labelled so.
     if (video_active && lat_avg > 0.0f) {
-        sprintf(buf, "LATENCY (gnd): %.1fms | MAX: %.1fms", lat_avg, lat_max);
+        sprintf(buf, air_delay_valid ? "LATENCY (g2g est): %.1fms | MAX: %.1fms"
+                                     : "LATENCY (gnd): %.1fms | MAX: %.1fms", lat_avg, lat_max);
     } else if (video_active) {
         sprintf(buf, "LATENCY (gnd): -- | MAX: --");
     } else {
@@ -3419,12 +3419,9 @@ void OSD::render_gl() {
         float dec_avg  = osd_vars.decoding_latency_avg;
         float disp_avg = osd_vars.display_latency_avg;
         if (air_delay_valid)
-            // "air+" is delay ABOVE the best observed floor, not absolute:
-            // the air capture clock and BB_GET_AP_TIME tick 1:1 but their
-            // origins differ by a constant we cannot measure, so only the
-            // variable part is recoverable. Spikes and stalls show; the
-            // steady-state baseline reads ~0.
-            sprintf(buf, "[air+:%.1f, rsm:%.1f, dec:%.1f, disp:%.1f]",
+            // "air" is capture stamp to the first slice's arrival: camera
+            // readout, encode, the air app, the radio and the goggle's daemon.
+            sprintf(buf, "[air:%.1f, rsm:%.1f, dec:%.1f, disp:%.1f]",
                     air_delay_ms, rsm_avg, dec_avg, disp_avg);
         else
             sprintf(buf, "[rsm:%.1f, dec:%.1f, disp:%.1f]  (ground)",
@@ -4557,7 +4554,7 @@ void OSD::update_stats(int current_framerate, latency_stats stats) {
             RESET);
         printf("\n");
 
-        printf(BOLDMAGENTA "Network Transport (ms):%s\n", RESET);
+        printf(BOLDMAGENTA "Air - capture stamp to first slice here (ms):%s\n", RESET);
         print_latency_dist(osd_vars.proc_latency_values, osd_vars.proc_latency_avg, osd_vars.proc_latency_min, osd_vars.proc_latency_max, MAX_LATENCY_SCALE, GRAPH_BAR_WIDTH, BOLDCYAN);
         
         printf(BOLDMAGENTA "Frame assembly - first slice to decoder (ms):%s\n", RESET);
@@ -4569,13 +4566,13 @@ void OSD::update_stats(int current_framerate, latency_stats stats) {
         printf(BOLDMAGENTA "\nDisplay (VSync Aging) (ms):%s\n", RESET);
         print_latency_dist(osd_vars.display_latency_values, osd_vars.display_latency_avg, osd_vars.display_latency_min, osd_vars.display_latency_max, MAX_LATENCY_SCALE, GRAPH_BAR_WIDTH, RED);
         
-        printf(BOLDMAGENTA "\nCamera Capture / ISP (ms):%s\n", RESET);
+        printf(BOLDMAGENTA "\nExposure wait + panel, calibrated (ms):%s\n", RESET);
         print_latency_dist(osd_vars.capture_latency_values, osd_vars.capture_latency_avg, osd_vars.capture_latency_min, osd_vars.capture_latency_max, MAX_LATENCY_SCALE, GRAPH_BAR_WIDTH, BOLDGREEN);
  
         printf(BOLDMAGENTA "TX Encoder Processing (ms):%s\n", RESET);
         print_latency_dist(osd_vars.tx_latency_values, osd_vars.tx_latency_avg, osd_vars.tx_latency_min, osd_vars.tx_latency_max, MAX_LATENCY_SCALE, GRAPH_BAR_WIDTH, CYAN);
         
-        printf(BOLDMAGENTA "\nTotal End-to-End Latency (ms):%s\n", RESET);
+        printf(BOLDMAGENTA "\nGlass-to-glass estimate (ms):%s\n", RESET);
         print_latency_dist(osd_vars.total_latency_values, osd_vars.total_latency_avg, osd_vars.total_latency_min, osd_vars.total_latency_max, MAX_LATENCY_SCALE, GRAPH_BAR_WIDTH, GREEN);
 
         printf(BOLDMAGENTA "\nFrame Pace (ms per frame):%s\n", RESET);

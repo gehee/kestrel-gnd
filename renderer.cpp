@@ -6,6 +6,7 @@ extern "C"{
 #include <iomanip>
 
 #include "renderer.hpp"
+#include "utils/ltrace.hpp"
 #include "dvr.hpp"
 #include "webstream.hpp"
 
@@ -503,6 +504,15 @@ void Renderer::run(){
     }
 }
 
+// A nominal exposure + readout for the capture end of the latency figures,
+// when the source has no measured one. The AR8030 path measures its own (see
+// Ar8030Source::air_delay_for) and sends it in tx_capture_delay_us.
+uint64_t Renderer::sensor_offset_us(const DecodedUnit* du) {
+    if (du->tx_capture_delay_us || !osd) return 0;
+    uint32_t fps = osd->get_sky_framerate();
+    return fps > 0 ? (uint64_t)osd->get_sky_exposure_us() + 1000000 / fps : 0;
+}
+
 bool Renderer::render_frame(DecodedUnit *du) {
 	if (render_mode == Disable) {
         update_stats(du, 0);
@@ -566,31 +576,21 @@ bool Renderer::render_frame(DecodedUnit *du) {
         // We skip page_flip to avoid 'flip_pending' deadlock (no event for no-op flip).
         submitted = true;
     } else if (render_mode == Atomic) {
-        uint64_t hw_offset_us = 0;
-        if (osd) {
-            uint32_t exp_us = osd->get_sky_exposure_us();
-            uint32_t fps = osd->get_sky_framerate();
-            if (fps > 0) {
-                // ISP/VENC pipeline latency is already measured dynamically in
-                // tx_capture_delay_us (air cmd 0x06: now_us - pack->timestamp).
-                // Only add the pure sensor hardware offset here.
-                uint32_t readout_us = 1000000 / fps;
-                hw_offset_us = (uint64_t)exp_us + readout_us;
-            }
-        }
-        uint32_t total_tx_age = du->tx_capture_delay_us + du->tx_processing_delay_us + hw_offset_us;
+        uint64_t hw_offset_us = sensor_offset_us(du);
+        uint32_t total_tx_age = ((du->tx_capture_delay_us >> 16) & 0xFFFF) +
+                                (du->tx_capture_delay_us & 0xFFFF) +
+                                du->tx_processing_delay_us + hw_offset_us;
+        if (ltrace::on()) ltrace::rec(ltrace::kRender, get_time_us(), (uint32_t)du->pts, (uint64_t)fb_id);
         submitted = dev->page_flip(fb_id, du->recv_ts, du->dec_start_ts, du->dec_end_ts, render_start_ts, total_tx_age);
     } else if (render_mode == FrontBuffer) {
         // FrontBuffer: Always "submitted" because we already wrote to memory.
-        uint64_t hw_offset_us = 0;
-        if (osd) {
-            uint32_t exp_us = osd->get_sky_exposure_us();
-            uint32_t fps = osd->get_sky_framerate();
-            if (fps > 0) hw_offset_us = (uint64_t)exp_us + (1000000 / fps);
-        }
+        uint64_t hw_offset_us = sensor_offset_us(du);
+        if (ltrace::on()) ltrace::rec(ltrace::kRender, get_time_us(), (uint32_t)du->pts, (uint64_t)fb_id);
         dev->record_direct_frame(du->recv_ts, du->dec_start_ts, du->dec_end_ts,
                                  render_start_ts,
-                                 du->tx_capture_delay_us + du->tx_processing_delay_us + hw_offset_us);
+                                 ((du->tx_capture_delay_us >> 16) & 0xFFFF) +
+                                 (du->tx_capture_delay_us & 0xFFFF) +
+                                 du->tx_processing_delay_us + hw_offset_us);
         submitted = true;
     }
         
@@ -857,15 +857,7 @@ void Renderer::update_stats(DecodedUnit *du, uint64_t display_start_ts) {
         uint64_t proc_lat = du->dec_start_ts > du->recv_ts ? du->dec_start_ts - du->recv_ts : 0;
         uint64_t dec_lat = du->dec_end_ts > du->dec_start_ts ? du->dec_end_ts - du->dec_start_ts : 0;
         
-        uint64_t hw_offset_us = 0;
-        if (osd) {
-            uint32_t exp_us = osd->get_sky_exposure_us();
-            uint32_t fps = osd->get_sky_framerate();
-            if (fps > 0) {
-                uint32_t readout_us = 1000000 / fps;
-                hw_offset_us = (uint64_t)exp_us + readout_us;
-            }
-        }
+        uint64_t hw_offset_us = sensor_offset_us(du);
 
         uint32_t packed_tx_delays = du->tx_capture_delay_us;
         uint64_t tx_cap = ((packed_tx_delays >> 16) & 0xFFFF) + hw_offset_us;

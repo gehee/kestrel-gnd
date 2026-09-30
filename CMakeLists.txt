@@ -18,6 +18,7 @@ set(SOURCE_FILES
         utils/mpp_encoder.cpp
         utils/h264_cfr.cpp
         utils/prof.cpp
+        utils/ltrace.cpp
         queue/Queue.cpp
         queue/Msg.cpp
         dvr.cpp

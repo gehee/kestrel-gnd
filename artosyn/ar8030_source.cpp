@@ -1,4 +1,5 @@
 #include "ar8030_source.hpp"
+#include "../utils/ltrace.hpp"
 #include "bb_watchdog.hpp"
 #include "ar8030_handshake.h"
 #include "../settings.hpp"
@@ -248,6 +249,9 @@ int Ar8030Source::ap_index = 0;
 bool Ar8030Source::chan_auto = true;
 bool Ar8030Source::chan_manual_cli = false;
 int Ar8030Source::tx_power_mw  = kArPwrDefaultMw;
+// Photodiode against this goggle's panel: 14.8 ms outside what kestrel can
+// timestamp at 100 fps, of which half a frame is the wait for an exposure.
+int Ar8030Source::panel_latency_us = 9800;
 int Ar8030Source::tx_power_dbm = kArPwrLevels[ar_pwr_index(kArPwrDefaultMw)].dbm;
 bool Ar8030Source::tx_power_auto = false;
 bool Ar8030Source::skip_handshake = false;
@@ -2142,16 +2146,6 @@ void Ar8030Source::publish_link_stats() {
 
     if (st.tx_freq > 0) link_freq_mhz = st.tx_freq;
 
-    // Air clock, for the video delay computed in emit_nal(). Cheap, and the
-    // pairing with the local monotonic clock has to be as tight as we can
-    // manage or the interpolation inherits the round-trip.
-    bb_get_ap_time_out_t apt;
-    memset(&apt, 0, sizeof(apt));
-    if (ar_ioctl(dev, BB_GET_AP_TIME, NULL, &apt) == 0 && apt.timestamp) {
-        ap_time_ms  = apt.timestamp;
-        ap_local_ms = now_ms();
-    }
-
     // Sky cmd 0x26 asks the air unit for its own measured video delay - the
     // number stock shows, computed where both timestamps share a clock domain
     // so the offset that defeats a ground-side calculation never arises.
@@ -2479,7 +2473,7 @@ void Ar8030Source::update_stats(size_t frame_size) {
             // Cached by publish_link_stats(), called just above on this thread.
             printf("ar8030: rx=%llu bytes nals=%llu frames=%llu lost=%llu telemetry_drained=%llu"
                    " msp=%llu rx_mcs=%d bw=%s MHz link=%.2f Mbps video=%.2f Mbps dist=%d"
-                   " air+=%.1fms\n",
+                   " air=%.1fms\n",
                    total_bytes, nal_count, (unsigned long long)frames_seen, frames_lost,
                    ctrl_bytes,
                    msp_bytes, mcs, ar_bw_label(last_bw_idx), last_link_kbps / 1000.0,
@@ -2497,6 +2491,45 @@ void Ar8030Source::update_dvr(std::shared_ptr<std::vector<uint8_t>> frame) {
     DvrRecorder::instance().feed(frame);
 }
 
+// The fastest a picture's first slice gets from its capture stamp to our
+// read, on the stock air firmware (1080p100: 17.9 ms, 720p100: 17.4 ms over
+// three runs, each within 0.3 ms). Measured with the air unit's and the
+// goggle's clocks both synced to a host over USB, and the only calibration
+// the air delay below needs.
+static const int64_t kAirFloorUs = 17800;
+
+// Capture -> arrival of the picture whose header came last, in us, or 0 until
+// there is one. See air_win_min in the header.
+uint32_t Ar8030Source::air_delay_for(uint64_t recv_us) {
+    if (!cap_valid) return 0;
+    const int64_t d = (int64_t)recv_us - (int64_t)cap_us64;
+    const uint64_t slot = recv_us / 500000;
+    int64_t floor = INT64_MAX;
+    for (int i = 0; i < kAirWinSlots; i++)
+        if (air_win_slot[i] + kAirWinSlots > slot && air_win_min[i] < floor)
+            floor = air_win_min[i];
+    // A jump of a second either way is a new clock, not a slow picture: an
+    // air unit that rebooted starts its stamps again from zero.
+    if (floor != INT64_MAX && (d - floor > 1000000 || d - floor < -1000000)) {
+        memset(air_win_slot, 0, sizeof(air_win_slot));
+        floor = INT64_MAX;
+    }
+    int64_t& m = air_win_min[slot % kAirWinSlots];
+    if (air_win_slot[slot % kAirWinSlots] != slot) {
+        air_win_slot[slot % kAirWinSlots] = slot;
+        m = d;
+    } else if (d < m) {
+        m = d;
+    }
+    if (d < floor) floor = d;
+    const int64_t us = d - floor + kAirFloorUs;
+    if (us <= 0 || us > 1000000) return 0;
+    const float ms = (float)us / 1000.0f;
+    air_delay_ms = (air_delay_ms < 0.0f) ? ms : 0.95f * air_delay_ms + 0.05f * ms;
+    if (osd) osd->set_air_delay(air_delay_ms);
+    return (uint32_t)us;
+}
+
 // Emit one NAL (payload without the leading start code) to the decoder.
 void Ar8030Source::emit_nal(const uint8_t* nal, size_t len) {
     if (len == 0) return;
@@ -2509,17 +2542,14 @@ void Ar8030Source::emit_nal(const uint8_t* nal, size_t len) {
     // slices reach the decoder (ffmpeg and the stock firmware skip them too).
     if (nal[0] & 0x80) {
         nal_count++;
-        // DIAGNOSTIC (section 41.5): this is NOT junk - it is the air unit's
-        // per-frame metadata header, which we have been discarding. Candidate
-        // layout, from correlating captures against known session settings:
+        // Not junk: the air unit's per-picture metadata header, repeated
+        // ahead of each slice. Layout, from captures against known settings:
         //   [9]      fps        (0x64=100, 0x3C=60)
+        //   [12..13] picture counter LE
         //   [14..15] width  LE  (0x0780=1920, 0x0500=1280)
         //   [16..17] height LE  (0x0438=1080, 0x02D0=720)
-        //   [18..21] capture timestamp LE u32, microseconds of air uptime
-        // If [18..21] really is an air-clock capture stamp, then paired with
-        // BB_GET_AP_TIME (air uptime in ms) it gives the true air->ground
-        // delay that stock shows and that the baseband SDK does not expose.
-        // Log enough to confirm or kill the theory before wiring anything.
+        //   [18..21] capture stamp LE u32: the air unit's CLOCK_MONOTONIC in
+        //            microseconds, the same clock as its encoder PTS
         // Validate before trusting: the Annex-B splitter can hit a false start
         // code inside a header and hand us a shifted fragment. A good header
         // has a plausible resolution and a non-zero fps.
@@ -2530,9 +2560,21 @@ void Ar8030Source::emit_nal(const uint8_t* nal, size_t len) {
             bool sane = (w >= 160 && w <= 4096) && (h >= 120 && h <= 2160) &&
                         (fps > 0 && fps <= 240);
             if (sane) {
-                // Frame counter - detect pictures the link dropped. Needs no
-                // clock at all, so it works even before AP_TIME is available.
+                // Frame counter - detect pictures the link dropped.
                 uint16_t hseq = (uint16_t)(nal[12] | (nal[13] << 8));
+                // The capture stamp, unwrapped: 32 bits of microseconds last
+                // 71 minutes. An air unit reboot sends it backwards by less
+                // than half the range, which is not a wrap.
+                const uint32_t cap32 = (uint32_t)nal[18] | ((uint32_t)nal[19] << 8) |
+                                       ((uint32_t)nal[20] << 16) | ((uint32_t)nal[21] << 24);
+                if (cap_valid && cap32 < cap_last32 && cap_last32 - cap32 > 0x80000000u)
+                    cap_wraps++;
+                cap_last32 = cap32;
+                cap_us64 = ((uint64_t)cap_wraps << 32) | cap32;
+                cap_valid = true;
+                hdr_fps = fps;
+                if (ltrace::on())
+                    ltrace::rec(ltrace::kHdr, now_us(), hseq, cap32, nal, len);
                 // The header repeats for each slice of a picture, so anything
                 // measured per picture has to be gated on the counter changing.
                 const bool new_pic = !hseq_valid || hseq != last_hseq;
@@ -2563,35 +2605,6 @@ void Ar8030Source::emit_nal(const uint8_t* nal, size_t len) {
                     }
                     resync_prev_us_  = arr_us;
                     resync_prev_cap_ = cap_hdr;
-                }
-
-                if (ap_time_ms) {
-                    uint32_t cap_us = (uint32_t)nal[18] | ((uint32_t)nal[19] << 8) |
-                                      ((uint32_t)nal[20] << 16) | ((uint32_t)nal[21] << 24);
-                    // Air-clock "now": last polled air uptime plus local time
-                    // elapsed since. Both clocks tick 1:1 (verified), so the
-                    // skew is constant offset + true delay.
-                    int64_t air_now_us =
-                        (int64_t)(ap_time_ms + (now_ms() - ap_local_ms)) * 1000LL;
-                    int64_t skew = air_now_us - (int64_t)cap_us;
-
-                    // Re-baseline the floor every 30s so it tracks slow drift
-                    // and recovers if a resync moves the offset.
-                    uint64_t hnow = now_ms();
-                    if (air_skew_reset_ms == 0) air_skew_reset_ms = hnow;
-                    if (hnow - air_skew_reset_ms > 30000) {
-                        air_skew_reset_ms = hnow;
-                        air_skew_floor_us = skew;
-                    }
-                    if (skew < air_skew_floor_us) air_skew_floor_us = skew;
-
-                    float d_ms = (float)(skew - air_skew_floor_us) / 1000.0f;
-                    if (d_ms >= 0.0f && d_ms < 500.0f) {
-                        air_delay_ms = (air_delay_ms < 0.0f)
-                                           ? d_ms
-                                           : 0.9f * air_delay_ms + 0.1f * d_ms;
-                        if (osd) osd->set_air_delay(air_delay_ms);
-                    }
                 }
             }
         }
@@ -2673,6 +2686,10 @@ void Ar8030Source::emit_nal(const uint8_t* nal, size_t len) {
             const int addr = (codec == VideoCodec::H265)
                 ? hevc_slice_address(nal_type, nal + 2, len - 2, ctb_addr_bits, pps_dep_slices)
                 : -1;
+            if (ltrace::on())
+                ltrace::rec(ltrace::kSlice, recv_us, (uint32_t)addr,
+                            (uint64_t)len | ((uint64_t)first_slice << 32) |
+                            ((uint64_t)nal_type << 40));
             if (first_slice && au_open) {
                 // Completed by the next picture's arrival: the fallback, and
                 // how the last slice's start address gets learned.
@@ -2688,6 +2705,7 @@ void Ar8030Source::emit_nal(const uint8_t* nal, size_t len) {
                 return;
             }
             if (first_slice) {
+                au_air_us = air_delay_for(recv_us);
                 au_pts = frame_pts;
                 au_nal_type = nal_type;   // picture key-ness (IDR vs trailing)
                 au_first_recv_us = recv_us;  // zero point for this picture
@@ -2864,8 +2882,17 @@ void Ar8030Source::flush_access_unit(uint64_t recv_us) {
         // Hand the decoder this AU's OWN first-slice arrival, not the arrival
         // of the read that happens to be flushing it - see au_first_recv_us.
         const uint64_t au_recv = au_first_recv_us ? au_first_recv_us : recv_us;
+        if (ltrace::on()) ltrace::rec(ltrace::kAu, now_us(), (uint32_t)au_pts, au_recv);
+        // The glass-to-glass part nothing here can timestamp, calibrated
+        // against a photodiode on the goggle's own panel: on average half a
+        // frame waiting for the exposure that catches a change, and the
+        // panel (HDMI bridge and OLED). It travels in the capture half of the
+        // packed delay; the air delay is the processing one.
+        uint32_t outside_us = (uint32_t)panel_latency_us;
+        if (hdr_fps > 0) outside_us += 500000u / hdr_fps;
         vdec->feed_packet_to_decoder(au_slices.data(), (int)au_slices.size(),
-                                     au_pts, au_recv, au_nal_type, 0, 0);
+                                     au_pts, au_recv, au_nal_type,
+                                     au_air_us ? (outside_us << 16) : 0, au_air_us);
         frame_pts++;
 
         // Reassembly span: first slice of THIS picture on the wire to its
@@ -3117,6 +3144,7 @@ void Ar8030Source::run() {
                 hex[n * 3] = 0;
                 printf("ar8030: read[%d] %d bytes: %s\n", dumped_reads, rd, hex);
             }
+            if (ltrace::on()) ltrace::rec(ltrace::kRead, now_us(), (uint32_t)rd, 0);
             consume(buf.data(), (size_t)rd);
         } else {
             // bb_socket_read() returns -1 both for a plain read timeout (no
