@@ -461,6 +461,17 @@ void DrmDevice::sync_frozen_video_rect() {
     }
 }
 
+bool DrmDevice::last_vblank(uint64_t *ts_us) {
+    // RELATIVE 0 returns at once, with the time of the vblank just past.
+    drmVBlank vbl = {};
+    vbl.request.type = (drmVBlankSeqType)(DRM_VBLANK_RELATIVE |
+        ((output_list->crtc_index << DRM_VBLANK_HIGH_CRTC_SHIFT) & DRM_VBLANK_HIGH_CRTC_MASK));
+    vbl.request.sequence = 0;
+    if (drmWaitVBlank(drm_fd, &vbl)) return false;
+    *ts_us = (uint64_t)vbl.reply.tval_sec * 1000000ULL + vbl.reply.tval_usec;
+    return true;
+}
+
 bool DrmDevice::wait_for_flip_completion(int timeout_ms) {
     if (!flip_pending) return true;
     

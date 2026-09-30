@@ -203,6 +203,13 @@ public:
     struct gbm_device* get_gbm_device() { return gbm_dev; }
     int get_osd_zpos() { return osd_zpos; }
     bool is_flip_pending() { return flip_pending; }
+    // Kernel timestamp (CLOCK_MONOTONIC us) of the last vblank on our CRTC.
+    bool last_vblank(uint64_t *ts_us);
+    // One refresh of the current mode, in microseconds.
+    double frame_period_us() const {
+        return output_list && output_list->mode.clock
+            ? (double)output_list->mode.htotal * output_list->mode.vtotal * 1000.0 / output_list->mode.clock : 0;
+    }
 
 public:
     int drm_fd = -1;

@@ -6,6 +6,9 @@ extern "C"{
 #include <iomanip>
 
 #include "renderer.hpp"
+#include "settings.hpp"
+#include <cmath>
+#include <time.h>
 #include "utils/ltrace.hpp"
 #include "dvr.hpp"
 #include "webstream.hpp"
@@ -421,6 +424,26 @@ void Renderer::run(){
     
     std::shared_ptr<DecodedUnit> latest_frame = nullptr;
 
+    // Deadline commit. A picture is not committed the moment it is decoded but
+    // just before the next vblank, with whatever is newest by then. The flip
+    // then lands at that very vblank, so it is never still pending when the
+    // next picture arrives. Committing at once instead let a picture decoded
+    // while a flip was pending go out just after that flip's vblank, pending a
+    // whole refresh and blocking the next picture the same way: at 120 Hz that
+    // put the median flip-to-vblank wait at 6 ms, and at 100 Hz output with
+    // 100 fps video it chained on every picture. Photodiode, 3 pairs each:
+    // median 46.7 -> 44.4 ms, p90 68.2 -> 61.5 ms.
+    //
+    // The margin is how long before the vblank the commit is made. On this
+    // VOP2 a commit takes 0.2 to over 0.8 ms to be latched: at 0.8 ms before
+    // the vblank 23% missed it and went out a refresh later, at 1.2 ms 1%. A
+    // picture less than commit_min_slack_ms from a vblank waits for the next.
+    const bool deadline_commit = Settings::getInstance().getInt("deadline_commit", 1) != 0;
+    const double commit_margin_us = Settings::getInstance().getFloat("commit_margin_ms", 1.2f) * 1000.0;
+    const double commit_min_slack_us = Settings::getInstance().getFloat("commit_min_slack_ms", 0.6f) * 1000.0;
+    if (deadline_commit && render_mode == Atomic)
+        printf("renderer: committing %.1f ms before each vblank\n", commit_margin_us / 1000);
+
     while(!*should_stop) {
         // Handle resolution-change flush request from the decoder thread.
         // All display_buffers access happens here in the renderer thread — no mutex needed.
@@ -472,6 +495,31 @@ void Renderer::run(){
             last_alive = now;
         }
 
+        // 2b. Deadline commit: hold the newest picture until just before the
+        // next vblank. Sleeping returns to the top, so anything decoded in the
+        // meantime replaces it (the drain above keeps only the newest).
+        if (deadline_commit && render_mode == Atomic && latest_frame) {
+            if (dev->is_flip_pending()) {
+                dev->wait_for_flip_completion(2);
+                continue;
+            }
+            uint64_t vb = 0;
+            double period = dev->frame_period_us();
+            if (period > 0 && dev->last_vblank(&vb)) {
+                uint64_t t = get_time_us();
+                double since = t > vb ? (double)(t - vb) : 0.0;
+                double to_next = period - fmod(since, period);
+                double sleep_us = 0;
+                if (to_next > commit_margin_us) sleep_us = to_next - commit_margin_us;                  // early: wait
+                else if (to_next < commit_min_slack_us) sleep_us = to_next + period - commit_margin_us; // too late for this one
+                if (sleep_us > 50) {
+                    struct timespec ts = { 0, (long)(sleep_us * 1000) };
+                    nanosleep(&ts, nullptr);
+                    continue;
+                }
+            }
+        }
+
         // 3. If hardware is busy, wait for it to clear BEFORE attempting render
         // EXCEPTION: FrontBuffer mode does NOT wait. It renders (memcopies) immediately and uses flip ONLY for async stats.
         if (latest_frame && dev->is_flip_pending() && render_mode != FrontBuffer) {
@@ -492,6 +540,7 @@ void Renderer::run(){
                 // cost an RTTI lookup on every frame.
                 auto& dm = static_cast<DataMsg<std::shared_ptr<DecodedUnit>>&>(*m);
                 latest_frame = dm.getPayload();
+                if (deadline_commit && render_mode == Atomic) continue;   // through the deadline above
             } else {
                 continue;
             }
