@@ -442,6 +442,13 @@ void VdecRK::feed_packet_to_decoder(void* data_p, int data_len, int64_t pts, uin
             // fps/resolution/bitrate labels were never drawn.
             .is_keyframe = is_key,
         };
+        // MPP drops the pictures it cannot decode, and their entries were
+        // never collected: over a broken stream this grew by every picture
+        // sent. No picture spends 128 others inside the decoder.
+        if (decoding_stats.size() > 256) {
+            for (auto it = decoding_stats.begin(); it != decoding_stats.end();)
+                it = (it->first < pts - 128) ? decoding_stats.erase(it) : std::next(it);
+        }
     }
     
     const uint64_t put_start_us = get_time_us();
