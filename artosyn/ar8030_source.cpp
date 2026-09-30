@@ -268,6 +268,7 @@ int Ar8030Source::replay_stock_rf = 1;
 int Ar8030Source::prj_rf_bw     = -1;
 int Ar8030Source::prj_rf_pwr_mw = -1;
 std::string Ar8030Source::dump_path;
+std::string Ar8030Source::replay_path, Ar8030Source::video_dump_path;
 int Ar8030Source::mode_w = 0;
 int Ar8030Source::mode_h = 0;
 int Ar8030Source::mode_fps = 0;
@@ -2392,6 +2393,7 @@ void Ar8030Source::disconnect_bb() {
     // --debug-bb-dump's file was opened lazily and never closed; on a forced exit the
     // tail of the capture was whatever had not been flushed.
     if (dump_fp) { fclose((FILE *)dump_fp); dump_fp = nullptr; }
+    if (video_dump_fp) { fclose((FILE *)video_dump_fp); video_dump_fp = nullptr; }
     // Hand the channel back to AUTO/ACS before letting go of the device.
     //
     // Defensive, not a known fix: leaving the radio pinned is measurably
@@ -2935,6 +2937,42 @@ void Ar8030Source::flush_access_unit(uint64_t recv_us) {
     au_open = false;
 }
 
+// --debug-replay: the video stream from a file in place of the baseband's
+// socket - the same splitter, picture assembly, decoder, DVR and web feeds,
+// with no air unit and no link. For finding out what a damaged stream does to
+// them (tools/ar8030_fuzz.py makes one from any H.265 file). Read in the air
+// unit's ~4K bursts at about 11 Mbit/s, round and round until stopped, with
+// two seconds of nothing between passes: the air app stopping and starting
+// its stream again, which is how a restart looks from here.
+void Ar8030Source::run_replay() {
+    FILE* f = fopen(replay_path.c_str(), "rb");
+    if (!f) {
+        printf("ar8030: replay: cannot open %s\n", replay_path.c_str());
+        return;
+    }
+    printf("ar8030: replaying %s in place of the baseband\n", replay_path.c_str());
+    std::vector<uint8_t> buf(4096);
+    unsigned passes = 0;
+    bool read_any = false;
+    while (!*should_stop) {
+        const size_t n = fread(buf.data(), 1, buf.size(), f);
+        if (n == 0) {
+            if (!read_any) break;              // empty file
+            rewind(f);
+            printf("ar8030: replay: pass %u done\n", ++passes);
+            for (int i = 0; i < 20 && !*should_stop; i++) usleep(100000);
+            continue;
+        }
+        read_any = true;
+        total_bytes += n;
+        last_data_ms = now_ms();
+        consume(buf.data(), n);
+        usleep(3000);
+    }
+    fclose(f);
+    printf("ar8030: replay stopped (%llu frames)\n", (unsigned long long)frames_seen);
+}
+
 // Split an Annex-B byte stream into NALs. Handles NALs straddling reads by
 // keeping the tail in `accum` until the next start code arrives.
 void Ar8030Source::consume(const uint8_t* data, size_t len) {
@@ -2987,6 +3025,7 @@ void Ar8030Source::run() {
     printf("ar8030: source starting (host=%s:%d slot=%d port=%d) decode=%s\n",
            host.c_str(), host_port, slot, video_port,
            decode_enabled ? "ON" : "off (--ar8030-decode to enable)");
+    if (!replay_path.empty()) { run_replay(); return; }
 
     std::vector<uint8_t> buf(AR_READ_CHUNK);
 
@@ -3145,6 +3184,19 @@ void Ar8030Source::run() {
                 printf("ar8030: read[%d] %d bytes: %s\n", dumped_reads, rd, hex);
             }
             if (ltrace::on()) ltrace::rec(ltrace::kRead, now_us(), (uint32_t)rd, 0);
+            if (!video_dump_path.empty() && video_dump_written < 64u * 1024 * 1024) {
+                if (!video_dump_fp) {
+                    // Appending after a reconnect, which closes it.
+                    video_dump_fp = (void *)fopen(video_dump_path.c_str(),
+                                                  video_dump_written ? "ab" : "wb");
+                    if (video_dump_fp) printf("ar8030: dumping video to %s\n", video_dump_path.c_str());
+                    else video_dump_path.clear();
+                }
+                if (video_dump_fp) {
+                    fwrite(buf.data(), 1, (size_t)rd, (FILE *)video_dump_fp);
+                    video_dump_written += (unsigned long long)rd;
+                }
+            }
             consume(buf.data(), (size_t)rd);
         } else {
             // bb_socket_read() returns -1 both for a plain read timeout (no

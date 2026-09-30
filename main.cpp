@@ -827,6 +827,16 @@ int main(int argc, char **argv)
 		continue;
 	}
 
+	__OnArgument("--debug-replay") {
+		Ar8030Source::replay_path = __ArgValue;
+		continue;
+	}
+
+	__OnArgument("--debug-video-dump") {
+		Ar8030Source::video_dump_path = __ArgValue;
+		continue;
+	}
+
 	__OnArgument("--no-osd") {
 		enable_osd = 0;
 		g_disable_gl = true;   // skip EGL/GLES entirely - GPU stays idle

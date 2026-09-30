@@ -99,6 +99,10 @@ class Ar8030Source {
         // what the air unit actually sends. Capped so a forgotten flag cannot
         // fill the rootfs.
         static std::string dump_path; // isolate: configure + RX only, never TX
+        // --debug-replay: video from a file instead of the baseband (run_replay).
+        // --debug-video-dump: the video socket's bytes to a file, as they
+        // arrive - something to replay. Capped like dump_path.
+        static std::string replay_path, video_dump_path;
         static bool decode_enabled; // --ar8030-decode; off = link/OSD only
         // --ar8030-mode WxH@FPS: retune the camera after the handshake.
         // 0 leaves whatever the stock handshake configured.
@@ -266,6 +270,8 @@ class Ar8030Source {
         uint8_t  last_air_focus = 0;
         void*              dump_fp = nullptr;
         unsigned long long dump_written = 0;
+        void*              video_dump_fp = nullptr;
+        unsigned long long video_dump_written = 0;
         // Access-unit assembly for sliced pictures (see emit_nal): the air
         // unit sends each picture as two slice NALs; group them into one packet/PTS.
         std::vector<uint8_t> au_slices;
@@ -427,6 +433,7 @@ class Ar8030Source {
         //  command line. Replaced by the bind_* state machine above, which the
         //  menu, the front-panel button and --ar8030-pair all drive.)
         void disconnect_bb();
+        void run_replay();
         void consume(const uint8_t* data, size_t len);
         void emit_nal(const uint8_t* nal, size_t len);
         void flush_access_unit(uint64_t recv_us);
