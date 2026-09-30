@@ -853,7 +853,7 @@ void Renderer::update_stats(DecodedUnit *du, uint64_t display_start_ts) {
         reset_stats(now);
     }
 
-    if (du && stats_.frame_counter < 500) {
+    if (du && stats_.frame_counter < Stats::kMaxFrames) {
         uint64_t proc_lat = du->dec_start_ts > du->recv_ts ? du->dec_start_ts - du->recv_ts : 0;
         uint64_t dec_lat = du->dec_end_ts > du->dec_start_ts ? du->dec_end_ts - du->dec_start_ts : 0;
         

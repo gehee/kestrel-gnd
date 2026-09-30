@@ -95,39 +95,48 @@ struct DecodedUnit{
 };
 
 struct Stats{
+    // Frames sampled per stats window (osd_refresh, 1 s by default). Every
+    // array below is this long and update_stats() stops sampling at it. The
+    // guard there used to say 500 while the arrays held 200, so any window
+    // with more than 200 frames - a decoder draining its backlog after a
+    // stall, an air unit dumping its start-up buffer, a broken stream -
+    // wrote floats past the end of the Renderer into the next heap block,
+    // and kestrel died somewhere else later (a SIGSEGV in the renderer
+    // queue's tryGet(), and a jump into the heap with no backtrace).
+    static constexpr int kMaxFrames = 512;
     int frame_counter = 0;
     uint64_t decoding_stats_start = 0;
     uint64_t last_frame_ts = 0;
 
-    float proc_latency_avg[200] = {0};
+    float proc_latency_avg[kMaxFrames] = {0};
     float proc_latency_min = 1e18f; // Use a large but float-friendly value
     float proc_latency_max = 0;
 
-    float total_latency_avg[200] = {0};
+    float total_latency_avg[kMaxFrames] = {0};
     float total_latency_min = 1e18f;
     float total_latency_max = 0;
 
-    float decoding_latency_avg[200] = {0};
+    float decoding_latency_avg[kMaxFrames] = {0};
     float decoding_latency_min = 1e18f;
     float decoding_latency_max = 0;
 
-    float display_latency_avg[200] = {0};
+    float display_latency_avg[kMaxFrames] = {0};
     float display_latency_min = 1e18f;
     float display_latency_max = 0;
 
-    float tx_latency_avg[200] = {0};
+    float tx_latency_avg[kMaxFrames] = {0};
     float tx_latency_min = 1e18f;
     float tx_latency_max = 0;
 
-    float capture_latency_avg[200] = {0};
+    float capture_latency_avg[kMaxFrames] = {0};
     float capture_latency_min = 1e18f;
     float capture_latency_max = 0;
 
-    float reassemble_latency_avg[200] = {0};
+    float reassemble_latency_avg[kMaxFrames] = {0};
     float reassemble_latency_min = 1e18f;
     float reassemble_latency_max = 0;
 
-    float frame_pace_avg[200] = {0};
+    float frame_pace_avg[kMaxFrames] = {0};
     float frame_pace_min = 1e18f;
     float frame_pace_max = 0;
 };
