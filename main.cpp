@@ -4,6 +4,9 @@
 #include <arpa/inet.h>
 #include <signal.h>
 #include <execinfo.h>
+#include <dlfcn.h>
+#include <ucontext.h>
+#include <sys/prctl.h>
 #include <memory>
 #include <linux/random.h>
 #include <sys/ioctl.h>
@@ -421,9 +424,38 @@ void printHelp() {
   );
 }
 
-static void segv_bt(int sig){
+// A code address as library+offset, which addr2line takes; or that it is in
+// no library at all.
+static void crash_addr(const char* what, void* a) {
+    Dl_info di;
+    if (a && dladdr(a, &di) && di.dli_fname)
+        fprintf(stderr, "  %s %p = %s+0x%lx (%s)\n", what, a, di.dli_fname,
+                (unsigned long)((uintptr_t)a - (uintptr_t)di.dli_fbase),
+                di.dli_sname ? di.dli_sname : "?");
+    else
+        fprintf(stderr, "  %s %p (in no library)\n", what, a);
+}
+
+// The registers come first. A call through a corrupted pointer - heap
+// corruption, as the renderer's stats overflow once caused - leaves the PC in
+// no library, and the backtrace stops right there with nothing to go on; the
+// link register still says who made the call, and the thread's name whose
+// thread it was.
+static void segv_bt(int sig, siginfo_t* si, void* ucv){
+    char name[17] = {0};
+    prctl(PR_GET_NAME, name);
+    fprintf(stderr, "\n### %s in thread %s, fault address %p ###\n",
+            sig == SIGSEGV ? "SIGSEGV" : sig == SIGBUS ? "SIGBUS" : "SIGABRT", name, si->si_addr);
+#if defined(__aarch64__)
+    const mcontext_t& mc = ((ucontext_t*)ucv)->uc_mcontext;
+    crash_addr("pc", (void*)mc.pc);
+    crash_addr("lr", (void*)mc.regs[30]);
+    fprintf(stderr, "  sp %p\n", (void*)mc.sp);
+#else
+    (void)ucv;
+#endif
     void* bt[48]; int n=backtrace(bt,48);
-    fprintf(stderr,"\n### SIGSEGV backtrace (%d frames) ###\n", n);
+    fprintf(stderr,"### backtrace (%d frames) ###\n", n);
     backtrace_symbols_fd(bt,n,2);
     signal(sig,SIG_DFL); raise(sig);
 }
@@ -917,8 +949,14 @@ int main(int argc, char **argv)
 
 	signal(SIGUSR1, rec_toggle_handler);
 	signal(SIGTERM, sig_handler);   // systemctl stop / killall, same watchdog
-	signal(SIGSEGV, segv_bt);
-	signal(SIGABRT, segv_bt);
+	{
+		struct sigaction sa = {};
+		sa.sa_sigaction = segv_bt;
+		sa.sa_flags = SA_SIGINFO;
+		sigaction(SIGSEGV, &sa, nullptr);
+		sigaction(SIGBUS, &sa, nullptr);
+		sigaction(SIGABRT, &sa, nullptr);
+	}
 	// Ignore SIGPIPE — a broken socket (e.g. the RPC link when the gnd radio
 	// reboots, as a channel pin does) must surface as an EPIPE the send/recv
 	// paths handle + reconnect from, not tear the whole app down.
