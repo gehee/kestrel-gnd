@@ -347,6 +347,31 @@ class Ar8030Source {
         bool     hseq_valid = false;
         unsigned long long frames_lost = 0;
 
+        // Stale pictures. An air unit whose encoder is driven in a way its
+        // own app does not expect (intra refresh switched on underneath it)
+        // sends pictures from seconds ago - its encoder ring over again,
+        // header and all - between the live ones. Mixed into the live stream
+        // they put two pictures' slices in one access unit, and MPP answered
+        // with a hardware timeout and reset on nearly every picture.
+        // The header's capture stamp says which pictures those are: anything
+        // not newer than the newest picture shown (stale_picture()).
+        bool     stale_picture(uint32_t cap32);
+        uint32_t live_cap_ = 0;          // capture stamp of the newest picture shown
+        bool     live_cap_valid_ = false;
+        uint32_t stale_prev_cap_ = 0;    // the last picture refused, and how many
+        int      stale_run_ = 0;         // refused in a row that run forward
+        bool     hdr_stale_ = false;     // the NALs after the last header are stale
+        uint16_t hdr_seq_ = 0;           // the last header's counter, stale or not
+        bool     hdr_seq_valid_ = false;
+        int      slice_hseq_ = -1;       // counter of the header ahead of the next slice
+        int      au_hseq_ = -1;          // ...and of the picture being built
+        unsigned long long stale_pics = 0, foreign_slices = 0;
+        uint16_t sps_ids_ok_ = 0;        // SPS ids a valid SPS has been seen for
+        // A new clock - the air unit rebooted - also reads as not newer, but
+        // runs forward from where it restarted, uninterrupted by live
+        // pictures. That many in a row and it is the live stream.
+        static constexpr int kStaleAdopt = 16;
+
         bool connect_bb();
         void subscribe_events();    // stock does this before any socket
         void configure_link();      // candidates + freq + bandwidth

@@ -78,6 +78,16 @@ struct Rbsp {
         while (!bad && u(1) == 0) if (++z > 31) { bad = true; return 0; }
         return z ? (1u << z) - 1 + u(z) : 0;
     }
+    int32_t se() {
+        const uint32_t k = ue();
+        return (k & 1) ? (int32_t)((k >> 1) + 1) : -(int32_t)(k >> 1);
+    }
+    // rbsp_trailing_bits: a one, then nothing but zeros to the end.
+    bool at_end() {
+        if (bad || u(1) != 1) return false;
+        while (bit < b.size() * 8) if (u(1)) return false;
+        return true;
+    }
 };
 }  // namespace
 
@@ -87,7 +97,11 @@ static int hevc_param_set_id(int type, const uint8_t* p, size_t n) {
     Rbsp r(p, n);
     if (type == 32) {                                   // VPS
         const uint32_t id = r.u(4);
-        return r.bad ? -1 : (int)id;
+        r.u(2);                                         // base layer internal/available
+        const uint32_t layers = r.u(6), sub = r.u(3);
+        r.u(1);                                         // temporal_id_nesting
+        const uint32_t reserved = r.u(16);              // vps_reserved_0xffff_16bits
+        return (r.bad || layers != 0 || sub > 6 || reserved != 0xFFFF) ? -1 : (int)id;
     }
     if (type == 34) {                                   // PPS
         const uint32_t id = r.ue();
@@ -141,6 +155,75 @@ static int hevc_sps_addr_bits(const uint8_t* p, size_t n) {
     int bits = 0;
     while ((1u << bits) < ctbs) bits++;
     return bits;
+}
+
+// scaling_list_data(), read and range-checked; false if it cannot be.
+static bool hevc_scaling_list_ok(Rbsp& r) {
+    for (int size = 0; size < 4; size++)
+        for (int m = 0; m < 6; m += (size == 3) ? 3 : 1) {
+            if (!r.u(1)) {                              // scaling_list_pred_mode_flag
+                if (r.ue() > (uint32_t)(size == 3 ? m / 3 : m)) return false;
+                continue;
+            }
+            const int coefs = size == 0 ? 16 : 64;
+            if (size > 1) {
+                const int32_t dc = r.se();              // scaling_list_dc_coef_minus8
+                if (dc < -7 || dc > 247) return false;
+            }
+            for (int i = 0; i < coefs; i++) {
+                const int32_t d = r.se();               // scaling_list_delta_coef
+                if (d < -128 || d > 127 || r.bad) return false;
+            }
+        }
+    return !r.bad;
+}
+
+// Whether an H.265 PPS (payload after the 2-byte header) reads right to its
+// rbsp_trailing_bits with every value in range; its SPS's id in *sps_id.
+// Random bytes behind a good header all but never do - and MPP re-parses a
+// PPS over the one in use, so one that fails half way leaves that one broken:
+// seen as a SIGSEGV in its set_sps() on the next slice, the half-parsed PPS
+// naming an SPS that did not exist. Extensions are refused: they belong to
+// profiles beyond Main 10, which this decoder does not do.
+static bool hevc_pps_ok(const uint8_t* p, size_t n, int* sps_id) {
+    Rbsp r(p, n);
+    const uint32_t pps_id = r.ue(), sid = r.ue();
+    r.u(1); r.u(1); r.u(3); r.u(1); r.u(1);   // dependent slices .. cabac_init_present_flag
+    if (r.ue() > 14 || r.ue() > 14) return false;   // num_ref_idx_l0/l1_default_active_minus1
+    const int32_t qp = r.se();                         // init_qp_minus26
+    r.u(1); r.u(1);                                    // constrained_intra_pred, transform_skip
+    if (r.u(1) && r.ue() > 3) return false;            // diff_cu_qp_delta_depth
+    const int32_t cb = r.se(), cr = r.se();
+    if (pps_id > 63 || sid > 15 || qp < -38 || qp > 25 || cb < -12 || cb > 12 ||
+        cr < -12 || cr > 12)
+        return false;
+    r.u(1); r.u(1); r.u(1); r.u(1);                    // chroma qp offsets .. transquant_bypass
+    const uint32_t tiles = r.u(1);
+    r.u(1);                                            // entropy_coding_sync_enabled_flag
+    if (tiles) {
+        const uint32_t cols = r.ue(), rows = r.ue();
+        if (cols > 19 || rows > 21) return false;
+        if (!r.u(1)) {                                 // uniform_spacing_flag
+            for (uint32_t i = 0; i < cols; i++) r.ue();
+            for (uint32_t i = 0; i < rows; i++) r.ue();
+        }
+        r.u(1);                                        // loop_filter_across_tiles
+    }
+    r.u(1);                                            // loop_filter_across_slices
+    if (r.u(1)) {                                      // deblocking_filter_control_present
+        r.u(1);
+        if (!r.u(1)) {
+            const int32_t beta = r.se(), tc = r.se();
+            if (beta < -6 || beta > 6 || tc < -6 || tc > 6) return false;
+        }
+    }
+    if (r.u(1) && !hevc_scaling_list_ok(r)) return false;
+    r.u(1);                                            // lists_modification_present
+    if (r.ue() > 4) return false;                      // log2_parallel_merge_level_minus2
+    r.u(1);                                            // slice_segment_header_extension
+    if (r.u(1) && r.u(8) != 0) return false;           // pps_extension_present, and which
+    *sps_id = (int)sid;
+    return r.at_end();
 }
 
 // A PPS's dependent_slice_segments_enabled_flag, with its id in *id; -1 if it
@@ -2475,12 +2558,12 @@ void Ar8030Source::update_stats(size_t frame_size) {
             // Cached by publish_link_stats(), called just above on this thread.
             printf("ar8030: rx=%llu bytes nals=%llu frames=%llu lost=%llu telemetry_drained=%llu"
                    " msp=%llu rx_mcs=%d bw=%s MHz link=%.2f Mbps video=%.2f Mbps dist=%d"
-                   " air=%.1fms\n",
+                   " air=%.1fms stale=%llu foreign=%llu\n",
                    total_bytes, nal_count, (unsigned long long)frames_seen, frames_lost,
                    ctrl_bytes,
                    msp_bytes, mcs, ar_bw_label(last_bw_idx), last_link_kbps / 1000.0,
                    video_bw / 125000.0, dist_m,
-                   air_delay_ms < 0.0f ? 0.0f : air_delay_ms);
+                   air_delay_ms < 0.0f ? 0.0f : air_delay_ms, stale_pics, foreign_slices);
         }
         bytes_received = 0;
     }
@@ -2564,28 +2647,37 @@ void Ar8030Source::emit_nal(const uint8_t* nal, size_t len) {
             if (sane) {
                 // Frame counter - detect pictures the link dropped.
                 uint16_t hseq = (uint16_t)(nal[12] | (nal[13] << 8));
+                const uint32_t cap32 = (uint32_t)nal[18] | ((uint32_t)nal[19] << 8) |
+                                       ((uint32_t)nal[20] << 16) | ((uint32_t)nal[21] << 24);
+                if (ltrace::on())
+                    ltrace::rec(ltrace::kHdr, now_us(), hseq, cap32, nal, len);
+                // The header repeats for each slice of a picture, so anything
+                // measured per picture has to be gated on the counter changing.
+                const bool new_pic = !hdr_seq_valid_ || hseq != hdr_seq_;
+                hdr_seq_ = hseq;
+                hdr_seq_valid_ = true;
+                slice_hseq_ = hseq;
+                // A picture from the past, and everything up to the next
+                // header with it: nothing it says about the link is true.
+                if (new_pic) hdr_stale_ = stale_picture(cap32);
+                if (hdr_stale_) return;
                 // The capture stamp, unwrapped: 32 bits of microseconds last
                 // 71 minutes. An air unit reboot sends it backwards by less
                 // than half the range, which is not a wrap.
-                const uint32_t cap32 = (uint32_t)nal[18] | ((uint32_t)nal[19] << 8) |
-                                       ((uint32_t)nal[20] << 16) | ((uint32_t)nal[21] << 24);
                 if (cap_valid && cap32 < cap_last32 && cap_last32 - cap32 > 0x80000000u)
                     cap_wraps++;
                 cap_last32 = cap32;
                 cap_us64 = ((uint64_t)cap_wraps << 32) | cap32;
                 cap_valid = true;
                 hdr_fps = fps;
-                if (ltrace::on())
-                    ltrace::rec(ltrace::kHdr, now_us(), hseq, cap32, nal, len);
-                // The header repeats for each slice of a picture, so anything
-                // measured per picture has to be gated on the counter changing.
-                const bool new_pic = !hseq_valid || hseq != last_hseq;
-                if (hseq_valid) {
-                    uint16_t gap = (uint16_t)(hseq - last_hseq);
-                    if (gap > 1 && gap < 1000) frames_lost += (gap - 1);
+                if (new_pic) {
+                    if (hseq_valid) {
+                        uint16_t gap = (uint16_t)(hseq - last_hseq);
+                        if (gap > 1 && gap < 1000) frames_lost += (gap - 1);
+                    }
+                    last_hseq = hseq;
+                    hseq_valid = true;
                 }
-                last_hseq = hseq;
-                hseq_valid = true;
 
                 // Are we live yet? Compare how far apart two pictures were
                 // captured with how far apart they arrived. Draining a backlog
@@ -2634,6 +2726,9 @@ void Ar8030Source::emit_nal(const uint8_t* nal, size_t len) {
         return;
     }
 
+    // Everything up to the next header belongs to a stale picture's.
+    if (hdr_stale_) return;
+
     // feed_packet_to_decoder expects the Annex-B start code present, so rebuild it.
     static thread_local std::vector<uint8_t> unit;
     unit.clear();
@@ -2672,6 +2767,44 @@ void Ar8030Source::emit_nal(const uint8_t* nal, size_t len) {
         }
     }
 
+    const bool is_param_set = (codec == VideoCodec::H265)
+                                  ? (nal_type == 32 || nal_type == 33 || nal_type == 34)
+                                  : (nal_type == 7 || nal_type == 8);
+
+    // Validate a parameter set before anything takes it - the decoder too.
+    // An RF bit-error can flip a slice NAL into something that *looks* like a
+    // parameter set: we saw "41 1F ..." and "44 1F ..." land in hvcC, which
+    // decode to nuh_layer_id 35 (the base layer must be 0) and made players
+    // report "PPS id out of range" and refuse the file. MPP re-parses a PPS
+    // over the one in use, so a bad one handed to it breaks every picture
+    // after. Type alone is not enough - the rest of the header has to be sane.
+    bool ps_valid = false;
+    int ps_id = 0;
+    if (is_param_set && len >= 6) {
+        if (codec == VideoCodec::H265) {
+            // 2-byte header: nuh_layer_id must be 0 and nuh_temporal_id_plus1 1,
+            // which for a base-layer parameter set means byte 1 is exactly 0x01
+            // and the low bit of byte 0 (the top layer_id bit) is clear. Then
+            // the contents: an id in range, and for an SPS a real picture.
+            ps_valid = ((nal[0] & 0x01) == 0) && (nal[1] == 0x01);
+            if (ps_valid) {
+                ps_id = hevc_param_set_id(nal_type, nal + 2, len - 2);
+                ps_valid = ps_id >= 0;
+            }
+            // An SPS has to read on to its coding block sizes, and a PPS to
+            // its end, naming an SPS that did.
+            if (ps_valid && nal_type == 33) {
+                ps_valid = hevc_sps_addr_bits(nal + 2, len - 2) > 0;
+                if (ps_valid) sps_ids_ok_ |= (uint16_t)(1u << ps_id);
+            } else if (ps_valid && nal_type == 34) {
+                int sid = -1;
+                ps_valid = hevc_pps_ok(nal + 2, len - 2, &sid) && (sps_ids_ok_ >> sid & 1);
+            }
+        } else {
+            ps_valid = ((nal[0] & 0x60) != 0);   // nal_ref_idc != 0
+        }
+    }
+
     uint64_t recv_us = now_us();
 
     // The air unit sends each picture as two slice NALs, its two halves. Feeding each slice to
@@ -2680,18 +2813,36 @@ void Ar8030Source::emit_nal(const uint8_t* nal, size_t len) {
     // slices of one picture and feed them as a single access unit with one PTS.
     if (vdec && decode_enabled) {
         if (is_vcl) {
+            // Which picture the air unit says this slice is (-1: no header).
+            const int hseq = slice_hseq_;
+            slice_hseq_ = -1;
             // first_slice_segment_in_pic_flag is the first bit after the HEVC
             // 2-byte NAL header; a 1 marks the start of a new picture.
             uint8_t first_slice = (codec == VideoCodec::H265)
                 ? ((len >= 3) ? ((nal[2] >> 7) & 1) : 1)
                 : 1;  // H.264 (unused for AR8030): one slice == one picture
-            const int addr = (codec == VideoCodec::H265)
+            const int addr = (codec == VideoCodec::H265 && len >= 3)
                 ? hevc_slice_address(nal_type, nal + 2, len - 2, ctb_addr_bits, pps_dep_slices)
                 : -1;
             if (ltrace::on())
                 ltrace::rec(ltrace::kSlice, recv_us, (uint32_t)addr,
                             (uint64_t)len | ((uint64_t)first_slice << 32) |
                             ((uint64_t)nal_type << 40));
+            if (!first_slice && au_open &&
+                (nal_type != au_nal_type || (addr >= 0 && addr <= au_max_addr) ||
+                 (hseq >= 0 && au_hseq_ >= 0 && hseq != au_hseq_))) {
+                // Not this picture's: another picture's slice (one whose own
+                // first slice was lost, or a stale one without a readable
+                // header), or one of this picture's again. Appended, MPP
+                // decodes two pictures as one ("POC change between slices")
+                // and the hardware times out on the result.
+                if (++foreign_slices <= 3 || (foreign_slices % 1000) == 0)
+                    printf("ar8030: dropped a slice that is not the picture's being built "
+                           "(type %d/%d, CTB %d after %d, picture %d/%d; %llu so far)\n",
+                           nal_type, au_nal_type, addr, au_max_addr, hseq, au_hseq_,
+                           foreign_slices);
+                return;
+            }
             if (first_slice && au_open) {
                 // Completed by the next picture's arrival: the fallback, and
                 // how the last slice's start address gets learned.
@@ -2712,6 +2863,7 @@ void Ar8030Source::emit_nal(const uint8_t* nal, size_t len) {
                 au_nal_type = nal_type;   // picture key-ness (IDR vs trailing)
                 au_first_recv_us = recv_us;  // zero point for this picture
                 au_max_addr = 0;
+                au_hseq_ = hseq;
                 frames_seen++;            // count real pictures, not slices
                 if (++late_window_pics >= 64) { late_window_pics = 0; late_slices = 0; }
             }
@@ -2725,7 +2877,7 @@ void Ar8030Source::emit_nal(const uint8_t* nal, size_t len) {
             // wait.
             if (last_slice_addr > 0 && addr == last_slice_addr)
                 flush_access_unit(recv_us);
-        } else {
+        } else if (!is_param_set || ps_valid) {
             // VPS/SPS/PPS are cached and SEI dropped inside the decoder; the
             // cached param sets get prepended to the next IDR automatically.
             vdec->feed_packet_to_decoder(unit.data(), (int)unit.size(), frame_pts,
@@ -2733,38 +2885,14 @@ void Ar8030Source::emit_nal(const uint8_t* nal, size_t len) {
         }
     }
 
-    const bool is_param_set = (codec == VideoCodec::H265)
-                                  ? (nal_type == 32 || nal_type == 33 || nal_type == 34)
-                                  : (nal_type == 7 || nal_type == 8);
-
     // Keep our own copy of the parameter sets for the DVR. The decoder's cache
     // is private to it, and a recording started mid-stream needs VPS/SPS/PPS
     // ahead of its first IDR or the muxer emits an empty hvcC and the file
     // plays black. H.265: VPS 32, SPS 33, PPS 34. H.264: SPS 7, PPS 8.
-    //
-    // Validate before caching. An RF bit-error can flip a slice NAL into
-    // something that *looks* like a parameter set: we saw "41 1F ..." and
-    // "44 1F ..." land in hvcC, which decode to nuh_layer_id 35 (the base layer
-    // must be 0) and made players report "PPS id out of range" and refuse the
-    // file. Type alone is not enough - the rest of the header has to be sane.
-    // Exactly one of each type is kept, so hvcC can never accumulate copies.
-    if (is_param_set && len >= 6) {
-        bool valid;
-        int ps_id = 0;
-        if (codec == VideoCodec::H265) {
-            // 2-byte header: nuh_layer_id must be 0 and nuh_temporal_id_plus1 1,
-            // which for a base-layer parameter set means byte 1 is exactly 0x01
-            // and the low bit of byte 0 (the top layer_id bit) is clear. Then
-            // the contents: an id in range, and for an SPS a real picture.
-            valid = ((nal[0] & 0x01) == 0) && (nal[1] == 0x01);
-            if (valid) {
-                ps_id = hevc_param_set_id(nal_type, nal + 2, len - 2);
-                valid = ps_id >= 0;
-            }
-        } else {
-            valid = ((nal[0] & 0x60) != 0);   // nal_ref_idc != 0
-        }
-        if (valid) {
+    // Only valid sets (ps_valid, above), and exactly one of each type is
+    // kept, so hvcC can never accumulate copies.
+    if (is_param_set) {
+        if (ps_valid) {
             // One set per (type, id). This stream uses more than one PPS, so a
             // single set per type left slices unable to resolve theirs
             // ("PPS changed between slices"); keyed by id, every PPS is kept,
@@ -2817,7 +2945,7 @@ void Ar8030Source::emit_nal(const uint8_t* nal, size_t len) {
             ps_dropped++;
             if (ps_dropped <= 5 || (ps_dropped % 100) == 0)
                 printf("ar8030: dropped corrupt param-set NAL type=%d hdr=%02X %02X "
-                       "(total %llu)\n", nal_type, nal[0], nal[1],
+                       "(total %llu)\n", nal_type, nal[0], len > 1 ? nal[1] : 0,
                        (unsigned long long)ps_dropped);
         }
     }
@@ -2844,6 +2972,36 @@ void Ar8030Source::emit_nal(const uint8_t* nal, size_t len) {
     update_stats(unit.size());
 
     nal_count++;
+}
+
+// Is the picture this header opens one from the past? Pictures are captured in
+// order, so a live one is always newer than the newest seen - by a frame
+// interval, or by the length of an outage. One that is not is a replay of the
+// air unit's encoder ring (see live_cap_), or a new clock after the air unit
+// restarted; the second keeps running forward, uninterrupted by any live
+// picture, and after kStaleAdopt of those it is taken as the live stream.
+bool Ar8030Source::stale_picture(uint32_t cap32) {
+    // Differences in wrapping 32-bit microseconds: good for 35 minutes either way.
+    if (!live_cap_valid_ || (int32_t)(cap32 - live_cap_) > 0) {
+        live_cap_ = cap32;
+        live_cap_valid_ = true;
+        stale_run_ = 0;
+        return false;
+    }
+    const int32_t step = (int32_t)(cap32 - stale_prev_cap_);
+    stale_run_ = (stale_run_ > 0 && step > 0 && step < 1000000) ? stale_run_ + 1 : 1;
+    stale_prev_cap_ = cap32;
+    if (stale_run_ >= kStaleAdopt) {
+        printf("ar8030: the air unit's capture clock went back %.1f s and stayed - "
+               "a restart; following it\n", (double)(int32_t)(live_cap_ - cap32) / 1e6);
+        live_cap_ = cap32;
+        stale_run_ = 0;
+        return false;
+    }
+    if (++stale_pics <= 3 || (stale_pics % 1000) == 0)
+        printf("ar8030: dropped a picture captured %.3f s before the newest one "
+               "(%llu so far)\n", (double)(int32_t)(live_cap_ - cap32) / 1e6, stale_pics);
+    return true;
 }
 
 // Where a picture's last slice starts, learned from pictures completed by the
@@ -3136,6 +3294,8 @@ void Ar8030Source::run() {
                         // keyframe from the new link.
                         au_slices.clear();
                         au_open = false;
+                        live_cap_valid_  = false;   // a new link may be a new clock
+                        hdr_stale_       = false;
                         resync_          = true;
                         resync_live_     = 0;
                         resync_prev_us_  = 0;
