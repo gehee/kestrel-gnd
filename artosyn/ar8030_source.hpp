@@ -72,7 +72,8 @@ class Ar8030Source {
         static bool chan_manual_cli;   // --ar8030-chan-manual: pinned to freq_khz from the start
         static int tx_power_dbm;
         static int tx_power_mw;   // stock's encoding: N = hold N mW, N+1 = auto capped at N
-        static int panel_latency_us;   // glass-to-glass outside our timestamps, less half a frame
+        static int panel_latency_us;   // the screen's share (vblank to light), 0 = not counted
+        static int air_floor_us;       // fastest capture -> first slice (air_floor_ms), see air_delay_for
         static bool tx_power_auto;
         void apply_tx_power(int mw); // PA output; stock uses 24
         static bool skip_handshake;
@@ -330,7 +331,7 @@ class Ar8030Source {
         // the smallest such difference seen lately, which is the offset plus
         // the fastest a picture ever makes it; that fastest time is a
         // property of the air pipeline and was measured with both clocks
-        // synced through a host (kAirFloorUs in the .cpp). A window, not an
+        // synced through a host (air_floor_us, air_floor_ms). A window, not an
         // all-time minimum: the two crystals drift apart by ~7 ppm.
         static constexpr int kAirWinSlots = 8;          // x 500 ms
         int64_t  air_win_min[kAirWinSlots];

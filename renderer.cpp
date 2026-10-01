@@ -555,9 +555,11 @@ void Renderer::run(){
 
 // A nominal exposure + readout for the capture end of the latency figures,
 // when the source has no measured one. The AR8030 path measures its own (see
-// Ar8030Source::air_delay_for) and sends it in tx_capture_delay_us.
+// Ar8030Source::air_delay_for): the air delay in tx_processing_delay_us, and
+// in tx_capture_delay_us the screen's share, which is 0 unless
+// panel_latency_ms is set - so a 0 there is not "unmeasured".
 uint64_t Renderer::sensor_offset_us(const DecodedUnit* du) {
-    if (du->tx_capture_delay_us || !osd) return 0;
+    if (du->tx_capture_delay_us || du->tx_processing_delay_us || !osd) return 0;
     uint32_t fps = osd->get_sky_framerate();
     return fps > 0 ? (uint64_t)osd->get_sky_exposure_us() + 1000000 / fps : 0;
 }

@@ -3389,12 +3389,14 @@ void OSD::render_gl() {
 
     current_ly += 0.07f * s;
     // With the air delay measured (the AR8030 path: see air_delay_for) this is
-    // a glass-to-glass estimate - capture stamp to the hardware flip, plus
-    // the calibrated exposure wait and panel. Without it, arrival to flip
-    // only, and labelled so.
+    // capture stamp to the vblank the picture goes out on - plus the screen's
+    // own share when panel_latency_ms is set, which makes it glass to glass.
+    // Without the air delay, arrival to vblank only, and labelled so.
     if (video_active && lat_avg > 0.0f) {
-        sprintf(buf, air_delay_valid ? "LATENCY (g2g est): %.1fms | MAX: %.1fms"
-                                     : "LATENCY (gnd): %.1fms | MAX: %.1fms", lat_avg, lat_max);
+        sprintf(buf, !air_delay_valid ? "LATENCY (gnd): %.1fms | MAX: %.1fms"
+                     : Ar8030Source::panel_latency_us > 0 ? "LATENCY (g2g est): %.1fms | MAX: %.1fms"
+                                                          : "LATENCY (to vsync): %.1fms | MAX: %.1fms",
+                lat_avg, lat_max);
     } else if (video_active) {
         sprintf(buf, "LATENCY (gnd): -- | MAX: --");
     } else {
@@ -3633,9 +3635,11 @@ void OSD::render_gl() {
                       hc[0] * dim, hc[1] * dim, hc[2] * dim);
             // "STANDBY | " sits on the same line but keeps its own amber, so
             // it reads as a mode flag rather than part of the link health. Only
-            // drawn when the air unit actually reports standby - the line is
-            // right-aligned, so it is placed by measuring the LINK text.
-            if (air_standby) {
+            // drawn when the VTX is actually in standby (vtx_low_power, from
+            // cmd 0x05 bytes 29-30) - NOT air_standby, the TLV 0x12 value, which
+            // only echoes the Auto Standby setting. The line is right-aligned,
+            // so it is placed by measuring the LINK text.
+            if (vtx_low_power) {
                 float link_w = text_width(buf, 0.07f * s);
                 draw_text("STANDBY | ", outer_x - link_w, current_ry, 0.07f * s, true,
                           1.0f, 0.75f, 0.20f);

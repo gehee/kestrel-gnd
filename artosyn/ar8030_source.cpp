@@ -2577,11 +2577,13 @@ void Ar8030Source::update_dvr(std::shared_ptr<std::vector<uint8_t>> frame) {
 }
 
 // The fastest a picture's first slice gets from its capture stamp to our
-// read, on the stock air firmware (1080p100: 17.9 ms, 720p100: 17.4 ms over
-// three runs, each within 0.3 ms). Measured with the air unit's and the
-// goggle's clocks both synced to a host over USB, and the only calibration
-// the air delay below needs.
-static const int64_t kAirFloorUs = 17800;
+// read: the one calibration the air delay below needs, since our clock and
+// the air unit's are not synced. Set by air_floor_ms. Measured with both
+// clocks synced to a host over USB, on the stock air firmware: 17.4-17.9 ms
+// on 2026-09-29 (1080p100 and 720p100), 20.1-20.7 ms on 2026-09-30 (1080p100,
+// three thousand pictures a run) - it moves with the link, so the figure is
+// only as good as this number for the setup at hand.
+int Ar8030Source::air_floor_us = 20500;
 
 // Capture -> arrival of the picture whose header came last, in us, or 0 until
 // there is one. See air_win_min in the header.
@@ -2607,7 +2609,7 @@ uint32_t Ar8030Source::air_delay_for(uint64_t recv_us) {
         m = d;
     }
     if (d < floor) floor = d;
-    const int64_t us = d - floor + kAirFloorUs;
+    const int64_t us = d - floor + air_floor_us;
     if (us <= 0 || us > 1000000) return 0;
     const float ms = (float)us / 1000.0f;
     air_delay_ms = (air_delay_ms < 0.0f) ? ms : 0.95f * air_delay_ms + 0.05f * ms;
@@ -3043,13 +3045,15 @@ void Ar8030Source::flush_access_unit(uint64_t recv_us) {
         // of the read that happens to be flushing it - see au_first_recv_us.
         const uint64_t au_recv = au_first_recv_us ? au_first_recv_us : recv_us;
         if (ltrace::on()) ltrace::rec(ltrace::kAu, now_us(), (uint32_t)au_pts, au_recv);
-        // The glass-to-glass part nothing here can timestamp, calibrated
-        // against a photodiode on the goggle's own panel: on average half a
-        // frame waiting for the exposure that catches a change, and the
-        // panel (HDMI bridge and OLED). It travels in the capture half of the
-        // packed delay; the air delay is the processing one.
+        // What nothing here can timestamp: the screen, if panel_latency_ms
+        // says how long it takes (0 by default, so the figure ends at the
+        // vblank). No exposure wait is added: an LED switched on in front
+        // of the camera is in the frame whose capture stamp comes 0 ms
+        // later on the median (-5..+5 ms, photodiode rig with the air unit
+        // and goggle clocks synced), so the stamp already stands for the
+        // moment of capture. It travels in the capture half of the packed
+        // delay; the air delay is the processing one.
         uint32_t outside_us = (uint32_t)panel_latency_us;
-        if (hdr_fps > 0) outside_us += 500000u / hdr_fps;
         vdec->feed_packet_to_decoder(au_slices.data(), (int)au_slices.size(),
                                      au_pts, au_recv, au_nal_type,
                                      au_air_us ? (outside_us << 16) : 0, au_air_us);
