@@ -3,7 +3,9 @@ cmake_minimum_required(VERSION 3.13.0)
 project(kestrel-gnd VERSION 1.0)
 # The version as people read it, pre-release suffix included. project() only
 # takes numbers, so the label is kept beside it and is what the binary reports.
-set(KESTREL_GND_VERSION_LABEL "2026.09.beta1")
+# A release build (fpvOS's release.sh) passes its own, so the menu always
+# shows the release it came from.
+set(KESTREL_GND_VERSION_LABEL "2026.10.beta2" CACHE STRING "Version shown in the menu and logs")
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
