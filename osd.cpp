@@ -4020,7 +4020,8 @@ void OSD::render_gl() {
             gbm_surface_release_buffer(gs, bo);
             return;
         }
-        close(prime_fd);
+        // prime_fd is kept: the screen recorder reads the OSD through it
+        // (dev->register_osd_fb below). The BOs live as long as the app.
 
         uint32_t stride = gbm_bo_get_stride(bo);
         uint32_t handles[4] = {handle, 0, 0, 0};
@@ -4052,10 +4053,12 @@ void OSD::render_gl() {
         }
         if (addfb_ret) {
             perror("drmModeAddFB2 (OSD)");
+            close(prime_fd);
             gbm_surface_release_buffer(gs, bo);
             return;
         }
         bo_to_fb[bo] = fb_id;
+        dev->register_osd_fb(fb_id, prime_fd, stride);
     } else {
         fb_id = bo_to_fb[bo];
     }
@@ -4875,7 +4878,7 @@ const char* OSD::menu_help_text(int tab, int i, const char* fallback) {
         switch (menu_dvr_source) {
         case 1:  return "Records the screen - video and HUD, as you see them - 30 times a second.";
         case 2:  return "Records the screen - video and HUD, as you see them - 60 times a second.\n"
-                        "Adds about 1.5 ms to the FPV feed's latency while recording.";
+                        "Adds about 1 ms to the FPV feed's latency while recording.";
         default: return "Records the FPV stream as the air unit sends it: full quality, no HUD.\n"
                         "No impact on the FPV feed's latency.";
         }

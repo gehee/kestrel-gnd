@@ -19,7 +19,7 @@
 
 MppH264Encoder::~MppH264Encoder() { deinit(); }
 
-bool MppH264Encoder::init(int width, int height, int fps, int bitrate_bps) {
+bool MppH264Encoder::init(int width, int height, int fps, int bitrate_bps, bool bt601) {
     deinit();
     w_ = width; h_ = height; fps_ = (fps > 0) ? fps : 30;
 
@@ -49,6 +49,12 @@ bool MppH264Encoder::init(int width, int height, int fps, int bitrate_bps) {
     mpp_enc_cfg_set_s32(cfg, "prep:hor_stride",   w_);
     mpp_enc_cfg_set_s32(cfg, "prep:ver_stride",   h_);
     mpp_enc_cfg_set_s32(cfg, "prep:format",       MPP_FMT_YUV420SP);
+    if (bt601) {
+        mpp_enc_cfg_set_s32(cfg, "prep:colorspace", MPP_FRAME_SPC_SMPTE170M);
+        mpp_enc_cfg_set_s32(cfg, "prep:colorprim",  MPP_FRAME_PRI_SMPTE170M);
+        mpp_enc_cfg_set_s32(cfg, "prep:colortrc",   MPP_FRAME_TRC_SMPTE170M);
+        mpp_enc_cfg_set_s32(cfg, "prep:colorrange", MPP_FRAME_RANGE_MPEG);
+    }
 
     mpp_enc_cfg_set_s32(cfg, "rc:mode",           MPP_ENC_RC_MODE_CBR);
     mpp_enc_cfg_set_s32(cfg, "rc:bps_target",     bitrate_bps);
@@ -189,7 +195,7 @@ void MppH264Encoder::deinit() {
 #else   // !USE_RKMPP - no hardware encoder on this build
 
 MppH264Encoder::~MppH264Encoder() {}
-bool MppH264Encoder::init(int, int, int, int) { return false; }
+bool MppH264Encoder::init(int, int, int, int, bool) { return false; }
 int  MppH264Encoder::input_dmabuf_fd(int) const { return -1; }
 void MppH264Encoder::deinit() {}
 bool MppH264Encoder::encode_buffer(

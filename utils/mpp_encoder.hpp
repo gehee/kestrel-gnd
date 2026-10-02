@@ -24,7 +24,10 @@ class MppH264Encoder {
         // NV12 in, H.264 out. Returns false if the hardware refuses the config.
         // NV12 in, H.264 out. The input buffer is exported as a DMA-BUF so the
         // DRM writeback connector can composite directly into it.
-        bool init(int width, int height, int fps, int bitrate_bps);
+        // bt601: tag the stream BT.601 limited range in its VUI, for input
+        // converted from RGB with that matrix (the RGA screen recorder), so
+        // players do not guess BT.709 for HD and shift the colours.
+        bool init(int width, int height, int fps, int bitrate_bps, bool bt601 = false);
         bool ready() const { return ctx_ != nullptr; }
 
         // SPS/PPS as Annex-B, fetched at init. minimp4 needs these before any

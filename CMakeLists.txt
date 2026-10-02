@@ -25,6 +25,8 @@ set(SOURCE_FILES
         queue/Msg.cpp
         dvr.cpp
         dvr_recover.cpp
+        screen_tap.cpp
+        rga_compositor.cpp
         vdec/vdec_ffmpeg.cpp
         renderer.cpp
         drm.cpp
@@ -111,6 +113,21 @@ endif()
 
 if(USE_RKMPP)
     target_link_libraries(${TARGET} rockchip_mpp)
+endif()
+
+# Rockchip RGA (librga.so.2 from the goggle's stock firmware, installed by
+# fpvOS's fpvos-vendor-libs; its headers are in include/rga). The screen
+# recorder composites with it; without it, screen recording uses writeback.
+if(USE_RKMPP AND NOT RGA_LIB)
+    find_library(RGA_LIB NAMES rga librga.so.2
+                 PATHS ${CMAKE_SYSROOT}/usr/lib ${CMAKE_SYSROOT}/lib)
+endif()
+if(USE_RKMPP AND RGA_LIB)
+    message(STATUS "RGA library: ${RGA_LIB}")
+    target_compile_definitions(${TARGET} PRIVATE USE_RGA)
+    target_link_libraries(${TARGET} ${RGA_LIB})
+else()
+    message(STATUS "librga not found - screen recording falls back to writeback")
 endif()
 
 # kestrel-splash — tiny standalone DRM/cairo boot splash (no GL/MPP).

@@ -88,6 +88,16 @@ struct DecodedUnit{
     // HW prime data
     bool has_prime_fd;
     int prime_fd;
+    // The decoder's buffer behind prime_fd, and how to keep it from being
+    // decoded into again: hold(buf) takes a reference, released when the
+    // returned pointer goes. Nothing is held by default; the renderer holds
+    // the pictures it shows while the screen is being recorded, since the
+    // recorder reads them after the display does.
+    void* buf = nullptr;
+    std::shared_ptr<void> (*hold)(void* buf) = nullptr;
+    // Bumped each time the decoder replaces its buffers: prime_fd numbers
+    // are only unique within one epoch.
+    uint32_t buf_epoch = 0;
 
     // SW data
     uint8_t *data[8];

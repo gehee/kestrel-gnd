@@ -184,6 +184,9 @@ void DrmDevice::handle_events() {
                 self->inflight_osd_fb_id = 0;
             }
             pthread_mutex_unlock(&self->osd_mutex);
+            // `frame` is the vblank the flip landed on - the counter
+            // drmWaitVBlank returns, which the screen recorder samples by.
+            self->tap.landed(frame);
             self->flip_pending = false;
             last_flip_complete = completion_ts;
             
@@ -361,6 +364,7 @@ void DrmDevice::init_gl() {
 void DrmDevice::set_osd_fb(uint32_t fb_id) {
     pthread_mutex_lock(&osd_mutex);
     pending_osd_fb_id = fb_id;
+    pending_osd_gen_ = ++osd_gen_;
     pthread_mutex_unlock(&osd_mutex);
 
     // While video is flowing, the next video flip carries this fb (page_flip
@@ -397,8 +401,10 @@ void DrmDevice::set_osd_fb(uint32_t fb_id) {
     }
     prof::count(prof::kCountOsdCommit);
     current_osd_fb_id = pending_osd_fb_id;
+    current_osd_gen_ = pending_osd_gen_;
     pending_osd_fb_id = 0;
     uint32_t commit_fb_id = current_osd_fb_id;
+    uint64_t commit_gen = current_osd_gen_;
     pthread_mutex_unlock(&osd_mutex);
 
     sync_frozen_video_rect();
@@ -416,6 +422,11 @@ void DrmDevice::set_osd_fb(uint32_t fb_id) {
             pthread_mutex_lock(&osd_mutex);
             onscreen_osd_fb_id = commit_fb_id;
             pthread_mutex_unlock(&osd_mutex);
+            if (tap.recording()) {
+                uint64_t vb;
+                uint32_t seq;
+                if (last_vblank(&vb, &seq)) tap.osd_landed(commit_fb_id, commit_gen, seq);
+            }
         }
     }
 }
@@ -426,7 +437,46 @@ bool DrmDevice::osd_fb_in_use(uint32_t fb_id) {
     bool used = fb_id == pending_osd_fb_id || fb_id == current_osd_fb_id ||
                 fb_id == inflight_osd_fb_id || fb_id == onscreen_osd_fb_id;
     pthread_mutex_unlock(&osd_mutex);
-    return used;
+    // The screen recorder reading it (RGA): drawing into it now would tear
+    // the recorded frame.
+    return used || tap.holds_osd(fb_id);
+}
+
+void DrmDevice::register_osd_fb(uint32_t fb_id, int dmabuf_fd, uint32_t stride) {
+    pthread_mutex_lock(&osd_mutex);
+    auto it = osd_fb_dmabuf_.find(fb_id);
+    if (it != osd_fb_dmabuf_.end() && it->second.first >= 0) close(it->second.first);
+    osd_fb_dmabuf_[fb_id] = std::make_pair(dmabuf_fd, stride);
+    pthread_mutex_unlock(&osd_mutex);
+}
+
+int DrmDevice::osd_fb_dmabuf(uint32_t fb_id, uint32_t* stride) {
+    int fd = -1;
+    pthread_mutex_lock(&osd_mutex);
+    auto it = osd_fb_dmabuf_.find(fb_id);
+    if (it != osd_fb_dmabuf_.end()) {
+        fd = it->second.first;
+        if (stride) *stride = it->second.second;
+    }
+    pthread_mutex_unlock(&osd_mutex);
+    return fd;
+}
+
+bool DrmDevice::wait_vblank(uint32_t* seq, uint64_t* ts_us) {
+    drmVBlank vbl = {};
+    vbl.request.type = (drmVBlankSeqType)(DRM_VBLANK_RELATIVE |
+        ((output_list->crtc_index << DRM_VBLANK_HIGH_CRTC_SHIFT) & DRM_VBLANK_HIGH_CRTC_MASK));
+    vbl.request.sequence = 1;
+    if (drmWaitVBlank(drm_fd, &vbl)) return false;
+    *seq = vbl.reply.sequence;
+    *ts_us = (uint64_t)vbl.reply.tval_sec * 1000000ULL + vbl.reply.tval_usec;
+    return true;
+}
+
+int DrmDevice::refresh_hz() const {
+    double p = frame_period_us();
+    if (p > 0) return (int)(1e6 / p + 0.5);
+    return output_list && output_list->mode.vrefresh ? (int)output_list->mode.vrefresh : 60;
 }
 
 // Picture Size moves the video plane's rectangle, but that rectangle is only
@@ -461,7 +511,7 @@ void DrmDevice::sync_frozen_video_rect() {
     }
 }
 
-bool DrmDevice::last_vblank(uint64_t *ts_us) {
+bool DrmDevice::last_vblank(uint64_t *ts_us, uint32_t *seq) {
     // RELATIVE 0 returns at once, with the time of the vblank just past.
     drmVBlank vbl = {};
     vbl.request.type = (drmVBlankSeqType)(DRM_VBLANK_RELATIVE |
@@ -469,6 +519,7 @@ bool DrmDevice::last_vblank(uint64_t *ts_us) {
     vbl.request.sequence = 0;
     if (drmWaitVBlank(drm_fd, &vbl)) return false;
     *ts_us = (uint64_t)vbl.reply.tval_sec * 1000000ULL + vbl.reply.tval_usec;
+    if (seq) *seq = vbl.reply.sequence;
     return true;
 }
 
@@ -587,9 +638,11 @@ bool DrmDevice::page_flip(int fb_id, uint64_t recv_ts, uint64_t dec_start_ts, ui
     pthread_mutex_lock(&osd_mutex);
     if (pending_osd_fb_id > 0) {
         current_osd_fb_id = pending_osd_fb_id;
+        current_osd_gen_ = pending_osd_gen_;
         pending_osd_fb_id = 0;
     }
     uint32_t osd_fb = current_osd_fb_id;
+    uint64_t osd_gen = current_osd_gen_;
     // Mark the fb this flip carries BEFORE committing: the flip's event can be
     // handled on the event thread before this one runs again, and it must
     // find the fb there to move it on screen. Undone below if the commit fails.
@@ -618,7 +671,13 @@ bool DrmDevice::page_flip(int fb_id, uint64_t recv_ts, uint64_t dec_start_ts, ui
 
     flip_pending = true;
     flip_submit_us = get_time_us();
+    // The screen recorder: what this commit puts on screen. Told before the
+    // commit, because its event can arrive before this thread runs again.
+    if (tap.recording() && flip_picture_)
+        tap.submitted(std::move(flip_picture_), osd_fb, osd_gen, vx, vy, vw, vh, flip_submit_us);
+    flip_picture_.reset();
     int ret = drmModeAtomicCommit(drm_fd, output_list->video_request, flags, this);
+    if (ret != 0) tap.submit_failed();
     if (ret == 0) {
         last_video_flip_us = flip_submit_us;
         if (blocking_flip) {
@@ -637,6 +696,11 @@ bool DrmDevice::page_flip(int fb_id, uint64_t recv_ts, uint64_t dec_start_ts, ui
         // The commit returned, so the flip is done. Close out the stats here
         // exactly as the event handler would, and leave nothing pending.
         uint64_t completion_ts = get_time_us();
+        if (tap.recording()) {
+            uint64_t vb;
+            uint32_t seq;
+            if (last_vblank(&vb, &seq)) tap.landed(seq); else tap.submit_failed();
+        }
         if (ltrace::on()) ltrace::rec(ltrace::kFlipDone, completion_ts, (uint32_t)fb_id, completion_ts);
         flip_pending = false;
         pthread_mutex_lock(&stats_mutex);

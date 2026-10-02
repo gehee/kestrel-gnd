@@ -6,12 +6,15 @@
 #include <time.h>
 #include <atomic>
 #include <thread>
+#include <deque>
+#include <sched.h>
 #include <cerrno>
 #include <cstring>
 #include <pthread.h>
 #include "webstream.hpp"
 #include "utils/time_util.h"
 #include "drm.hpp"
+#include "renderer.hpp"   // DecodedUnit, for the RGA recorder
 #include "settings.hpp"
 
 // Queued this far, a write waits for the card: ten seconds of the heaviest
@@ -140,22 +143,54 @@ int DVR::init(int frm_width, int frm_height) {
 	const int bitrate = 16000000;
 
 	if (!wb_dev) {
-		printf("DVR: no DRM device for writeback - screen recording unavailable\n");
+		printf("DVR: no DRM device - screen recording unavailable\n");
 		return -1;
 	}
+	// RGA unless asked otherwise: the screen rebuilt from what the display
+	// scanned out, every rga_div-th refresh (screen_tap.hpp). The file runs
+	// at that rate - 60 fps at 120 Hz, 30 if dvr_screen_fps asks for 30.
+	const bool want_rga = Settings::getInstance().getString("dvr_capture", "rga") != "writeback";
+	if (want_rga && RgaCompositor::available()) {
+		const int hz = wb_dev->refresh_hz();
+		const int want = dvr_screen_capture_fps();
+		rga_div = (hz + want - 1) / want;
+		if (rga_div < 1) rga_div = 1;
+		fps = (hz + rga_div / 2) / rga_div;
+		if (fps > 60) fps = 60;
+	} else if (want_rga) {
+		printf("DVR: no RGA (/dev/rga) - recording the screen with writeback, which costs the live picture\n");
+	}
 	screen_fps = fps;
-	if (!screen_enc.init(frm_width, frm_height, fps, bitrate)) {
+	if (!screen_enc.init(frm_width, frm_height, fps, bitrate, want_rga)) {
 		printf("DVR: hardware H.264 encoder unavailable - screen recording disabled\n");
 		return -1;
 	}
 	std::vector<int> fds;
 	for (int i = 0; i < screen_enc.input_count(); i++) fds.push_back(screen_enc.input_dmabuf_fd(i));
-	if (!wb_dev->writeback_init(frm_width, frm_height, fds)) {
-		printf("DVR: no writeback connector - screen recording unavailable\n");
-		screen_enc.deinit();
-		return -1;
+	if (want_rga && rga.init(frm_width, frm_height, fds)) {
+		use_rga = true;
+	} else {
+		if (want_rga) {
+			// The file was set up for RGA's colours; writeback's are its own.
+			printf("DVR: RGA unusable - recording the screen with writeback, which costs the live picture\n");
+			screen_fps = fps = 60;
+			if (wb_dev->output_list && wb_dev->output_list->mode.vrefresh > 0 &&
+			    (int)wb_dev->output_list->mode.vrefresh < 60)
+				screen_fps = fps = (int)wb_dev->output_list->mode.vrefresh;
+			if (!screen_enc.init(frm_width, frm_height, fps, bitrate)) {
+				printf("DVR: hardware H.264 encoder unavailable - screen recording disabled\n");
+				return -1;
+			}
+			fds.clear();
+			for (int i = 0; i < screen_enc.input_count(); i++) fds.push_back(screen_enc.input_dmabuf_fd(i));
+		}
+		if (!wb_dev->writeback_init(frm_width, frm_height, fds)) {
+			printf("DVR: no writeback connector - screen recording unavailable\n");
+			screen_enc.deinit();
+			return -1;
+		}
+		use_writeback = true;
 	}
-	use_writeback = true;
 
 	if (!dvr_file) {
 		printf("DVR: output file not open - screen recording disabled\n");
@@ -179,8 +214,12 @@ int DVR::init(int frm_width, int frm_height) {
 		mp4_h26x_write_nal(&mp4wr, screen_enc.header().data(),
 		                   (int)screen_enc.header().size(), 90000 / fps);
 
-	printf("DVR: screen recording %dx%d, DRM writeback composited capture\n",
-	       frm_width, frm_height);
+	if (use_rga)
+		printf("DVR: screen recording %dx%d at %d fps, RGA composite of every %d%s refresh\n",
+		       frm_width, frm_height, screen_fps, rga_div, rga_div == 2 ? "nd" : rga_div == 3 ? "rd" : "th");
+	else
+		printf("DVR: screen recording %dx%d, DRM writeback composited capture\n",
+		       frm_width, frm_height);
 	return 0;
 }
 
@@ -293,6 +332,214 @@ void DVR::run_screen() {
 	       (unsigned long long)frames, (unsigned long long)skips, screen_fps);
 }
 
+// The RGA screen recording. Every rga_div-th vblank is one frame of the file
+// (a slot). A sampler thread wakes just after that vblank, asks the screen
+// tap which picture and OSD the display showed on it, and has RGA composite
+// them into a free encoder buffer; this thread encodes them in order. Nothing
+// here touches the display, so the live picture pays nothing but memory
+// traffic. A slot whose screen did not change is a skip frame - nothing
+// composited, nothing encoded - and so is one the sampler could not fill
+// (encoder behind, woke too late), so the file stays on the slot grid.
+void DVR::run_screen_rga() {
+	struct Shot { int idx; int64_t slot; };   // idx -1: the screen of the slot before
+	std::mutex qm;
+	std::condition_variable qcv;
+	std::deque<Shot> q;
+	std::deque<int> free_bufs;
+	for (int i = 0; i < screen_enc.input_count(); i++) free_bufs.push_back(i);
+	std::atomic<bool> sampling{true};
+	ScreenTap& tap = wb_dev->tap;
+	tap.set_recording(true);
+
+	// Sampler counters, read after it is joined.
+	uint64_t n_slots = 0, n_same = 0, n_late = 0, n_busy = 0, n_fail = 0, n_nothing = 0;
+	uint32_t blend_hist[64] = {0};   // RGA time, 0.25 ms buckets
+	uint32_t blend_max = 0;
+
+	std::thread sampler([&] {
+		pthread_setname_np(pthread_self(), "dvr-sampler");
+		const int div = rga_div;
+		int parity = 0;
+		uint32_t n = 0, seq0 = 0;
+		bool have0 = false;
+		int64_t last_slot = -1;
+		bool have_last = false, last_video = false;
+		uint64_t last_pts = 0, last_dec = 0, last_gen = 0;
+		uint32_t last_epoch = 0;
+		int lvx = 0, lvy = 0, lvw = 0, lvh = 0;
+		while (sampling) {
+			uint32_t seq;
+			uint64_t vb;
+			if (!wb_dev->wait_vblank(&seq, &vb)) { usleep(10000); continue; }
+			tap.drain_graveyard();
+			if (div > 1) {
+				// Sample the refresh after the one pictures land on: 60 fps
+				// video on a 120 Hz screen is then taken once per picture,
+				// each on the second refresh it is shown.
+				if ((n++ % 32) == 0) {
+					int dom = tap.dominant_parity(div);
+					if (dom >= 0) parity = (dom + 1) % div;
+				}
+				if ((int)(seq % div) != parity) continue;
+			}
+			if (!have0) { seq0 = seq; have0 = true; }
+			const int64_t slot = ((int64_t)(uint32_t)(seq - seq0) + div / 2) / div;
+			if (slot <= last_slot) continue;      // the sampled parity moved
+			// Just after the vblank, so its flip event is in.
+			const uint64_t at = vb + 1500;
+			struct timespec ts = { (time_t)(at / 1000000), (long)((at % 1000000) * 1000) };
+			clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, nullptr);
+			ScreenPair p;
+			if (!tap.sample(seq, vb, p, 3000)) {
+				if (have_last) n_late++; else n_nothing++;
+				continue;
+			}
+			n_slots++;
+			const DecodedUnit* du = p.video.get();
+			const bool same = have_last && (du != nullptr) == last_video &&
+			                  (!du || (du->pts == last_pts && du->dec_end_ts == last_dec &&
+			                           du->buf_epoch == last_epoch)) &&
+			                  p.osd_gen == last_gen && p.vx == lvx && p.vy == lvy && p.vw == lvw && p.vh == lvh;
+			if (same) {
+				tap.sample_done();
+				n_same++;
+				{ std::lock_guard<std::mutex> lk(qm); q.push_back({-1, slot}); }
+				qcv.notify_one();
+				last_slot = slot;
+				continue;
+			}
+			int idx = -1;
+			{
+				std::lock_guard<std::mutex> lk(qm);
+				if (!free_bufs.empty()) { idx = free_bufs.front(); free_bufs.pop_front(); }
+			}
+			if (idx < 0) { tap.sample_done(); n_busy++; continue; }   // encoder behind
+			uint32_t stride = 0;
+			const int osd_fd = p.osd_fb ? wb_dev->osd_fb_dmabuf(p.osd_fb, &stride) : -1;
+			uint32_t us = 0;
+			const bool ok = rga.compose(p, osd_fd, stride, idx, &us);
+			tap.sample_done();
+			if (!ok) {
+				std::lock_guard<std::mutex> lk(qm);
+				free_bufs.push_back(idx);
+				n_fail++;
+				continue;
+			}
+			blend_hist[us / 250 < 63 ? us / 250 : 63]++;
+			if (us > blend_max) blend_max = us;
+			have_last = true;
+			last_video = du != nullptr;
+			last_pts = du ? du->pts : 0;
+			last_dec = du ? du->dec_end_ts : 0;
+			last_epoch = du ? du->buf_epoch : 0;
+			last_gen = p.osd_gen;
+			lvx = p.vx; lvy = p.vy; lvw = p.vw; lvh = p.vh;
+			p.video.reset();      // the picture goes back to the decoder from here
+			{ std::lock_guard<std::mutex> lk(qm); q.push_back({idx, slot}); }
+			qcv.notify_one();
+			last_slot = slot;
+		}
+	});
+
+	const int period = 90000 / (screen_fps > 0 ? screen_fps : 60);   // 90 kHz ticks
+	int64_t last_written = -1;
+	uint64_t frames = 0, skips = 0;
+	auto write = [&](const uint8_t* d, size_t len, int dur) {
+		auto r = mp4_h26x_write_nal(&mp4wr, d, (int)len, dur);
+		if (!(MP4E_STATUS_OK == r || MP4E_STATUS_BAD_ARGUMENTS == r))
+			printf("DVR: rga mp4_h26x_write_nal err %d\n", r);
+	};
+	auto skip = [&]() {
+		std::vector<uint8_t> sk = screen_cfr.skip_frame();
+		if (sk.empty()) return false;
+		write(sk.data(), sk.size(), period);
+		skips++;
+		return true;
+	};
+	// Without constant rate (dvr_screen_cfr: false) a frame's duration is only
+	// known when the next one arrives, so the last encoded frame waits here.
+	std::vector<uint8_t> held;
+	int64_t held_slot = -1;
+	auto flush_held = [&](int64_t until) {
+		if (held_slot < 0) return;
+		int64_t n = until - held_slot;
+		if (n < 1) n = 1;
+		if (n > screen_fps) n = screen_fps;
+		write(held.data(), held.size(), (int)(period * n));
+		held_slot = -1;
+	};
+	auto handle = [&](const Shot& s) {
+		if (s.idx < 0 && last_written < 0) return;   // nothing to repeat yet
+		if (screen_cfr.ready()) {
+			if (last_written >= 0) {
+				int64_t gap = s.slot - last_written - 1;
+				if (gap > screen_fps) gap = screen_fps;   // a second at most
+				for (int64_t i = 0; i < gap; i++) if (!skip()) break;
+			}
+			if (s.idx < 0) skip();
+		}
+		if (s.idx >= 0) {
+			if (!screen_cfr.ready()) flush_held(s.slot);
+			screen_enc.encode_buffer(s.idx, [&](const uint8_t* p_hw, size_t len, bool) {
+				// One bulk copy out of the encoder's uncached output first (see run_screen).
+				pkt_copy_.assign(p_hw, p_hw + len);
+				if (screen_cfr.ready()) {
+					std::vector<uint8_t> au = screen_cfr.rewrite(pkt_copy_.data(), len);
+					write(au.data(), au.size(), period);
+				} else {
+					held = pkt_copy_;
+					held_slot = s.slot;
+				}
+			});
+			frames++;
+			std::lock_guard<std::mutex> lk(qm);
+			free_bufs.push_back(s.idx);
+		}
+		last_written = s.slot;
+	};
+	auto pop = [&](Shot& s, int wait_ms) {
+		std::unique_lock<std::mutex> lk(qm);
+		if (wait_ms > 0) qcv.wait_for(lk, std::chrono::milliseconds(wait_ms), [&] { return !q.empty(); });
+		if (q.empty()) return false;
+		s = q.front();
+		q.pop_front();
+		return true;
+	};
+
+	for (;;) {
+		{
+			std::lock_guard<std::mutex> lock(mtx);
+			if (should_exit) break;
+		}
+		if (*should_stop) break;
+		Shot s;
+		if (pop(s, 50)) handle(s);
+	}
+	sampling = false;
+	sampler.join();
+	// Frames already composited are still part of the recording.
+	Shot s;
+	while (pop(s, 0)) handle(s);
+	if (!screen_cfr.ready()) flush_held(last_written + 1);
+	tap.set_recording(false);
+
+	uint64_t total = 0, med_i = 0, p99_i = 0, acc = 0;
+	for (uint32_t c : blend_hist) total += c;
+	for (int i = 0; i < 64; i++) {
+		acc += blend_hist[i];
+		if (!med_i && acc * 2 >= total) med_i = i + 1;
+		if (!p99_i && acc * 100 >= total * 99) p99_i = i + 1;
+	}
+	printf("DVR: %llu frames encoded, %llu skip frames (%d fps). Sampled %llu slots: %llu unchanged, "
+	       "%llu missed (sampler late), %llu with the encoder behind, %llu composite failures, %llu "
+	       "before anything was on screen. RGA ~%.2f ms median, ~%.2f ms p99, %.2f ms max\n",
+	       (unsigned long long)frames, (unsigned long long)skips, screen_fps,
+	       (unsigned long long)n_slots, (unsigned long long)n_same, (unsigned long long)n_late,
+	       (unsigned long long)n_busy, (unsigned long long)n_fail, (unsigned long long)n_nothing,
+	       med_i * 0.25, p99_i * 0.25, blend_max / 1000.0);
+	fflush(stdout);
+}
+
 void DVR::stop() {
 	{
 		std::lock_guard<std::mutex> lock(mtx);
@@ -304,7 +551,7 @@ void DVR::stop() {
 void DVR::run_dvr() {
 	printf("DVR::run_dvr start.\n");
 	if (record_screen) {
-		run_screen();
+		if (use_rga) run_screen_rga(); else run_screen();
 		if (mux) {
 			MP4E_close(mux);
 			mp4_h26x_write_close(&mp4wr);
@@ -312,7 +559,8 @@ void DVR::run_dvr() {
 		}
 		// Stop capturing before the encoder's buffers go away: writeback_deinit
 		// also waits out any capture still being written.
-		if (wb_dev) wb_dev->writeback_deinit();
+		if (wb_dev && use_writeback) wb_dev->writeback_deinit();
+		rga.deinit();
 		screen_enc.deinit();
 		writer.reset();             // everything written and synced
 		if (dvr_file) {

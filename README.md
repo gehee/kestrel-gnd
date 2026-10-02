@@ -39,8 +39,11 @@ plus camera settings pushed to the air unit over the `FE A5` sky protocol.
 
 **DVR** — recording is on the REC button; files land in `dvr_dir`
 (default `/media/dvr`). `--dvr-format raw|mp4|fmp4`, `--dvr-framerate N`.
-Screen recording uses the DRM writeback connector into the RK3568 VEPU, so no
-frame is copied; it is unavailable on builds without RKMPP.
+Screen recording rebuilds each frame from what the display scanned out - the
+decoded picture and the OSD, blended with the RK3568's RGA - and encodes it on
+the VEPU at 60 fps, without touching the display, so the live picture loses
+nothing to it (`screen_tap.hpp`). It needs RKMPP and librga; without librga it
+falls back to the DRM writeback connector, which costs the live picture.
 
 **Settings** — `kestrel-gnd.yaml` next to the binary.
 

@@ -6,7 +6,11 @@
 #include <vector>
 #include <deque>
 #include <condition_variable>
+#include <map>
+#include <memory>
 #include <mutex>
+
+#include "screen_tap.hpp"
 
 extern "C" {
     #include "drm/drm.h"
@@ -86,6 +90,15 @@ private:
     // is showing. A buffer in either (or pending) must not be drawn into again.
     uint32_t inflight_osd_fb_id = 0;
     uint32_t onscreen_osd_fb_id = 0;
+    // Which OSD frame each of those holds: a new one per set_osd_fb, since the
+    // fbs themselves are reused. For the screen recorder.
+    uint64_t osd_gen_ = 0, pending_osd_gen_ = 0, current_osd_gen_ = 0;
+    // The OSD fbs' DMA-BUFs and pitches, for the screen recorder (osd.cpp
+    // registers each one as it makes it). Under osd_mutex.
+    std::map<uint32_t, std::pair<int, uint32_t>> osd_fb_dmabuf_;
+    // The picture the next page_flip shows, for the screen tap (renderer
+    // thread only).
+    std::shared_ptr<DecodedUnit> flip_picture_;
     std::atomic<uint64_t> last_video_flip_us{0};   // last video flip submitted
     uint64_t last_pageflip_ts = 0;
 
@@ -143,6 +156,19 @@ public:
     bool page_flip(int fb_id, uint64_t recv_ts = 0, uint64_t dec_start_ts = 0, uint64_t dec_end_ts = 0, uint64_t sub_start_ts = 0, uint32_t tx_age_us = 0);
     CompletedStats get_latest_stats();
     RenderCadence get_render_cadence();
+
+    // What the screen showed, for the screen recorder (screen_tap.hpp).
+    ScreenTap tap;
+    // The decoded picture the next page_flip carries - the renderer says so
+    // just before, while recording.
+    void set_flip_picture(std::shared_ptr<DecodedUnit> du) { flip_picture_ = std::move(du); }
+    // Block until the next vblank: its sequence number and time (CLOCK_MONOTONIC us).
+    bool wait_vblank(uint32_t* seq, uint64_t* ts_us);
+    // The refresh rate of the current mode, in Hz (rounded).
+    int refresh_hz() const;
+    // An OSD fb's DMA-BUF (owned here) and pitch in bytes.
+    void register_osd_fb(uint32_t fb_id, int dmabuf_fd, uint32_t stride);
+    int  osd_fb_dmabuf(uint32_t fb_id, uint32_t* stride);
 
     // osd
     bool wait_for_flip_completion(int timeout_ms = 10);
@@ -204,7 +230,7 @@ public:
     int get_osd_zpos() { return osd_zpos; }
     bool is_flip_pending() { return flip_pending; }
     // Kernel timestamp (CLOCK_MONOTONIC us) of the last vblank on our CRTC.
-    bool last_vblank(uint64_t *ts_us);
+    bool last_vblank(uint64_t *ts_us, uint32_t *seq = nullptr);
     // One refresh of the current mode, in microseconds.
     double frame_period_us() const {
         return output_list && output_list->mode.clock

@@ -13,6 +13,7 @@
 #include "common.hpp"
 #include "utils/mpp_encoder.hpp"
 #include "utils/h264_cfr.hpp"
+#include "rga_compositor.hpp"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -29,11 +30,12 @@ extern "C" {
 #include <sstream>
 #include <thread>
 
-// How often a screen recording captures the screen, from dvr_screen_fps
-// (default 30, at most 60), on a capture thread of its own. Each capture is an
-// extra commit on the CRTC that also presents the video, and the video's next
-// page flip waits while it is in flight - more captures, smoother recording,
-// a little more cost to the live picture.
+// How many frames a second a screen recording has, from dvr_screen_fps
+// (default 60, at most 60). The RGA recorder (the default) takes every n-th
+// refresh for it - every other one at 120 Hz for 60 fps - at no cost to the
+// live picture. A writeback recording (dvr_capture: writeback) captures this
+// often on a timer instead, and each capture is an extra commit on the CRTC
+// that presents the video, whose flips are refused while it is in flight.
 int dvr_screen_capture_fps();
 
 // What REC records when the settings do not say (dvr_screen, dvr_screen_fps):
@@ -115,6 +117,12 @@ class DVR {
         int     screen_fps = 60;
         bool use_writeback = false;   // frames arrive already composited
         class DrmDevice* wb_dev = nullptr;
+        // The RGA recorder (the default, dvr_capture: rga): the screen rebuilt
+        // from what the display scanned out, every rga_div-th refresh.
+        bool use_rga = false;
+        int  rga_div = 2;
+        RgaCompositor rga;
+        void run_screen_rga();
 
         static std::string format_timestamped_filename(const std::string& base_filename) {
             if (base_filename.empty()) return "";

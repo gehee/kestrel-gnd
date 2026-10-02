@@ -1,4 +1,5 @@
 #include "vdec_rk.hpp"
+#include <atomic>
 #include "../utils/ltrace.hpp"
 
 #include <assert.h>
@@ -9,6 +10,9 @@
 #include "common.hpp"
 #include "utils/scheduling_helper.hpp"
 #include "utils/time_util.h"
+
+// Which set of decoder buffers prime_fds refer to (DecodedUnit::buf_epoch).
+static std::atomic<uint32_t> s_buf_epoch{1};
 
 
 // void VdecRK::init_buffer(MppFrame frame) {
@@ -71,7 +75,9 @@ void VdecRK::init_buffer(MppFrame frame) {
 				mpi.frame_to_drm[i].fb_id = 0;
 			}
 		}
-		// 2. Release MPP buffer group (closes prime_fds owned by MPP)
+		// 2. Release MPP buffer group (closes prime_fds owned by MPP). Their
+		// numbers may come back for the new buffers: a new epoch.
+		s_buf_epoch++;
 		mpp_buffer_group_put(mpi.frm_grp);
 		mpi.frm_grp = NULL;
 		// 3. Destroy underlying GEM dumb buffers
@@ -313,7 +319,15 @@ void VdecRK::run_frame()
 // GL-texture path) or to the renderer's video plane (live feed). For the sink
 // path the underlying MPP buffer is ref-held via du->frame_ref so it stays
 // valid until the consumer finishes its (deferred) EGL import.
+static std::shared_ptr<void> hold_mpp_buffer(void* b) {
+    mpp_buffer_inc_ref((MppBuffer)b);
+    return std::shared_ptr<void>(b, [](void* p) { mpp_buffer_put((MppBuffer)p); });
+}
+
 void VdecRK::emit_decoded(std::shared_ptr<DecodedUnit> du, MppBuffer buffer) {
+    du->buf = buffer;
+    du->hold = hold_mpp_buffer;
+    du->buf_epoch = s_buf_epoch.load(std::memory_order_relaxed);
     if (frame_sink_) {
         mpp_buffer_inc_ref(buffer);
         du->frame_ref = std::shared_ptr<void>(buffer, [](void* b) {
@@ -321,6 +335,11 @@ void VdecRK::emit_decoded(std::shared_ptr<DecodedUnit> du, MppBuffer buffer) {
         });
         frame_sink_(du);
     } else {
+        // While the screen is recorded, the picture is held from here, while
+        // MPP still has it: the recorder reads it after the display has
+        // (screen_tap.hpp), and the hold - not MPP's least-recently-used
+        // reuse - is what keeps the decoder from writing into it meanwhile.
+        if (dev && dev->tap.recording()) du->frame_ref = hold_mpp_buffer(buffer);
         renderer->queue_frame(du);
     }
 }

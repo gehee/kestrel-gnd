@@ -546,6 +546,15 @@ void Renderer::run(){
             }
         }
         
+        // The screen recorder reads the shown picture after the display has
+        // (screen_tap.hpp), so while it runs that picture is held from now
+        // until the tap lets it go, and the flip tells the tap which it is.
+        if (render_mode == Atomic && dev->tap.recording()) {
+            if (!latest_frame->frame_ref && latest_frame->hold && latest_frame->buf)
+                latest_frame->frame_ref = latest_frame->hold(latest_frame->buf);
+            dev->set_flip_picture(latest_frame);
+        }
+
         // 5. Hardware is guaranteed free (or we have no choice but to try), so render.
         if (render_frame(latest_frame.get())) {
             latest_frame = nullptr; 
