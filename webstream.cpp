@@ -552,6 +552,12 @@ class Thumbnailer {
     private:
         void run() {
             pthread_setname_np(pthread_self(), "webstream-thumb");
+            // Made from a real-time thread (a recording stopping), and ffmpeg
+            // would inherit that: `nice` does nothing to SCHED_FIFO, and a
+            // real-time software decode right after every recording held up
+            // the live picture's decoder threads, which are ordinary ones.
+            struct sched_param sp = {};
+            pthread_setschedparam(pthread_self(), SCHED_OTHER, &sp);
             for (;;) {
                 std::string name;
                 {

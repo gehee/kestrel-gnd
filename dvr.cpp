@@ -430,10 +430,36 @@ int dvr_screen_capture_fps() {
 
 namespace {
 
+// Threads inherit their creator's scheduling. A recording is started from the
+// REC button's thread, which is real-time (SCHED_FIFO 10), and so was every
+// thread a recording made: its own, the file writer's and MPP's encoder
+// threads. The decoder's own MPP threads (mpp_dec_parser, mpp_dec_hal) are
+// ordinary ones, so whatever CPU a recording needed came ahead of the live
+// picture's decode. A recording's threads are ordinary ones now: none of them
+// has a deadline the pilot sees.
+class OrdinaryScheduling {
+    public:
+        OrdinaryScheduling() {
+            restore_ = pthread_getschedparam(pthread_self(), &policy_, &param_) == 0 &&
+                       policy_ != SCHED_OTHER;
+            if (restore_) {
+                struct sched_param p = {};
+                pthread_setschedparam(pthread_self(), SCHED_OTHER, &p);
+            }
+        }
+        ~OrdinaryScheduling() {
+            if (restore_) pthread_setschedparam(pthread_self(), policy_, &param_);
+        }
+    private:
+        int policy_ = SCHED_OTHER;
+        struct sched_param param_ = {};
+        bool restore_ = false;
+};
+
 // Deletes the oldest fpvOS_*.mp4 / fpvOS_*.h265 recordings in dir - and
 // kestrel_*, what earlier builds named them - until
 // free space clears min_free_bytes, or there is nothing left to delete. Only
-// called from start_locked(), before any recording is open, so there is
+// called from start_recording(), before any recording is open, so there is
 // never a live file among the candidates.
 void purge_oldest_recordings(const std::string& dir, uint64_t min_free_bytes) {
     struct statvfs st;
@@ -530,17 +556,14 @@ void DvrRecorder::set_writeback(DrmDevice* dev) {
 
 
 void DvrRecorder::set_screen_mode(bool on) {
-    std::lock_guard<std::mutex> lk(m_);
     screen_ = on;
 }
 
 bool DvrRecorder::screen_mode() const {
-    std::lock_guard<std::mutex> lk(m_);
     return screen_;
 }
 
 bool DvrRecorder::is_recording() const {
-    std::lock_guard<std::mutex> lk(m_);
     return running_;
 }
 
@@ -549,8 +572,31 @@ std::string DvrRecorder::current_file() const {
     return file_;
 }
 
-bool DvrRecorder::start_locked() {
-    if (!configured_) {
+// Starting and stopping run under ctl_ only - one at a time - and take m_
+// just to read the configuration and to publish or retract the recording.
+// They used to hold m_ throughout: a stop joins the DVR's thread, which
+// writes the MP4's index and syncs the file, and a start purges old
+// recordings and sets the encoder up. Meanwhile feed() on the video ingest
+// thread and is_recording() on the OSD thread waited on m_ - the live
+// picture or the HUD froze for as long as REC took.
+bool DvrRecorder::start_recording() {
+    VideoCodec codec;
+    int fps, fw, fh, sw, sh;
+    DvrFormat fmt;
+    volatile bool* stop_signal;
+    std::string dir;
+    bool configured;
+    const bool screen = screen_;
+    DrmDevice* wb_dev;
+    std::vector<std::vector<uint8_t>> ps;
+    {
+        std::lock_guard<std::mutex> lk(m_);
+        codec = codec_; fps = fps_; fmt = fmt_; stop_signal = stop_; dir = dir_;
+        configured = configured_; fw = fw_; fh = fh_; sw = sw_; sh = sh_;
+        wb_dev = wb_dev_;
+        if (!screen) ps = ps_;
+    }
+    if (!configured) {
         printf("DVR: not configured, cannot record\n");
         return false;
     }
@@ -559,97 +605,124 @@ bool DvrRecorder::start_locked() {
     // into the rootfs and filling it - a directory existing is not enough
     // proof of that, since S35dvrpart mkdir's the mount point up front
     // regardless of whether the mount itself succeeded. Compare device IDs
-    // with the parent directory instead: identical means dir_ is just a
+    // with the parent directory instead: identical means dir is just a
     // plain directory sitting on whatever filesystem holds its parent, not a
     // separate mounted partition.
     struct stat st, parent_st;
-    if (stat(dir_.c_str(), &st) != 0 || !S_ISDIR(st.st_mode) ||
-        stat((dir_ + "/..").c_str(), &parent_st) != 0 ||
+    if (stat(dir.c_str(), &st) != 0 || !S_ISDIR(st.st_mode) ||
+        stat((dir + "/..").c_str(), &parent_st) != 0 ||
         parent_st.st_dev == st.st_dev) {
-        printf("DVR: %s is not a mounted recordings partition - not recording\n", dir_.c_str());
+        printf("DVR: %s is not a mounted recordings partition - not recording\n", dir.c_str());
         return false;
     }
 
     // Keep some headroom on the recordings partition itself so an unattended
     // pile of old footage never runs it to zero.
-    purge_oldest_recordings(dir_, 300ull * 1024 * 1024);
+    purge_oldest_recordings(dir, 300ull * 1024 * 1024);
     // DVR::format_timestamped_filename() turns "<dir>/fpvOS.mp4" into
     // "<dir>/fpvOS_YYYYMMDD_HHMMSS.mp4".
-    const char* ext = (fmt_ == DvrFormat::RAW) ? ".h265" : ".mp4";
-    std::string base = dir_ + "/fpvOS" + ext;
+    const char* ext = (fmt == DvrFormat::RAW) ? ".h265" : ".mp4";
+    std::string base = dir + "/fpvOS" + ext;
+
+    // Everything made from here on - the DVR's thread, the writer's, the
+    // encoder's - is scheduled as an ordinary thread (OrdinaryScheduling).
+    OrdinaryScheduling ordinary;
 
     // Screen recordings are always H.264/MP4 (that is what the VEPU encodes),
     // regardless of what codec the FPV link is using.
-    dvr_ = screen_
-        ? std::make_shared<DVR>(base, VideoCodec::H264, fps_,
-                                fmt_ == DvrFormat::MP4 ? DvrFormat::MP4 : DvrFormat::FMP4, stop_, true)
-        : std::make_shared<DVR>(base, codec_, fps_, fmt_, stop_, false);
-    if (screen_ && wb_dev_) dvr_->set_writeback_dev(wb_dev_);
+    std::shared_ptr<DVR> dvr = screen
+        ? std::make_shared<DVR>(base, VideoCodec::H264, fps,
+                                fmt == DvrFormat::MP4 ? DvrFormat::MP4 : DvrFormat::FMP4, stop_signal, true)
+        : std::make_shared<DVR>(base, codec, fps, fmt, stop_signal, false);
+    if (screen && wb_dev) dvr->set_writeback_dev(wb_dev);
     // Without this the muxer is never created and every frame the writer thread
     // dequeues is silently dropped - the file is opened, the timer runs, and
     // nothing is ever written. Renderer only calls init() on the legacy --dvr
     // object, which is always null now.
     // Screen recordings use the display size; the FPV path uses the video size.
-    if (screen_ && sw_ > 0 && sh_ > 0) dvr_->init(sw_, sh_);
-    else                               dvr_->init(fw_, fh_);
-    if (pthread_create(&tid_, nullptr, DVR::run_dvr_thread, dvr_.get()) != 0) {
+    if (screen && sw > 0 && sh > 0) dvr->init(sw, sh);
+    else                            dvr->init(fw, fh);
+    pthread_t tid;
+    if (pthread_create(&tid, nullptr, DVR::run_dvr_thread, dvr.get()) != 0) {
         printf("DVR: failed to start writer thread\n");
-        dvr_ = nullptr;
         return false;
     }
     // Replay the parameter sets before any picture data. Without them the
     // muxer has no decoder configuration to put in hvcC and the file plays as
-    // black even though the video data is all there.
-    ps_sent_ = false;
-    if (!screen_) {
-        for (const auto& p : ps_)
-            dvr_->enqueueDvrPacket(std::make_shared<std::vector<uint8_t>>(p));
-        ps_sent_ = !ps_.empty();
-        if (ps_.empty())
+    // black even though the video data is all there. Before the recording is
+    // published, so no picture from feed() can get in ahead of them.
+    if (!screen) {
+        for (const auto& p : ps)
+            dvr->enqueueDvrPacket(std::make_shared<std::vector<uint8_t>>(p));
+        if (ps.empty())
             printf("DVR: no VPS/SPS/PPS seen yet - they go in ahead of the first "
                    "picture after they arrive\n");
     }
 
-    running_ = true;
     // The name alone: what the gallery lists, serves and asks about.
-    file_    = dvr_->path().substr(dvr_->path().find_last_of('/') + 1);
-    printf("DVR: recording -> %s\n", dvr_->path().c_str());
+    std::string file = dvr->path().substr(dvr->path().find_last_of('/') + 1);
+    printf("DVR: recording -> %s\n", dvr->path().c_str());
+    {
+        std::lock_guard<std::mutex> lk(m_);
+        dvr_ = dvr;
+        tid_ = tid;
+        file_ = file;
+        ps_sent_ = !ps.empty();
+        running_ = true;
+    }
     return true;
 }
 
-void DvrRecorder::stop_locked() {
-    if (!running_) return;
-    printf("DVR: stopping -> %s\n", file_.c_str());
-    dvr_->stop();
-    pthread_join(tid_, nullptr);
-    tid_     = 0;
-    dvr_     = nullptr;
-    running_ = false;
+void DvrRecorder::stop_recording() {
+    std::shared_ptr<DVR> dvr;
+    pthread_t tid;
+    std::string file;
+    {
+        std::lock_guard<std::mutex> lk(m_);
+        if (!running_) return;
+        running_ = false;
+        dvr.swap(dvr_);
+        tid = tid_;
+        tid_ = 0;
+        file.swap(file_);
+    }
+    printf("DVR: stopping -> %s\n", file.c_str());
+    dvr->stop();
+    pthread_join(tid, nullptr);
+    dvr.reset();
     // The file is complete now (moov written): its gallery thumbnail can be
     // made in the background, ready before the gallery is opened.
-    WebStream::instance().recording_finished(file_);
-    file_.clear();
+    WebStream::instance().recording_finished(file);
 }
 
 bool DvrRecorder::toggle() {
-    std::lock_guard<std::mutex> lk(m_);
-    if (running_) { stop_locked(); return false; }
-    return start_locked();
+    std::lock_guard<std::mutex> ctl(ctl_);
+    if (running_) { stop_recording(); return false; }
+    return start_recording();
 }
 
 void DvrRecorder::feed(std::shared_ptr<std::vector<uint8_t>> frame) {
-    std::lock_guard<std::mutex> lk(m_);
-    if (!running_ || !dvr_) return;   // cheap no-op when idle
-    if (!ps_sent_ && !ps_.empty()) {
-        for (const auto& p : ps_)
-            dvr_->enqueueDvrPacket(std::make_shared<std::vector<uint8_t>>(p));
-        ps_sent_ = true;
+    if (!running_) return;   // cheap no-op when idle
+    std::shared_ptr<DVR> dvr;
+    std::vector<std::vector<uint8_t>> ps;
+    {
+        std::lock_guard<std::mutex> lk(m_);
+        if (!running_ || !dvr_) return;
+        dvr = dvr_;
+        if (!ps_sent_ && !ps_.empty()) {
+            ps = ps_;
+            ps_sent_ = true;
+        }
+    }
+    if (!ps.empty()) {
+        for (const auto& p : ps)
+            dvr->enqueueDvrPacket(std::make_shared<std::vector<uint8_t>>(p));
         printf("DVR: parameter sets arrived - recording video from here\n");
     }
-    dvr_->enqueueDvrPacket(frame);
+    dvr->enqueueDvrPacket(frame);
 }
 
 void DvrRecorder::shutdown() {
-    std::lock_guard<std::mutex> lk(m_);
-    stop_locked();
+    std::lock_guard<std::mutex> ctl(ctl_);
+    stop_recording();
 }

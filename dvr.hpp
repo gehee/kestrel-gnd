@@ -227,13 +227,14 @@ class DvrRecorder {
 
     private:
         DvrRecorder() {}
-        bool start_locked();
-        void stop_locked();
+        bool start_recording();
+        void stop_recording();
 
-        mutable std::mutex   m_;
+        std::mutex           ctl_;    // one start or stop at a time (see start_recording)
+        mutable std::mutex   m_;      // the fields below, briefly
         std::shared_ptr<DVR> dvr_;
         pthread_t            tid_ = 0;
-        bool                 running_ = false;
+        std::atomic<bool>    running_{false};
         std::string          file_;
 
         VideoCodec    codec_ = VideoCodec::H265;
@@ -243,7 +244,7 @@ class DvrRecorder {
         std::string   dir_   = "/media/dvr";
         bool          configured_ = false;
         int           fw_ = 1920, fh_ = 1080;  // frame size handed to the muxer
-        bool          screen_ = false;         // record the screen, not the FPV stream
+        std::atomic<bool> screen_{false};      // record the screen, not the FPV stream
         int sw_ = 0, sh_ = 0;                  // display size for screen recordings
         class DrmDevice* wb_dev_ = nullptr;    // non-null once writeback is usable
         std::vector<std::vector<uint8_t>> ps_;  // VPS/SPS/PPS, replayed on start
