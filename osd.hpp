@@ -171,7 +171,7 @@ class OSD {
         GLint a_pos_ = -1, a_uv_ = -1, a_alpha_factor_ = -1;
         
         // Textures
-        GLuint fps_tex, lat_tex, net_tex, logo_tex, bg_tex, font_tex;
+        GLuint fps_tex, lat_tex, net_tex, logo_tex, bg_tex;
         std::map<int, GLuint> rssi_texs;
         std::map<int, GLuint> link_texs;
         
