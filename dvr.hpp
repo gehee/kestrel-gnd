@@ -121,6 +121,10 @@ class DVR {
         // from what the display scanned out, every rga_div-th refresh.
         bool use_rga = false;
         int  rga_div = 2;
+        // One slot of the recording in 90 kHz ticks: rga_div refreshes of the
+        // screen's real rate, not of the rounded fps (144 Hz at 30 fps is a
+        // slot every 5 refreshes, 28.8 fps).
+        int  rga_slot_ticks = 1500;
         RgaCompositor rga;
         void run_screen_rga();
 

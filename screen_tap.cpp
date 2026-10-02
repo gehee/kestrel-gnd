@@ -9,20 +9,23 @@ void ScreenTap::bury(std::shared_ptr<DecodedUnit>& du) {
     du.reset();
 }
 
-void ScreenTap::set_recording(bool on) {
+void ScreenTap::set_recording(bool on, const ScreenPair* seed) {
     std::vector<std::shared_ptr<DecodedUnit>> drop;
     {
         std::lock_guard<std::mutex> lk(m_);
         on_ = on;
-        if (!on) {
-            bury(pending_.video);
-            bury(cur_.video);
-            has_pending_ = has_cur_ = false;
-            sampling_osd_ = 0;
-            land_n_ = 0;
-            drop.swap(graveyard_);
-            graveyard_.reserve(16);
+        // Whatever an earlier recording left goes, either way.
+        bury(pending_.video);
+        bury(cur_.video);
+        has_pending_ = has_cur_ = false;
+        sampling_osd_ = 0;
+        land_n_ = 0;
+        if (on && seed && (seed->video || seed->osd_fb)) {
+            cur_ = *seed;
+            has_cur_ = true;
         }
+        drop.swap(graveyard_);
+        graveyard_.reserve(16);
     }
     cv_.notify_all();
 }
@@ -31,6 +34,8 @@ void ScreenTap::submitted(std::shared_ptr<DecodedUnit> video, uint32_t osd_fb, u
                           int vx, int vy, int vw, int vh, uint64_t now_us) {
     if (!recording()) return;
     std::lock_guard<std::mutex> lk(m_);
+    // Checked again under the lock: a stop may have cleared the tap since.
+    if (!on_) return;
     bury(pending_.video);
     pending_.video = std::move(video);
     pending_.osd_fb = osd_fb;
@@ -43,6 +48,7 @@ void ScreenTap::submitted(std::shared_ptr<DecodedUnit> video, uint32_t osd_fb, u
 void ScreenTap::submit_failed() {
     if (!recording()) return;
     std::lock_guard<std::mutex> lk(m_);
+    if (!on_) return;
     bury(pending_.video);
     has_pending_ = false;
 }
@@ -51,7 +57,7 @@ void ScreenTap::landed(uint32_t seq) {
     if (!recording()) return;
     {
         std::lock_guard<std::mutex> lk(m_);
-        if (!has_pending_) return;
+        if (!on_ || !has_pending_) return;
         bury(cur_.video);
         cur_ = std::move(pending_);
         pending_.video.reset();
@@ -67,6 +73,7 @@ void ScreenTap::osd_landed(uint32_t osd_fb, uint64_t osd_gen, uint32_t seq) {
     if (!recording()) return;
     {
         std::lock_guard<std::mutex> lk(m_);
+        if (!on_) return;
         // The video plane keeps whatever it last showed.
         cur_.osd_fb = osd_fb;
         cur_.osd_gen = osd_gen;
@@ -74,6 +81,35 @@ void ScreenTap::osd_landed(uint32_t osd_fb, uint64_t osd_gen, uint32_t seq) {
         has_cur_ = true;
     }
     cv_.notify_all();
+}
+
+void ScreenTap::moved(int vx, int vy, int vw, int vh, uint32_t seq) {
+    if (!recording()) return;
+    {
+        std::lock_guard<std::mutex> lk(m_);
+        if (!on_ || !has_cur_) return;
+        cur_.vx = vx; cur_.vy = vy; cur_.vw = vw; cur_.vh = vh;
+        cur_.seq = seq;
+    }
+    cv_.notify_all();
+}
+
+void ScreenTap::drop_pictures() {
+    std::vector<std::shared_ptr<DecodedUnit>> drop;
+    {
+        std::unique_lock<std::mutex> lk(m_);
+        // A composite in progress holds its own copy of the picture; it lets
+        // go before sample_done(). A blend takes ~5 ms.
+        cv_.wait_for(lk, std::chrono::milliseconds(200), [this] { return !sampling_; });
+        bury(pending_.video);
+        bury(cur_.video);
+        has_pending_ = false;
+        // Nothing known on screen until the next flip lands.
+        has_cur_ = false;
+        drop.swap(graveyard_);
+        graveyard_.reserve(16);
+    }
+    // drop goes here, on the caller's thread, before it returns.
 }
 
 bool ScreenTap::sample(uint32_t seq, uint64_t vblank_us, ScreenPair& out, int wait_us) {
@@ -88,12 +124,17 @@ bool ScreenTap::sample(uint32_t seq, uint64_t vblank_us, ScreenPair& out, int wa
     if (!has_cur_ || (int32_t)(cur_.seq - seq) > 0) return false;
     out = cur_;
     sampling_osd_ = cur_.osd_fb;
+    sampling_ = true;
     return true;
 }
 
 void ScreenTap::sample_done() {
-    std::lock_guard<std::mutex> lk(m_);
-    sampling_osd_ = 0;
+    {
+        std::lock_guard<std::mutex> lk(m_);
+        sampling_osd_ = 0;
+        sampling_ = false;
+    }
+    cv_.notify_all();
 }
 
 bool ScreenTap::holds_osd(uint32_t fb) {

@@ -157,6 +157,8 @@ int DVR::init(int frm_width, int frm_height) {
 		if (rga_div < 1) rga_div = 1;
 		fps = (hz + rga_div / 2) / rga_div;
 		if (fps > 60) fps = 60;
+		const double period_us = wb_dev->frame_period_us();
+		rga_slot_ticks = period_us > 0 ? (int)(period_us * rga_div * 0.09 + 0.5) : 90000 / fps;
 	} else if (want_rga) {
 		printf("DVR: no RGA (/dev/rga) - recording the screen with writeback, which costs the live picture\n");
 	}
@@ -349,7 +351,9 @@ void DVR::run_screen_rga() {
 	for (int i = 0; i < screen_enc.input_count(); i++) free_bufs.push_back(i);
 	std::atomic<bool> sampling{true};
 	ScreenTap& tap = wb_dev->tap;
-	tap.set_recording(true);
+	// Seeded with what the screen shows now, so a recording started with no
+	// video flowing records the frozen picture, not black.
+	wb_dev->start_screen_tap();
 
 	// Sampler counters, read after it is joined.
 	uint64_t n_slots = 0, n_same = 0, n_late = 0, n_busy = 0, n_fail = 0, n_nothing = 0;
@@ -401,6 +405,7 @@ void DVR::run_screen_rga() {
 			                           du->buf_epoch == last_epoch)) &&
 			                  p.osd_gen == last_gen && p.vx == lvx && p.vy == lvy && p.vw == lvw && p.vh == lvh;
 			if (same) {
+				p.video.reset();
 				tap.sample_done();
 				n_same++;
 				{ std::lock_guard<std::mutex> lk(qm); q.push_back({-1, slot}); }
@@ -413,11 +418,14 @@ void DVR::run_screen_rga() {
 				std::lock_guard<std::mutex> lk(qm);
 				if (!free_bufs.empty()) { idx = free_bufs.front(); free_bufs.pop_front(); }
 			}
-			if (idx < 0) { tap.sample_done(); n_busy++; continue; }   // encoder behind
+			if (idx < 0) { p.video.reset(); tap.sample_done(); n_busy++; continue; }   // encoder behind
 			uint32_t stride = 0;
 			const int osd_fd = p.osd_fb ? wb_dev->osd_fb_dmabuf(p.osd_fb, &stride) : -1;
 			uint32_t us = 0;
 			const bool ok = rga.compose(p, osd_fd, stride, idx, &us);
+			// The picture goes back to the decoder from here: let go before
+			// telling the tap, which a resolution change waits on.
+			p.video.reset();
 			tap.sample_done();
 			if (!ok) {
 				std::lock_guard<std::mutex> lk(qm);
@@ -434,14 +442,16 @@ void DVR::run_screen_rga() {
 			last_epoch = du ? du->buf_epoch : 0;
 			last_gen = p.osd_gen;
 			lvx = p.vx; lvy = p.vy; lvw = p.vw; lvh = p.vh;
-			p.video.reset();      // the picture goes back to the decoder from here
 			{ std::lock_guard<std::mutex> lk(qm); q.push_back({idx, slot}); }
 			qcv.notify_one();
 			last_slot = slot;
 		}
 	});
 
-	const int period = 90000 / (screen_fps > 0 ? screen_fps : 60);   // 90 kHz ticks
+	const int period = rga_slot_ticks;   // 90 kHz ticks
+	// A gap of missed slots is filled up to this; the slot numbers come from
+	// the vblank counter, so a bigger one is not a real gap.
+	const int64_t kMaxGap = (int64_t)screen_fps * 600;
 	int64_t last_written = -1;
 	uint64_t frames = 0, skips = 0;
 	auto write = [&](const uint8_t* d, size_t len, int dur) {
@@ -462,9 +472,11 @@ void DVR::run_screen_rga() {
 	int64_t held_slot = -1;
 	auto flush_held = [&](int64_t until) {
 		if (held_slot < 0) return;
+		// Unchanged slots are not encoded, so a held frame stands for every
+		// slot until the next one - a still screen can be minutes of them.
 		int64_t n = until - held_slot;
 		if (n < 1) n = 1;
-		if (n > screen_fps) n = screen_fps;
+		if (n > kMaxGap) n = kMaxGap;
 		write(held.data(), held.size(), (int)(period * n));
 		held_slot = -1;
 	};
@@ -473,7 +485,7 @@ void DVR::run_screen_rga() {
 		if (screen_cfr.ready()) {
 			if (last_written >= 0) {
 				int64_t gap = s.slot - last_written - 1;
-				if (gap > screen_fps) gap = screen_fps;   // a second at most
+				if (gap > kMaxGap) gap = kMaxGap;
 				for (int64_t i = 0; i < gap; i++) if (!skip()) break;
 			}
 			if (s.idx < 0) skip();
@@ -531,7 +543,8 @@ void DVR::run_screen_rga() {
 		if (!p99_i && acc * 100 >= total * 99) p99_i = i + 1;
 	}
 	printf("DVR: %llu frames encoded, %llu skip frames (%d fps). Sampled %llu slots: %llu unchanged, "
-	       "%llu missed (sampler late), %llu with the encoder behind, %llu composite failures, %llu "
+	       "%llu missed (sampler late, or the picture changing size), %llu with the encoder behind, "
+	       "%llu composite failures, %llu "
 	       "before anything was on screen. RGA ~%.2f ms median, ~%.2f ms p99, %.2f ms max\n",
 	       (unsigned long long)frames, (unsigned long long)skips, screen_fps,
 	       (unsigned long long)n_slots, (unsigned long long)n_same, (unsigned long long)n_late,
@@ -882,6 +895,13 @@ bool DvrRecorder::start_recording() {
         ? std::make_shared<DVR>(base, VideoCodec::H264, fps,
                                 fmt == DvrFormat::MP4 ? DvrFormat::MP4 : DvrFormat::FMP4, stop_signal, true)
         : std::make_shared<DVR>(base, codec, fps, fmt, stop_signal, false);
+    // The gallery must not take the new file for a finished one while it is
+    // being set up: it is the current file from the moment it exists.
+    std::string file = dvr->path().substr(dvr->path().find_last_of('/') + 1);
+    {
+        std::lock_guard<std::mutex> lk(m_);
+        file_ = file;
+    }
     if (screen && wb_dev) dvr->set_writeback_dev(wb_dev);
     // Without this the muxer is never created and every frame the writer thread
     // dequeues is silently dropped - the file is opened, the timer runs, and
@@ -893,6 +913,8 @@ bool DvrRecorder::start_recording() {
     pthread_t tid;
     if (pthread_create(&tid, nullptr, DVR::run_dvr_thread, dvr.get()) != 0) {
         printf("DVR: failed to start writer thread\n");
+        std::lock_guard<std::mutex> lk(m_);
+        file_.clear();
         return false;
     }
     // Replay the parameter sets before any picture data. Without them the
@@ -907,14 +929,11 @@ bool DvrRecorder::start_recording() {
                    "picture after they arrive\n");
     }
 
-    // The name alone: what the gallery lists, serves and asks about.
-    std::string file = dvr->path().substr(dvr->path().find_last_of('/') + 1);
     printf("DVR: recording -> %s\n", dvr->path().c_str());
     {
         std::lock_guard<std::mutex> lk(m_);
         dvr_ = dvr;
         tid_ = tid;
-        file_ = file;
         ps_sent_ = !ps.empty();
         running_ = true;
     }
@@ -932,12 +951,16 @@ void DvrRecorder::stop_recording() {
         dvr.swap(dvr_);
         tid = tid_;
         tid_ = 0;
-        file.swap(file_);
+        file = file_;   // still the current file until it is complete
     }
     printf("DVR: stopping -> %s\n", file.c_str());
     dvr->stop();
     pthread_join(tid, nullptr);
     dvr.reset();
+    {
+        std::lock_guard<std::mutex> lk(m_);
+        file_.clear();
+    }
     // The file is complete now (moov written): its gallery thumbnail can be
     // made in the background, ready before the gallery is opened.
     WebStream::instance().recording_finished(file);

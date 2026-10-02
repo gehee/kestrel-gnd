@@ -452,6 +452,7 @@ void Renderer::run(){
             // Drain any queued frames with stale prime_fds
             while (decoded_unit_queue->size() > 0) decoded_unit_queue->tryGet();
             latest_frame = nullptr;
+            dev->set_flip_picture(nullptr);
             // Clean up all cached display buffer entries (gem handles + DRM FBs)
             for (auto& buf : display_buffers) {
                 if (buf.drm_fb_id != 0) cleanup_display_buffer(buf);
@@ -546,11 +547,12 @@ void Renderer::run(){
             }
         }
         
-        // The screen recorder reads the shown picture after the display has
-        // (screen_tap.hpp), so while it runs that picture is held from now
-        // until the tap lets it go, and the flip tells the tap which it is.
-        if (render_mode == Atomic && dev->tap.recording()) {
-            if (!latest_frame->frame_ref && latest_frame->hold && latest_frame->buf)
+        // The device is told which picture it is about to show, for the
+        // screen recorder (screen_tap.hpp). That reads the picture after the
+        // display has, so while it runs the picture is held from now until
+        // the tap lets it go.
+        if (render_mode == Atomic || render_mode == FrontBuffer) {
+            if (dev->tap.recording() && !latest_frame->frame_ref && latest_frame->hold && latest_frame->buf)
                 latest_frame->frame_ref = latest_frame->hold(latest_frame->buf);
             dev->set_flip_picture(latest_frame);
         }
@@ -646,6 +648,7 @@ bool Renderer::render_frame(DecodedUnit *du) {
         // FrontBuffer: Always "submitted" because we already wrote to memory.
         uint64_t hw_offset_us = sensor_offset_us(du);
         if (ltrace::on()) ltrace::rec(ltrace::kRender, get_time_us(), (uint32_t)du->pts, (uint64_t)fb_id);
+        dev->direct_shown();
         dev->record_direct_frame(du->recv_ts, du->dec_start_ts, du->dec_end_ts,
                                  render_start_ts,
                                  ((du->tx_capture_delay_us >> 16) & 0xFFFF) +

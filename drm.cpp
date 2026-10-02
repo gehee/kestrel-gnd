@@ -1,4 +1,5 @@
 #include <ostream>
+#include "renderer.hpp"   // DecodedUnit, for the screen tap
 #include <iostream>
 #include <algorithm>
 #include <cstring>
@@ -504,11 +505,77 @@ void DrmDevice::sync_frozen_video_rect() {
     int ret = drmModeAtomicCommit(drm_fd, req, DRM_MODE_ATOMIC_ALLOW_MODESET, NULL);
     drmModeAtomicFree(req);
     if (ret == 0) {
-        vrect_x_ = vx; vrect_y_ = vy; vrect_w_ = vw; vrect_h_ = vh;
+        {
+            std::lock_guard<std::mutex> lk(shown_m_);
+            vrect_x_ = vx; vrect_y_ = vy; vrect_w_ = vw; vrect_h_ = vh;
+        }
+        if (tap.recording()) {
+            uint64_t vb;
+            uint32_t seq;
+            if (last_vblank(&vb, &seq)) tap.moved(vx, vy, vw, vh, seq);
+        }
     } else {
         static bool warned = false;
         if (!warned) { warned = true; perror("picture size: moving the frozen video frame"); }
     }
+}
+
+void DrmDevice::direct_shown() {
+    std::shared_ptr<DecodedUnit> pic = std::move(flip_picture_);
+    flip_picture_.reset();
+    if (!pic) return;
+    int vx, vy, vw, vh;
+    picture_rect(video_fb_width, video_fb_height, vx, vy, vw, vh);
+    vx += video_fb_x; vy += video_fb_y;
+    if (tap.recording()) {
+        pthread_mutex_lock(&osd_mutex);
+        uint32_t osd_fb = current_osd_fb_id;
+        uint64_t osd_gen = current_osd_gen_;
+        pthread_mutex_unlock(&osd_mutex);
+        uint64_t vb;
+        uint32_t seq;
+        if (last_vblank(&vb, &seq)) {
+            // Copied in mid-scan: the next refresh is the first that shows
+            // all of it.
+            tap.submitted(pic, osd_fb, osd_gen, vx, vy, vw, vh, get_time_us());
+            tap.landed(seq + 1);
+        }
+    }
+    std::lock_guard<std::mutex> lk(shown_m_);
+    last_shown_ = std::move(pic);
+    vrect_x_ = vx; vrect_y_ = vy; vrect_w_ = vw; vrect_h_ = vh;
+}
+
+void DrmDevice::start_screen_tap() {
+    ScreenPair seed;
+    {
+        std::lock_guard<std::mutex> lk(shown_m_);
+        if (last_shown_) {
+            // A copy of its own, holding the picture: last_shown_ itself is
+            // not held while nothing is recorded.
+            seed.video = std::make_shared<DecodedUnit>(*last_shown_);
+            if (!seed.video->frame_ref && seed.video->hold && seed.video->buf)
+                seed.video->frame_ref = seed.video->hold(seed.video->buf);
+        }
+        seed.vx = vrect_x_; seed.vy = vrect_y_; seed.vw = vrect_w_; seed.vh = vrect_h_;
+    }
+    pthread_mutex_lock(&osd_mutex);
+    seed.osd_fb = onscreen_osd_fb_id ? onscreen_osd_fb_id : current_osd_fb_id;
+    seed.osd_gen = current_osd_gen_;
+    pthread_mutex_unlock(&osd_mutex);
+    uint64_t vb;
+    if (!last_vblank(&vb, &seed.seq)) seed.seq = 0;
+    tap.set_recording(true, &seed);
+}
+
+void DrmDevice::drop_screen_pictures() {
+    std::shared_ptr<DecodedUnit> drop;
+    {
+        std::lock_guard<std::mutex> lk(shown_m_);
+        drop.swap(last_shown_);
+    }
+    drop.reset();
+    tap.drop_pictures();
 }
 
 bool DrmDevice::last_vblank(uint64_t *ts_us, uint32_t *seq) {
@@ -673,11 +740,16 @@ bool DrmDevice::page_flip(int fb_id, uint64_t recv_ts, uint64_t dec_start_ts, ui
     flip_submit_us = get_time_us();
     // The screen recorder: what this commit puts on screen. Told before the
     // commit, because its event can arrive before this thread runs again.
-    if (tap.recording() && flip_picture_)
-        tap.submitted(std::move(flip_picture_), osd_fb, osd_gen, vx, vy, vw, vh, flip_submit_us);
+    std::shared_ptr<DecodedUnit> pic = std::move(flip_picture_);
     flip_picture_.reset();
+    if (tap.recording() && pic)
+        tap.submitted(pic, osd_fb, osd_gen, vx, vy, vw, vh, flip_submit_us);
     int ret = drmModeAtomicCommit(drm_fd, output_list->video_request, flags, this);
     if (ret != 0) tap.submit_failed();
+    if (ret == 0 && pic) {
+        std::lock_guard<std::mutex> lk(shown_m_);
+        last_shown_ = std::move(pic);
+    }
     if (ret == 0) {
         last_video_flip_us = flip_submit_us;
         if (blocking_flip) {
@@ -743,7 +815,10 @@ bool DrmDevice::page_flip(int fb_id, uint64_t recv_ts, uint64_t dec_start_ts, ui
         return false;
     }
     last_video_fb_id_ = fb_id;
-    vrect_x_ = vx; vrect_y_ = vy; vrect_w_ = vw; vrect_h_ = vh;
+    {
+        std::lock_guard<std::mutex> lk(shown_m_);
+        vrect_x_ = vx; vrect_y_ = vy; vrect_w_ = vw; vrect_h_ = vh;
+    }
 
     // Track flip submission timing (AFTER flip has been submitted)
     static uint64_t last_flip_submit = 0;

@@ -96,9 +96,12 @@ private:
     // The OSD fbs' DMA-BUFs and pitches, for the screen recorder (osd.cpp
     // registers each one as it makes it). Under osd_mutex.
     std::map<uint32_t, std::pair<int, uint32_t>> osd_fb_dmabuf_;
-    // The picture the next page_flip shows, for the screen tap (renderer
-    // thread only).
+    // The picture the next page_flip shows (renderer thread only), and the
+    // last one a flip showed - where a recording started with no video
+    // flowing begins. The latter, and the plane's rectangle, under shown_m_.
     std::shared_ptr<DecodedUnit> flip_picture_;
+    std::mutex shown_m_;
+    std::shared_ptr<DecodedUnit> last_shown_;
     std::atomic<uint64_t> last_video_flip_us{0};   // last video flip submitted
     uint64_t last_pageflip_ts = 0;
 
@@ -160,8 +163,16 @@ public:
     // What the screen showed, for the screen recorder (screen_tap.hpp).
     ScreenTap tap;
     // The decoded picture the next page_flip carries - the renderer says so
-    // just before, while recording.
+    // just before it.
     void set_flip_picture(std::shared_ptr<DecodedUnit> du) { flip_picture_ = std::move(du); }
+    // FrontBuffer mode: the picture set_flip_picture named was copied into
+    // the scan-out buffer just now, and shows from the next refresh on.
+    void direct_shown();
+    // Start the tap (screen recording), seeded with what is on screen now.
+    void start_screen_tap();
+    // Let go of every decoded picture held here and in the tap. The decoder,
+    // before it replaces its buffers (see ScreenTap::drop_pictures).
+    void drop_screen_pictures();
     // Block until the next vblank: its sequence number and time (CLOCK_MONOTONIC us).
     bool wait_vblank(uint32_t* seq, uint64_t* ts_us);
     // The refresh rate of the current mode, in Hz (rounded).

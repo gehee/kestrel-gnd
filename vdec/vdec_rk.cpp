@@ -68,6 +68,9 @@ void VdecRK::init_buffer(MppFrame frame) {
 		// 0. Ask renderer to drain its frame queue and clear its display_buffers cache.
 		//    This prevents false prime_fd matches after fd numbers are reused by new allocations.
 		if (renderer) renderer->request_flush();
+		// The screen recorder's pictures too: a buffer still referenced when
+		// the group is put back below is never freed by MPP 1.0.3.
+		if (dev) dev->drop_screen_pictures();
 		// 1. Remove DRM framebuffers (kernel ref-counts, safe even if still displayed)
 		for (int i = 0; i < MAX_FRAMES; i++) {
 			if (mpi.frame_to_drm[i].fb_id) {
@@ -76,8 +79,13 @@ void VdecRK::init_buffer(MppFrame frame) {
 			}
 		}
 		// 2. Release MPP buffer group (closes prime_fds owned by MPP). Their
-		// numbers may come back for the new buffers: a new epoch.
+		// numbers may come back for the new buffers: a new epoch. Cleared
+		// first, as MPP's own decoder test does on an info change: a buffer
+		// something still references is marked discard, so it is freed when
+		// that lets go. Put back with one still in use, MPP 1.0.3 would
+		// otherwise keep it - and the orphaned group - for good.
 		s_buf_epoch++;
+		mpp_buffer_group_clear(mpi.frm_grp);
 		mpp_buffer_group_put(mpi.frm_grp);
 		mpi.frm_grp = NULL;
 		// 3. Destroy underlying GEM dumb buffers
