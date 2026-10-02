@@ -30,16 +30,16 @@ extern "C" {
 #include <sstream>
 #include <thread>
 
-// How many frames a second a screen recording has, from dvr_screen_fps
-// (default 60, at most 60). The RGA recorder (the default) takes every n-th
-// refresh for it - every other one at 120 Hz for 60 fps - at no cost to the
-// live picture. A writeback recording (dvr_capture: writeback) captures this
-// often on a timer instead, and each capture is an extra commit on the CRTC
-// that presents the video, whose flips are refused while it is in flight.
+// How often a writeback screen recording (dvr_capture: writeback, or no RGA)
+// captures the screen, from dvr_screen_fps (default 60, at most 60). Each
+// capture is an extra commit on the CRTC that presents the video, whose flips
+// are refused while it is in flight, so fewer cost the live picture less. The
+// RGA recorder costs it nothing and always records 60 frames a second (every
+// other refresh at 120 Hz); the menu offers screen recording at 60 only.
 int dvr_screen_capture_fps();
 
-// What REC records when the settings do not say (dvr_screen, dvr_screen_fps):
-// the screen - video and HUD as the pilot sees them - 60 times a second.
+// What REC records when the settings do not say (dvr_screen): the screen -
+// video and HUD as the pilot sees them - 60 times a second.
 constexpr bool kDvrScreenDefault    = true;
 constexpr int  kDvrScreenFpsDefault = 60;
 

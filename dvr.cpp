@@ -148,11 +148,13 @@ int DVR::init(int frm_width, int frm_height) {
 	}
 	// RGA unless asked otherwise: the screen rebuilt from what the display
 	// scanned out, every rga_div-th refresh (screen_tap.hpp). The file runs
-	// at that rate - 60 fps at 120 Hz, 30 if dvr_screen_fps asks for 30.
+	// at that rate: 60 fps, every other refresh at 120 Hz. Not dvr_screen_fps,
+	// which only spares the live picture writeback captures: an earlier menu
+	// wrote 30 there for "SCREEN (30fps)", and the menu now says SCREEN at 60.
 	const bool want_rga = Settings::getInstance().getString("dvr_capture", "rga") != "writeback";
 	if (want_rga && RgaCompositor::available()) {
 		const int hz = wb_dev->refresh_hz();
-		const int want = dvr_screen_capture_fps();
+		const int want = 60;
 		rga_div = (hz + want - 1) / want;
 		if (rga_div < 1) rga_div = 1;
 		fps = (hz + rga_div / 2) / rga_div;

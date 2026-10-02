@@ -4866,18 +4866,15 @@ const char* OSD::menu_help_warning(int tab, int i) {
     return nullptr;
 }
 
-// The DVR Source row's value as the menu shows it. A dvr_screen_fps set by
-// hand to something other than 30 or 60 shows as the nearer of the two.
+// The DVR Source row's value as the menu shows it: FPV or SCREEN.
 int OSD::dvr_source_now() const {
-    if (!dvr_screen) return 0;
-    return dvr_screen_capture_fps() > 45 ? 2 : 1;
+    return dvr_screen ? 1 : 0;
 }
 
 const char* OSD::menu_help_text(int tab, int i, const char* fallback) {
     if (tab == kTabDvr && i == 0) {
         switch (menu_dvr_source) {
-        case 1:  return "Records the screen - video and HUD, as you see them - 30 times a second.";
-        case 2:  return "Records the screen - video and HUD, as you see them - 60 times a second.\n"
+        case 1:  return "Records the screen - video and HUD, as you see them - 60 times a second.\n"
                         "Adds about 1 ms to the FPV feed's latency while recording.";
         default: return "Records the FPV stream as the air unit sends it: full quality, no HUD.\n"
                         "No impact on the FPV feed's latency.";
@@ -5439,7 +5436,7 @@ void OSD::menu_apply_change(int tab, int index, int dir) {
         }
     } else if (menu_tab == kTabDvr) {
         if (menu_index == 0) {
-            menu_dvr_source = menu_step(menu_dvr_source, dir, 3);
+            menu_dvr_source = menu_step(menu_dvr_source, dir, 2);
         }
     } else if (menu_tab == kTabSystem) {
         if (menu_index == 3) {
@@ -5616,8 +5613,8 @@ void OSD::menu_value_text(int tab, int i, char* val_buf, size_t cap) {
             if (i == 0) {
                 // Says what the DVR records, which "Record OSD" as a bare
                 // ON/OFF never did.
-                static const char* kSource[3] = { "FPV", "SCREEN (30fps)", "SCREEN (60fps)" };
-                int src = (menu_dvr_source >= 0 && menu_dvr_source < 3) ? menu_dvr_source : 0;
+                static const char* kSource[2] = { "FPV", "SCREEN" };
+                int src = (menu_dvr_source >= 0 && menu_dvr_source < 2) ? menu_dvr_source : 0;
                 sprintf(val_buf, "< %s >", kSource[src]);
             } else if (i == 1) {
                 sprintf(val_buf, "%s", dvr_dir_path());
@@ -6097,9 +6094,6 @@ void OSD::handle_key(int key) {
                     // dvr_screen.mp4 and had nothing to do with the REC button.
                     dvr_screen = menu_dvr_source > 0;
                     Settings::getInstance().set("dvr_screen", dvr_screen);
-                    // Read when a screen recording starts (dvr_screen_capture_fps).
-                    if (dvr_screen)
-                        Settings::getInstance().set("dvr_screen_fps", menu_dvr_source == 2 ? 60 : 30);
                     DvrRecorder::instance().set_screen_mode(dvr_screen);
                 }
             } else if (menu_tab == kTabSystem) {
