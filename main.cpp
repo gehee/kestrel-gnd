@@ -123,8 +123,8 @@ void sig_handler(int signum)
 // the same keys the keyboard path already uses, so menu behaviour is identical:
 //   up/down    'w'/'s'  move between rows
 //   left/right 'a'/'d'  change the selected value
-//   ok         Enter    apply
-//   esc        'm'      open / close the menu
+//   ok         Enter    apply; on the live picture, open the menu
+//   esc        Back     on the live picture, open the gallery; in the menu, close it
 //   rec        'r'      currently unbound in OSD::handle_key - the app has no
 //                       runtime record toggle yet, so this is a hook, not a
 //                       working record button.
@@ -174,7 +174,7 @@ void* vrx_button_thread_func(void* arg) {
 				case VrxButtons::VB_LEFT:  key = 'a'; break;
 				case VrxButtons::VB_RIGHT: key = 'd'; break;
 				case VrxButtons::VB_OK:    key = 13;  break;
-				case VrxButtons::VB_ESC:   key = 'm'; break;
+				case VrxButtons::VB_ESC:   key = OSD::kKeyBack; break;
 				case VrxButtons::VB_REC: {
 					// Toggle recording directly: the OSD has no runtime record
 					// action, and routing this through handle_key would just be
@@ -321,7 +321,7 @@ void* kb_thread_func(void* arg) {
                             case KEY_RIGHT: key = 0x103; break;
                             case KEY_LEFT: key = 0x104; break;
                             case KEY_ENTER: key = 13; break;
-                            case KEY_ESC: key = 'm'; break; // Esc toggles menu like 'm'
+                            case KEY_ESC: key = OSD::kKeyBack; break; // Esc is the Back button
                             case KEY_M: key = 'm'; break;
                             case KEY_W: key = 'w'; break;
                             case KEY_S: key = 's'; break;
@@ -363,12 +363,6 @@ void printHelp() {
     "                               menu from a workstation: it is otherwise reachable\n"
     "                               only by pressing a button on the goggle, which makes\n"
     "                               it the one screen that cannot be captured.\n"
-    "\n"
-    "    --demo=0|1               - Demo mode: drive the HUD from a simulated flight\n"
-    "                               instead of the radio, cycling through idle, link\n"
-    "                               acquired, armed and landed. Overrides 'demo_mode' in\n"
-    "                               kestrel-gnd.yaml for this run only, and is never\n"
-    "                               written back. Also on the HUD menu.\n"
     "\n"
     "    --bbwatchdog=N           - Bring-up watchdog: 0 disables it, 1 uses the default\n"
     "                               deadline, any larger N is the deadline in seconds.\n"
@@ -709,20 +703,6 @@ int main(int argc, char **argv)
 		continue;
 	}
 
-	// --demo=0|1 - simulated flight instead of the radio. Worth a flag as well
-	// as a menu row because the states worth looking at - idle, link acquired,
-	// armed - are exactly the ones you cannot stage on demand with real
-	// hardware.
-	if (!strncmp(Arg, "--demo=", 7) || !strcmp(Arg, "--demo")) {
-		std::string spec = (Arg[6] == '=') ? std::string(Arg + 7) : std::string(__ArgValue);
-		if (spec != "0" && spec != "1") {
-			printf("--demo: expected 0 or 1; got '%s'\n", spec.c_str());
-			return 1;
-		}
-		osd_set_demo_mode(spec == "1");
-		continue;
-	}
-
 	// --bbwatchdog=N - see bb_watchdog.cpp. 0 off, 1 default deadline, N>1 the
 	// deadline in seconds. Kept as a flag rather than only an environment
 	// variable because the thing it guards against happens at bring-up, which
@@ -1006,6 +986,7 @@ int main(int argc, char **argv)
 		}
 		
 		renderer = std::make_shared<Renderer>(render_mode, dev, dvr, osd, &signal_stop, console_stats);
+		dev->flips_are_frames = (render_mode == Atomic);   // the stats screen reads flip timing as smoothness
 		vdec = new_vdec(codec, decoder_name, renderer, dev, &signal_stop);
 	}
 

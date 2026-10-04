@@ -814,9 +814,10 @@ void OSD::draw_canopy_hud(const CanopyIn& in) {
             float half_px = (T_STATE / U) * 0.5f;
             draw_text(tag, LXo(lx), MY(456.0f + half_px), T_STATE, false, lc[0], lc[1], lc[2]);
         } else {
-            // No label to interrupt it: keep it short rather than drawing one
-            // long unbroken bar across the top of the video.
-            rule(true, -kBleed, 150.0f, y, 2.2f * U, kRailAlpha);
+            // No label to interrupt it (no flight controller talking): the rail runs the
+            // full length, to the same boundary as the other rails and the right panel's,
+            // rather than stopping short where the label would have been.
+            rule(true, -kBleed, kFrameEnd, y, 2.2f * U, kRailAlpha);
         }
         // Same weight and brightness as the top rail. It was a 1.2px hairline at
         // 0.42 - a deliberate accent - but next to a 2.2px rule at 0.95 it read
@@ -1253,139 +1254,4 @@ void OSD::draw_canopy_hud(const CanopyIn& in) {
         x -= igap;
         draw_text(buf, x, BL(base, T_ROW), T_ROW, true, ltr, ltg, ltb);
     }
-}
-
-namespace {
-// The demo clock, shared. The top strip asks whether the simulated link is up
-// long before demo_fill runs, and two copies of "c > 10" reading two different
-// t0 values is exactly the kind of disagreement that shows up as a flickering
-// state word.
-uint64_t g_demo_t0 = 0;
-// Nine phases, eight seconds apiece, not a simple modular pattern - the
-// sequence visits standby three times and idle twice at different points in
-// the loop, because what follows an idle depends on WHERE it falls: the one
-// at the wrap comes from a fresh connect (still active, one beat before it
-// settles to standby), the other two go straight back to standby, the same
-// shortcut a real reconnect takes. Armed only ever coincides with active and
-// disarmed only ever coincides with standby - the FC only tells the VTX to
-// save power while it isn't flying (see ar8030-power-and-standby-verified.md)
-// - so there is no "disarmed, still active" phase except that one beat right
-// after a connect. IDLE_1 vs IDLE_2 needs no special-casing here: it falls
-// out of canopy_link_up_ latching once in the real renderer, regardless of
-// which array slot asks for link-down.
-constexpr float kDemoPhaseS = 8.0f;
-constexpr int   kDemoPhases = 9;
-constexpr float kDemoCycle  = kDemoPhaseS * (float)kDemoPhases;
-//                                     0      1     2     3     4     5      6      7     8
-constexpr bool kPhaseLink[kDemoPhases]    = {false, true, true, true, true, true, false, true, false};
-constexpr bool kPhaseArmed[kDemoPhases]   = {false, false,false, true,false, true, false,false,false};
-constexpr bool kPhaseStandby[kDemoPhases] = {false, false, true,false, true,false, false, true,false};
-
-float demo_phase(uint64_t now) {
-    if (!g_demo_t0) g_demo_t0 = now;
-    return fmodf((float)(now - g_demo_t0) / 1000000.0f, kDemoCycle);
-}
-}  // namespace
-
-bool OSD::demo_link_up() {
-    int phase = (int)(demo_phase(get_time_us()) / kDemoPhaseS);
-    return kPhaseLink[phase];
-}
-
-bool OSD::demo_ever_connected() {
-    uint64_t now = get_time_us();
-    demo_phase(now);   // ensures g_demo_t0 is initialized before it's read
-    return (float)(now - g_demo_t0) / 1000000.0f >= kDemoPhaseS;
-}
-
-void OSD::demo_fill(CanopyIn& in) {
-    uint64_t now = get_time_us();
-    const float t = (float)(now - (g_demo_t0 ? g_demo_t0 : now)) / 1000000.0f;
-
-    float c = demo_phase(now);
-    int   phase   = (int)(c / kDemoPhaseS);
-    float phase_t = c - (float)phase * kDemoPhaseS;   // seconds into this phase
-
-    const bool link    = kPhaseLink[phase];
-    const bool armed   = kPhaseArmed[phase];
-    const bool standby = kPhaseStandby[phase];
-    float ft = armed ? phase_t : 0.0f;      // seconds airborne, this phase
-
-    // A throttle trace: mostly cruising, punctuated. Everything that responds
-    // to throttle is derived from this one number, so current, sag, speed and
-    // altitude move together the way they do in the air.
-    float thr = 0.42f + 0.34f * sinf(ft * 0.55f) + 0.14f * sinf(ft * 2.3f);
-    thr = fmaxf(0.0f, fminf(1.0f, armed ? thr : 0.0f));
-
-    // Pack: 4.15V sagging under load across the one armed phase.
-    float used  = armed ? fminf(1.0f, ft / kDemoPhaseS) : 0.0f;
-    float rest  = 4.15f - 0.50f * used;
-    in.bf.have_cell_v = link;
-    in.bf.cell_v      = rest - 0.42f * thr;
-    in.bf.have_pack_v = link;
-    in.bf.pack_v      = in.bf.cell_v * 6.0f;             // a 6S pack
-    in.bf.have_amps   = link;
-    in.bf.amps        = 1.2f + 38.0f * thr * thr;
-
-    in.bf.have_alt   = armed;
-    in.bf.alt_m      = armed ? 12.0f + 44.0f * (0.5f + 0.5f * sinf(ft * 0.31f)) : 0.0f;
-    in.bf.have_speed = armed;
-    in.bf.speed_kmh  = armed ? 8.0f + 92.0f * thr : 0.0f;
-    in.bf.have_mode  = link;
-    snprintf(in.bf.mode, sizeof(in.bf.mode), "%s", "ACRO");
-    // -2 is "nothing said either way", which is what a goggle with no link
-    // actually knows. It suppresses the ARMED/DISARMED label rather than
-    // asserting a state we cannot see.
-    in.bf.arm        = link ? (armed ? 1 : 0) : -2;
-    // Nothing above this line exists without a link, so all of it is gated on
-    // one: a goggle with no aircraft has no voltage, no mode and no arm state
-    // to show. Stamping telemetry fresh through the idle window would also
-    // make have_aircraft true there, putting the idle state - the dim and the
-    // IDLE label - out of reach in demo mode entirely.
-    in.bf.stamp_us   = link ? now : 0;
-
-    // The flight timer is ours, driven off the same arm transition the real
-    // one uses, so the label behaves exactly as it will in the air.
-    in.bf.have_timer = armed;
-    in.bf.timer_s    = (int)ft;
-
-    // Control link: strong, with a dip as the aircraft gets out to distance.
-    float far = armed ? fminf(1.0f, ft / kDemoPhaseS) : 0.0f;
-    in.bf.have_lq = link;
-    in.bf.lq_pct  = (int)(99.0f - 26.0f * far + 3.0f * sinf(ft * 1.7f));
-    if (in.bf.lq_pct > 100) in.bf.lq_pct = 100;
-    if (in.bf.lq_pct < 0)   in.bf.lq_pct = 0;
-
-    // Video link. The MCS ladder steps rather than slides, which is the whole
-    // reason the gauge is drawn in rungs.
-    in.link_up  = link;
-    in.mcs_norm = fmaxf(0.14f, 1.0f - 0.72f * far);
-    in.mcs_norm = floorf(in.mcs_norm * 7.0f + 0.5f) / 7.0f;
-    in.quality  = fmaxf(0.05f, 0.95f - 0.65f * far);
-    // The same rung thresholds as the real link: the bottom two rungs red,
-    // the next two amber - so the demo runs amber, then red, as it flies out.
-    {
-        int rung = (int)(in.mcs_norm * 7.0f + 0.5f) - 1;
-        in.link_warn = !link ? 0 : (rung <= 1) ? 2 : (rung <= 3) ? 1 : 0;
-    }
-    in.dist_m   = link ? (int)(4.0f + 420.0f * far) : -1;
-
-    in.video_active = in.link_up;
-    in.v_w = 1920; in.v_h = 1080; in.fps = 60;
-    in.mbps       = 19.5f - 6.0f * far + 0.8f * sinf(t * 0.9f);
-    in.have_lat   = true;
-    in.lat_med_ms = 28.0f + 16.0f * far + 3.0f * sinf(t * 1.3f);
-    snprintf(in.vtx_pwr, sizeof(in.vtx_pwr), "%s", "500mW");
-    in.link_freq_mhz  = 5740;
-    in.vtx_temp_valid = true;
-    in.vtx_temp_c     = 41.0f + 9.0f * used;
-    in.vrx_temp_c     = 46.0f + 6.0f * (0.5f + 0.5f * sinf(t * 0.12f));
-    // A 3S pack sagging slowly, so the row can be judged without hardware.
-    in.vrx_volts      = 12.1f - 0.9f * (0.5f + 0.5f * sinf(t * 0.03f));
-
-    // The one field real telemetry sets that demo mode used to leave alone -
-    // demo_fill replaces the real sources rather than joining them, so
-    // without this line whatever OSD::vtx_low_power last held (false, absent
-    // a real air unit) would just survive untouched through every phase.
-    in.vtx_low_power = standby;
 }

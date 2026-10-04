@@ -276,18 +276,12 @@ GLuint OSD::load_texture_from_png(const unsigned char* png, unsigned int length)
 // bring-up, so the Cairo decode runs on another core while the GPU driver
 // initializes. init_gl_buffers() then only uploads the already-decoded pixels.
 // ---------------------------------------------------------------------------
-// Demo mode as given on the command line: -1 when the flag was absent, so the
-// stored setting decides. Kept out of Settings deliberately - see above.
-static int s_demo_override = -1;
-void osd_set_demo_mode(int on)      { s_demo_override = on ? 1 : 0; }
 // Same idea for --menu: set before the OSD exists, read once when it starts.
 static bool s_menu_at_start = false;
 static int  s_menu_start_tab = -1;
 void osd_set_menu_at_start(bool on) { s_menu_at_start = on; }
 // Which tab --menu opens on. -1 leaves whatever the menu would pick.
 void osd_set_menu_start_tab(int t) { s_menu_start_tab = t; }
-bool osd_demo_mode_overridden()     { return s_demo_override >= 0; }
-int  osd_demo_mode_override()       { return s_demo_override; }
 
 static pthread_t        s_prefetch_thread;
 static bool             s_prefetch_started = false;
@@ -416,6 +410,8 @@ OSD::OSD(std::shared_ptr<DrmDevice> dev_, int refresh_frequency_ms_, volatile bo
         pthread_cond_init(&osd_cond, &ca);
         pthread_condattr_destroy(&ca);
     }
+    dev->flip_hook_ctx = this;
+    dev->flip_hook = [](void* c) { static_cast<OSD*>(c)->on_flip(); };
 
     osd_vars.ui_scale = 1.0f;
     osd_vars.sky_exposure_us = 5000;
@@ -460,7 +456,6 @@ OSD::OSD(std::shared_ptr<DrmDevice> dev_, int refresh_frequency_ms_, volatile bo
     dist_offset   = Settings::getInstance().getInt("dist_offset", 115);
     show_all_adapters = true;
     bg_video_enabled = Settings::getInstance().getBool("bg_video_enabled", true);
-    show_drone_model = Settings::getInstance().getBool("show_drone_model", true);
     link_edge_on_ = Settings::getInstance().getBool("link_edge_warning", true);
     // 0=OFF 1=SMALL 2=MEDIUM 3=EXTREME. This was a bool before the intensity
     // levels existed, so migrate the stored "true"/"false" rather than letting
@@ -535,20 +530,12 @@ OSD::OSD(std::shared_ptr<DrmDevice> dev_, int refresh_frequency_ms_, volatile bo
         volt_mode = (vm == 0 || vm == 1) ? vm : 0;
     }
     menu_bf_osd = bf_osd;
-    // --demo wins over the stored setting for this run only. It is not written
-    // back, because a flag is a way to try something without committing to it -
-    // and Settings::set() saves the file the moment it is called.
-    demo_mode = osd_demo_mode_overridden()
-              ? osd_demo_mode_override()
-              : (Settings::getInstance().getInt("demo_mode", 0) ? 1 : 0);
     menu_hud_style = hud_style;
     menu_volt_mode = volt_mode;
-    menu_demo_mode = demo_mode;
     menu_wifi_ap = wifi_ap_on() ? 1 : 0;   // off after boot; see wifi_ap.hpp
     menu_show_latency_graph = show_latency_graph;
     menu_show_all_adapters = true;
     menu_bg_video = bg_video_enabled;
-    menu_show_drone_model = show_drone_model;
     menu_hud_reactivity = hud_reactivity;
 
     // Restore picture size. 100 is the untouched full-screen path.
@@ -563,7 +550,17 @@ OSD::OSD(std::shared_ptr<DrmDevice> dev_, int refresh_frequency_ms_, volatile bo
     pinned_ci = Settings::getInstance().getInt("pinned_chan", -1);
 }
 
+void OSD::on_flip() {
+    last_flip_seen_us_.store(get_time_us(), std::memory_order_relaxed);
+    if (!phase_lock_.load(std::memory_order_relaxed)) return;
+    pthread_mutex_lock(&osd_mutex);
+    flip_tick_ = true;
+    pthread_cond_signal(&osd_cond);
+    pthread_mutex_unlock(&osd_mutex);
+}
+
 OSD::~OSD() {
+    dev->flip_hook = nullptr;
     eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, context);
     glDeleteProgram(shader_program);
     glDeleteBuffers(1, &vbo);
@@ -575,6 +572,13 @@ OSD::~OSD() {
     if (bg_tex != 0) glDeleteTextures(1, &bg_tex);
     if (bg_video_tex_ != 0) glDeleteTextures(1, &bg_video_tex_);
     if (bg_ext_tex_   != 0) glDeleteTextures(1, &bg_ext_tex_);
+    clip_player_.reset();    // joins its decoder before the textures go
+    if (clip_ext_tex_ != 0) glDeleteTextures(1, &clip_ext_tex_);
+    if (live_ext_tex_ != 0) glDeleteTextures(1, &live_ext_tex_);
+    if (gallery_snap_tex_ != 0) glDeleteTextures(1, &gallery_snap_tex_);
+    if (gallery_snap_shader_ != 0) glDeleteProgram(gallery_snap_shader_);
+    if (gallery_flat_shader_ != 0) glDeleteProgram(gallery_flat_shader_);
+    for (auto& th : gallery_thumbs_) if (th.second.tex) glDeleteTextures(1, &th.second.tex);
     if (warp_shader_prog_ != 0) glDeleteProgram(warp_shader_prog_);
     if (bg_ext_shader_    != 0) glDeleteProgram(bg_ext_shader_);
     if (warp_ext_shader_  != 0) glDeleteProgram(warp_ext_shader_);
@@ -674,6 +678,21 @@ void OSD::init_gl_buffers() {
     // DRM/EGL zero-copy texture (GL_TEXTURE_EXTERNAL_OES — hardware decode)
     glGenTextures(1, &bg_ext_tex_);
     glBindTexture(GL_TEXTURE_EXTERNAL_OES, bg_ext_tex_);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    // The gallery's recording playback gets one of its own, so the idle
+    // background and a recording never share a picture.
+    glGenTextures(1, &clip_ext_tex_);
+    glBindTexture(GL_TEXTURE_EXTERNAL_OES, clip_ext_tex_);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glGenTextures(1, &live_ext_tex_);
+    glBindTexture(GL_TEXTURE_EXTERNAL_OES, live_ext_tex_);
     glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -963,6 +982,37 @@ void OSD::init_shaders() {
     };
     bg_ext_shader_   = build_prog(ext_vert, ext_frag_plain);
     warp_ext_shader_ = build_prog(ext_vert, ext_frag_warp);
+    // A texture of premultiplied RGBA as it is, for the gallery's copy of the
+    // screen. (The main program reads its textures as BGRA.)
+    static const char* snap_frag =
+        "precision mediump float;\n"
+        "varying vec2 v_uv;\n"
+        "uniform sampler2D tex;\n"
+        "uniform float alpha;\n"
+        "void main() {\n"
+        "    gl_FragColor = texture2D(tex, v_uv) * alpha;\n"
+        "}\n";
+    gallery_snap_shader_ = build_prog(ext_vert, snap_frag);
+    // Flat colour per vertex (premultiplied, as the OSD plane holds it): the stats charts.
+    static const char* flat_vert =
+        "attribute vec2 pos;\n"
+        "attribute vec4 col;\n"
+        "uniform mat4 mvp;\n"
+        "varying vec4 v_col;\n"
+        "void main() {\n"
+        "    gl_Position = mvp * vec4(pos, 0.0, 1.0);\n"
+        "    v_col = col;\n"
+        "}\n";
+    static const char* flat_frag =
+        "precision mediump float;\n"
+        "varying vec4 v_col;\n"
+        "void main() { gl_FragColor = v_col; }\n";
+    gallery_flat_shader_ = build_prog(flat_vert, flat_frag);
+    if (gallery_flat_shader_) {
+        flat_mvp_ = glGetUniformLocation(gallery_flat_shader_, "mvp");
+        flat_pos_ = glGetAttribLocation(gallery_flat_shader_, "pos");
+        flat_col_ = glGetAttribLocation(gallery_flat_shader_, "col");
+    }
 
     // Load EGL DMA-BUF extension function pointers
     pfn_eglCreateImageKHR = (PFNEGLCREATEIMAGEKHRPROC)
@@ -2287,6 +2337,16 @@ void OSD::render_gl() {
     glDisable(GL_SCISSOR_TEST);
     glClear(GL_COLOR_BUFFER_BIT);
 
+    // The gallery (Back on the live picture) takes the whole frame: no HUD,
+    // no picture scale. It hands back false once it has closed.
+    frame_tile_ = DrmDevice::Tile();
+    if (!gallery_.active()) phase_lock_.store(false, std::memory_order_relaxed);
+    if (prof::enabled() && !gallery_.active()) stats_prof(get_time_us());
+    if (gallery_.active() && render_gallery(screen_w, screen_h)) {
+        present_gl_frame();
+        return;
+    }
+
     // Clip the whole overlay to the scaled picture. The canopy's wings are
     // drawn to run PAST the physical screen edge on purpose, so the edge
     // clips their outer ends - and shrinking everything in clip space brought
@@ -2341,7 +2401,7 @@ void OSD::render_gl() {
     // springing them about on whatever stale reading survived) reads as a
     // stuck HUD - so centre them and leave them still. hud_connected_ is a
     // frame behind here, which is not visible.
-    msp_osd.set_motion_wanted((hud_reactivity > 0 && hud_connected_) || show_drone_model);
+    msp_osd.set_motion_wanted(hud_reactivity > 0 && hud_connected_);
     if (hud_reactivity > 0 && hud_connected_) {
         // 1=SMALL 2=MEDIUM 3=EXTREME. MEDIUM is 1.0 - the amount tuned
         // against a real craft, so the other two hang off it.
@@ -2393,8 +2453,11 @@ void OSD::render_gl() {
         if (last != 0 && now_us - last > 150000) {
             int fill = (int)((now_us - last) / 33333);   // ~30 entries per second
             if (fill > 90) fill = 90;                    // cap backlog per pass
-            for (int k = 0; k < fill; k++)
-                osd_vars.latency_ring.push(LatencyFrame{});
+            for (int k = 0; k < fill; k++) {
+                LatencyFrame gap{};
+                gap.t_us = now_us - (uint64_t)(fill - k) * 33333ULL;
+                osd_vars.latency_ring.push(gap);
+            }
             osd_vars.latency_history_last_us = now_us;
         }
     }
@@ -2494,10 +2557,7 @@ void OSD::render_gl() {
         // State is one-way: BACKGROUND → TRANSITION → LIVE.
         // Once FPV is received we stay in LIVE and show the frozen last frame on
         // disconnect. The background video is never restarted after first FPV lock.
-        // Advance transition. Demo mode starts this state directly (see the
-        // raw_aircraft rising edge below - it has no decoder frames to reach
-        // it the normal way), but once started it advances exactly like a
-        // real one, same duration and all.
+        // Advance transition.
         if (video_state_ == VideoState::TRANSITION) {
             if (TRANSITION_DURATION_US <= 0.0f) {
                 // Zero duration means the warp is switched off. Take the branch
@@ -2538,38 +2598,7 @@ void OSD::render_gl() {
         if (bg_player_->is_drm() &&
             pfn_eglCreateImageKHR && pfn_glEGLImageTargetTexture2DOES) {
             // --- Zero-copy DRM path: import NV12 DMA-BUF as EGL external texture ---
-            BgDrmFrame drm;
-            if (bg_player_->get_latest_drm_frame(drm) && drm.valid) {
-                EGLint attribs[32]; int ai = 0;
-                attribs[ai++] = EGL_WIDTH;                    attribs[ai++] = drm.width;
-                attribs[ai++] = EGL_HEIGHT;                   attribs[ai++] = drm.height;
-                attribs[ai++] = EGL_LINUX_DRM_FOURCC_EXT;    attribs[ai++] = (EGLint)drm.drm_fmt;
-                attribs[ai++] = EGL_DMA_BUF_PLANE0_FD_EXT;  attribs[ai++] = drm.fd;
-                attribs[ai++] = EGL_DMA_BUF_PLANE0_OFFSET_EXT; attribs[ai++] = 0;
-                attribs[ai++] = EGL_DMA_BUF_PLANE0_PITCH_EXT;  attribs[ai++] = (EGLint)drm.stride_y;
-                attribs[ai++] = EGL_DMA_BUF_PLANE1_FD_EXT;  attribs[ai++] = drm.fd;
-                attribs[ai++] = EGL_DMA_BUF_PLANE1_OFFSET_EXT; attribs[ai++] = (EGLint)drm.offset_uv;
-                attribs[ai++] = EGL_DMA_BUF_PLANE1_PITCH_EXT;  attribs[ai++] = (EGLint)drm.stride_uv;
-                if (drm.modifier != DRM_FORMAT_MOD_INVALID && drm.modifier != DRM_FORMAT_MOD_LINEAR) {
-                    attribs[ai++] = EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT; attribs[ai++] = (EGLint)(drm.modifier & 0xFFFFFFFF);
-                    attribs[ai++] = EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT; attribs[ai++] = (EGLint)(drm.modifier >> 32);
-                    attribs[ai++] = EGL_DMA_BUF_PLANE1_MODIFIER_LO_EXT; attribs[ai++] = (EGLint)(drm.modifier & 0xFFFFFFFF);
-                    attribs[ai++] = EGL_DMA_BUF_PLANE1_MODIFIER_HI_EXT; attribs[ai++] = (EGLint)(drm.modifier >> 32);
-                }
-                attribs[ai++] = EGL_NONE;
-
-                EGLImageKHR img = pfn_eglCreateImageKHR(
-                    display, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, nullptr, attribs);
-                if (img != EGL_NO_IMAGE_KHR) {
-                    glActiveTexture(GL_TEXTURE0);
-                    glBindTexture(GL_TEXTURE_EXTERNAL_OES, bg_ext_tex_);
-                    pfn_glEGLImageTargetTexture2DOES(GL_TEXTURE_EXTERNAL_OES, img);
-                    pfn_eglDestroyImageKHR(display, img);
-                } else {
-                    fprintf(stderr, "[OSD] eglCreateImageKHR failed: 0x%x\n", eglGetError());
-                }
-                // drm.ref drops here — EGL holds its own GEM import reference
-            }
+            import_drm_frame(bg_player_, bg_ext_tex_);
         } else {
             // --- CPU path: sws BGRA → GL_TEXTURE_2D ---
             bg_player_->upload_latest_frame(bg_video_tex_);
@@ -2624,7 +2653,7 @@ void OSD::render_gl() {
     // frame). That gap used to raise the black panel and reticle before
     // there was anything to acquire yet; now the plain background loop
     // stays up through it, same as before there was ever an aircraft, and
-    // the warp - real or demo's stand-in for one - takes over the instant
+    // the warp takes over the instant
     // video actually arrives, unfought (974c86e turned the warp off instead
     // of fixing this fight; fixed here instead). Every later reconnect
     // finds vs already at LIVE, since it never reverts, so acquiring still
@@ -2643,24 +2672,7 @@ void OSD::render_gl() {
                   : (lock_hold_until_us_ > lk_now
                          ? fminf(1.0f, (float)(lock_hold_until_us_ - lk_now) / (float)kLockFadeUs)
                          : 0.0f);
-    // Demo mode has no decoder frames to freeze on disconnect the way a real
-    // link does - left alone, a simulated IDLE_2 would show the same idle
-    // bench loop and "fpvOS" wordmark as an aircraft that has never
-    // connected, which reads backwards: a real drop freezes or blanks the
-    // picture, it doesn't keep animating or invite a pilot to fly. One-time
-    // latch, same as the real canopy_link_up_ - before the first simulated
-    // connect, BACKGROUND is still the right slot for both. Checked ahead of
-    // everything else and not on vs==BACKGROUND specifically, because vs is
-    // stuck at LIVE by the time this can ever be true (the demo's warp-zoom,
-    // below, has long since finished) and LIVE otherwise draws nothing here -
-    // correct on real hardware, where that means the real video plane, but
-    // there is no such plane in demo mode.
-    const bool demo_idle2 = demo_mode && demo_ever_connected() && !demo_link_up();
-
-    if (demo_idle2) {
-        draw_panel(-frustum_w, -frustum_h, frustum_w * 2.0f, frustum_h * 2.0f,
-                   1.0f, 0.0f, 0.0f, 0.0f);
-    } else if (acquiring) {
+    if (acquiring) {
         // Opaque black, drawn rather than left clear: the OSD plane is blended
         // over the video plane at scanout, and leaving it transparent shows
         // whatever that plane last held. Only while acquiring - once there is a
@@ -3093,22 +3105,9 @@ void OSD::render_gl() {
         // Any one of them is proof enough - the AR8030 does fail to reach state
         // 2 with video on screen, and gating on it alone flagged idle over a
         // HUD full of live readings.
-        //
-        // Demo mode simulates an aircraft that is not there for the first ten
-        // seconds of its cycle, so it answers with the simulated link rather
-        // than with "yes, always" - otherwise the idle state the demo exists to
-        // show is the one state it cannot reach.
-        // Demo mode REPLACES the real sources rather than joining them. Or-ing
-        // it in meant the simulated link held the HUD connected no matter what
-        // the radio did, so unplugging a real air unit changed nothing on
-        // screen - the demo says the link is up for 140 of every 150 seconds,
-        // and no real disconnect could outvote it. A simulation that reality
-        // cannot switch off is not a simulation.
-        bool raw_aircraft = demo_mode
-            ? demo_link_up()
-            : ((last_conn_ms && strip_ms - last_conn_ms < 3000) ||
-               video_active ||
-               (strip_bf.stamp_us && get_time_us() - strip_bf.stamp_us < 3000000ULL));
+        bool raw_aircraft = (last_conn_ms && strip_ms - last_conn_ms < 3000) ||
+                            video_active ||
+                            (strip_bf.stamp_us && get_time_us() - strip_bf.stamp_us < 3000000ULL);
 
         // The hold belongs on the way OUT, not on the way in.
         //
@@ -3131,21 +3130,6 @@ void OSD::render_gl() {
                 hud_connected_since_us_ = strip_us;
                 frames_since_connect_   = 0;
                 lock_hold_until_us_     = strip_us + kLockMinUs;
-                // Demo mode's stand-in for the real keyframe that starts this
-                // on actual hardware: it has no decoder to produce one, so it
-                // starts the warp itself, on this connection's rising edge.
-                // video_state_ is one-way and this branch only runs once
-                // while it still reads BACKGROUND, so this fires exactly
-                // once - the demo's first-ever connect, same scope the real
-                // warp had before 974c86e turned it off.
-                if (demo_mode && video_state_ == VideoState::BACKGROUND) {
-                    pthread_mutex_lock(&osd_mutex);
-                    if (video_state_ == VideoState::BACKGROUND) {
-                        video_state_         = VideoState::TRANSITION;
-                        transition_start_us_ = strip_us;
-                    }
-                    pthread_mutex_unlock(&osd_mutex);
-                }
             }
             hud_connected_   = true;
         } else if (hud_connected_) {
@@ -3783,7 +3767,6 @@ void OSD::render_gl() {
             canopy.lat_med_ms = latency_median_ms;
             canopy.have_lat = true;
         }
-        if (demo_mode) demo_fill(canopy);
         prof::mark(prof::kDrawPre);
         draw_canopy_hud(canopy);
         prof::mark(prof::kCanopy);
@@ -3877,100 +3860,17 @@ void OSD::render_gl() {
             signal_render(prof::kWakeAnim);
     }
 
-    // Draw 3D drone attitude indicator in the top left corner of the screen
-    if (show_drone_model) {
-        int16_t ax_raw = 0, ay_raw = 0, az_raw = 2048;
-        msp_osd.get_raw_imu(ax_raw, ay_raw, az_raw);
-        float ax_val = ax_raw;
-        float ay_val = ay_raw;
-        float az_val = az_raw;
+    if (gallery_capture_) gallery_capture_frame(screen_w, screen_h);   // before the swap
+    present_gl_frame();
+}
 
-        float roll = atan2f(ay_val, az_val);
-        float pitch = atan2f(-ax_val, sqrtf(ay_val * ay_val + az_val * az_val));
-
-        float cx = -frustum_w + 0.28f * s;
-        float cy = frustum_h - 0.28f * s;
-        float model_scale = s * 0.45f;
-
-        // Draw a premium background frame/box for the 3D model
-        draw_hex_panel(cx - 0.22f * s, cy - 0.22f * s, 0.44f * s, 0.44f * s, 0.45f, 0.005f, 0.015f, 0.04f, true, 4, 4);
-
-        float cos_r = cosf(roll), sin_r = sinf(roll);
-        float cos_p = cosf(pitch), sin_p = sinf(pitch);
-        
-        float yaw_v = -35.0f * 3.14159f / 180.0f;
-        float pitch_v = -22.0f * 3.14159f / 180.0f;
-        float cos_yv = cosf(yaw_v), sin_yv = sinf(yaw_v);
-        float cos_pv = cosf(pitch_v), sin_pv = sinf(pitch_v);
-
-        auto project_3d = [&](float x, float y, float z) -> math::Vec2 {
-            float x1 = x * cos_r - y * sin_r;
-            float y1 = x * sin_r + y * cos_r;
-            float z1 = z;
-
-            float x2 = x1;
-            float y2 = y1 * cos_p - z1 * sin_p;
-            float z2 = y1 * sin_p + z1 * cos_p;
-
-            float x3 = x2 * cos_yv - z2 * sin_yv;
-            float y3 = y2;
-            float z3 = x2 * sin_yv + z2 * cos_yv;
-
-            float x4 = x3;
-            float y4 = y3 * cos_pv - z3 * sin_pv;
-
-            return math::Vec2{ cx + x4 * model_scale, cy + y4 * model_scale };
-        };
-
-        glUniformMatrix4fv(u_mvp_, 1, GL_FALSE, mvp_hud_c);
-
-        math::Vec2 center = project_3d(0.0f, 0.0f, 0.0f);
-        
-        math::Vec2 stack_top = project_3d(0.0f, 0.05f, 0.0f);
-        draw_glow_line({center, stack_top}, 2.0f, 0.7f, 0.0f, 0.8f, 1.0f);
-
-        math::Vec2 f_front = project_3d(0.0f, 0.0f, 0.07f);
-        math::Vec2 f_back  = project_3d(0.0f, 0.0f, -0.07f);
-        math::Vec2 f_left  = project_3d(-0.04f, 0.0f, 0.0f);
-        math::Vec2 f_right = project_3d(0.04f, 0.0f, 0.0f);
-        
-        draw_glow_line({f_front, f_right}, 2.0f, 0.6f, 0.0f, 0.9f, 1.0f);
-        draw_glow_line({f_right, f_back},  2.0f, 0.6f, 0.0f, 0.9f, 1.0f);
-        draw_glow_line({f_back, f_left},   2.0f, 0.6f, 0.0f, 0.9f, 1.0f);
-        draw_glow_line({f_left, f_front},  2.0f, 0.6f, 0.0f, 0.9f, 1.0f);
-
-        math::Vec2 motor_fl = project_3d(-0.16f, 0.0f, 0.16f);
-        math::Vec2 motor_fr = project_3d(0.16f, 0.0f, 0.16f);
-        math::Vec2 motor_bl = project_3d(-0.16f, 0.0f, -0.16f);
-        math::Vec2 motor_br = project_3d(0.16f, 0.0f, -0.16f);
-
-        draw_glow_line({f_left, motor_fl},  3.0f, 0.9f, 1.0f, 0.3f, 0.1f);
-        draw_glow_line({f_right, motor_fr}, 3.0f, 0.9f, 1.0f, 0.3f, 0.1f);
-        draw_glow_line({f_left, motor_bl},  3.0f, 0.9f, 0.2f, 1.0f, 0.2f);
-        draw_glow_line({f_right, motor_br}, 3.0f, 0.9f, 0.2f, 1.0f, 0.2f);
-
-        math::Vec2 cam_tip = project_3d(0.0f, -0.01f, 0.11f);
-        draw_glow_line({f_front, cam_tip}, 3.0f, 0.9f, 0.0f, 0.9f, 1.0f);
-
-        auto draw_rotor = [&](const math::Vec2& m_pos, float ox, float oz, float r, float g, float b) {
-            math::Vec2 shaft_top = project_3d(ox, 0.02f, oz);
-            math::Vec2 shaft_bot = project_3d(ox, -0.02f, oz);
-            draw_glow_line({shaft_bot, shaft_top}, 2.0f, 0.8f, 0.5f, 0.5f, 0.5f);
-
-            math::Vec2 p_b1 = project_3d(ox - 0.05f, 0.02f, oz);
-            math::Vec2 p_b2 = project_3d(ox + 0.05f, 0.02f, oz);
-            math::Vec2 p_b3 = project_3d(ox, 0.02f, oz - 0.05f);
-            math::Vec2 p_b4 = project_3d(ox, 0.02f, oz + 0.05f);
-
-            draw_glow_line({p_b1, p_b2}, 1.5f, 0.8f, r, g, b);
-            draw_glow_line({p_b3, p_b4}, 1.5f, 0.8f, r, g, b);
-        };
-
-        draw_rotor(motor_fl, -0.16f, 0.16f, 1.0f, 0.4f, 0.2f);
-        draw_rotor(motor_fr, 0.16f, 0.16f, 1.0f, 0.4f, 0.2f);
-        draw_rotor(motor_bl, -0.16f, -0.16f, 0.2f, 1.0f, 0.2f);
-        draw_rotor(motor_br, 0.16f, -0.16f, 0.2f, 1.0f, 0.2f);
-    }
+// The end of a frame: swap, wrap the buffer as a DRM framebuffer, and hand it to
+// the display. Shared by the HUD and the gallery.
+void OSD::present_gl_frame() {
+    auto& gb = gl_buffers[0];
+    struct gbm_surface *gs = (struct gbm_surface *)gb.bo;
+    const int screen_w = dev->output_list->mode.hdisplay;
+    const int screen_h = dev->output_list->mode.vdisplay;
 
     // Screen capture feeds the one recorder, and only while a screen recording
     // is actually running - glReadPixels of a 1080p frame is not free, so it
@@ -4068,6 +3968,7 @@ void OSD::render_gl() {
     }
     locked_bo = bo;
     prof::mark(prof::kLock);
+    dev->stage_tile(frame_tile_);   // the picture's rectangle goes with this frame
     dev->set_osd_fb(fb_id);
     prof::mark(prof::kHandoff);
 
@@ -4110,6 +4011,10 @@ void OSD::run() {
     constexpr uint64_t kMinGapUs = 16000;
     while(!*signal_stop) {
         uint64_t interval = next_render_interval_us();
+        // Phase-locked to the display's flips while the gallery animates: a flip starts the
+        // next frame, and the timer is only the fallback for when none comes (video stalled).
+        const bool lock_flips = phase_lock_.load(std::memory_order_relaxed);
+        if (lock_flips && interval < 30000) interval = 30000;
         uint64_t due = loop_start_us_ + interval;
 
         pthread_mutex_lock(&osd_mutex);
@@ -4126,12 +4031,15 @@ void OSD::run() {
         ts.tv_sec += ns / 1000000000L;
         ts.tv_nsec = ns % 1000000000L;
         int rc = 0;
-        while (!render_requested && !msp_wake_ && !*signal_stop && rc != ETIMEDOUT && wait_us > 0)
+        while (!render_requested && !msp_wake_ && !(lock_flips && flip_tick_ && anim_pending_) &&
+               !*signal_stop && rc != ETIMEDOUT && wait_us > 0)
             rc = pthread_cond_timedwait(&osd_cond, &osd_mutex, &ts);
         now = get_time_us();
         bool requested = render_requested;
         bool msp       = msp_wake_ || (msp_dirty_ && now >= last_msp_signal_us_ + 33000);
-        bool heartbeat = now >= due;
+        const bool tick = lock_flips && flip_tick_ && anim_pending_;
+        bool heartbeat = now >= due || tick;
+        flip_tick_ = false;
         render_requested = false;
         msp_wake_ = false;
         if (msp) { msp_dirty_ = false; last_msp_signal_us_ = now; }
@@ -4151,7 +4059,11 @@ void OSD::run() {
         else if (!requested) prof::wake(prof::kWakeOther);   // MSP change
 
         now = get_time_us();
-        if (now - loop_start_us_ < kMinGapUs) usleep((useconds_t)(kMinGapUs - (now - loop_start_us_)));
+        // Locked to the flips, the flip decides when a frame starts: the usual 16 ms minimum
+        // is shorter than a 60 fps flip cycle, so any frame started a little late would set
+        // the next by the clock and the phase would slide off the flips for good.
+        const uint64_t min_gap = lock_flips ? 12000 : kMinGapUs;
+        if (now - loop_start_us_ < min_gap) usleep((useconds_t)(min_gap - (now - loop_start_us_)));
 
         last_msp_ver_ = msp_ver;
         pthread_mutex_lock(&osd_mutex);
@@ -4170,10 +4082,10 @@ uint64_t OSD::next_render_interval_us() {
     if (anim) return 16667;                                  // animating: 60 Hz
 
     uint64_t us = (uint64_t)refresh_frequency_ms * 1000;    // idle: 1 s
-    // A simulated flight, or the scrolling debug graphs: continuous motion.
+    // The scrolling debug graphs: continuous motion.
     // (The HUD moving with the craft asks for frames itself while its spring
     // is settling - see render_gl.)
-    if (demo_mode || show_latency_graph)
+    if (show_latency_graph)
         us = std::min<uint64_t>(us, 33333);
     // Connected: figures, freshness and stall detection (the red rails come
     // up 400 ms into a stall) - 10 Hz is ample for all of them.
@@ -4690,9 +4602,14 @@ void OSD::add_latency_frame(LatencyFrame frame) {
     // Snapshot current bitrate alongside the latency frame
     frame.video_mbps = osd_vars.video_bandwidth;
     frame.rf_mbps = (float)osd_vars.artosyn.rx_data_rate_kbps / 1000.0f;
+    frame.t_us = now_us;
+    frame.lost = osd_vars.link_stats.count_p_lost;
+    frame.snr = (int8_t)std::max(-127.0f, std::min(127.0f, osd_vars.artosyn.snr));
+    frame.mcs = (uint8_t)std::max(0, std::min(255, osd_vars.artosyn.rx_mcs_val));
 
     osd_vars.latency_ring.push(frame);
     osd_vars.latency_history_last_us = now_us;
+    if (!is_dummy) latency_frames_total_.fetch_add(1, std::memory_order_relaxed);
     pthread_mutex_unlock(&osd_mutex);
 }
 
@@ -4861,7 +4778,7 @@ const char* OSD::menu_help_warning(int tab, int i) {
     }
     if (tab == kTabSystem && i == 3 && menu_dirty[kTabSystem][3])
         return "Enter tries it: the app restarts, then asks whether to keep it.";
-    if (tab == kTabSystem && i == 5)
+    if (tab == kTabSystem && i == 4)
         return "Warning: Before enabling, plug an external antenna to the wifi uFL connector.";
     return nullptr;
 }
@@ -4890,10 +4807,10 @@ const char* OSD::menu_help_text(int tab, int i, const char* fallback) {
         mode = std::string("Showing ") + now + ". Auto picks the highest refresh the screen offers.";
         return mode.c_str();
     }
-    if (tab == kTabSystem && i == 5) {
+    if (tab == kTabSystem && i == 4) {
         // While a change is pending, the "Pending: OFF -> ON" line says it
         // all; the antenna warning above it comes from menu_help_warning().
-        if (menu_dirty[kTabSystem][5]) return "";
+        if (menu_dirty[kTabSystem][4]) return "";
         static std::string wifi;          // rebuilt each frame the row is selected
         wifi = wifi_ap_describe();
         return wifi.c_str();
@@ -4992,13 +4909,9 @@ std::vector<OSD::MenuItem> OSD::menu_items(int tab) const {
             {"Calib Distance", 3, "Zero the range reading where you are standing. "
                                   "The arrows trim the offset by hand.", "ENTER: ZERO HERE"},
             {"SCREEN", 2},
-            {"Clock", 1, "When the time is shown at the top of the screen."},
-            {"Clock Format", 1, "How the time is written."},
+            {"Clock", 1, "When the time is shown at the top of the screen, and how it is written."},
             {"ATTITUDE", 2},
-            {"Drone Model", 1, "The attitude model in the centre of the screen."},
             {"Dynamic HUD", 1, "Let the panels move with the aircraft."}
-            // Demo Mode moved to SYSTEM: it drives a simulated flight for
-            // testing the whole screen, not just this tab's own settings.
         };
     } else if (tab == 3) { // DISPLAY Tab - how the screen looks
         // This tab was PHYSICS, two cosmetic toggles on their own. The screen
@@ -5024,10 +4937,7 @@ std::vector<OSD::MenuItem> OSD::menu_items(int tab) const {
             {"Version", 0},
             {"Decoder", 0},
             // Help is built live by menu_help_text: the mode in use.
-            {"Screen Mode", 1, ""},
-            // Was on the HUD tab: it drives a simulated flight over the
-            // whole screen for testing, not a HUD drawing setting.
-            {"Demo Mode", 1, "Drive the HUD from a simulated flight."}
+            {"Screen Mode", 1, ""}
         };
         // Help is built live by menu_help_text: name, password, channel.
         items.push_back({"WiFi AP", 1, ""});
@@ -5259,6 +5169,17 @@ void OSD::menu_refresh_options() {
     }
 }
 
+// The Clock row is one choice made of two settings - when the time shows
+// (clock_show: 0 off, 1 idle only, 2 always) and how it is written
+// (clock_mode: 1 = 12H, 2 = 24H): OFF, then idle only and always, each in 12H
+// and 24H. OFF leaves the format as it was, so coming back to it keeps it.
+static const int kClockChoices = 5;
+static const char* const kClockLabels[kClockChoices] =
+    { "OFF", "IDLE ONLY 12H", "IDLE ONLY 24H", "ON 12H", "ON 24H" };
+static int clock_choice(int show, int mode) {
+    return show <= 0 ? 0 : 1 + (show - 1) * 2 + (mode == 2 ? 1 : 0);
+}
+
 // Rows that take effect the moment the arrows move them.
 //
 // These write the setting as they go, so there is nothing for Enter to apply
@@ -5269,12 +5190,12 @@ void OSD::menu_refresh_options() {
 // is a capture the row makes at the moment you press it.
 bool OSD::menu_row_applies_live(int tab, int index) {
     if (tab == 2) {
-        // HUD Style, Betaflight OSD, Voltage, Calib Distance, Clock and Clock
-        // Format write as they go; the plain show/hide toggles (Graph, Drone
-        // Model) and the reactivity level wait for Enter.
+        // Every HUD row writes as it goes, Calib Distance's arrows included;
+        // its Enter is a capture, not an apply.
         switch (index) {
             case kHudRowStyle: case kHudRowBfOsd: case kHudRowVoltage:
-            case kHudRowCalib: case kHudRowClock: case kHudRowClockFmt:
+            case kHudRowGraph: case kHudRowCalib: case kHudRowClock:
+            case kHudRowDynamic:
                 return true;
             default:
                 return false;
@@ -5282,8 +5203,8 @@ bool OSD::menu_row_applies_live(int tab, int index) {
     }
     if (tab == 3)   // DISPLAY: all but Background Video, which owns a player
         return index != kDispBgVideo;
-    if (tab == kTabSystem)   // Demo Mode writes as it goes; WiFi AP waits for
-        return index == 4;   // Enter, after its antenna warning has been shown
+    // SYSTEM: Screen Mode restarts the app and WiFi AP waits for Enter, after
+    // its antenna warning has been shown; neither applies as it is stepped.
     return false;
 }
 
@@ -5365,6 +5286,10 @@ void OSD::menu_apply_change(int tab, int index, int dir) {
             }
         } else if (menu_index == kHudRowGraph) {
             menu_show_latency_graph = menu_step(menu_show_latency_graph ? 1 : 0, dir, 2) != 0;
+            if (!menu_stepping_) {
+                show_latency_graph = menu_show_latency_graph;
+                Settings::getInstance().set("show_latency_graph", show_latency_graph);
+            }
         } else if (menu_index == kHudRowCalib) {
             // left/right nudges the calibration by 1
             if (!menu_stepping_) {
@@ -5372,22 +5297,21 @@ void OSD::menu_apply_change(int tab, int index, int dir) {
                 Settings::getInstance().set("dist_offset", dist_offset);
             }
         } else if (menu_index == kHudRowClock) {
-            menu_clock_show = menu_step(menu_clock_show, dir, 3);
+            const int c = menu_step(clock_choice(menu_clock_show, menu_clock_mode), dir, kClockChoices);
+            menu_clock_show = c == 0 ? 0 : 1 + (c - 1) / 2;
+            if (c > 0) menu_clock_mode = ((c - 1) % 2) ? 2 : 1;
             if (!menu_stepping_) {
                 clock_show = menu_clock_show;
-                Settings::getInstance().set("clock_show", clock_show);
-            }
-        } else if (menu_index == kHudRowClockFmt) {
-            // Only two formats, and clock_mode numbers them 1 and 2.
-            menu_clock_mode = menu_step(menu_clock_mode == 2 ? 1 : 0, dir, 2) + 1;
-            if (!menu_stepping_) {
                 clock_mode = menu_clock_mode;
+                Settings::getInstance().set("clock_show", clock_show);
                 Settings::getInstance().set("clock_mode", clock_mode);
             }
-        } else if (menu_index == kHudRowDroneModel) {
-            menu_show_drone_model = menu_step(menu_show_drone_model ? 1 : 0, dir, 2) != 0;
         } else if (menu_index == kHudRowDynamic) {
             menu_hud_reactivity = menu_step(menu_hud_reactivity, dir, 4);
+            if (!menu_stepping_) {
+                hud_reactivity = menu_hud_reactivity;
+                Settings::getInstance().set("hud_reactivity", hud_reactivity);
+            }
         }
     } else if (menu_tab == 3) { // DISPLAY
         if (menu_index == kDispBrightness) {
@@ -5443,16 +5367,7 @@ void OSD::menu_apply_change(int tab, int index, int dir) {
             // Only stages the choice: the display is set up once, at start,
             // so Enter saves it and restarts kestrel (below).
             menu_screen_mode = menu_step(screen_mode_menu(), dir, (int)screen_modes().size() + 1);
-        } else if (menu_index == 4) {
-            menu_demo_mode = menu_step(menu_demo_mode ? 1 : 0, dir, 2) != 0;
-            if (!menu_stepping_) {
-                demo_mode = menu_demo_mode;
-                // A flag-forced value is not the user's stored preference, so
-                // moving the arrows over it must not turn it into one.
-                if (!osd_demo_mode_overridden())
-                    Settings::getInstance().set("demo_mode", demo_mode);
-            }
-        } else if (menu_index == 5 && wifi_ap_available()) {
+        } else if (menu_index == 4 && wifi_ap_available()) {
             // Only stages the choice. Enter applies it (below, with DVR
             // Source), so turning the radio on always passes through the
             // pending state, whose help line is the antenna warning.
@@ -5582,15 +5497,8 @@ void OSD::menu_value_text(int tab, int i, char* val_buf, size_t cap) {
                 if (link_distance_raw < 0) sprintf(val_buf, "ofs %d", dist_offset);
                 else sprintf(val_buf, "raw %d  ofs %d", link_distance_raw, dist_offset);
             } else if (i == kHudRowClock) {
-                const char* show_labels[3] = { "OFF", "IDLE ONLY", "ON" };
-                int m = (menu_clock_show >= 0 && menu_clock_show < 3) ? menu_clock_show : 1;
-                sprintf(val_buf, "< %s >", show_labels[m]);
-            } else if (i == kHudRowClockFmt) {
-                const char* fmt_labels[2] = { "12H", "24H" };
-                int m = (menu_clock_mode == 1) ? 0 : 1;
-                sprintf(val_buf, "< %s >", fmt_labels[m]);
-            } else if (i == kHudRowDroneModel) {
-                sprintf(val_buf, "< %s >", menu_show_drone_model ? "ON" : "OFF");
+                const int show = (menu_clock_show >= 0 && menu_clock_show < 3) ? menu_clock_show : 1;
+                sprintf(val_buf, "< %s >", kClockLabels[clock_choice(show, menu_clock_mode)]);
             } else if (i == kHudRowDynamic) {
                 const char* react_labels[4] = { "OFF", "SMALL", "MEDIUM", "EXTREME" };
                 int r = (menu_hud_reactivity >= 0 && menu_hud_reactivity < 4) ? menu_hud_reactivity : 2;
@@ -5634,8 +5542,6 @@ void OSD::menu_value_text(int tab, int i, char* val_buf, size_t cap) {
                 else
                     sprintf(val_buf, "< %s >", screen_mode_label(screen_mode_menu()).c_str());
             } else if (i == 4) {
-                sprintf(val_buf, "< %s >", menu_demo_mode ? "ON" : "OFF");
-            } else if (i == 5) {
                 if (wifi_ap_available())
                     sprintf(val_buf, "< %s >", menu_wifi_ap ? "ON" : "OFF");
                 else
@@ -5715,6 +5621,40 @@ void OSD::handle_key(int key) {
         return;
     }
     
+    // The buttons. On the live picture the D-pad's Enter opens the menu and Back
+    // opens the gallery. With the menu open they are what they were: Enter
+    // applies, Back closes (as M does). With the gallery open they are its keys.
+    if (gallery_.active()) {
+        Gallery::Key gk = Gallery::kUp;
+        bool is_gallery_key = true;
+        if      (key == 'w' || key == 'W' || key == KEY_UP    || key == 0x101) gk = Gallery::kUp;
+        else if (key == 's' || key == 'S' || key == KEY_DOWN  || key == 0x102) gk = Gallery::kDown;
+        else if (key == 'a' || key == 'A' || key == KEY_LEFT  || key == 0x104) gk = Gallery::kLeft;
+        else if (key == 'd' || key == 'D' || key == KEY_RIGHT || key == 0x103) gk = Gallery::kRight;
+        else if (key == 13 || key == '\n')                                     gk = Gallery::kEnter;
+        else if (key == kKeyBack || key == 27)                                  gk = Gallery::kBack;
+        else is_gallery_key = false;   // M and the rest wait until it is closed
+        if (is_gallery_key) gallery_.key(gk);
+        render_requested = true;
+        pthread_cond_signal(&osd_cond);
+        pthread_mutex_unlock(&osd_mutex);
+        return;
+    }
+    if (key == kKeyBack || key == 27) {
+        if (!menu_open) {
+            // The next frame copies the screen, then opens the gallery on it
+            // (gallery_capture_frame).
+            gallery_capture_ = true;
+            render_requested = true;
+            pthread_cond_signal(&osd_cond);
+            pthread_mutex_unlock(&osd_mutex);
+            return;
+        }
+        key = 'm';   // the menu (or the channel scan in it) closes
+    } else if ((key == 13 || key == '\n') && !menu_open) {
+        key = 'm';   // Enter on the live picture opens the menu
+    }
+
     if (key == 'm' || key == 'M') {
         // In the channel-scan sub-screen, M/Back closes it and returns to the RF
         // menu. It used to cancel an armed pin-confirm first, but that flow is
@@ -5776,11 +5716,9 @@ void OSD::handle_key(int key) {
              menu_hud_theme = hud_theme_idx;
              menu_hud_style = hud_style;
              menu_volt_mode = volt_mode;
-             menu_demo_mode = demo_mode;
              menu_ui_scale = osd_vars.ui_scale;
              menu_picture_scale = dev->picture_scale_pct;
              menu_bg_video = bg_video_enabled;
-             menu_show_drone_model = show_drone_model;
              menu_hud_reactivity = hud_reactivity;
              menu_dvr_source = dvr_source_now();
              // Seed the RF rows from what the radio and the air unit report.
@@ -6052,12 +5990,9 @@ void OSD::handle_key(int key) {
                     }
                 }
             } else if (menu_tab == 2) { // HUD - grouped order, see menu_items()
-                // Only the rows Enter still owns. Everything else on this tab
-                // applies and saves as the arrows move it.
-                if (menu_index == kHudRowGraph) {
-                    show_latency_graph = menu_show_latency_graph;
-                    Settings::getInstance().set("show_latency_graph", show_latency_graph);
-                } else if (menu_index == kHudRowCalib) {
+                // Only Calib Distance has anything for Enter to do. Every
+                // other row applies and saves as the arrows move it.
+                if (menu_index == kHudRowCalib) {
                     // Zero the ranging: with the units side by side, Enter
                     // captures the current reading as the new base value. The
                     // arrows nudge the same offset by hand.
@@ -6066,12 +6001,6 @@ void OSD::handle_key(int key) {
                         Settings::getInstance().set("dist_offset", dist_offset);
                         printf("[OSD] distance calibrated: offset = %d\n", dist_offset);
                     }
-                } else if (menu_index == kHudRowDroneModel) {
-                    show_drone_model = menu_show_drone_model;
-                    Settings::getInstance().set("show_drone_model", show_drone_model);
-                } else if (menu_index == kHudRowDynamic) {
-                    hud_reactivity = menu_hud_reactivity;
-                    Settings::getInstance().set("hud_reactivity", hud_reactivity);
                 }
             } else if (menu_tab == 3) { // DISPLAY
                 // Brightness, UI Scaling, Theme and Picture Size all apply and
@@ -6112,7 +6041,7 @@ void OSD::handle_key(int key) {
                     printf("menu: screen mode %s on trial - restarting to apply it\n", v);
                     kestrel_request_restart();
                 }
-                if (menu_index == 5 && wifi_ap_available()) {
+                if (menu_index == 4 && wifi_ap_available()) {
                     wifi_ap_set(menu_wifi_ap != 0);   // for this session only
                 }
             }
@@ -6271,6 +6200,45 @@ void OSD::draw_bg_png(float fw, float fh, const float* mvp, float warp_t) {
 
     // Always reset to opaque so subsequent draws are unaffected.
     if (alpha_loc != -1) glVertexAttrib1f(alpha_loc, 1.0f);
+}
+
+// Import a player's newest decoded picture (an NV12 DMA-BUF) as the external
+// texture `tex`. The one place this is done, for the idle background and for
+// a recording in the gallery.
+bool OSD::import_drm_frame(BgVideoPlayer* player, GLuint tex) {
+    if (!player || !pfn_eglCreateImageKHR || !pfn_glEGLImageTargetTexture2DOES) return false;
+    BgDrmFrame drm;
+    if (!player->get_latest_drm_frame(drm) || !drm.valid) return false;
+    EGLint attribs[32]; int ai = 0;
+    attribs[ai++] = EGL_WIDTH;                    attribs[ai++] = drm.width;
+    attribs[ai++] = EGL_HEIGHT;                   attribs[ai++] = drm.height;
+    attribs[ai++] = EGL_LINUX_DRM_FOURCC_EXT;    attribs[ai++] = (EGLint)drm.drm_fmt;
+    attribs[ai++] = EGL_DMA_BUF_PLANE0_FD_EXT;  attribs[ai++] = drm.fd;
+    attribs[ai++] = EGL_DMA_BUF_PLANE0_OFFSET_EXT; attribs[ai++] = 0;
+    attribs[ai++] = EGL_DMA_BUF_PLANE0_PITCH_EXT;  attribs[ai++] = (EGLint)drm.stride_y;
+    attribs[ai++] = EGL_DMA_BUF_PLANE1_FD_EXT;  attribs[ai++] = drm.fd;
+    attribs[ai++] = EGL_DMA_BUF_PLANE1_OFFSET_EXT; attribs[ai++] = (EGLint)drm.offset_uv;
+    attribs[ai++] = EGL_DMA_BUF_PLANE1_PITCH_EXT;  attribs[ai++] = (EGLint)drm.stride_uv;
+    if (drm.modifier != DRM_FORMAT_MOD_INVALID && drm.modifier != DRM_FORMAT_MOD_LINEAR) {
+        attribs[ai++] = EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT; attribs[ai++] = (EGLint)(drm.modifier & 0xFFFFFFFF);
+        attribs[ai++] = EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT; attribs[ai++] = (EGLint)(drm.modifier >> 32);
+        attribs[ai++] = EGL_DMA_BUF_PLANE1_MODIFIER_LO_EXT; attribs[ai++] = (EGLint)(drm.modifier & 0xFFFFFFFF);
+        attribs[ai++] = EGL_DMA_BUF_PLANE1_MODIFIER_HI_EXT; attribs[ai++] = (EGLint)(drm.modifier >> 32);
+    }
+    attribs[ai++] = EGL_NONE;
+
+    EGLImageKHR img = pfn_eglCreateImageKHR(
+        display, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, nullptr, attribs);
+    if (img == EGL_NO_IMAGE_KHR) {
+        fprintf(stderr, "[OSD] eglCreateImageKHR failed: 0x%x\n", eglGetError());
+        return false;
+    }
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_EXTERNAL_OES, tex);
+    pfn_glEGLImageTargetTexture2DOES(GL_TEXTURE_EXTERNAL_OES, img);
+    pfn_eglDestroyImageKHR(display, img);
+    // drm.ref drops here — EGL holds its own GEM import reference
+    return true;
 }
 
 void OSD::draw_bg_video(float fw, float fh, const float* mvp, float warp_t) {

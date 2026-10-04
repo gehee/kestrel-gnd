@@ -20,6 +20,8 @@
 #include "utils/math_utils.hpp"
 #include "msp_osd.hpp"
 #include "bg_video.hpp"
+#include "gallery.hpp"
+#include "gallery_stats.hpp"
 
 struct DecodedUnit;
 class DVR;
@@ -69,6 +71,12 @@ typedef struct {
     float pace_ms;    // Time since last frame (frame interval)
     float video_mbps; // Video bitrate at this frame
     float rf_mbps;    // RF link bitrate (data + parity) at this frame
+    // For the stats screen:
+    uint64_t t_us = 0;   // when this entry was made (CLOCK_MONOTONIC)
+    uint32_t lost = 0;   // link packets lost so far
+    int8_t   snr = 0;    // link SNR, dB
+    uint8_t  mcs = 0;    // receive MCS
+    uint8_t  key = 0;    // this picture was a keyframe
 } LatencyFrame;
 
 #include "utils/latency_ring.hpp"
@@ -126,14 +134,9 @@ struct osd_vars {
 
 
 
-// Demo mode from the command line (--demo). The flag wins over the stored
-// setting for the life of the process and is never written back.
-void osd_set_demo_mode(int on);
 // Open the settings menu at startup (--menu). See the member for why.
 void osd_set_menu_at_start(bool on);
 void osd_set_menu_start_tab(int t);
-bool osd_demo_mode_overridden();
-int  osd_demo_mode_override();
 
 class OSD {
     private:
@@ -240,6 +243,102 @@ class OSD {
 
         void draw_bg_png(float fw, float fh, const float* mvp, float warp_t = 0.0f);
         void draw_bg_video(float fw, float fh, const float* mvp, float warp_t);
+        // Import a player's newest decoded picture (an NV12 DMA-BUF) as the
+        // external texture `tex`, without a copy. False when there is no new one.
+        bool import_drm_frame(BgVideoPlayer* player, GLuint tex);
+
+        // --- Gallery (gallery.hpp has the logic, osd_gallery.cpp draws it) ---
+        // Back on the live picture opens it; while it is open it draws the
+        // whole frame in place of the HUD, and the key handler hands it the keys.
+        Gallery gallery_;
+        // The recording being played: its own decoder, its latest picture as
+        // an external texture. Opened and closed on the render thread.
+        std::unique_ptr<BgVideoPlayer> clip_player_;
+        std::string clip_playing_;
+        GLuint      clip_ext_tex_ = 0;
+        // The live picture again, as a texture (the stats screen shows it next to the charts
+        // while the video plane shows it in the strip's live tile).
+        bool        live_ext_have_ = false;
+        uint64_t    live_ext_pts_ = 0;
+        uint32_t    live_ext_epoch_ = 0;
+        bool        import_live_picture();
+        bool        clip_have_frame_ = false;
+        // Thumbnails on the GPU, loaded as the strip scrolls to them.
+        struct GalleryThumb {
+            GLuint   tex = 0;
+            int      w = 0, h = 0;
+            uint64_t used = 0;          // frame counter, for evicting the stalest
+            uint64_t next_try_us = 0;   // a thumbnail still being made is looked for again later
+        };
+        std::map<std::string, GalleryThumb> gallery_thumbs_;
+        uint64_t gallery_frame_ = 0;
+        // Where the live picture's tile is in the frame being drawn; handed to
+        // the display with the frame (DrmDevice::stage_tile).
+        DrmDevice::Tile frame_tile_;
+        // Back on the live picture does not open the gallery at once: the next
+        // HUD frame is drawn as usual and copied to gallery_snap_tex_ (what is on
+        // the screen, whatever it is - the HUD over the picture, or the idle
+        // screen), and the gallery opens after it. That copy is what shrinks into
+        // the live tile with the picture, so nothing on the screen changes at the
+        // moment of the press.
+        std::atomic<bool> gallery_capture_{false};
+        // While the gallery animates, frames are started right after a display flip lands,
+        // not on a free-running timer: an OSD frame reaches the screen on the next video flip
+        // (page_flip carries it), so a frame started at a fixed point in the flip cycle waits
+        // a fixed time, where a timer's frames waited 0-17 ms at random - a pixel of jitter
+        // on anything that moves steadily.
+        std::atomic<bool> phase_lock_{false};
+        bool flip_tick_ = false;                // a flip landed (under osd_mutex)
+        void on_flip();
+        std::atomic<uint64_t> latency_frames_total_{0};   // pictures rendered, ever (KESTREL_PROF)
+        std::atomic<uint64_t> last_flip_seen_us_{0};
+        int since_flip_hist_[7] = {0, 0, 0, 0, 0, 0, 0};   // KESTREL_PROF
+        GLuint            gallery_snap_tex_ = 0;
+        bool              gallery_snap_valid_ = false;
+        GLuint            gallery_snap_shader_ = 0;   // a plain premultiplied RGBA texture draw
+        // The stats screen's numbers: rebuilt from the latency history and the flip log
+        // about ten times a second while the stats tile or screen is showing; the
+        // figures printed from it (stats_shown_) are refreshed twice a second, so the
+        // text does not change - and is not re-rendered - every frame.
+        StatsView stats_view_{}, stats_shown_{};
+        uint64_t  stats_view_us_ = 0, stats_shown_us_ = 0;
+        int       stats_view_window_ = -1;
+        void stats_refresh(int window_idx, uint64_t now_us);
+    void stats_prof(uint64_t now_us);
+    // The history the stats screen works from, kept here and only topped up with what is new
+    // (stats_history_update): up to the longest window, oldest first, from index *_head_ on.
+    std::vector<StatsFrame> stats_frames_;
+    std::vector<StatsFlip>  stats_flips_;
+    size_t   stats_frames_head_ = 0, stats_flips_head_ = 0;
+    uint64_t stats_frames_t_ = 0, stats_flips_t_ = 0;       // the newest entry held
+    void stats_history_update(uint64_t now_us);
+    float stats_ymax_ = 0, stats_lmax_ = 0;     // the chart scales, eased
+    float stats_p50_ = 0, stats_p99_ = 0;       // the p50 / p99 lines, eased
+    // The stats screen's slow layer, kept as a texture (see render_gallery), and the flat
+    // per-vertex-coloured program the charts are drawn with.
+    struct StatsLayerKey {
+        int win = -1, ymax_q = 0, lmax_q = 0, W = 0, H = 0, ox_q = 0, oy_q = 0, m_q = 0, theme_q = 0;
+        uint64_t shown_us = 0;
+        bool operator==(const StatsLayerKey& o) const {
+            return win == o.win && ymax_q == o.ymax_q && lmax_q == o.lmax_q && W == o.W && H == o.H &&
+                   ox_q == o.ox_q && oy_q == o.oy_q && m_q == o.m_q && theme_q == o.theme_q && shown_us == o.shown_us;
+        }
+    };
+    StatsLayerKey stats_layer_key_{};
+    bool   stats_layer_valid_ = false;
+    GLuint stats_fbo_ = 0, stats_layer_tex_ = 0;
+    int    stats_layer_w_ = 0, stats_layer_h_ = 0;
+    GLuint gallery_flat_shader_ = 0, gallery_flat_vbo_ = 0;
+    GLint  flat_mvp_ = -1, flat_pos_ = -1, flat_col_ = -1;
+    uint64_t stats_clock_us_ = 0;               // the chart's time base (see render_gallery)
+    double stats_dt_us_ = 16667.0;
+    int gallery_dt_hist_[6] = {0, 0, 0, 0, 0, 0};   // KESTREL_PROF: frame intervals
+        void gallery_capture_frame(int screen_w, int screen_h);
+        void gallery_prewarm();
+        bool render_gallery(int screen_w, int screen_h);
+        void service_clip_player(const Gallery::Snapshot& s);
+        GLuint gallery_thumb(const std::string& name, int& w, int& h, bool may_load, bool& loaded);
+        void present_gl_frame();
 
         static const int KEY_UP = 0x101;
         static const int KEY_DOWN = 0x102;
@@ -312,12 +411,6 @@ class OSD {
         // reading means nothing until you know the cell count.
         int  volt_mode = 0;
         int  menu_volt_mode = 0;
-        // Demo mode: drive the HUD from a simulated flight instead of the
-        // radio. Everything the canopy draws gets a plausible, moving value,
-        // so the layout can be judged - and the arm and link animations
-        // watched - without an aircraft on the bench.
-        int  demo_mode = 0;
-        int  menu_demo_mode = 0;
         int  menu_wifi_ap = 0;     // SYSTEM > WiFi AP (fpvos-wifi)
         // SYSTEM > Screen Mode: 0 is Auto, then the connector's modes as
         // screen_modes() lists them. -1 until first read from screen_mode.
@@ -474,7 +567,6 @@ class OSD {
         bool show_latency_graph = false; // Default OFF
         bool show_all_adapters = false; // Default OFF
         bool bg_video_enabled = true;   // Default ON — use background.mp4
-        bool show_drone_model = true;   // Default ON
         // Reactive HUD intensity: 0=OFF 1=SMALL 2=MEDIUM 3=EXTREME.
         // MEDIUM is the tuned default (see kBankGain/kMaxOffset in msp_osd).
         int  hud_reactivity = 2;
@@ -503,8 +595,8 @@ class OSD {
         enum HudRow {
             kHudHdrOverlay = 0, kHudRowStyle, kHudRowBfOsd,
             kHudHdrReadouts, kHudRowVoltage, kHudRowGraph, kHudRowCalib,
-            kHudHdrScreen, kHudRowClock, kHudRowClockFmt,
-            kHudHdrAttitude, kHudRowDroneModel, kHudRowDynamic
+            kHudHdrScreen, kHudRowClock,
+            kHudHdrAttitude, kHudRowDynamic
         };
         // A row's help line, which for a few rows depends on the value it is
         // showing; everything else gets its MenuItem::help back.
@@ -521,7 +613,6 @@ class OSD {
         void menu_plain_value(int tab, int i, char* out, size_t cap);
         bool menu_show_all_adapters = false;
         bool menu_bg_video = true;
-        bool menu_show_drone_model = true;
         int  menu_hud_reactivity = 2;
         // DVR Source row: 0 FPV, 1 SCREEN at 30 captures/s, 2 SCREEN at 60.
         int  menu_dvr_source = 0;
@@ -727,19 +818,6 @@ class OSD {
             float vrx_volts  = 0.0f;
         };
         void draw_canopy_hud(const CanopyIn& in);
-        // Overwrite the inputs with a simulated flight. Applied after the real
-        // ones are gathered, so there is exactly one place where the HUD stops
-        // showing measurements - and no demo value can leak into a live one.
-        void demo_fill(CanopyIn& in);
-        // Whether the simulated link is up, for callers that run before
-        // demo_fill has filled the canopy struct.
-        bool demo_link_up();
-        // Whether the demo has connected at least once, ever - a one-way
-        // latch like the real canopy_link_up_, for the video background draw
-        // (see render_gl): it has no decoder frames to advance VideoState
-        // past BACKGROUND, so without this a simulated IDLE_2 would show the
-        // same idle bench loop as an aircraft that has never connected.
-        bool demo_ever_connected();
         // A run of tapering blocks, the canopy's only gauge form. `edge_left`
         // puts the tall end at the left (screen) edge and fills rightwards;
         // false mirrors it. `filled` is 0..1 of the run.
@@ -806,6 +884,9 @@ class OSD {
           void set_slices_received(bool val);
           bool get_slices_received();
           void update_link_stats(packets_stats v);
+        // The Back button (and Esc on a keyboard). On the live picture it opens
+        // the gallery; with the menu open it closes it, as M does.
+        static constexpr int kKeyBack = 0x105;
         void handle_key(int key);
         void set_ui_scale(float v);
         void set_decoder_name(std::string name) { decoder_name = name; }

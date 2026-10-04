@@ -139,6 +139,18 @@ private:
     uint64_t cadence_last_flip_us = 0;
     double   cadence_gap_ewma_us = 0.0;   // expected frame period (EWMA of normal gaps)
     uint32_t cadence_stutters = 0;        // cumulative gaps > max(2.5x expected, 20ms)
+public:
+    struct FlipSample { uint64_t t_us; uint32_t gap_us; };
+private:
+    // Every flip's completion time and the gap since the one before, the last
+    // ~4 minutes of them (stats screen). Under stats_mutex.
+    static const int FLIP_LOG = 32768;
+    std::vector<FlipSample> flip_log_ = std::vector<FlipSample>(FLIP_LOG);
+    int flip_log_head_ = 0, flip_log_n_ = 0;
+    void push_flip_log(uint64_t t_us, uint32_t gap_us) {
+        flip_log_[(flip_log_head_ + flip_log_n_) % FLIP_LOG] = { t_us, gap_us };
+        if (flip_log_n_ < FLIP_LOG) flip_log_n_++; else flip_log_head_ = (flip_log_head_ + 1) % FLIP_LOG;
+    }
 
 public:
     EGLConfig egl_config;
@@ -152,6 +164,33 @@ public:
     // destination in page_flip, and the OSD's scissor - so the overlay's clip
     // edge lands on exactly the pixels the hardware-scaled video ends on.
     void picture_rect(int base_w, int base_h, int &x, int &y, int &w, int &h) const;
+
+    // The gallery shrinks the live picture into a tile on its strip: where the
+    // video plane goes instead of the picture rectangle, in screen pixels from
+    // the top left, and it may run off the screen (the strip scrolls it past
+    // the edge) - the plane is cut at the edge and the picture cut with it, so
+    // what shows is not squeezed. The OSD stages one per frame, and it takes
+    // effect with that frame's OSD buffer (set_osd_fb), so the hole the OSD
+    // leaves for the picture and the picture's rectangle change together.
+    struct Tile { bool active = false; int x = 0, y = 0, w = 0, h = 0; };
+    void stage_tile(const Tile& t);
+    // The part of a tile that is on a sw x sh screen, even-aligned as the plane
+    // needs it; false if none of it is. The OSD leaves exactly this as the hole
+    // the picture shows through, so it has to be the plane's own arithmetic.
+    static bool tile_on_screen(const Tile& t, int sw, int sh, int &x0, int &y0, int &x1, int &y1);
+    static Tile even_tile(const Tile& t);
+    // How many OSD frames a video flip picked up, and how many were replaced
+    // before one did (profiling: a replaced frame is a step of an animation the
+    // screen never shows).
+    std::atomic<uint64_t> osd_consumed_{0}, osd_superseded_{0};
+    // KESTREL_PROF: how long OSD frames waited between being rendered (set_osd_fb) and being
+    // committed - by a video flip that carried them, or by a commit of their own.
+    std::atomic<uint32_t> osd_age_hist_[6] = {};     // <5 <10 <20 <35 <60 more (ms)
+    uint64_t pending_osd_set_us_ = 0;
+    // Called on the event thread each time a flip has landed, once its bookkeeping is done.
+    // The OSD uses it to start an animation frame right after a flip (see OSD::run).
+    void (*flip_hook)(void*) = nullptr;
+    void* flip_hook_ctx = nullptr;
     void cleanup();
     void cond_signal();
     // video
@@ -173,6 +212,17 @@ public:
     // Let go of every decoded picture held here and in the tap. The decoder,
     // before it replaces its buffers (see ScreenTap::drop_pictures).
     void drop_screen_pictures();
+    // The picture the display is showing (null before the first), for drawing a second copy of it.
+    std::shared_ptr<DecodedUnit> shown_picture();
+    // The flips since `since_us`, oldest first.
+    void copy_flip_log(uint64_t since_us, std::vector<FlipSample>& out);
+    // Appends the flips newer than after_us to out, oldest first, looking only at those
+    // (the log is in time order, so it walks back from the newest).
+    void append_flip_log_after(uint64_t after_us, std::vector<FlipSample>& out);
+    // Whether a flip is a picture reaching the screen: true with vsync (Atomic
+    // mode). Without it the flips are probes, and their timing says nothing
+    // about smoothness. Set once by main().
+    bool flips_are_frames = false;
     // Block until the next vblank: its sequence number and time (CLOCK_MONOTONIC us).
     bool wait_vblank(uint32_t* seq, uint64_t* ts_us);
     // The refresh rate of the current mode, in Hz (rounded).
@@ -269,7 +319,15 @@ private:
     // the link is down is applied from the OSD side (see set_osd_fb).
     int last_video_fb_id_ = 0;
     int vrect_x_ = 0, vrect_y_ = 0, vrect_w_ = 0, vrect_h_ = 0;
+    int vsrc_x_ = 0, vsrc_y_ = 0, vsrc_w_ = 0, vsrc_h_ = 0;   // and the part of the picture in it
     void sync_frozen_video_rect();
+    // Where the video plane goes, and which part of the picture goes there.
+    // Destination in CRTC pixels; source in picture pixels.
+    void video_geometry(const Tile& tile, int &dx, int &dy, int &dw, int &dh,
+                        int &sx, int &sy, int &sw, int &sh) const;
+    // Under osd_mutex: staged by the OSD, the one that goes with the pending
+    // OSD buffer, and the one that goes with the buffer on screen.
+    Tile staged_tile_, pending_tile_, current_tile_;
 };
 
 #endif // DRM_DEVICE_H  // End of the header guard

@@ -95,7 +95,7 @@ class MspOsd {
         // MSP packet - the FC resends an unchanged screen continuously.
         std::atomic<uint32_t> content_ver_{0};
         bool hud_moving_ = false;   // spring not yet settled (update_physics)
-        std::atomic<bool> motion_wanted_{false};   // reactive HUD / drone model on: attitude is news
+        std::atomic<bool> motion_wanted_{false};   // reactive HUD on: attitude is news
 
         // Raw IMU accelerometer readings (typically 2048 = 1G). Only populated
         // if the air unit ever relays MSP_RAW_IMU (102), which this one does
@@ -169,8 +169,8 @@ class MspOsd {
 
     public:
         // See content_ver_: changes whenever the HUD has something new to show.
-        // Whether attitude changes are worth a redraw (reactive HUD or the
-        // drone model is showing them). Set by the OSD every frame.
+        // Whether attitude changes are worth a redraw (the reactive HUD is
+        // showing them). Set by the OSD every frame.
         void set_motion_wanted(bool on) { motion_wanted_ = on; }
         uint32_t content_version() const { return content_ver_.load(std::memory_order_relaxed); }
         MspOsd();
@@ -178,7 +178,6 @@ class MspOsd {
         void parse_bytes(const uint8_t* p, size_t size);
         
         void handle_msp_frame(uint16_t function, const uint8_t* payload, size_t size);
-        void get_raw_imu(int16_t& ax, int16_t& ay, int16_t& az);
         BfTelem get_telem();
         
         void draw(math::Mat4& projection, math::Mat4& view, std::function<void(float x, float y, const std::vector<uint16_t>& span)> draw_span_cb);

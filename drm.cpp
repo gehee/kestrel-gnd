@@ -207,6 +207,7 @@ void DrmDevice::handle_events() {
             // a gap well past it is a stutter the viewer can perceive.
             if (self->cadence_last_flip_us > 0 && completion_ts > self->cadence_last_flip_us) {
                 uint32_t gap = (uint32_t)(completion_ts - self->cadence_last_flip_us);
+                self->push_flip_log(completion_ts, gap);
                 self->cadence_gaps_us[self->cadence_idx] = gap;
                 self->cadence_idx = (self->cadence_idx + 1) % CADENCE_RING;
                 if (self->cadence_count < CADENCE_RING) self->cadence_count++;
@@ -233,6 +234,7 @@ void DrmDevice::handle_events() {
             pthread_mutex_lock(&self->flip_mutex);
             pthread_cond_broadcast(&self->flip_cond);
             pthread_mutex_unlock(&self->flip_mutex);
+            if (self->flip_hook) self->flip_hook(self->flip_hook_ctx);
         }
     };
 
@@ -364,8 +366,11 @@ void DrmDevice::init_gl() {
 
 void DrmDevice::set_osd_fb(uint32_t fb_id) {
     pthread_mutex_lock(&osd_mutex);
+    if (pending_osd_fb_id > 0) osd_superseded_++;
     pending_osd_fb_id = fb_id;
     pending_osd_gen_ = ++osd_gen_;
+    pending_tile_ = staged_tile_;
+    if (prof::enabled()) pending_osd_set_us_ = get_time_us();
     pthread_mutex_unlock(&osd_mutex);
 
     // While video is flowing, the next video flip carries this fb (page_flip
@@ -401,8 +406,13 @@ void DrmDevice::set_osd_fb(uint32_t fb_id) {
         return;
     }
     prof::count(prof::kCountOsdCommit);
+    if (prof::enabled()) {
+        const uint64_t age = get_time_us() - pending_osd_set_us_;
+        osd_age_hist_[age < 5000 ? 0 : age < 10000 ? 1 : age < 20000 ? 2 : age < 35000 ? 3 : age < 60000 ? 4 : 5]++;
+    }
     current_osd_fb_id = pending_osd_fb_id;
     current_osd_gen_ = pending_osd_gen_;
+    current_tile_ = pending_tile_;
     pending_osd_fb_id = 0;
     uint32_t commit_fb_id = current_osd_fb_id;
     uint64_t commit_gen = current_osd_gen_;
@@ -491,13 +501,20 @@ int DrmDevice::refresh_hz() const {
 // state is sticky, so the FB and the source stay as page_flip left them.
 void DrmDevice::sync_frozen_video_rect() {
     if (last_video_fb_id_ <= 0) return;
-    int vx, vy, vw, vh;
-    picture_rect(video_fb_width, video_fb_height, vx, vy, vw, vh);
-    vx += video_fb_x; vy += video_fb_y;
-    if (vx == vrect_x_ && vy == vrect_y_ && vw == vrect_w_ && vh == vrect_h_) return;
+    pthread_mutex_lock(&osd_mutex);
+    const Tile tile = current_tile_;
+    pthread_mutex_unlock(&osd_mutex);
+    int vx, vy, vw, vh, sx, sy, sw, sh;
+    video_geometry(tile, vx, vy, vw, vh, sx, sy, sw, sh);
+    if (vx == vrect_x_ && vy == vrect_y_ && vw == vrect_w_ && vh == vrect_h_ &&
+        sx == vsrc_x_ && sy == vsrc_y_ && sw == vsrc_w_ && sh == vsrc_h_) return;
 
     drmModeAtomicReq *req = drmModeAtomicAlloc();
     if (!req) return;
+    set_drm_object_property(req, &output_list->video_plane, "SRC_X", (uint64_t)sx << 16);
+    set_drm_object_property(req, &output_list->video_plane, "SRC_Y", (uint64_t)sy << 16);
+    set_drm_object_property(req, &output_list->video_plane, "SRC_W", (uint64_t)sw << 16);
+    set_drm_object_property(req, &output_list->video_plane, "SRC_H", (uint64_t)sh << 16);
     set_drm_object_property(req, &output_list->video_plane, "CRTC_X", vx);
     set_drm_object_property(req, &output_list->video_plane, "CRTC_Y", vy);
     set_drm_object_property(req, &output_list->video_plane, "CRTC_W", vw);
@@ -508,6 +525,7 @@ void DrmDevice::sync_frozen_video_rect() {
         {
             std::lock_guard<std::mutex> lk(shown_m_);
             vrect_x_ = vx; vrect_y_ = vy; vrect_w_ = vw; vrect_h_ = vh;
+            vsrc_x_ = sx; vsrc_y_ = sy; vsrc_w_ = sw; vsrc_h_ = sh;
         }
         if (tap.recording()) {
             uint64_t vb;
@@ -566,6 +584,11 @@ void DrmDevice::start_screen_tap() {
     uint64_t vb;
     if (!last_vblank(&vb, &seed.seq)) seed.seq = 0;
     tap.set_recording(true, &seed);
+}
+
+std::shared_ptr<DecodedUnit> DrmDevice::shown_picture() {
+    std::lock_guard<std::mutex> lk(shown_m_);
+    return last_shown_;
 }
 
 void DrmDevice::drop_screen_pictures() {
@@ -673,6 +696,31 @@ bool DrmDevice::page_flip(int fb_id, uint64_t recv_ts, uint64_t dec_start_ts, ui
     // Enable VRR if supported and not disabled
     set_drm_object_property(output_list->video_request, &output_list->crtc, "VRR_ENABLED", enable_vrr ? 1 : 0);
 
+    // Bundle OSD update. First, so that the video plane's rectangle below is
+    // the one that goes with the OSD buffer this flip carries (the gallery's
+    // tile moves with its OSD frame).
+    pthread_mutex_lock(&osd_mutex);
+    if (pending_osd_fb_id > 0) {
+        current_osd_fb_id = pending_osd_fb_id;
+        current_osd_gen_ = pending_osd_gen_;
+        current_tile_ = pending_tile_;
+        pending_osd_fb_id = 0;
+        osd_consumed_++;
+        if (prof::enabled()) {
+            const uint64_t age = get_time_us() - pending_osd_set_us_;
+            osd_age_hist_[age < 5000 ? 0 : age < 10000 ? 1 : age < 20000 ? 2 : age < 35000 ? 3 : age < 60000 ? 4 : 5]++;
+        }
+    }
+    uint32_t osd_fb = current_osd_fb_id;
+    uint64_t osd_gen = current_osd_gen_;
+    const Tile tile = current_tile_;
+    // Mark the fb this flip carries BEFORE committing: the flip's event can be
+    // handled on the event thread before this one runs again, and it must
+    // find the fb there to move it on screen. Undone below if the commit fails.
+    uint32_t prev_inflight = inflight_osd_fb_id;
+    if (!blocking_flip) inflight_osd_fb_id = osd_fb;
+    pthread_mutex_unlock(&osd_mutex);
+
     // Destination rectangle for the video plane, shrunk about the screen
     // centre by picture_scale_pct. At 100 these are exactly the full-screen
     // rectangles this code always used, so the default path is untouched.
@@ -684,38 +732,21 @@ bool DrmDevice::page_flip(int fb_id, uint64_t recv_ts, uint64_t dec_start_ts, ui
     // debugfs - video shrank, OSD stayed 1920x1080, nothing in dmesg). The
     // OSD scissors itself to the same rectangle instead, so the two stay in
     // step; picture_rect() is the one place that rectangle is computed.
-    int vx, vy, vw, vh;
-    picture_rect(video_fb_width, video_fb_height, vx, vy, vw, vh);
-    vx += video_fb_x; vy += video_fb_y;
+    int vx, vy, vw, vh, sx, sy, sw, sh;
+    video_geometry(tile, vx, vy, vw, vh, sx, sy, sw, sh);
 
     // Always set video plane properties
     set_drm_object_property(output_list->video_request, &output_list->video_plane, "FB_ID", fb_id);
     set_drm_object_property(output_list->video_request, &output_list->video_plane, "CRTC_ID", output_list->crtc.id);
-    set_drm_object_property(output_list->video_request, &output_list->video_plane, "SRC_X", 0);
-    set_drm_object_property(output_list->video_request, &output_list->video_plane, "SRC_Y", 0);
-    set_drm_object_property(output_list->video_request, &output_list->video_plane, "SRC_W", video_frm_width << 16);
-    set_drm_object_property(output_list->video_request, &output_list->video_plane, "SRC_H", video_frm_height << 16);
+    set_drm_object_property(output_list->video_request, &output_list->video_plane, "SRC_X", (uint64_t)sx << 16);
+    set_drm_object_property(output_list->video_request, &output_list->video_plane, "SRC_Y", (uint64_t)sy << 16);
+    set_drm_object_property(output_list->video_request, &output_list->video_plane, "SRC_W", (uint64_t)sw << 16);
+    set_drm_object_property(output_list->video_request, &output_list->video_plane, "SRC_H", (uint64_t)sh << 16);
     set_drm_object_property(output_list->video_request, &output_list->video_plane, "CRTC_X", vx);
     set_drm_object_property(output_list->video_request, &output_list->video_plane, "CRTC_Y", vy);
     set_drm_object_property(output_list->video_request, &output_list->video_plane, "CRTC_W", vw);
     set_drm_object_property(output_list->video_request, &output_list->video_plane, "CRTC_H", vh);
     set_drm_object_property(output_list->video_request, &output_list->video_plane, "zpos", video_zpos);
-
-    // Bundle OSD update
-    pthread_mutex_lock(&osd_mutex);
-    if (pending_osd_fb_id > 0) {
-        current_osd_fb_id = pending_osd_fb_id;
-        current_osd_gen_ = pending_osd_gen_;
-        pending_osd_fb_id = 0;
-    }
-    uint32_t osd_fb = current_osd_fb_id;
-    uint64_t osd_gen = current_osd_gen_;
-    // Mark the fb this flip carries BEFORE committing: the flip's event can be
-    // handled on the event thread before this one runs again, and it must
-    // find the fb there to move it on screen. Undone below if the commit fails.
-    uint32_t prev_inflight = inflight_osd_fb_id;
-    if (!blocking_flip) inflight_osd_fb_id = osd_fb;
-    pthread_mutex_unlock(&osd_mutex);
 
     if (osd_fb > 0) {
         set_drm_object_property(output_list->video_request, &output_list->osd_plane, "FB_ID", osd_fb);
@@ -790,6 +821,7 @@ bool DrmDevice::page_flip(int fb_id, uint64_t recv_ts, uint64_t dec_start_ts, ui
         // counter and the expected-period EWMA stay meaningful in this mode.
         if (cadence_last_flip_us > 0 && completion_ts > cadence_last_flip_us) {
             uint32_t gap = (uint32_t)(completion_ts - cadence_last_flip_us);
+            push_flip_log(completion_ts, gap);
             cadence_gaps_us[cadence_idx] = gap;
             cadence_idx = (cadence_idx + 1) % CADENCE_RING;
             if (cadence_count < CADENCE_RING) cadence_count++;
@@ -807,6 +839,19 @@ bool DrmDevice::page_flip(int fb_id, uint64_t recv_ts, uint64_t dec_start_ts, ui
     }
     if (ret < 0) {
         printf("drmModeAtomicCommit ret <0\n ");
+        if (tile.active) {
+            // A tile the plane would not take: say which, and fall back to the
+            // picture rectangle for the next flips - left as it was, every
+            // video flip (60-100 a second) would be refused the same way.
+            static int logged = 0;
+            if (++logged <= 8)
+                printf("gallery tile refused: tile %d,%d %dx%d -> dst %d,%d %dx%d src %d,%d %dx%d (picture %ux%u)\n",
+                       tile.x, tile.y, tile.w, tile.h, vx, vy, vw, vh, sx, sy, sw, sh,
+                       video_frm_width, video_frm_height);
+            pthread_mutex_lock(&osd_mutex);
+            current_tile_ = Tile();
+            pthread_mutex_unlock(&osd_mutex);
+        }
         flip_pending = false; // Commit failed, no event will be sent
         if (errno == EBUSY) prof::count(prof::kCountFlipBusy);
         if (errno != EBUSY) {
@@ -818,6 +863,7 @@ bool DrmDevice::page_flip(int fb_id, uint64_t recv_ts, uint64_t dec_start_ts, ui
     {
         std::lock_guard<std::mutex> lk(shown_m_);
         vrect_x_ = vx; vrect_y_ = vy; vrect_w_ = vw; vrect_h_ = vh;
+        vsrc_x_ = sx; vsrc_y_ = sy; vsrc_w_ = sw; vsrc_h_ = sh;
     }
 
     // Track flip submission timing (AFTER flip has been submitted)
@@ -850,6 +896,26 @@ CompletedStats DrmDevice::get_latest_stats() {
     latest_stats.available = false; // Consume
     pthread_mutex_unlock(&stats_mutex);
     return s;
+}
+
+void DrmDevice::append_flip_log_after(uint64_t after_us, std::vector<FlipSample>& out) {
+    pthread_mutex_lock(&stats_mutex);
+    int i = flip_log_n_;
+    while (i > 0 && flip_log_[(flip_log_head_ + i - 1) % FLIP_LOG].t_us > after_us) i--;
+    out.reserve(out.size() + (size_t)(flip_log_n_ - i));
+    for (int j = i; j < flip_log_n_; j++) out.push_back(flip_log_[(flip_log_head_ + j) % FLIP_LOG]);
+    pthread_mutex_unlock(&stats_mutex);
+}
+
+void DrmDevice::copy_flip_log(uint64_t since_us, std::vector<FlipSample>& out) {
+    out.clear();
+    pthread_mutex_lock(&stats_mutex);
+    out.reserve((size_t)flip_log_n_);
+    for (int i = 0; i < flip_log_n_; i++) {
+        const FlipSample& f = flip_log_[(flip_log_head_ + i) % FLIP_LOG];
+        if (f.t_us >= since_us) out.push_back(f);
+    }
+    pthread_mutex_unlock(&stats_mutex);
 }
 
 RenderCadence DrmDevice::get_render_cadence() {
@@ -895,6 +961,61 @@ void DrmDevice::picture_rect(int base_w, int base_h, int &x, int &y, int &w, int
     h = (base_h * picture_scale_pct / 100) & ~1;
     x = ((base_w - w) / 2) & ~1;
     y = ((base_h - h) / 2) & ~1;
+}
+
+void DrmDevice::stage_tile(const Tile& t) {
+    pthread_mutex_lock(&osd_mutex);
+    staged_tile_ = t;
+    pthread_mutex_unlock(&osd_mutex);
+}
+
+// The tile with its origin and size rounded down to even numbers. Everything
+// else (what part is on screen, which part of the picture goes in it) is worked
+// out from this one rectangle: measured from the unrounded edge, an odd origin
+// put the on-screen part's edge before the tile's own, a negative offset into the
+// picture, and the plane refused the whole commit.
+DrmDevice::Tile DrmDevice::even_tile(const Tile& t) {
+    Tile e = t;
+    e.x = t.x & ~1;
+    e.y = t.y & ~1;
+    e.w = t.w & ~1;
+    e.h = t.h & ~1;
+    return e;
+}
+
+bool DrmDevice::tile_on_screen(const Tile& t, int sw, int sh, int &x0, int &y0, int &x1, int &y1) {
+    if (!t.active || t.w < 2 || t.h < 2) return false;
+    const Tile e = even_tile(t);
+    x0 = std::max(e.x, 0);
+    y0 = std::max(e.y, 0);
+    x1 = std::min(e.x + e.w, sw & ~1);
+    y1 = std::min(e.y + e.h, sh & ~1);
+    return x1 - x0 >= 2 && y1 - y0 >= 2;
+}
+
+// The picture rectangle, or the gallery's tile. A tile the strip has scrolled
+// past the screen edge is cut there, and the part of the picture that falls in
+// the cut is dropped in the same proportion; both stay even (the plane is YUV).
+// A tile wholly off the screen leaves the plane where the picture would be: the
+// OSD covers the whole screen then, so it is not seen.
+void DrmDevice::video_geometry(const Tile& tile, int &dx, int &dy, int &dw, int &dh,
+                               int &sx, int &sy, int &sw, int &sh) const {
+    picture_rect(video_fb_width, video_fb_height, dx, dy, dw, dh);
+    dx += video_fb_x; dy += video_fb_y;
+    sx = 0; sy = 0; sw = (int)video_frm_width; sh = (int)video_frm_height;
+    if (!tile.active || tile.w < 2 || tile.h < 2 || sw < 2 || sh < 2) return;
+
+    int x0, y0, x1, y1;
+    if (!tile_on_screen(tile, output_list->mode.hdisplay, output_list->mode.vdisplay, x0, y0, x1, y1)) return;
+
+    const Tile e = even_tile(tile);
+    dx = x0; dy = y0; dw = x1 - x0; dh = y1 - y0;
+    sx = (int)((int64_t)(x0 - e.x) * video_frm_width / e.w) & ~1;
+    sy = (int)((int64_t)(y0 - e.y) * video_frm_height / e.h) & ~1;
+    sw = (int)((int64_t)(x1 - x0) * video_frm_width / e.w) & ~1;
+    sh = (int)((int64_t)(y1 - y0) * video_frm_height / e.h) & ~1;
+    sw = std::max(2, std::min(sw, (int)video_frm_width - sx));
+    sh = std::max(2, std::min(sh, (int)video_frm_height - sy));
 }
 
 void DrmDevice::perform_modeset_video(int fb_id) {

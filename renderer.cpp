@@ -969,7 +969,8 @@ void Renderer::update_stats(DecodedUnit *du, uint64_t display_start_ts) {
                 .net_ms = (float)tx_proc / 1000.0f,       // Network transport!
                 .reassemble_ms = (float)proc_lat / 1000.0f, // Ground reassembly!
                 .dec_ms = (float)dec_lat / 1000.0f,                   // Pure hardware decode!
-                .disp_ms = (float)disp_lat / 1000.0f
+                .disp_ms = (float)disp_lat / 1000.0f,
+                .key = (uint8_t)(du->is_keyframe ? 1 : 0)
             });
         }
 

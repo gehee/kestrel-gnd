@@ -5,6 +5,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <climits>
+#include <algorithm>
 #include <unistd.h>
 #include <time.h>
 #include <sys/resource.h>
@@ -30,8 +32,8 @@ extern "C" {
 // texture. The old ffmpeg software path only reached ~21fps at 1080p60.
 // ─────────────────────────────────────────────────────────────────────────────
 
-BgVideoPlayer::BgVideoPlayer(const char* path, std::shared_ptr<DrmDevice> dev)
-    : path_(path), dev_(std::move(dev)) {
+BgVideoPlayer::BgVideoPlayer(const char* path, std::shared_ptr<DrmDevice> dev, bool loop)
+    : path_(path), loop_(loop), dev_(std::move(dev)) {
     pthread_mutex_init(&mu_, nullptr);
 }
 
@@ -125,6 +127,49 @@ static void bg_feed_annexb(VdecRK* vdec, const uint8_t* buf, int size,
         bg_feed_nal(vdec, buf + nal_begin, size - nal_begin, pts, is_h265);
 }
 
+// A recording's pictures can have several slices (the air unit sends two). The
+// decoder wants a picture's slices as ONE packet with one timestamp: fed one
+// slice at a time, the second half of every picture came out wrong - the live
+// path (ar8030_source.cpp, "feed them as a single access unit") has the same
+// rule. So the picture's slice NALs are gathered into one packet; parameter sets
+// and the rest go in alone, where the decoder caches or drops them.
+static void bg_feed_access_unit(VdecRK* vdec, const uint8_t* buf, int size,
+                                int64_t pts, bool is_h265) {
+    std::vector<uint8_t> au;
+    uint8_t au_type = 0;
+    auto nal_header_type = [&](const uint8_t* nal, int len) -> int {
+        const int sc = (nal[2] == 1) ? 3 : 4;
+        if (len <= sc) return -1;
+        const uint8_t hdr = nal[sc];
+        return is_h265 ? ((hdr >> 1) & 0x3F) : (hdr & 0x1F);
+    };
+    auto take = [&](const uint8_t* nal, int len) {
+        if (len < 4) return;
+        const int type = nal_header_type(nal, len);
+        if (type < 0) return;
+        const bool vcl = is_h265 ? (type <= 31) : (type >= 1 && type <= 5);
+        if (!vcl) { bg_feed_nal(vdec, nal, len, pts, is_h265); return; }
+        if (au.empty()) au_type = (uint8_t)type;
+        au.insert(au.end(), nal, nal + len);
+    };
+    int i = 0, nal_begin = -1;
+    while (i + 3 <= size) {
+        const bool sc3 = (buf[i] == 0 && buf[i + 1] == 0 && buf[i + 2] == 1);
+        const bool sc4 = (i + 4 <= size && buf[i] == 0 && buf[i + 1] == 0 &&
+                          buf[i + 2] == 0 && buf[i + 3] == 1);
+        if (sc3 || sc4) {
+            if (nal_begin >= 0) take(buf + nal_begin, i - nal_begin);
+            nal_begin = i;
+            i += sc4 ? 4 : 3;
+        } else {
+            i++;
+        }
+    }
+    if (nal_begin >= 0 && nal_begin < size) take(buf + nal_begin, size - nal_begin);
+    if (!au.empty())
+        vdec->feed_packet_to_decoder(au.data(), (int)au.size(), pts, 0, au_type, 0, 0, false);
+}
+
 void BgVideoPlayer::decode_loop() {
     // Lower priority so the GL/OSD thread isn't starved during VPU init.
     setpriority(PRIO_PROCESS, 0, 5);
@@ -135,10 +180,10 @@ void BgVideoPlayer::decode_loop() {
         AVDictionary* fmt_opts = nullptr;
         av_dict_set_int(&fmt_opts, "probesize",       65536,  0);
         av_dict_set_int(&fmt_opts, "analyzeduration", 500000, 0);
-        int open_ret = avformat_open_input(&fmt, path_, nullptr, &fmt_opts);
+        int open_ret = avformat_open_input(&fmt, path_.c_str(), nullptr, &fmt_opts);
         av_dict_free(&fmt_opts);
         if (open_ret == 0) { avformat_find_stream_info(fmt, nullptr); break; }
-        fprintf(stderr, "[BgVideo] cannot open '%s', retrying in 2s\n", path_);
+        fprintf(stderr, "[BgVideo] cannot open '%s', retrying in 2s\n", path_.c_str());
         sleep(2);
     }
     if (!running_) { if (fmt) avformat_close_input(&fmt); return; }
@@ -147,7 +192,7 @@ void BgVideoPlayer::decode_loop() {
     for (unsigned i = 0; i < fmt->nb_streams; i++)
         if (fmt->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) { vs = (int)i; break; }
     if (vs < 0) {
-        fprintf(stderr, "[BgVideo] no video stream in '%s'\n", path_);
+        fprintf(stderr, "[BgVideo] no video stream in '%s'\n", path_.c_str());
         avformat_close_input(&fmt);
         return;
     }
@@ -198,6 +243,7 @@ void BgVideoPlayer::decode_loop() {
         bf.ref       = du->frame_ref;          // keeps the MPP buffer alive until import
         bf.valid     = true;
 
+        frames_++;
         pthread_mutex_lock(&mu_);
         w_ = bf.width; h_ = bf.height;
         back_drm_ = std::move(bf);
@@ -222,9 +268,59 @@ void BgVideoPlayer::decode_loop() {
     uint64_t fps_count = 0, fps_window_ns = 0;
 
     AVPacket* pkt = av_packet_alloc();
+
+    // Recording playback paces on the pictures' own times, from a point on the
+    // wall clock that is set again after anything that breaks the run: the
+    // start, a pause, a seek. A seek lands on a keyframe and plays from there;
+    // running the decoder on to the exact target as fast as it will take pictures
+    // overflowed its input and dropped some, and what followed was garbled
+    // until the next keyframe.
+    const AVRational stream_tb = fmt->streams[vs]->time_base;
+    auto picture_ms = [&](const AVPacket* p) -> int64_t {
+        const int64_t v = p->pts != AV_NOPTS_VALUE ? p->pts : p->dts;
+        return v == AV_NOPTS_VALUE ? -1 : av_rescale_q(v, stream_tb, AVRational{1, 1000});
+    };
+    uint64_t base_wall_ns = 0;
+    int64_t  base_pic_ms = 0;
+    bool     resync = true;
+    bool     show_one = false;    // a seek while paused still puts its picture on screen
+
     while (running_) {
+        if (!loop_) {
+            const int delta = seek_delta_ms_.exchange(0);
+            if (delta != 0) {
+                ended_ = false;
+                int64_t dur = duration_ms_ > 0 ? (int64_t)duration_ms_
+                              : (fmt->duration > 0 ? fmt->duration / 1000 : INT64_MAX);
+                int64_t want = delta <= INT_MIN / 2 ? 0 : (int64_t)pos_ms_ + delta;
+                if (want > dur - 500) want = dur - 500;   // leave something to play
+                if (want < 0) want = 0;
+                // Back to the keyframe at or before the target; forward to the
+                // one at or after it, so a short jump still moves when the
+                // keyframes are further apart than it. With none ahead, a
+                // forward jump has nowhere to go: playback carries on.
+                const int64_t ts = av_rescale_q(want, AVRational{1, 1000}, stream_tb);
+                if (delta > 0) {
+                    if (av_seek_frame(fmt, vs, ts, 0) < 0) continue;
+                } else if (av_seek_frame(fmt, vs, ts, AVSEEK_FLAG_BACKWARD) < 0) {
+                    av_seek_frame(fmt, vs, 0, AVSEEK_FLAG_BACKWARD);   // no index: from the start
+                }
+                av_bsf_flush(bsf_ctx);
+                pos_ms_ = (int)want;
+                ended_ = false;
+                resync = true;
+                show_one = true;
+            }
+            if ((paused_ || ended_) && !show_one) {   // the last picture stays on screen
+                usleep(10000);
+                resync = true;
+                continue;
+            }
+        }
+
         int ret = av_read_frame(fmt, pkt);
         if (ret == AVERROR_EOF) {
+            if (!loop_) { ended_ = true; continue; }   // idles above until a seek or stop()
             av_seek_frame(fmt, vs, 0, AVSEEK_FLAG_BACKWARD);
             av_bsf_flush(bsf_ctx);
             next_frame_ns = 0;
@@ -233,10 +329,27 @@ void BgVideoPlayer::decode_loop() {
         if (ret < 0) break;
         if (pkt->stream_index != vs) { av_packet_unref(pkt); continue; }
 
-        // Steady frame-rate pacing on the feed (robust to B-frame reordering).
         struct timespec now;
         clock_gettime(CLOCK_MONOTONIC, &now);
         uint64_t now_ns = (uint64_t)now.tv_sec * 1000000000ULL + now.tv_nsec;
+
+        if (!loop_) {
+            const int64_t pm = picture_ms(pkt);
+            if (pm >= 0) {
+                if (resync) { base_wall_ns = now_ns; base_pic_ms = pm; resync = false; }
+                const uint64_t due = base_wall_ns + (uint64_t)std::max<int64_t>(0, pm - base_pic_ms) * 1000000ULL;
+                if (due > now_ns && due - now_ns < 1000000000ULL) {
+                    struct timespec tgt;
+                    tgt.tv_sec  = due / 1000000000ULL;
+                    tgt.tv_nsec = due % 1000000000ULL;
+                    clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &tgt, nullptr);
+                } else if (now_ns > due + 200000000ULL) {
+                    resync = true;           // far behind: carry on from here, not in a burst
+                }
+                pos_ms_ = (int)pm;
+            }
+        } else {
+        // Steady frame-rate pacing on the feed (robust to B-frame reordering).
         if (next_frame_ns == 0) next_frame_ns = now_ns;
         next_frame_ns += frame_interval_ns;
         if (next_frame_ns > now_ns) {
@@ -247,19 +360,23 @@ void BgVideoPlayer::decode_loop() {
         } else {
             next_frame_ns = now_ns; // fell behind — resync, don't accumulate drift
         }
+        }
 
         // Convert this access unit to Annex-B and feed its NALs.
         if (av_bsf_send_packet(bsf_ctx, pkt) == 0) {
             AVPacket* out = av_packet_alloc();
             while (av_bsf_receive_packet(bsf_ctx, out) == 0) {
-                bg_feed_annexb(vdec_.get(), out->data, out->size, feed_pts++, is_h265);
+                if (loop_) bg_feed_annexb(vdec_.get(), out->data, out->size, feed_pts++, is_h265);
+                else       bg_feed_access_unit(vdec_.get(), out->data, out->size, feed_pts++, is_h265);
                 av_packet_unref(out);
             }
             av_packet_free(&out);
         }
         av_packet_unref(pkt);
+        show_one = false;
 
         // FPS meter every 5s (feed rate; the sink/display rate follows it).
+        if (!loop_) continue;
         if (fps_window_ns == 0) fps_window_ns = now_ns;
         fps_count++;
         uint64_t elapsed = now_ns - fps_window_ns;

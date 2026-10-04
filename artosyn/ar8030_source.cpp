@@ -1,3 +1,4 @@
+#include <algorithm>
 #include "ar8030_source.hpp"
 #include "../utils/ltrace.hpp"
 #include "bb_watchdog.hpp"
@@ -3069,6 +3070,34 @@ void Ar8030Source::flush_access_unit(uint64_t recv_us) {
         // slices share a timestamp. Non-zero means the picture straddled
         // reads - which is exactly the case worth seeing, since that is when
         // waiting for a complete picture actually costs latency.
+        if (prof::enabled() && au_last_recv_us >= au_recv) {
+            // KESTREL_PROF: what the reassembly stage is made of - the span from a picture's
+            // first slice to its last, against the picture's size, for key and other pictures.
+            static std::vector<float> span[2];
+            static double bytes[2] = {0, 0};
+            static uint64_t last_print = 0;
+            const bool key = (codec == VideoCodec::H265) ? (au_nal_type >= 19 && au_nal_type <= 21) : (au_nal_type == 5);
+            span[key ? 1 : 0].push_back((float)(au_last_recv_us - au_recv) / 1000.0f);
+            bytes[key ? 1 : 0] += (double)au_slices.size();
+            const uint64_t tnow = now_us();
+            if (tnow - last_print > 2000000) {
+                if (last_print) {
+                    for (int kk = 0; kk < 2; kk++) {
+                        auto& s = span[kk];
+                        if (s.empty()) continue;
+                        std::sort(s.begin(), s.end());
+                        int zero = 0;
+                        for (float x : s) if (x < 0.05f) zero++;
+                        printf("PROF AU %s: n=%zu span ms p50 %.1f p90 %.1f max %.1f, same-read %d, avg %.1f kB\n",
+                               kk ? "key  " : "other", s.size(), s[s.size() / 2], s[s.size() * 9 / 10], s.back(), zero,
+                               bytes[kk] / (double)s.size() / 1000.0);
+                    }
+                    fflush(stdout);
+                }
+                last_print = tnow;
+                span[0].clear(); span[1].clear(); bytes[0] = bytes[1] = 0;
+            }
+        }
         if (osd && au_last_recv_us >= au_recv) {
             float rsm_ms = (float)(au_last_recv_us - au_recv) / 1000.0f;
             if (rsm_ms < 200.0f) {   // ignore absurd outliers

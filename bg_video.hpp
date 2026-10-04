@@ -1,8 +1,10 @@
 #pragma once
 #include <stdint.h>
 #include <pthread.h>
+#include <atomic>
 #include <functional>
 #include <memory>
+#include <string>
 #include <GLES2/gl2.h>
 
 // Forward declarations only — including vdec_rk.hpp here would create an
@@ -41,7 +43,12 @@ public:
     // `dev` is needed to construct the VdecRK hardware decoder (DRM buffer
     // allocation). The decoder feeds frames back through a sink into the same
     // zero-copy DRM path (get_latest_drm_frame) the GL/OSD layer already uses.
-    BgVideoPlayer(const char* path, std::shared_ptr<DrmDevice> dev);
+    //
+    // `loop` is the idle background: it wraps round at the end and runs at its
+    // own frame rate. Without it the player is a recording player (the gallery):
+    // it plays once at the recording's own pace, can pause and seek, and stops
+    // on the last picture.
+    BgVideoPlayer(const char* path, std::shared_ptr<DrmDevice> dev, bool loop = true);
     ~BgVideoPlayer();
 
     void start();
@@ -63,11 +70,28 @@ public:
     int width()  const { return w_; }
     int height() const { return h_; }
 
+    // --- Recording playback (loop == false) ---
+    // The recording's length, when the caller knows it better than the container.
+    void set_duration_ms(int ms) { duration_ms_ = ms; }
+    void set_paused(bool p) { paused_ = p; }
+    // Jump by `delta_ms` from where playback is (negative: back). INT_MIN/2 and
+    // below is "to the start". Takes effect on the feed thread.
+    void seek_by_ms(int delta_ms) { seek_delta_ms_ += delta_ms; }
+    // The picture time of the last access unit fed to the decoder.
+    int  position_ms() const { return (int)pos_ms_; }
+    // The last picture has been fed (a seek clears it).
+    bool ended() const { return ended_; }
+    // A seek has been asked for and not taken up yet; `ended()` is stale until it is.
+    bool seek_pending() const { return seek_delta_ms_ != 0; }
+    // Decoded pictures delivered so far; 0 until the first one lands.
+    uint64_t frames() const { return frames_; }
+
 private:
     static void* thread_func(void* arg);
     void decode_loop();
 
-    const char* path_;
+    std::string path_;
+    const bool loop_;
     volatile bool running_ = false;   // true while the feed/demux loop runs
     volatile bool vdec_stop_ = false; // VdecRK::run_frame stop signal (true = stop)
     pthread_t thread_;                 // feed/demux thread (decode_loop)
@@ -92,4 +116,11 @@ private:
 
     bool new_frame_ = false;
     int w_ = 0, h_ = 0;
+
+    std::atomic<bool> paused_{false};
+    std::atomic<bool> ended_{false};
+    std::atomic<int>  seek_delta_ms_{0};
+    std::atomic<int>  pos_ms_{0};
+    std::atomic<int>  duration_ms_{0};
+    std::atomic<uint64_t> frames_{0};
 };

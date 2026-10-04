@@ -24,6 +24,10 @@ set(SOURCE_FILES
         queue/Queue.cpp
         queue/Msg.cpp
         dvr.cpp
+        dvr_library.cpp
+        gallery.cpp
+        gallery_stats.cpp
+        osd_gallery.cpp
         dvr_recover.cpp
         screen_tap.cpp
         rga_compositor.cpp

@@ -1,4 +1,3 @@
 decoder_name: rkmpp
 hud_reactivity: false
-show_drone_model: false
 show_latency_graph: false

@@ -1115,9 +1115,3 @@ void MspOsd::reset_hud_motion() {
     last_physics_update_us = 0;
 }
 
-void MspOsd::get_raw_imu(int16_t& ax, int16_t& ay, int16_t& az) {
-    std::lock_guard<std::mutex> lock(mtx);
-    ax = raw_acc_x;
-    ay = raw_acc_y;
-    az = raw_acc_z;
-}
