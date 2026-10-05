@@ -90,6 +90,7 @@ class Ar8030Source {
         // stores MHz (5/10/20/40, 255=auto) but whether the sky command carries
         // MHz or a bb_bandwidth_e gear is not established. -1 disables.
         static int  air_bw;
+        static int  max_kbps;   // ar8030_max_kbps: the video bitrate cap sent at link-up, 0 = none
         // Replay stock's startup SET sequence verbatim. See the .cpp.
         static int  replay_stock_rf;
         // BB socket port carrying the flight controller's MSP stream, or 0 to
@@ -155,7 +156,10 @@ class Ar8030Source {
                         // 3D DNR, sky cmd 0x1B. body[35] of the config carries it
                         // too, but that is the air's echo in its status report -
                         // writing it there is acked and ignored.
-                        CAM_3DNR };
+                        CAM_3DNR,
+                        // Ours: the cap on the air unit's video bitrate, kbps
+                        // (0 = none), sky cmd 0x40 - kestrel-air only. 0x30E.
+                        CAM_MAX_KBPS };
         static void request_setting(int field, int value);
 
         // RF controls. Which of these the baseband actually honours is decided
@@ -230,8 +234,11 @@ class Ar8030Source {
 
         // Annex-B accumulator: bb_socket_read() returns arbitrary chunks, so a
         // NAL can straddle reads. We keep a rolling buffer and only emit
-        // complete NALs (i.e. up to the *next* start code).
+        // complete NALs (i.e. up to the *next* start code) - or up to the end
+        // of the air unit's packet, when its header says where that is.
         std::vector<uint8_t> accum;
+        uint64_t accum_base_ = 0;        // stream offset of accum[0]
+        uint64_t pkt_end_pos_ = 0;       // stream offset just past the open packet's trailer, 0 = unknown
         int64_t frame_pts = 0;
         uint64_t frames_seen = 0;
         long long bytes_received = 0;
@@ -317,11 +324,23 @@ class Ar8030Source {
         int      au_max_addr = -1;           // largest slice start in the picture being built
         int      last_slice_addr = -1;       // learned start of a picture's last slice
         int      last_addr_cand = -1, last_addr_streak = 0;
+        // Streamed pictures (Vdec::stream_supported): each goes to the
+        // decoder with its first slice and takes the rest as they arrive.
+        // That needs the number of slices a picture has, learned with where
+        // the last one starts.
+        int      au_slice_count = 0;         // slices in the picture being built
+        int      last_slice_count = 0;       // learned slices per picture
+        int      last_count_cand = 0;
+        bool     au_streamed = false;        // the picture went to the decoder from its first slice
+        bool     au_stream_done = false;     // ...and its last slice followed
+        static bool stream_decode;           // KESTREL_STREAM_DECODE (default on)
+        uint64_t stream_pics = 0, stream_ended = 0, stream_refused = 0;
+        void     feed_au(const uint8_t *data, size_t len, int stream_slices);
         uint32_t late_slices = 0, late_window_pics = 0;
         uint64_t late_slices_total = 0;
         static constexpr int      kLearnRun = 32;
         static constexpr uint32_t kLateMax  = 4;
-        void     learn_last_slice(int max_addr);
+        void     learn_last_slice(int max_addr, int slices);
         void     late_slice();
 
         // Capture -> arrival, per picture. The video header's capture stamp
@@ -344,6 +363,56 @@ class Ar8030Source {
         uint32_t au_air_us = 0;         // this picture's capture -> arrival
         float    air_delay_ms = -1.0f;  // EWMA of it, for the stats line
         uint32_t air_delay_for(uint64_t recv_us);
+
+        // Who the air unit says it is. kestrel-air announces itself in its
+        // version message (cmd 0x04, bytes 1..4: "KA", protocol, feature bits);
+        // the stock air app sends zeros there. Reset at every link-up, since the
+        // next air unit may be the other kind. The feature bits are kestrel-air's
+        // (sky.h there): 1 = per-slice air-side times in the header bytes 35..41,
+        // 2 = intra refresh (keyframes only when asked for), 4 = IMU SEI.
+        static constexpr uint8_t kAirFeatLatInfo = 0x01;
+        static constexpr uint8_t kAirFeatIntraRefresh = 0x02;
+        static constexpr uint8_t kAirFeatImu = 0x04;
+        bool     air_ver_seen_ = false;
+        bool     air_kestrel_ = false;
+        uint8_t  air_proto_ = 0;
+        uint8_t  air_feat_ = 0;
+        unsigned air_untagged_ = 0;      // sane headers in a row without the tag
+        bool     air_hdr_tag_ = false;   // seen in a slice header, which is more reliable than the message
+        void note_air_version(const uint8_t *pl, size_t n);
+        void note_air_announce(bool ka, uint8_t proto, uint8_t feat);
+        // Air-side times of each slice, us, over 5 s windows, from the header.
+        std::vector<uint32_t> lat_enc_, lat_queue_, lat_write_;
+        unsigned lat_depth_max_ = 0;
+        uint64_t lat_log_ms_ = 0;
+        void note_air_latency(const uint8_t *hdr);
+        // The radio's AP clock (BB_GET_AP_TIME, ms), which the air unit also
+        // stamps into bytes 26..29 of each header: our now_us() minus the AP
+        // clock, in us, refreshed once a second. With it each picture's
+        // capture is a moment on our clock, so the air delay is measured
+        // instead of pinned to air_floor_us.
+        static constexpr uint8_t kAirFeatApClock = 0x08;   // byte 2: the stamp's sub-ms part
+        int64_t  ap_off_us_ = 0;
+        bool     ap_off_valid_ = false;
+        uint64_t ap_poll_ms_ = 0;
+        uint64_t pic_cap_us_ = 0;        // the picture being received: its capture, our clock (0 = unknown)
+        uint32_t pic_enc_us_ = 0;        // and capture -> its first slice out of the encoder
+        uint32_t au_enc_us_ = 0;         // the same for the open access unit; 0 with au_air_us estimated
+        bool     au_measured_ = false;
+        // 5 s windows, us: per picture capture -> encoder out, -> first slice
+        // here, -> last slice here (reassembled); per slice, handed to the
+        // air unit's radio -> here.
+        std::vector<uint32_t> ap_enc_, ap_first_, ap_all_, ap_link_;
+        std::vector<uint32_t> ap_link_pos_[3];   // the same by the slice's place: first, middle, last
+        std::vector<uint32_t> ap_enc_last_;      // capture -> the picture's last slice out of the encoder
+        uint64_t ap_log_ms_ = 0;
+        void poll_ap_time();
+        void bw_poll();                  // /tmp/bw.req: the video link's bandwidth, an experiment
+        void note_ap_delay(const uint8_t *hdr, size_t len, bool new_pic);
+        void note_ap_picture(uint64_t last_recv_us);
+        // An intra refresh stream has no keyframes to join on: ask for one.
+        uint64_t idr_asked_ms_ = 0;
+        void request_air_idr();
         uint16_t last_hseq = 0;          // header frame counter, for loss
         bool     hseq_valid = false;
         unsigned long long frames_lost = 0;
@@ -451,6 +520,10 @@ class Ar8030Source {
         // the full table, which BB_SET_WORK_CHAN_LIST needs.
         int  chan_index_for_freq(uint32_t freq_khz, uint32_t *freqs, int *n_out);
     public:
+        // What the air unit announced; false/0 for the stock air app and until
+        // its version message has arrived (every few seconds after link-up).
+        bool    air_is_kestrel() const { return air_kestrel_; }
+        uint8_t air_features() const { return air_feat_; }
         // Set by the OSD when the scan screen opens, so we poll faster while
         // the user is looking at it (matching the old RPC client's cadence).
         static std::atomic<bool> scan_active;

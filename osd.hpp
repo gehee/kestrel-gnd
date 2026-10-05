@@ -507,6 +507,7 @@ class OSD {
         int menu_ar_power = 500;   // mW, stock's encoding (see kArPwrLevels)
         int menu_ar_chan  = -1;   // -1 = AUTO
         bool menu_ar_hop  = true;  // channel hopping (AUTO/ACS)
+        int menu_ar_maxbr = 0;     // index into kArMaxBrVals (0 = AUTO, no cap)
         int menu_cam_ev       = 3;  // index into kEvSteps below (3 = 0.0 EV)
         int menu_cam_sat      = 0;
         int menu_cam_contrast = 0;  // 0-15: the config packs it into a nibble

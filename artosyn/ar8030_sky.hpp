@@ -57,6 +57,7 @@ enum Cmd : uint8_t {
     // touch, so there is nothing to match it against.
     CMD_SET_ANTI_FLICKER  = 0x1F,
     CMD_SET_BB_PWR        = 0x22,  // u16 mW
+    CMD_ENABLE_IDR        = 0x20,  // u8 1: send a keyframe (stock's "enable I-frames"; the handshake has it)
     CMD_SET_STANDBY       = 0x23,  // u8
     // Ask the air unit for its measured video delay. Stock's ground app polls
     // this rather than trying to reconcile clocks: the air computes the number
@@ -70,6 +71,7 @@ enum Cmd : uint8_t {
     CMD_SET_BB_BANDWIDTH  = 0x24,  // u8
     CMD_SET_VIDEO_STRATEGY= 0x25,  // u8
     CMD_SET_CONTRAST      = 0x27,  // u32 contrast
+    CMD_KA_MAX_BITRATE    = 0x40,  // u32 kbps, 0 = none - kestrel-air only (stock logs and ignores it)
 };
 
 // The FPV-channel (ch0) video modes this camera accepts, taken from the mode

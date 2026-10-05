@@ -48,6 +48,17 @@ extern "C" uint64_t gbm_bo_get_modifier(struct gbm_bo *bo);
 static const int kArChanVals[]   = { -1, 5740000, 5770000, 5805000, 5839000 };
 static const char* kArChanLabels[] = { "AUTO", "5740", "5770", "5805", "5839" };
 static const int kArChanCount = 5;
+// Max Bitrate: kestrel-air's video bitrate cap, kbps (0 = AUTO: it follows the
+// link, up to 20 Mbps). Below the link's own rate it buys a steadier picture
+// and shorter slices on the air; stock air units ignore it.
+static const int kArMaxBrVals[]     = { 0, 6000, 8000, 10000, 12000, 15000, 18000 };
+static const char* kArMaxBrLabels[] = { "AUTO", "6 Mbps", "8 Mbps", "10 Mbps", "12 Mbps",
+                                        "15 Mbps", "18 Mbps" };
+static const int kArMaxBrCount = 7;
+static int ar_maxbr_index(int kbps) {
+    for (int i = 0; i < kArMaxBrCount; i++) if (kArMaxBrVals[i] == kbps) return i;
+    return 0;
+}
 
 std::vector<std::pair<const char*, int>> OSD::ar_rf_items() const {
     std::vector<std::pair<const char*, int>> v;
@@ -4867,7 +4878,12 @@ std::vector<OSD::MenuItem> OSD::menu_items(int tab) const {
                 // CMD_SET_CHN_FOCUS), so it lives with the other AR8030
                 // camera settings here rather than in our DISPLAY tab, which
                 // only holds goggle-local drawing settings.
-                {"Focus Mode", 1}
+                {"Focus Mode", 1},
+                // The air unit's video bitrate: AUTO follows the link; a cap is
+                // a kestrel-air command (sky cmd 0x40), ignored by stock.
+                {"Max Bitrate", 1, "Cap on the video bitrate. AUTO follows the link. A cap "
+                                   "below it gives a steadier picture and less time on the "
+                                   "air per frame. Kestrel air units only."}
             };
         }
     } else if (tab == 1) { // RF Tab
@@ -5243,6 +5259,7 @@ void OSD::menu_apply_change(int tab, int index, int dir) {
            case 7: menu_cam_sharp    = std::min(kCamSharpMax,    std::max(0, menu_cam_sharp + dir)); break;
            case 8: menu_cam_3dnr    = menu_step(menu_cam_3dnr, dir, kDnrCount); break;
            case 9: menu_cam_focus = menu_step(menu_cam_focus ? 1 : 0, dir, 2) != 0; break;
+           case 10: menu_ar_maxbr = menu_step(menu_ar_maxbr, dir, kArMaxBrCount); break;
            default: break;
        }
     } else if (menu_tab == 1) {
@@ -5437,6 +5454,7 @@ void OSD::menu_value_text(int tab, int i, char* val_buf, size_t cap) {
             case 7: sprintf(val_buf, "< %s >", cam_auto_label(menu_cam_sharp)); break;
             case 8: sprintf(val_buf, "< %s >", kDnrLabels[menu_cam_3dnr]); break;
             case 9: sprintf(val_buf, "< %s >", menu_cam_focus ? "On" : "Off"); break;
+            case 10: sprintf(val_buf, "< %s >", kArMaxBrLabels[menu_ar_maxbr]); break;
             default: break;
         }
     } else if (menu_tab == 1) { // AR8030 RF items
@@ -5727,6 +5745,7 @@ void OSD::handle_key(int key) {
              menu_ar_power = Ar8030Source::tx_power_mw;
              menu_ar_standby = air_standby;   // start the row at the air's real state
              menu_ar_hop = Ar8030Source::chan_auto;
+             menu_ar_maxbr = ar_maxbr_index(Ar8030Source::max_kbps);
              menu_refresh_options();      // seeded: work out what row 0 shows
         }
         render_requested = true;
@@ -5945,6 +5964,8 @@ void OSD::handle_key(int key) {
                         // the source re-sends CMD_SET_CONFIG instead.
                         case 8: cmd_cb(0x30D, kDnrVals[menu_cam_3dnr]); break;
                         case 9: cmd_cb(0x306, menu_cam_focus ? 1 : 0); break;
+                        // Max Bitrate: saved, and sent again at every link-up.
+                        case 10: cmd_cb(0x30E, kArMaxBrVals[menu_ar_maxbr]); break;
                         default: break;
                     }
                 }

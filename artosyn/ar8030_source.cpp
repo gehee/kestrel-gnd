@@ -348,6 +348,7 @@ int Ar8030Source::standby_mode = -1;
 // the extra noise bandwidth just lowers SNR. Enable only together with the
 // air-side half below.
 int Ar8030Source::air_bw        = -1;
+int Ar8030Source::max_kbps      = 0;
 int Ar8030Source::replay_stock_rf = 1;
 int Ar8030Source::prj_rf_bw     = -1;
 int Ar8030Source::prj_rf_pwr_mw = -1;
@@ -379,6 +380,12 @@ void Ar8030Source::request_setting(int field, int value) {
     pending_settings.push_back({field, value});
 }
 bool Ar8030Source::decode_enabled = false;
+// Pictures decoded from their first slice (Vdec::stream_supported): on unless
+// KESTREL_STREAM_DECODE=0.
+bool Ar8030Source::stream_decode = []() {
+    const char *e = getenv("KESTREL_STREAM_DECODE");
+    return !(e && atoi(e) == 0);
+}();
 
 // Parse the paired air-unit MACs out of /factory/user_cfg.json. The file is a
 // flat object holding "bb_mac_addr_N": [ "0xE5", "0xDA", "0x00", "0x08" ], the
@@ -1210,6 +1217,8 @@ void Ar8030Source::scan_air_status(const uint8_t *buf, int n) {
         // board temperature, both single-byte °C. Publish the max as the
         // VTX temperature - whichever is closer to a thermal limit is the
         // number that matters. Log periodically for post-mortems.
+        if (buf[i + 6] == 0x04) note_air_version(buf + i + 6, len - 6 - 5);
+
         if (buf[i + 6] == 0x05 && (len - 6 - 5) >= 34) {
             const uint8_t *pl = buf + i + 6;
             // VTX CPU temp = byte 1, VTX RF board temp = byte 33, both °C.
@@ -1593,6 +1602,7 @@ void Ar8030Source::apply_pending_settings() {
             case CAM_3DNR:      cmd = sky::CMD_SET_3DNR;       name = "3D DNR";       break;
             case CAM_STANDBY:   cmd = sky::CMD_SET_STANDBY;      name = "standby";      break;
             case CAM_BW:        cmd = sky::CMD_SET_BB_BANDWIDTH; name = "air bandwidth";break;
+            case CAM_MAX_KBPS:  cmd = sky::CMD_KA_MAX_BITRATE; name = "video bitrate cap"; break;
             case CAM_PWR:       cmd = sky::CMD_SET_BB_PWR;      name = "air power mW"; break;
             case CAM_FOCUS:     cmd = sky::CMD_SET_CHN_FOCUS;   name = "focus mode";   break;
             default: continue;
@@ -2449,6 +2459,8 @@ bool Ar8030Source::connect_bb() {
     // The air-side half. Section 31 established the same shape for the RF
     // channel: both ends have to be told, or the link just desynchronises.
     if (air_bw >= 0) request_setting(CAM_BW, air_bw);
+    // kestrel-air keeps the cap in RAM only: it is ours to send at every link-up.
+    if (max_kbps > 0) request_setting(CAM_MAX_KBPS, max_kbps);
 
     if (skip_handshake) printf("ar8030: handshake SKIPPED (--debug-no-handshake)\n");
     else send_air_handshake();
@@ -2537,6 +2549,7 @@ void Ar8030Source::update_stats(size_t frame_size) {
     if (period_start == 0) { period_start = t; return; }
     if (t - period_start >= 1000) {
         period_start = t;
+        poll_ap_time();
         double video_bw = (double)bytes_received;   // bytes in the last second
         if (osd) {
             osd->update_video_bandwidth(video_bw / 125000.0);  // -> Mbit/s
@@ -2618,6 +2631,220 @@ uint32_t Ar8030Source::air_delay_for(uint64_t recv_us) {
     return (uint32_t)us;
 }
 
+// cmd 0x04, the air unit's version message. pl[0] is the cmd byte. It is only sent
+// in some states of the air app, so a slice header with the tag (below) counts first.
+void Ar8030Source::note_air_version(const uint8_t *pl, size_t n) {
+    if (n < 8) return;
+    const bool ka = pl[1] == 'K' && pl[2] == 'A';
+    if (!ka && air_hdr_tag_) return;
+    note_air_announce(ka, ka ? pl[3] : 0, ka ? pl[4] : 0);
+}
+
+void Ar8030Source::note_air_announce(bool ka, uint8_t proto, uint8_t feat) {
+    if (air_ver_seen_ && ka == air_kestrel_ && proto == air_proto_ && feat == air_feat_) return;
+    air_ver_seen_ = true;
+    air_kestrel_ = ka;
+    air_proto_ = proto;
+    air_feat_ = feat;
+    lat_enc_.clear(); lat_queue_.clear(); lat_write_.clear();
+    lat_depth_max_ = 0;
+    if (ka)
+        printf("ar8030: the air unit is kestrel-air, protocol %u, features:%s%s%s%s\n", proto,
+               (feat & kAirFeatLatInfo) ? " air-side-times" : "",
+               (feat & kAirFeatIntraRefresh) ? " intra-refresh" : "",
+               (feat & kAirFeatImu) ? " imu" : "",
+               (feat & kAirFeatApClock) ? " us-radio-clock" : "");
+    else
+        printf("ar8030: the air unit is the stock air app (no kestrel-air announcement in its "
+               "version message)\n");
+}
+
+static float pct_ms(std::vector<uint32_t> &v, int pct) {
+    if (v.empty()) return 0.0f;
+    std::sort(v.begin(), v.end());
+    return v[std::min(v.size() - 1, v.size() * pct / 100)] / 1000.0f;
+}
+
+// One slice's header (hdr[0] = the 0x80 byte), from a kestrel-air that sent
+// feature bit 1: bytes 35..41 are the air side's own times, 10 us units, LE.
+void Ar8030Source::note_air_latency(const uint8_t *hdr) {
+    auto u16 = [&](int o) { return (uint32_t)(hdr[o] | (hdr[o + 1] << 8)) * 10u; };
+    lat_enc_.push_back(u16(35));
+    lat_queue_.push_back(u16(37));
+    lat_write_.push_back(u16(39));
+    if (hdr[41] > lat_depth_max_) lat_depth_max_ = hdr[41];
+    const uint64_t t = now_ms();
+    if (!lat_log_ms_) lat_log_ms_ = t;
+    if (t - lat_log_ms_ < 5000) return;
+    printf("ar8030: air side, %zu slices in %.1fs: capture->encoder out p50 %.2f p99 %.2f ms | "
+           "waiting in the air's ring p50 %.2f p99 %.2f ms | radio write p50 %.2f p99 %.2f ms | "
+           "ring depth max %u\n",
+           lat_enc_.size(), (t - lat_log_ms_) / 1000.0, pct_ms(lat_enc_, 50), pct_ms(lat_enc_, 99),
+           pct_ms(lat_queue_, 50), pct_ms(lat_queue_, 99), pct_ms(lat_write_, 50),
+           pct_ms(lat_write_, 99), lat_depth_max_);
+    lat_enc_.clear(); lat_queue_.clear(); lat_write_.clear();
+    lat_depth_max_ = 0;
+    lat_log_ms_ = t;
+}
+
+// The radio's AP clock against ours. BB_GET_AP_TIME answers in whole ms, so a
+// sample is the middle of the request minus the middle of that ms; a slow
+// answer (over 2 ms) says little and is skipped. Averaged (1/8 per sample),
+// and started again on a jump of over 20 ms: a new link starts a new clock.
+void Ar8030Source::poll_ap_time() {
+    bb_dev_handle_t *dev = (bb_dev_handle_t *)bb_dev;
+    const uint64_t t = now_ms();
+    if (!dev || t - ap_poll_ms_ < 1000) return;
+    ap_poll_ms_ = t;
+    uint32_t ap_ms = 0;
+    const uint64_t t0 = now_us();
+    if (ar_ioctl(dev, BB_GET_AP_TIME, nullptr, &ap_ms) != 0) return;
+    const uint64_t t1 = now_us();
+    if (t1 - t0 > 2000) return;
+    const int64_t off = (int64_t)((t0 + t1) / 2) - ((int64_t)ap_ms * 1000 + 500);
+    if (!ap_off_valid_ || off - ap_off_us_ > 20000 || off - ap_off_us_ < -20000) {
+        if (ap_off_valid_)
+            printf("ar8030: the radio's AP clock moved by %.1f ms against ours\n",
+                   (off - ap_off_us_) / 1000.0);
+        ap_off_us_ = off;
+        ap_off_valid_ = true;
+    } else {
+        ap_off_us_ += (off - ap_off_us_) / 8;
+    }
+}
+
+// Experiment: `echo G > /tmp/bw.req` puts the video link on bandwidth gear G
+// (bb_bandwidth_e, 0..5 = 1.25, 2.5, 5, 10, 20, 40 MHz; bb_config_*.json starts
+// it, the "br" link, at 5 MHz = 2). The air unit is the AP and transmits the
+// video, so it has to change first: sky cmd 0x24 with gear + 1 to kestrel-air
+// (stock ignores it; its own handshake sends 0 at every link-up), then our
+// receive side. The radio also widens the link by itself after link-up. No new picture 3 s later and both go back to the
+// gear before - kestrel-air does that by itself when the link is gone, since we
+// could not reach it then. Not saved.
+void Ar8030Source::bw_poll() {
+    static int cur = 2, prev = -1;
+    static uint64_t last = 0, at = 0, frames_at = 0;
+    bb_dev_handle_t *dev = (bb_dev_handle_t *)bb_dev;
+    const uint64_t t = now_ms();
+    if (!dev || t - last < 500) return;
+    last = t;
+    auto set_ours = [&](int g) {
+        bb_set_bandwidth_t p;
+        memset(&p, 0, sizeof(p));
+        p.slot = BB_SLOT_AP;
+        p.dir = BB_DIR_RX;
+        p.bandwidth = (uint8_t)g;
+        return ar_ioctl(dev, BB_SET_BANDWIDTH, &p, NULL);
+    };
+    auto tell_air = [&](int g) {
+        if (ctrl_sockfd < 0) return -1;
+        // gear + 1: 0 is what stock's own handshake sends, and means "leave it".
+        std::vector<uint8_t> f = sky_proto.build_u8(sky::CMD_SET_BB_BANDWIDTH, (uint8_t)(g + 1));
+        return bb_socket_write(ctrl_sockfd, f.data(), (uint32_t)f.size(), 200);
+    };
+    if (prev >= 0 && t - at >= 3000) {
+        if (frames_seen == frames_at) {
+            printf("ar8030: bandwidth gear %d: no picture in 3 s - back to gear %d\n", cur, prev);
+            const int w = tell_air(prev);
+            usleep(50000);
+            printf("ar8030: bandwidth gear %d: air <- %d, ours -> %d\n", prev, w, set_ours(prev));
+            cur = prev;
+        } else {
+            printf("ar8030: bandwidth gear %d kept: %llu pictures in 3 s\n", cur,
+                   (unsigned long long)(frames_seen - frames_at));
+        }
+        prev = -1;
+    }
+    FILE *rq = fopen("/tmp/bw.req", "r");
+    if (!rq) return;
+    int g = -1;
+    if (fscanf(rq, "%d", &g) != 1) g = -1;
+    fclose(rq);
+    unlink("/tmp/bw.req");
+    if (g < 0 || g > 5 || prev >= 0 || g == cur) return;
+    const int w = tell_air(g);
+    usleep(50000);
+    printf("ar8030: bandwidth gear %d -> %d: air <- %d, ours -> %d\n", cur, g, w, set_ours(g));
+    prev = cur;
+    cur = g;
+    at = t;
+    frames_at = frames_seen;
+}
+
+// Bytes 26..29 of a header: the AP clock (ms) the air unit stamped the slice
+// with - when stock built the packet; when kestrel-air's encoder handed the
+// slice out, with the sub-ms part in byte 2 (kAirFeatApClock). Our AP clock
+// now, minus that, is the stamp -> here. Capture -> stamp comes from the same
+// header: kestrel-air's encoder time (bytes 35..36, 10 us), or stock's byte
+// 30 (whole ms). Without byte 2 both ends read the clock in whole ms, so a
+// picture is good to about 1 ms; with it, to the two offsets' noise.
+void Ar8030Source::note_ap_delay(const uint8_t *hdr, size_t len, bool new_pic) {
+    if (new_pic) pic_cap_us_ = 0;
+    if (!ap_off_valid_ || len < 31) return;
+    auto u16 = [&](int o) { return (int64_t)(hdr[o] | (hdr[o + 1] << 8)) * 10; };
+    const bool ka = air_kestrel_ && (air_feat_ & kAirFeatLatInfo) && len >= 42;
+    const bool fine = ka && (air_feat_ & kAirFeatApClock);
+    const uint32_t rt = (uint32_t)hdr[26] | ((uint32_t)hdr[27] << 8) |
+                        ((uint32_t)hdr[28] << 16) | ((uint32_t)hdr[29] << 24);
+    const uint64_t here = now_us();
+    const uint64_t ap_us = here - (uint64_t)ap_off_us_;
+    const int64_t frac_us = fine ? ((int64_t)hdr[2] * 1000 + 128) / 256 : 500;
+    const int64_t d = (int64_t)(int32_t)((uint32_t)(ap_us / 1000) - rt) * 1000 +
+                      (int64_t)(ap_us % 1000) - frac_us;
+    if (d < -1000000 || d > 1000000) return;
+    const int64_t enc = ka ? u16(35) : (int64_t)hdr[30] * 1000;
+    const int64_t queue = ka ? u16(37) : 0;
+    if (ka && (hdr[32] & 0x40)) ap_enc_last_.push_back((uint32_t)enc);
+    if (d - queue >= 0) {
+        ap_link_.push_back((uint32_t)(d - queue));
+        if (len >= 33) {   // byte 32: slice index | 0x20 more follow | 0x40 last
+            const int pos = (hdr[32] & 0x40) ? 2 : (hdr[32] & 0x1f) == 0 ? 0 : 1;
+            ap_link_pos_[pos].push_back((uint32_t)(d - queue));
+        }
+    }
+    if (new_pic && d + enc > 0 && (uint64_t)(d + enc) < here) {
+        pic_cap_us_ = here - (uint64_t)(d + enc);
+        pic_enc_us_ = (uint32_t)enc;
+    }
+}
+
+// A picture handed to the decoder whose capture was measured: its first and
+// last slice's arrival, against the capture, and every 5 s the spread.
+void Ar8030Source::note_ap_picture(uint64_t last_recv_us) {
+    if (!au_measured_) return;
+    const uint64_t cap = au_first_recv_us - au_air_us;
+    ap_enc_.push_back(au_enc_us_);
+    ap_first_.push_back(au_air_us);
+    if (last_recv_us >= cap) ap_all_.push_back((uint32_t)(last_recv_us - cap));
+    const uint64_t t = now_ms();
+    if (!ap_log_ms_) ap_log_ms_ = t;
+    if (t - ap_log_ms_ < 5000) return;
+    printf("ar8030: latency by the radio clock (%s), %zu pictures: capture->encoder out p50 %.2f "
+           "p99 %.2f | capture->first slice here p50 %.2f p99 %.2f | capture->all slices here "
+           "p50 %.2f p99 %.2f ms | per slice, air unit's radio->here p50 %.2f p99 %.2f ms\n",
+           (air_feat_ & kAirFeatApClock) ? "us stamps" : "ms stamps", ap_first_.size(),
+           pct_ms(ap_enc_, 50), pct_ms(ap_enc_, 99), pct_ms(ap_first_, 50), pct_ms(ap_first_, 99),
+           pct_ms(ap_all_, 50), pct_ms(ap_all_, 99), pct_ms(ap_link_, 50), pct_ms(ap_link_, 99));
+    printf("ar8030: per slice, air unit's radio->here by place: first %zu p50 %.2f p99 %.2f | "
+           "middle %zu p50 %.2f p99 %.2f | last %zu p50 %.2f p99 %.2f ms | capture->last slice "
+           "out of the encoder p50 %.2f p99 %.2f ms\n",
+           ap_link_pos_[0].size(), pct_ms(ap_link_pos_[0], 50), pct_ms(ap_link_pos_[0], 99),
+           ap_link_pos_[1].size(), pct_ms(ap_link_pos_[1], 50), pct_ms(ap_link_pos_[1], 99),
+           ap_link_pos_[2].size(), pct_ms(ap_link_pos_[2], 50), pct_ms(ap_link_pos_[2], 99),
+           pct_ms(ap_enc_last_, 50), pct_ms(ap_enc_last_, 99));
+    ap_enc_.clear(); ap_first_.clear(); ap_all_.clear(); ap_link_.clear(); ap_enc_last_.clear();
+    for (auto &v : ap_link_pos_) v.clear();
+    ap_log_ms_ = t;
+}
+
+// The stock "enable I-frames" message, which the handshake also carries.
+void Ar8030Source::request_air_idr() {
+    if (ctrl_sockfd < 0) return;
+    std::vector<uint8_t> f = sky_proto.build_u8(sky::CMD_ENABLE_IDR, 1);
+    int w = bb_socket_write(ctrl_sockfd, f.data(), (uint32_t)f.size(), 200);
+    printf("ar8030: asked the air unit for a keyframe (seq=0x%02X) -> %d\n", f[3], w);
+}
+
 // Emit one NAL (payload without the leading start code) to the decoder.
 void Ar8030Source::emit_nal(const uint8_t* nal, size_t len) {
     if (len == 0) return;
@@ -2664,6 +2891,21 @@ void Ar8030Source::emit_nal(const uint8_t* nal, size_t len) {
                 // header with it: nothing it says about the link is true.
                 if (new_pic) hdr_stale_ = stale_picture(cap32);
                 if (hdr_stale_) return;
+                // kestrel-air tags every header (byte 33 'K', 10 protocol, 11 features).
+                if (len >= 42 && nal[33] == 0x4B) {
+                    air_hdr_tag_ = true;
+                    air_untagged_ = 0;
+                    note_air_announce(true, nal[10], nal[11]);
+                } else if (len >= 42 && air_hdr_tag_ && ++air_untagged_ >= 200) {
+                    // The tag stopped (another air unit, or KA_LATINFO=0): the version
+                    // message decides again. 200 headers, so one misread cannot clear it.
+                    air_hdr_tag_ = false;
+                    air_untagged_ = 0;
+                    air_ver_seen_ = false;
+                }
+                if (air_kestrel_ && (air_feat_ & kAirFeatLatInfo) && len >= 42)
+                    note_air_latency(nal);
+                note_ap_delay(nal, len, new_pic);
                 // The capture stamp, unwrapped: 32 bits of microseconds last
                 // 71 minutes. An air unit reboot sends it backwards by less
                 // than half the range, which is not a wrap.
@@ -2765,6 +3007,14 @@ void Ar8030Source::emit_nal(const uint8_t* nal, size_t len) {
                        (unsigned long long)held,
                        timed_out ? "timed out, showing it anyway" : "arriving at capture rate");
             } else {
+                // Intra refresh has no keyframes to join on, and the ones the
+                // air sent at link-up came before the video did: once the
+                // stream is live, ask for one, again every half second.
+                if (is_vcl && !key && resync_live_ >= kResyncLive && air_kestrel_ &&
+                    (air_feat_ & kAirFeatIntraRefresh) && now_ms() - idr_asked_ms_ >= 500) {
+                    idr_asked_ms_ = now_ms();
+                    request_air_idr();
+                }
                 return;                       // still catching up
             }
         }
@@ -2849,7 +3099,7 @@ void Ar8030Source::emit_nal(const uint8_t* nal, size_t len) {
             if (first_slice && au_open) {
                 // Completed by the next picture's arrival: the fallback, and
                 // how the last slice's start address gets learned.
-                learn_last_slice(au_max_addr);
+                learn_last_slice(au_max_addr, au_slice_count);
                 flush_access_unit(recv_us);
             }
             if (!first_slice && !au_open) {
@@ -2861,12 +3111,29 @@ void Ar8030Source::emit_nal(const uint8_t* nal, size_t len) {
                 return;
             }
             if (first_slice) {
-                au_air_us = air_delay_for(recv_us);
+                // Measured by the radio's clock when there is a capture for
+                // this picture, the floor estimate otherwise.
+                au_measured_ = pic_cap_us_ && recv_us > pic_cap_us_ &&
+                               recv_us - pic_cap_us_ < 1000000;
+                if (au_measured_) {
+                    au_air_us = (uint32_t)(recv_us - pic_cap_us_);
+                    au_enc_us_ = std::min(std::min(pic_enc_us_, au_air_us), 0xffffu);
+                    const float ms = (float)au_air_us / 1000.0f;
+                    air_delay_ms = (air_delay_ms < 0.0f) ? ms : 0.95f * air_delay_ms + 0.05f * ms;
+                    if (osd) osd->set_air_delay(air_delay_ms);
+                } else {
+                    au_air_us = air_delay_for(recv_us);
+                    au_enc_us_ = 0;
+                }
+                pic_cap_us_ = 0;   // one picture, one capture
                 au_pts = frame_pts;
                 au_nal_type = nal_type;   // picture key-ness (IDR vs trailing)
                 au_first_recv_us = recv_us;  // zero point for this picture
                 au_max_addr = 0;
                 au_hseq_ = hseq;
+                au_slice_count = 0;
+                au_streamed = false;
+                au_stream_done = false;
                 frames_seen++;            // count real pictures, not slices
                 if (++late_window_pics >= 64) { late_window_pics = 0; late_slices = 0; }
             }
@@ -2874,6 +3141,29 @@ void Ar8030Source::emit_nal(const uint8_t* nal, size_t len) {
             au_last_recv_us = recv_us;   // newest slice of this picture
             au_open = true;
             if (addr > au_max_addr) au_max_addr = addr;
+            au_slice_count++;
+            const bool last = last_slice_addr > 0 && addr == last_slice_addr;
+            // Streamed: the decoder starts on the first slice while the rest is
+            // still on the air - the air unit sends the second half about half
+            // a frame after the first - and finishes about a millisecond after
+            // the last lands rather than a whole decode later.
+            if (first_slice) {
+                if (stream_decode && !last && last_slice_addr > 0 && last_slice_count > 1 &&
+                    vdec->stream_supported()) {
+                    if (!stream_pics++)
+                        printf("ar8030: decoding each picture from its first slice "
+                               "(%d slices a picture, stream mode)\n", last_slice_count);
+                    feed_au(unit.data(), unit.size(), last_slice_count);
+                    au_streamed = true;
+                }
+            } else if (au_streamed && !au_stream_done) {
+                if (!vdec->stream_append(unit.data(), (int)unit.size(), au_pts, last) &&
+                    (++stream_refused <= 3 || (stream_refused % 1000) == 0))
+                    printf("ar8030: the decoder did not take a slice of picture %lld "
+                           "(%llu so far)\n", (long long)au_pts,
+                           (unsigned long long)stream_refused);
+                au_stream_done = last;
+            }
             // The picture's last slice: decode it now, not when the next
             // picture's first slice turns up - a frame interval later (10 ms
             // at 100 fps), which is how long every complete picture used to
@@ -2931,7 +3221,7 @@ void Ar8030Source::emit_nal(const uint8_t* nal, size_t len) {
                     printf("ar8030: slice addresses are %d bits in this picture size\n", bits);
                     ctb_addr_bits = bits;
                     last_slice_addr = -1;              // a new picture size: learn again
-                    last_addr_cand = -1; last_addr_streak = 0;
+                    last_addr_cand = -1; last_addr_streak = 0; last_count_cand = 0; last_slice_count = 0;
                 }
             } else if (codec == VideoCodec::H265 && nal_type == 34) {
                 int id = -1;
@@ -3012,12 +3302,29 @@ bool Ar8030Source::stale_picture(uint32_t cap32) {
 // pictures in a row. The air unit cuts every picture the same way - two
 // halves, the second at CTB 255 of 510 at 1080p, IDR or not - so this settles
 // within a second of video; a new picture size (SPS) starts it over.
-void Ar8030Source::learn_last_slice(int max_addr) {
+void Ar8030Source::learn_last_slice(int max_addr, int slices) {
     if (last_slice_addr > 0 || max_addr <= 0) return;
-    if (max_addr == last_addr_cand) last_addr_streak++;
-    else { last_addr_cand = max_addr; last_addr_streak = 1; }
+    // Only a larger end starts over: a picture that ends early (a slice lost or
+    // unreadable) says nothing about where pictures end. With intra refresh a
+    // GOP start every 17 pictures did that, the run never reached kLearnRun, and
+    // every picture waited for the next one to be decoded - a frame of latency
+    // (2026-10-05). The slice count is learned with it (streamed pictures need
+    // it): the same end with more slices starts over too, with fewer it is a
+    // picture that lost one.
+    if (max_addr == last_addr_cand && slices == last_count_cand) last_addr_streak++;
+    else if (max_addr > last_addr_cand || (max_addr == last_addr_cand && slices > last_count_cand)) {
+        last_addr_cand = max_addr; last_count_cand = slices; last_addr_streak = 1;
+    } else {
+        static unsigned shorter = 0;
+        if (++shorter <= 5 || shorter % 1000 == 0)
+            printf("ar8030: a picture ended at CTB %d with %d slices, short of %d with %d - "
+                   "not counted (%u so far)\n", max_addr, slices, last_addr_cand,
+                   last_count_cand, shorter);
+        return;
+    }
     if (last_addr_streak >= kLearnRun) {
         last_slice_addr = max_addr;
+        last_slice_count = slices;
         printf("ar8030: pictures end with the slice at CTB %d - decoding each as that "
                "slice arrives\n", last_slice_addr);
     }
@@ -3033,31 +3340,58 @@ void Ar8030Source::late_slice() {
         printf("ar8030: %u slices after their picture ended in %u pictures - relearning "
                "where pictures end\n", late_slices, late_window_pics);
         last_slice_addr = -1;
-        last_addr_cand = -1; last_addr_streak = 0;
+        last_addr_cand = -1; last_addr_streak = 0; last_count_cand = 0; last_slice_count = 0;
         late_slices = 0;
     }
 }
 
+// Hand the decoder a picture, or with stream_slices > 1 the first slice of one
+// that many slices long (the rest by Vdec::stream_append), stamped as the
+// picture open in au_*.
+void Ar8030Source::feed_au(const uint8_t *data, size_t len, int stream_slices) {
+    // This AU's OWN first-slice arrival, not the arrival of the read that
+    // happens to be flushing it - see au_first_recv_us.
+    const uint64_t au_recv = au_first_recv_us ? au_first_recv_us : now_us();
+    if (ltrace::on()) ltrace::rec(ltrace::kAu, now_us(), (uint32_t)au_pts, au_recv);
+    // What nothing here can timestamp: the screen, if panel_latency_ms
+    // says how long it takes (0 by default, so the figure ends at the
+    // vblank). No exposure wait is added: an LED switched on in front
+    // of the camera is in the frame whose capture stamp comes 0 ms
+    // later on the median (-5..+5 ms, photodiode rig with the air unit
+    // and goggle clocks synced), so the stamp already stands for the
+    // moment of capture. It travels in the capture half of the packed
+    // delay; the air delay is the processing one. Measured by the radio's
+    // clock, the encoder's share goes in the other half (the HUD's enc),
+    // and the processing one keeps encoder out -> first slice here (net).
+    const uint32_t outside_us = (uint32_t)panel_latency_us;
+    const uint32_t cap_us = au_air_us ? (outside_us << 16) | au_enc_us_ : 0;
+    const uint32_t proc_us = au_air_us - au_enc_us_;
+    if (stream_slices > 1)
+        vdec->stream_start((void *)data, (int)len, au_pts, au_recv, au_nal_type,
+                           cap_us, proc_us, stream_slices);
+    else
+        vdec->feed_packet_to_decoder((void *)data, (int)len, au_pts, au_recv, au_nal_type,
+                                     cap_us, proc_us);
+}
+
 // Feed the accumulated slices of one picture as a single access unit / PTS.
+// A streamed one is in the decoder already: if its last slice never came, it
+// is told there is no more.
 void Ar8030Source::flush_access_unit(uint64_t recv_us) {
     if (!au_open) return;
     if (!au_slices.empty() && vdec) {
-        // Hand the decoder this AU's OWN first-slice arrival, not the arrival
-        // of the read that happens to be flushing it - see au_first_recv_us.
         const uint64_t au_recv = au_first_recv_us ? au_first_recv_us : recv_us;
-        if (ltrace::on()) ltrace::rec(ltrace::kAu, now_us(), (uint32_t)au_pts, au_recv);
-        // What nothing here can timestamp: the screen, if panel_latency_ms
-        // says how long it takes (0 by default, so the figure ends at the
-        // vblank). No exposure wait is added: an LED switched on in front
-        // of the camera is in the frame whose capture stamp comes 0 ms
-        // later on the median (-5..+5 ms, photodiode rig with the air unit
-        // and goggle clocks synced), so the stamp already stands for the
-        // moment of capture. It travels in the capture half of the packed
-        // delay; the air delay is the processing one.
-        uint32_t outside_us = (uint32_t)panel_latency_us;
-        vdec->feed_packet_to_decoder(au_slices.data(), (int)au_slices.size(),
-                                     au_pts, au_recv, au_nal_type,
-                                     au_air_us ? (outside_us << 16) : 0, au_air_us);
+        if (!au_streamed) {
+            feed_au(au_slices.data(), au_slices.size(), 0);
+        } else if (!au_stream_done) {
+            vdec->stream_end(au_pts);
+            if (++stream_ended <= 3 || (stream_ended % 1000) == 0)
+                printf("ar8030: picture %lld ended without its last slice "
+                       "(%llu of %llu streamed pictures)\n", (long long)au_pts,
+                       (unsigned long long)stream_ended, (unsigned long long)stream_pics);
+        }
+        au_streamed = au_stream_done = false;
+        note_ap_picture(au_last_recv_us);
         frame_pts++;
 
         // Reassembly span: first slice of THIS picture on the wire to its
@@ -3166,19 +3500,30 @@ void Ar8030Source::run_replay() {
 
 // Split an Annex-B byte stream into NALs. Handles NALs straddling reads by
 // keeping the tail in `accum` until the next start code arrives.
+//
+// That alone holds every packet's last NAL until the next packet: the first
+// slice of a picture waited for the second (~5 ms at 1080p100, the encoder's
+// gap between them), and the last for whatever came next. The air unit's own
+// framing says where a packet ends - its header (first byte 0x80) gives the
+// slice's length (bytes 4..7, with any SEI after it) and the extras' (byte
+// 31), and the packet closes with ee 29 55 9f - so once that trailer is in,
+// the packet's last NAL goes on at once, with the same bytes the next start
+// code would have given it. A header that does not add up, or a trailer that
+// is not there, leaves it to the start code.
 void Ar8030Source::consume(const uint8_t* data, size_t len) {
     accum.insert(accum.end(), data, data + len);
 
     if (accum.size() > AR_MAX_ACCUM) {
         printf("ar8030: no start code in %zu bytes - wrong port or non-AnnexB stream?\n",
                accum.size());
+        accum_base_ += accum.size();
+        pkt_end_pos_ = 0;
         accum.clear();
         return;
     }
 
     size_t i = 0, n = accum.size();
     size_t nal_start = SIZE_MAX;   // offset of current NAL payload
-    size_t last_consumed = 0;
 
     while (i + 3 < n) {
         bool sc4 = (accum[i] == 0 && accum[i+1] == 0 && accum[i+2] == 0 && accum[i+3] == 1);
@@ -3188,13 +3533,36 @@ void Ar8030Source::consume(const uint8_t* data, size_t len) {
             if (nal_start != SIZE_MAX) {
                 // NAL runs from nal_start up to this start code.
                 emit_nal(accum.data() + nal_start, i - nal_start);
-                last_consumed = i;
             }
             nal_start = i + sc_len;
             i += sc_len;
+            // A packet header, whole: where its packet ends.
+            if (nal_start + 42 <= n && accum[nal_start] == 0x80) {
+                const uint8_t *h = accum.data() + nal_start;
+                const uint32_t plen = (uint32_t)h[4] | ((uint32_t)h[5] << 8) |
+                                      ((uint32_t)h[6] << 16) | ((uint32_t)h[7] << 24);
+                const uint32_t ext = h[31];
+                pkt_end_pos_ = (plen > 0 && plen < AR_MAX_ACCUM && ext <= 64)
+                    ? accum_base_ + nal_start + 42 + ext + plen + 4 : 0;
+            }
             continue;
         }
         i++;
+    }
+
+    // The open NAL is its packet's last and the packet is all here: on with it.
+    if (nal_start != SIZE_MAX && pkt_end_pos_ > accum_base_ + nal_start &&
+        pkt_end_pos_ <= accum_base_ + n) {
+        const size_t pe = (size_t)(pkt_end_pos_ - accum_base_);
+        if (accum[pe - 4] == 0xee && accum[pe - 3] == 0x29 && accum[pe - 2] == 0x55 &&
+            accum[pe - 1] == 0x9f) {
+            emit_nal(accum.data() + nal_start, pe - nal_start);
+            accum.erase(accum.begin(), accum.begin() + pe);
+            accum_base_ += pe;
+            pkt_end_pos_ = 0;
+            return;
+        }
+        pkt_end_pos_ = 0;
     }
 
     // Keep the unterminated tail (from the last start code we saw, or the last
@@ -3202,10 +3570,11 @@ void Ar8030Source::consume(const uint8_t* data, size_t len) {
     if (nal_start != SIZE_MAX) {
         size_t keep_from = nal_start - (nal_start >= 4 ? 4 : nal_start);
         accum.erase(accum.begin(), accum.begin() + keep_from);
+        accum_base_ += keep_from;
     } else if (accum.size() > 3) {
+        accum_base_ += accum.size() - 3;
         accum.erase(accum.begin(), accum.end() - 3);
     }
-    (void)last_consumed;
 }
 
 void Ar8030Source::run() {
@@ -3222,6 +3591,7 @@ void Ar8030Source::run() {
 
     while (!*should_stop) {
         bb_watchdog_alive();   // the loop is still going round
+        bw_poll();
         if (sockfd < 0) {
             if (!connect_bb()) {
                 disconnect_bb();
@@ -3334,6 +3704,10 @@ void Ar8030Source::run() {
                         resync_prev_us_  = 0;
                         resync_prev_cap_ = 0;
                         resync_start_ms_ = now_ms();
+                        air_ver_seen_    = false;   // the next air unit may be the other kind
+                        air_hdr_tag_     = false;
+                        air_kestrel_     = false;
+                        air_feat_        = 0;
                         printf("ar8030: link up - dropping video until it arrives "
                                "at the rate it was captured\n");
                         printf("ar8030: link up - sending the air handshake now that "
@@ -3377,6 +3751,42 @@ void Ar8030Source::run() {
                 printf("ar8030: read[%d] %d bytes: %s\n", dumped_reads, rd, hex);
             }
             if (ltrace::on()) ltrace::rec(ltrace::kRead, now_us(), (uint32_t)rd, 0);
+            // `echo N > /tmp/vdump.req`: the next N seconds of the radio's video
+            // bytes, as read, into /tmp/vdump.bin - what --debug-video-dump does,
+            // without restarting kestrel-gnd - and the parameter sets held now
+            // into /tmp/vdump.ps.
+            {
+                static uint64_t req_check_ms = 0, dump_until_ms = 0;
+                const uint64_t t = now_ms();
+                if (t - req_check_ms >= 500) {
+                    req_check_ms = t;
+                    if (FILE *rq = fopen("/tmp/vdump.req", "r")) {
+                        int secs = 0;
+                        if (fscanf(rq, "%d", &secs) != 1) secs = 0;
+                        fclose(rq);
+                        unlink("/tmp/vdump.req");
+                        if (secs > 0) {
+                            if (video_dump_fp) { fclose((FILE *)video_dump_fp); video_dump_fp = nullptr; }
+                            // With intra refresh the parameter sets only come with a
+                            // keyframe: the ones we hold, to decode the dump with.
+                            if (FILE *ps = fopen("/tmp/vdump.ps", "wb")) {
+                                for (const auto &q : dvr_param_sets) fwrite(q.data(), 1, q.size(), ps);
+                                fclose(ps);
+                            }
+                            video_dump_path = "/tmp/vdump.bin";
+                            video_dump_written = 0;
+                            dump_until_ms = t + (uint64_t)secs * 1000;
+                        }
+                    }
+                }
+                if (dump_until_ms && t >= dump_until_ms) {
+                    if (video_dump_fp) { fclose((FILE *)video_dump_fp); video_dump_fp = nullptr; }
+                    printf("ar8030: video dump done, %llu bytes in %s\n", video_dump_written,
+                           video_dump_path.c_str());
+                    video_dump_path.clear();
+                    dump_until_ms = 0;
+                }
+            }
             if (!video_dump_path.empty() && video_dump_written < 64u * 1024 * 1024) {
                 if (!video_dump_fp) {
                     // Appending after a reconnect, which closes it.

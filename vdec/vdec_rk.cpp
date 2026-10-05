@@ -430,6 +430,10 @@ void VdecRK::feed_packet_to_decoder(void* data_p, int data_len, int64_t pts, uin
         return;
     }
     mpp_packet_set_pts(pkt, (RK_S64)pts);
+#ifdef MPP_PACKET_FLAG_STREAM_START
+    if (next_packet_flags_)
+        mpp_packet_set_flag(pkt, next_packet_flags_);
+#endif
 
     // Feed the data to mpp until either timeout (in which case the decoder might have stalled)
     // or success
@@ -524,6 +528,74 @@ void VdecRK::feed_packet_to_decoder(void* data_p, int data_len, int64_t pts, uin
     }
     mpp_packet_deinit(&pkt);
 }
+
+// Pictures decoded as their slices arrive: the decoder starts on a picture's
+// first slice while the next is still on the air, and finishes it about a
+// millisecond after the last one lands instead of a whole decode later. It
+// takes fpvOS's MPP (MPP_PACKET_FLAG_STREAM_START, MPP_DEC_SET_STREAM_APPEND)
+// on fpvOS's kernel (rkvdec stream mode); built against an MPP without them,
+// or run where MPP answers no, every picture goes whole as before.
+#ifdef MPP_PACKET_FLAG_STREAM_START
+void VdecRK::probe_stream() {
+    const char *env = getenv("KESTREL_STREAM_DECODE");
+    if (env && atoi(env) == 0) {
+        printf("VdecRK: stream decode off (KESTREL_STREAM_DECODE=0)\n");
+        return;
+    }
+    stream_ok_ = mpi.mpi->control(mpi.ctx, MPP_DEC_SET_STREAM_APPEND, nullptr) == MPP_OK;
+    printf("VdecRK: %s\n", stream_ok_
+           ? "pictures can be decoded as their slices arrive (stream mode)"
+           : "no stream mode in this MPP or kernel: pictures go whole");
+}
+
+void VdecRK::stream_start(void* data_p, int data_len, int64_t pts, uint64_t recv_ts, uint8_t nal_type,
+                          uint32_t capture_delay_us, uint32_t processing_delay_us, int slices) {
+    next_packet_flags_ = (stream_ok_ && slices > 1)
+        ? (MPP_PACKET_FLAG_STREAM_START | MPP_PACKET_STREAM_SLICES(slices)) : 0;
+    feed_packet_to_decoder(data_p, data_len, pts, recv_ts, nal_type, capture_delay_us, processing_delay_us);
+    next_packet_flags_ = 0;
+}
+
+bool VdecRK::stream_append(const void* data, int len, int64_t pts, bool last) {
+    if (!stream_ok_ || len <= 0) return false;
+    MppDecStreamAppend a;
+    a.data = data;
+    a.size = (RK_U32)len;
+    a.flags = last ? MPP_STREAM_APPEND_LAST : 0;
+    a.pts = pts;
+    const bool ok = mpi.mpi->control(mpi.ctx, MPP_DEC_SET_STREAM_APPEND, &a) == MPP_OK;
+    if (last) {
+        // The picture is all here: what the decoder takes from now on is its
+        // decode time proper, as for a picture fed whole.
+        std::lock_guard<std::mutex> lock(decoding_stats_mutex);
+        auto it = decoding_stats.find(pts);
+        if (it != decoding_stats.end()) it->second.decode_start_us = get_time_us();
+    }
+    return ok;
+}
+
+void VdecRK::stream_end(int64_t pts) {
+    if (!stream_ok_) return;
+    MppDecStreamAppend a;
+    a.data = nullptr;
+    a.size = 0;
+    a.flags = MPP_STREAM_APPEND_LAST;
+    a.pts = pts;
+    mpi.mpi->control(mpi.ctx, MPP_DEC_SET_STREAM_APPEND, &a);
+}
+#else
+void VdecRK::probe_stream() { stream_ok_ = false; }
+
+void VdecRK::stream_start(void* data_p, int data_len, int64_t pts, uint64_t recv_ts, uint8_t nal_type,
+                          uint32_t capture_delay_us, uint32_t processing_delay_us, int slices) {
+    (void)slices;
+    feed_packet_to_decoder(data_p, data_len, pts, recv_ts, nal_type, capture_delay_us, processing_delay_us);
+}
+
+bool VdecRK::stream_append(const void*, int, int64_t, bool) { return false; }
+
+void VdecRK::stream_end(int64_t) {}
+#endif
 
 void VdecRK::cleanup() {
 	printf("Feeding eos\n");

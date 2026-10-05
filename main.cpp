@@ -596,6 +596,8 @@ int main(int argc, char **argv)
 	Ar8030Source::prj_rf_bw     = Settings::getInstance().getInt("prj_rf_bw", -1);
 	Ar8030Source::prj_rf_pwr_mw = Settings::getInstance().getInt("prj_rf_pwr_mw", -1);
 	Ar8030Source::air_bw        = Settings::getInstance().getInt("air_bw", -1);
+	// The cap on kestrel-air's video bitrate (RF menu, Max Bitrate), kbps, 0 = none.
+	Ar8030Source::max_kbps      = Settings::getInstance().getInt("ar8030_max_kbps", 0);
 	Ar8030Source::replay_stock_rf = Settings::getInstance().getInt("replay_stock_rf", 1);
 	std::string decoder_name = Settings::getInstance().getString("decoder_name", "rkmpp");
 	bool enable_vrr = Settings::getInstance().getBool("enable_vrr", true);
@@ -1055,6 +1057,12 @@ int main(int argc, char **argv)
                 case 0x316:
                     // AR8030 RF controls from the RF LINK tab (cmd - 0x310).
                     Ar8030Source::request_rf(cmd - 0x310, val);
+                    return;
+                case 0x30E:
+                    // RF menu, Max Bitrate: kept here and sent at every link-up.
+                    Ar8030Source::max_kbps = val;
+                    Settings::getInstance().set("ar8030_max_kbps", val);
+                    Ar8030Source::request_setting(Ar8030Source::CAM_MAX_KBPS, val);
                     return;
                 case 0x301: case 0x302: case 0x303: case 0x304:
                 case 0x305: case 0x306: case 0x307: case 0x308:

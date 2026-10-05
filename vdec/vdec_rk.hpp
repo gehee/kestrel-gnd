@@ -45,6 +45,7 @@ class VdecRK : public Vdec {
         void init_buffer(MppFrame frame);
         void set_mpp_decoding_parameters();
         void set_control_verbose(MpiCmd control,RK_U32 enable);
+        void probe_stream();
         void emit_decoded(std::shared_ptr<DecodedUnit> du, MppBuffer buffer);
 
         std::vector<uint8_t> cached_vps;
@@ -61,6 +62,11 @@ class VdecRK : public Vdec {
         // feed its GL-texture path; the live feed leaves it unset.
         std::function<void(std::shared_ptr<DecodedUnit>)> frame_sink_;
 
+        // Streamed pictures: MPP and the kernel take them (probed at start),
+        // and the flags the next packet goes in with.
+        bool stream_ok_ = false;
+        uint32_t next_packet_flags_ = 0;
+
     public:
         void set_frame_sink(std::function<void(std::shared_ptr<DecodedUnit>)> cb) { frame_sink_ = std::move(cb); }
         // Bound the blocking output wait (default is infinite) so the run_frame
@@ -68,6 +74,10 @@ class VdecRK : public Vdec {
         // player is stopped mid-stream. parameter is in milliseconds.
         void set_output_timeout(RK_S64 ms) { mpi.mpi->control(mpi.ctx, MPP_SET_OUTPUT_TIMEOUT, &ms); }
         void feed_packet_to_decoder(void* data_p, int data_len, int64_t pts, uint64_t recv_ts, uint8_t nal_type, uint32_t capture_delay_us, uint32_t processing_delay_us, bool is_key_override = false);
+        bool stream_supported() const override { return stream_ok_; }
+        void stream_start(void* data_p, int data_len, int64_t pts, uint64_t recv_ts, uint8_t nal_type, uint32_t capture_delay_us, uint32_t processing_delay_us, int slices) override;
+        bool stream_append(const void* data, int len, int64_t pts, bool last) override;
+        void stream_end(int64_t pts) override;
         void cleanup();
         void run_frame();
 
@@ -102,6 +112,8 @@ class VdecRK : public Vdec {
             int param = MPP_POLL_BLOCK;
             ret = mpi.mpi->control(mpi.ctx, MPP_SET_OUTPUT_BLOCK, &param);
             assert(!ret);
+
+            probe_stream();
 
             for (int i = 0; i < NUM_SLICES_BUFFERS; i++) {
                 slices_buffers[i] = (uint8_t*)malloc(READ_BUF_SIZE);
