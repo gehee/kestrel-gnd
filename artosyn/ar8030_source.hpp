@@ -2,7 +2,9 @@
 #define AR8030_SOURCE_H
 
 #include <atomic>
+#include <condition_variable>
 #include <mutex>
+#include <thread>
 #include <utility>
 #include <cstdint>
 #include <memory>
@@ -14,6 +16,7 @@
 #include "../dvr.hpp"
 #include "../webstream.hpp"
 #include "../common.hpp"
+#include "../utils/slice_times.hpp"
 #include "ar8030_sky.hpp"
 
 // Direct AR8030 video source.
@@ -72,7 +75,6 @@ class Ar8030Source {
         static bool chan_manual_cli;   // --ar8030-chan-manual: pinned to freq_khz from the start
         static int tx_power_dbm;
         static int tx_power_mw;   // stock's encoding: N = hold N mW, N+1 = auto capped at N
-        static int panel_latency_us;   // the screen's share (vblank to light), 0 = not counted
         static int air_floor_us;       // fastest capture -> first slice (air_floor_ms), see air_delay_for
         static bool tx_power_auto;
         void apply_tx_power(int mw); // PA output; stock uses 24
@@ -91,6 +93,8 @@ class Ar8030Source {
         // MHz or a bb_bandwidth_e gear is not established. -1 disables.
         static int  air_bw;
         static int  max_kbps;   // ar8030_max_kbps: the video bitrate cap sent at link-up, 0 = none
+        static bool stream_decode;   // KESTREL_STREAM_DECODE / stream_decode: 0 (default on)
+        static int  max_bw_mhz; // ar8030_max_bw_mhz: the video link bandwidth cap sent at link-up, 20 or 40
         // Replay stock's startup SET sequence verbatim. See the .cpp.
         static int  replay_stock_rf;
         // BB socket port carrying the flight controller's MSP stream, or 0 to
@@ -159,7 +163,10 @@ class Ar8030Source {
                         CAM_3DNR,
                         // Ours: the cap on the air unit's video bitrate, kbps
                         // (0 = none), sky cmd 0x40 - kestrel-air only. 0x30E.
-                        CAM_MAX_KBPS };
+                        CAM_MAX_KBPS,
+                        // Ours: the cap on the video link's bandwidth, MHz (20
+                        // or 40), sky cmd 0x41 - kestrel-air only. 0x30F.
+                        CAM_MAX_BW };
         static void request_setting(int field, int value);
 
         // RF controls. Which of these the baseband actually honours is decided
@@ -257,7 +264,7 @@ class Ar8030Source {
         // handshake has to ride a link that is actually up: sent before the
         // radios have associated it goes into the air and nothing answers.
         int      last_link_state = -1;
-        uint64_t last_link_poll_ms = 0;
+        uint64_t retune_down_ms_ = 0;          // the link dropped right after a bandwidth change (0: no)
         uint64_t last_scan_ms = 0;
         int      link_freq_mhz = 0;   // real link frequency, from BB_GET_STATUS
         bool     scan_logged = false;
@@ -267,8 +274,8 @@ class Ar8030Source {
         unsigned long long nal_count = 0;
         unsigned long long ctrl_bytes = 0;  // telemetry drained off port 2
         unsigned long long msp_bytes = 0;   // FC MSP drained off msp_bb_port
-        int last_link_kbps = 0;
-        int last_bw_idx = -1;
+        std::atomic<int> last_link_kbps{0};      // written by the stats thread
+        std::atomic<int> last_bw_idx{-1};        // written by the stats thread
         int last_bw_rx_idx = -1;  // rx_status's gear, kept only for the log
         bool air_cfg_logged = false;
         uint8_t  last_air_angle = 0;
@@ -313,6 +320,36 @@ class Ar8030Source {
         // by a frame interval and understated. The AU's own first-byte arrival
         // is the correct zero point for "glass to glass" on the ground side.
         uint64_t au_first_recv_us = 0;
+
+        // The radio queries behind the HUD run on a thread of their own, so
+        // the video never waits for a radio reply: on the video thread the
+        // 3 s batch held a picture up by 2-3 ms every time. It polls the link
+        // state (400 ms), the link figures and distance (3 s) and the channel
+        // scan; the video thread acts on what it finds through the atomics.
+        std::thread stats_thread;
+        std::mutex stats_mu;
+        std::condition_variable stats_cv;
+        bool stats_stop = false;
+        void start_stats();
+        void stop_stats();
+        void stats_run();
+        std::atomic<int> link_state_{-1};          // newest: poll or event
+        std::atomic<unsigned> link_events_{0};     // link-state events so far
+        std::atomic<uint64_t> bw_change_ms_{0};    // the last bandwidth-change event (12)
+        // The video link's bandwidth gear (bb_bandwidth_e), -1 = no link. From
+        // the bandwidth-change events: BB_GET_STATUS reports the uplink's 2.5 MHz.
+        std::atomic<int> video_bw_idx_{-1};
+        std::atomic<int> stat_mcs_{-1}, stat_dist_{-1};
+        std::atomic<bool> stats_soon_{false};      // refresh the link figures early
+    public:
+        // ar_libre's event callbacks (on its reader thread): raw payloads.
+        void on_link_event(const uint8_t* p);
+        void on_mcs_event(const uint8_t* p);
+        void on_logged_event(int ev, const uint8_t* p);
+    private:
+        // When the data of the last video read came off USB, from the kernel
+        // (ar_libre's arlink_socket_rx_ns), or 0 when not known.
+        uint64_t read_rx_us = 0;
         // Arrival time of the LAST slice appended to the AU. Reassembly is
         // au_last - au_first; using the flush-triggering read instead measures
         // first-slice-to-next-picture's-first-slice, i.e. the frame interval.
@@ -333,7 +370,6 @@ class Ar8030Source {
         int      last_count_cand = 0;
         bool     au_streamed = false;        // the picture went to the decoder from its first slice
         bool     au_stream_done = false;     // ...and its last slice followed
-        static bool stream_decode;           // KESTREL_STREAM_DECODE (default on)
         uint64_t stream_pics = 0, stream_ended = 0, stream_refused = 0;
         void     feed_au(const uint8_t *data, size_t len, int stream_slices);
         uint32_t late_slices = 0, late_window_pics = 0;
@@ -392,6 +428,7 @@ class Ar8030Source {
         // capture is a moment on our clock, so the air delay is measured
         // instead of pinned to air_floor_us.
         static constexpr uint8_t kAirFeatApClock = 0x08;   // byte 2: the stamp's sub-ms part
+        static constexpr uint8_t kAirFeatMaxBw = 0x10;     // takes the goggle's bandwidth cap (sky 0x41)
         int64_t  ap_off_us_ = 0;
         bool     ap_off_valid_ = false;
         uint64_t ap_poll_ms_ = 0;
@@ -399,6 +436,30 @@ class Ar8030Source {
         uint32_t pic_enc_us_ = 0;        // and capture -> its first slice out of the encoder
         uint32_t au_enc_us_ = 0;         // the same for the open access unit; 0 with au_air_us estimated
         bool     au_measured_ = false;
+        // Each slice on its own (utils/slice_times.hpp). The slice header's
+        // encoder-out time, our clock, for the slice NAL that follows it.
+        uint64_t hdr_out_us_ = 0;
+        uint32_t hdr_height_ = 0, hdr_fps_ = 0;
+        uint32_t ctb_size_ = 0, ctbs_per_row_ = 0;   // from the SPS
+        SliceTimesPtr au_times_;                     // the open access unit's slices
+        // How long the sensor takes to read a frame out, top row to bottom:
+        // where in time a slice's first row was captured. Learned from how far
+        // apart the first and last slices leave the encoder (see note_slice).
+        std::vector<uint32_t> readout_win_;
+        uint32_t readout_us_ = 0;
+        void note_slice(int addr, bool first_slice, uint64_t recv_us);
+        void drop_au();   // the open access unit goes, a streamed one ended in the decoder
+        bool ps_since_pic_ = false;          // parameter sets came since the last picture (a GOP start)
+        // Where a picture's first slice ends, before its second slice says so.
+        // Usually at the last slice's learned start; the air unit's intra
+        // refresh cuts its sweep-start pictures - one every sweep, by its
+        // picture counter - after the refresh rows instead (CTB 120, row 64,
+        // every 17th at 1080p). Learned: the period and phase of those cuts.
+        int      cut_last_hseq_ = -1;        // the last cut picture's counter
+        int      cut_period_ = 0, cut_confirms_ = 0;
+        uint32_t cut_row_ = 0;
+        uint32_t pics_since_cut_ = 0;
+        uint32_t predict_first_end(int hseq) const;
         // 5 s windows, us: per picture capture -> encoder out, -> first slice
         // here, -> last slice here (reassembled); per slice, handed to the
         // air unit's radio -> here.

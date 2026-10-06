@@ -1,4 +1,5 @@
 
+#include <poll.h>
 #include <sys/statvfs.h>
 #include "artosyn/ar8030_source.hpp"
 #include "osd.hpp"
@@ -59,6 +60,13 @@ static int ar_maxbr_index(int kbps) {
     for (int i = 0; i < kArMaxBrCount; i++) if (kArMaxBrVals[i] == kbps) return i;
     return 0;
 }
+// Max Bandwidth: how wide kestrel-air may take the video link. It goes up to
+// 40 MHz by itself on a good link (more throughput, less margin, more of the
+// band taken); 20 keeps it there. Stock air units ignore it.
+static const int kArMaxBwVals[]     = { 20, 40 };
+static const char* kArMaxBwLabels[] = { "20 MHz", "40 MHz" };
+static const int kArMaxBwCount = 2;
+static int ar_maxbw_index(int mhz) { return mhz == 20 ? 0 : 1; }
 
 std::vector<std::pair<const char*, int>> OSD::ar_rf_items() const {
     std::vector<std::pair<const char*, int>> v;
@@ -78,6 +86,9 @@ std::vector<std::pair<const char*, int>> OSD::ar_rf_items() const {
     if (rf_caps & 16) v.push_back({"Channel",   5});  // RF_CHAN
     if (rf_caps & 16) v.push_back({"Channel Hop", 7});  // RF_HOP
     if (rf_caps & 1)  v.push_back({"TX Power",  1});  // RF_TX_POWER
+    // A kestrel-air command (sky cmd 0x41), not an rf_caps bit: only for an air
+    // unit that says it takes it.
+    if (air_max_bw_) v.push_back({"Max Bandwidth", 11});
     // MCS, Bandwidth and LNA Mode were removed rather than left visible.
     // BB_SET_MCS has no direction field, so it can only set our own transmit -
     // the video MCS is the air unit's choice, driven by the policy table in
@@ -1976,18 +1987,14 @@ void OSD::draw_latency_graph(float x, float y, float w, float h, const std::vect
             const auto& frame = data[total_count - count + i];
             float cur_sum = 0;
             float val = 0;
-            if (layer_idx > 0) cur_sum += frame.capture_ms;
-            if (layer_idx > 1) cur_sum += frame.processing_ms;
-            if (layer_idx > 2) cur_sum += frame.net_ms;
-            if (layer_idx > 3) cur_sum += frame.reassemble_ms;
-            if (layer_idx > 4) cur_sum += frame.dec_ms;
+            if (layer_idx > 0) cur_sum += frame.processing_ms;
+            if (layer_idx > 1) cur_sum += frame.net_ms;
+            if (layer_idx > 2) cur_sum += frame.dec_ms;
             
-            if      (layer_idx == 0) val = frame.capture_ms;
-            else if (layer_idx == 1) val = frame.processing_ms;
-            else if (layer_idx == 2) val = frame.net_ms;
-            else if (layer_idx == 3) val = frame.reassemble_ms;
-            else if (layer_idx == 4) val = frame.dec_ms;
-            else if (layer_idx == 5) val = frame.disp_ms;
+            if      (layer_idx == 0) val = frame.processing_ms;
+            else if (layer_idx == 1) val = frame.net_ms;
+            else if (layer_idx == 2) val = frame.dec_ms;
+            else if (layer_idx == 3) val = frame.disp_ms;
 
             float xp     = x + (max_history - count + i) * step;
             float base_y = y + std::min(cur_sum / max_val, 1.0f) * h;
@@ -2002,12 +2009,10 @@ void OSD::draw_latency_graph(float x, float y, float w, float h, const std::vect
         draw_glow_line(top_points, 1.8f, 0.9f, r_c, g_c, b_c);
     };
 
-    draw_component(0, 0.247f, 0.533f, 0.773f);   // Capture    (Blue)
-    draw_component(1, 0.816f, 0.000f, 0.000f);   // Air        (Red)
-    draw_component(2, 0.012f, 0.808f, 0.643f);   // Proc       (Teal)
-    draw_component(3, 0.700f, 0.300f, 0.900f);   // Reassemble (Purple)
-    draw_component(4, 0.918f, 0.769f, 0.208f);   // Decoding   (Yellow)
-    draw_component(5, 0.984f, 0.302f, 0.239f);   // Display    (Red/Orange)
+    draw_component(0, 0.816f, 0.000f, 0.000f);   // Encoder    (Red)
+    draw_component(1, 0.012f, 0.808f, 0.643f);   // RF         (Teal)
+    draw_component(2, 0.918f, 0.769f, 0.208f);   // Decoding   (Yellow)
+    draw_component(3, 0.984f, 0.302f, 0.239f);   // Display    (Red/Orange)
     
     // Draw total delay glowing sweeper dot at the top layer
     if (!top_points.empty()) {
@@ -2065,7 +2070,7 @@ void OSD::draw_latency_graph(float x, float y, float w, float h, const std::vect
     // --- LEGEND ---
     leg_h    = 0.09f;
     float leg_y    = y - 0.07f;
-    int num_items = 7;
+    int num_items = 5;
     float leg_item_w = 0.43f;
     float leg_x   = x + (w - leg_item_w * num_items) / 2.0f;
 
@@ -2075,13 +2080,11 @@ void OSD::draw_latency_graph(float x, float y, float w, float h, const std::vect
         draw_text(txt, ix + 0.05f, leg_y, 0.065f);
     };
 
-    draw_leg(0, "Cap",      0.247f, 0.533f, 0.773f);
-    draw_leg(1, "Enc",      0.816f, 0.000f, 0.000f);
-    draw_leg(2, "Net",      0.012f, 0.808f, 0.643f);
-    draw_leg(3, "Rsm",      0.700f, 0.300f, 0.900f);
-    draw_leg(4, "Dec",      0.918f, 0.769f, 0.208f);
-    draw_leg(5, "Disp",     0.984f, 0.302f, 0.239f);
-    draw_leg(6, "Pace",     0.8f, 0.0f, 1.0f);
+    draw_leg(0, "Enc",      0.816f, 0.000f, 0.000f);
+    draw_leg(1, "RF",       0.012f, 0.808f, 0.643f);
+    draw_leg(2, "Dec",      0.918f, 0.769f, 0.208f);
+    draw_leg(3, "Disp",     0.984f, 0.302f, 0.239f);
+    draw_leg(4, "Pace",     0.8f, 0.0f, 1.0f);
 }
 
 void OSD::draw_bitrate_graph(float x, float y, float w, float h, const std::vector<LatencyFrame>& data, float max_val) {
@@ -2243,11 +2246,9 @@ void OSD::draw_latency_health_bar(float x, float y, float h, const LatencyFrame&
     };
 
     // Draw ordered components
-    // Capture (Blue) -> Air (Red) -> Net (Teal) -> Reassemble (Purple) -> Decoding (Yellow) -> Display (Red/Orange)
-    draw_segments(frame.capture_ms, 0.247f, 0.533f, 0.773f);        // Cap: Blue (#3F88C5)
-    draw_segments(frame.processing_ms, 0.816f, 0.000f, 0.000f);      // Air: Red (#D00000)
-    draw_segments(frame.net_ms, 0.012f, 0.808f, 0.643f);             // Net: Teal (#03CEB2)
-    draw_segments(frame.reassemble_ms, 0.700f, 0.300f, 0.900f);      // Rsm: Purple (#B34DFF)
+    // Encoder (Red) -> RF (Teal) -> Decoding (Yellow) -> Display (Red/Orange)
+    draw_segments(frame.processing_ms, 0.816f, 0.000f, 0.000f);      // Enc: Red (#D00000)
+    draw_segments(frame.net_ms, 0.012f, 0.808f, 0.643f);             // RF: Teal (#03CEB2)
     draw_segments(frame.dec_ms, 0.918f, 0.769f, 0.208f);            // Dec: Yellow (#EAC435)
     draw_segments(frame.disp_ms, 0.984f, 0.302f, 0.239f);           // Disp: Orange-Red (#FB4D3D)
 }
@@ -2491,9 +2492,9 @@ void OSD::render_gl() {
     float lat_max = osd_vars.total_latency_max;
     bool slices_received = osd_vars.slices_received;
     if (slices_received) {
-        // sky = cap+ISP+enc (air side), net = RF transport, rsm = reassembly, dec, disp
-        lat_avg = osd_vars.capture_latency_avg + osd_vars.tx_latency_avg
-                + osd_vars.proc_latency_avg + osd_vars.reassemble_latency_avg
+        // the slowest slice's: enc = capture -> encoder out (air side), rf = encoder out to here, dec, disp
+        lat_avg = osd_vars.tx_latency_avg
+                + osd_vars.proc_latency_avg
                 + osd_vars.decoding_latency_avg + osd_vars.display_latency_avg;
         if (lat_max < lat_avg) lat_max = lat_avg;
     }
@@ -3346,17 +3347,15 @@ void OSD::render_gl() {
     // 5/21/8/10ms - a plausible-looking invented profile that summed to the
     // invented 44ms "max" below, so the bar drew a convincing shape from
     // nothing.
-    float r_cap = 0.0f, r_proc = 0.0f, r_net = 0.0f, r_rsm = 0.0f,
+    float r_proc = 0.0f, r_net = 0.0f,
           r_dec = 0.0f, r_disp = 0.0f;
     
     if (have_latency_frame) {
         const auto& last_frame = last_latency_frame;
-        float total = last_frame.capture_ms + last_frame.processing_ms + last_frame.net_ms + last_frame.reassemble_ms + last_frame.dec_ms + last_frame.disp_ms;
+        float total = last_frame.processing_ms + last_frame.net_ms + last_frame.dec_ms + last_frame.disp_ms;
         if (total > 0.1f) {
-            r_cap = last_frame.capture_ms / max_lat;
             r_proc = last_frame.processing_ms / max_lat;
             r_net = last_frame.net_ms / max_lat;
-            r_rsm = last_frame.reassemble_ms / max_lat;
             r_dec = last_frame.dec_ms / max_lat;
             r_disp = last_frame.disp_ms / max_lat;
         }
@@ -3375,22 +3374,21 @@ void OSD::render_gl() {
 
     if (legacy_panels)
     draw_stacked_bar(bx + hud_margin_l, current_ly, 0.85f * s, bar_h, m_slant, false,
-                     r_cap, neon_r * ldim, neon_g * ldim, neon_b * ldim,
                      r_proc, cyan_r * ldim, cyan_g * ldim, cyan_b * ldim,
-                     r_net, 0.012f * ldim, 0.808f * ldim, 0.643f * ldim, // Teal for Net
-                     r_rsm, 0.700f * ldim, 0.300f * ldim, 0.900f * ldim, // Purple for Reassembly
+                     r_net, 0.012f * ldim, 0.808f * ldim, 0.643f * ldim, // Teal for RF
                      r_dec, 0.918f * ldim, 0.769f * ldim, 0.208f * ldim, // Yellow for Dec
-                     r_disp, 0.9f * ldim, 0.2f * ldim, 0.2f * ldim);
+                     r_disp, 0.9f * ldim, 0.2f * ldim, 0.2f * ldim,
+                     0.0f, 0.0f, 0.0f, 0.0f,                             // (a fifth and sixth part: none)
+                     0.0f, 0.0f, 0.0f, 0.0f);
 
     current_ly += 0.07f * s;
     // With the air delay measured (the AR8030 path: see air_delay_for) this is
-    // capture stamp to the vblank the picture goes out on - plus the screen's
-    // own share when panel_latency_ms is set, which makes it glass to glass.
-    // Without the air delay, arrival to vblank only, and labelled so.
+    // the slowest slice's, from its first row's capture to the scan-out lighting
+    // that row (Renderer::update_stats). Without it, arrival to vblank only,
+    // and labelled so.
     if (video_active && lat_avg > 0.0f) {
         sprintf(buf, !air_delay_valid ? "LATENCY (gnd): %.1fms | MAX: %.1fms"
-                     : Ar8030Source::panel_latency_us > 0 ? "LATENCY (g2g est): %.1fms | MAX: %.1fms"
-                                                          : "LATENCY (to vsync): %.1fms | MAX: %.1fms",
+                                      : "LATENCY (to scan-out): %.1fms | MAX: %.1fms",
                 lat_avg, lat_max);
     } else if (video_active) {
         sprintf(buf, "LATENCY (gnd): -- | MAX: --");
@@ -3412,19 +3410,17 @@ void OSD::render_gl() {
         // sky telemetry frame (cmd 0x05) carries none, and stock's own debug
         // OSD shows its sky delay triple as "S: 0,0,0" on this hardware - so
         // stock does not have them here either.
-        float rsm_avg  = rsm_latency_ms;                  // AU reassembly
         float dec_avg  = osd_vars.decoding_latency_avg;
         float disp_avg = osd_vars.display_latency_avg;
         if (air_delay_valid)
             // "air" is capture stamp to the first slice's arrival: camera
             // readout, encode, the air app, the radio and the goggle's daemon.
-            sprintf(buf, "[air:%.1f, rsm:%.1f, dec:%.1f, disp:%.1f]",
-                    air_delay_ms, rsm_avg, dec_avg, disp_avg);
+            sprintf(buf, "[air:%.1f, dec:%.1f, disp:%.1f]",   // dec includes the slices' arrival
+                    air_delay_ms, dec_avg, disp_avg);
         else
-            sprintf(buf, "[rsm:%.1f, dec:%.1f, disp:%.1f]  (ground)",
-                    rsm_avg, dec_avg, disp_avg);
+            sprintf(buf, "[dec:%.1f, disp:%.1f]  (ground)", dec_avg, disp_avg);
     } else {
-        sprintf(buf, "[rsm:0.0, dec:0.0, disp:0.0]  (ground)");
+        sprintf(buf, "[dec:0.0, disp:0.0]  (ground)");
     }
     draw_text(buf, bx + hud_margin_l, current_ly, 0.058f * s, false, ldim * 0.8f, ldim * 0.8f, ldim * 0.8f);
     current_ly += 0.09f * s;
@@ -3691,7 +3687,7 @@ void OSD::render_gl() {
         // getting for it, which is the pair worth watching in flight. Gain,
         // LDPC, frequency and bandwidth are diagnostics and stay FULL-only.
         if (legacy_panels) {
-            sprintf(buf, "RX MCS%d  %.2f Mbps", artosyn_copy.rx_mcs_val,
+            sprintf(buf, "RX MCS%d  %.2f Mbps", ar_mcs_label(artosyn_copy.rx_mcs_val),
                     artosyn_copy.rx_data_rate_kbps / 1000.0f);
             draw_text(buf, outer_x, current_ry, 0.07f * s, true, dim, dim, dim);
             current_ry += rs;
@@ -3901,11 +3897,30 @@ void OSD::present_gl_frame() {
         const EGLint a[] = { EGL_SYNC_NATIVE_FENCE_FD_ANDROID, EGL_NO_NATIVE_FENCE_FD_ANDROID, EGL_NONE };
         prof_sync = pfn_eglCreateSyncKHR(display, EGL_SYNC_NATIVE_FENCE_ANDROID, a);
     }
+    // The frame is offered to the display only once the GPU has drawn it. A
+    // video flip carries the newest offered OSD frame in its own commit, and
+    // the kernel waits for that frame's rendering before the commit takes
+    // effect: with the OSD redrawn every refresh (the stats screen) half the
+    // video flips missed their vblank by waiting on the GPU - 5 ms more
+    // latency than on the live view. Waiting here costs the OSD thread, not
+    // the video.
+    EGLSyncKHR done_sync = EGL_NO_SYNC_KHR;
+    if (pfn_eglCreateSyncKHR && pfn_eglDupNativeFenceFDANDROID) {
+        const EGLint a[] = { EGL_SYNC_NATIVE_FENCE_FD_ANDROID, EGL_NO_NATIVE_FENCE_FD_ANDROID, EGL_NONE };
+        done_sync = pfn_eglCreateSyncKHR(display, EGL_SYNC_NATIVE_FENCE_ANDROID, a);
+    }
+    if (done_sync == EGL_NO_SYNC_KHR) glFinish();
     uint64_t prof_submit = get_time_us();
     eglSwapBuffers(display, gb.surface);
     if (prof_sync != EGL_NO_SYNC_KHR) {
         prof::gpu_fence(pfn_eglDupNativeFenceFDANDROID(display, prof_sync), prof_submit);
         pfn_eglDestroySyncKHR(display, prof_sync);
+    }
+    // closed on every way out of here, the early returns below included
+    struct FenceFd { int fd = -1; ~FenceFd() { if (fd >= 0) close(fd); } } done;
+    if (done_sync != EGL_NO_SYNC_KHR) {
+        done.fd = pfn_eglDupNativeFenceFDANDROID(display, done_sync);
+        pfn_eglDestroySyncKHR(display, done_sync);
     }
     prof::mark(prof::kSwap);
     last_render_ts = get_time_us();
@@ -3979,6 +3994,10 @@ void OSD::present_gl_frame() {
     }
     locked_bo = bo;
     prof::mark(prof::kLock);
+    if (done.fd >= 0) {
+        struct pollfd pfd = { done.fd, POLLIN, 0 };
+        poll(&pfd, 1, 100);   // the GPU has finished this frame (see done_sync)
+    }
     dev->stage_tile(frame_tile_);   // the picture's rectangle goes with this frame
     dev->set_osd_fb(fb_id);
     prof::mark(prof::kHandoff);
@@ -4133,6 +4152,12 @@ bool OSD::get_slices_received() {
     bool val = osd_vars.slices_received;
     pthread_mutex_unlock(&osd_mutex);
     return val;
+}
+
+void OSD::update_artosyn_rx_mcs(int mcs) {
+    pthread_mutex_lock(&osd_mutex);
+    osd_vars.artosyn.rx_mcs_val = mcs;
+    pthread_mutex_unlock(&osd_mutex);
 }
 
 void OSD::update_artosyn_stats(artosyn_stats v) {
@@ -4388,7 +4413,7 @@ void OSD::log_csv_row() {
             (unsigned long long)get_time_ms(),
             osd_vars.video_bandwidth,
             osd_vars.artosyn.rx_data_rate_kbps / 1000.0f,
-            osd_vars.artosyn.rx_mcs_val,
+            ar_mcs_label(osd_vars.artosyn.rx_mcs_val),
             osd_vars.artosyn.snr,
             osd_vars.link_stats.count_p_lost,
             osd_vars.total_latency_avg,
@@ -4430,10 +4455,6 @@ void OSD::update_stats(int current_framerate, latency_stats stats) {
 	osd_vars.tx_latency_min = stats.tx_latency.min;
     osd_vars.tx_latency_values = stats.tx_latency.values;
 
-    osd_vars.capture_latency_avg = stats.capture_latency.avg;
-    osd_vars.capture_latency_max = stats.capture_latency.max;
-    osd_vars.capture_latency_min = stats.capture_latency.min;
-    osd_vars.capture_latency_values = stats.capture_latency.values;
 
 	osd_vars.total_latency_avg = stats.total_latency.avg;
 	osd_vars.total_latency_max = stats.total_latency.max;
@@ -4445,17 +4466,11 @@ void OSD::update_stats(int current_framerate, latency_stats stats) {
 	osd_vars.frame_pace_min = stats.frame_pace.min;
     osd_vars.frame_pace_values = stats.frame_pace.values;
 
-    osd_vars.reassemble_latency_avg = stats.reassemble_latency.avg;
-    osd_vars.reassemble_latency_max = stats.reassemble_latency.max;
-    osd_vars.reassemble_latency_min = stats.reassemble_latency.min;
-    osd_vars.reassemble_latency_values = stats.reassemble_latency.values;
 
     osd_vars.proc_latency_worst = stats.proc_latency_worst;
     osd_vars.decoding_latency_worst = stats.decoding_latency_worst;
     osd_vars.display_latency_worst = stats.display_latency_worst;
     osd_vars.tx_latency_worst = stats.tx_latency_worst;
-    osd_vars.capture_latency_worst = stats.capture_latency_worst;
-    osd_vars.reassemble_latency_worst = stats.reassemble_latency_worst;
     osd_vars.latency_history.push_back(stats.total_latency.avg);
     if (osd_vars.latency_history.size() > 50) osd_vars.latency_history.erase(osd_vars.latency_history.begin());
 
@@ -4484,22 +4499,16 @@ void OSD::update_stats(int current_framerate, latency_stats stats) {
             RESET);
         printf("\n");
 
-        printf(BOLDMAGENTA "Air - capture stamp to first slice here (ms):%s\n", RESET);
+        printf(BOLDMAGENTA "RF - encoder out to the slice here (ms):%s\n", RESET);
         print_latency_dist(osd_vars.proc_latency_values, osd_vars.proc_latency_avg, osd_vars.proc_latency_min, osd_vars.proc_latency_max, MAX_LATENCY_SCALE, GRAPH_BAR_WIDTH, BOLDCYAN);
-        
-        printf(BOLDMAGENTA "Frame assembly - first slice to decoder (ms):%s\n", RESET);
-        print_latency_dist(osd_vars.reassemble_latency_values, osd_vars.reassemble_latency_avg, osd_vars.reassemble_latency_min, osd_vars.reassemble_latency_max, MAX_LATENCY_SCALE, GRAPH_BAR_WIDTH, BOLDMAGENTA);
 
-        printf(BOLDMAGENTA "Decoding / RX processing (ms):%s\n", RESET);
+        printf(BOLDMAGENTA "Decoding - the slice here to its rows decoded (ms):%s\n", RESET);
         print_latency_dist(osd_vars.decoding_latency_values, osd_vars.decoding_latency_avg, osd_vars.decoding_latency_min, osd_vars.decoding_latency_max, MAX_LATENCY_SCALE, GRAPH_BAR_WIDTH, BOLDYELLOW);
         
         printf(BOLDMAGENTA "\nDisplay (VSync Aging) (ms):%s\n", RESET);
         print_latency_dist(osd_vars.display_latency_values, osd_vars.display_latency_avg, osd_vars.display_latency_min, osd_vars.display_latency_max, MAX_LATENCY_SCALE, GRAPH_BAR_WIDTH, RED);
         
-        printf(BOLDMAGENTA "\nExposure wait + panel, calibrated (ms):%s\n", RESET);
-        print_latency_dist(osd_vars.capture_latency_values, osd_vars.capture_latency_avg, osd_vars.capture_latency_min, osd_vars.capture_latency_max, MAX_LATENCY_SCALE, GRAPH_BAR_WIDTH, BOLDGREEN);
- 
-        printf(BOLDMAGENTA "TX Encoder Processing (ms):%s\n", RESET);
+        printf(BOLDMAGENTA "\nCapture -> encoder out (ms):%s\n", RESET);
         print_latency_dist(osd_vars.tx_latency_values, osd_vars.tx_latency_avg, osd_vars.tx_latency_min, osd_vars.tx_latency_max, MAX_LATENCY_SCALE, GRAPH_BAR_WIDTH, CYAN);
         
         printf(BOLDMAGENTA "\nGlass-to-glass estimate (ms):%s\n", RESET);
@@ -4539,7 +4548,7 @@ void OSD::update_stats(int current_framerate, latency_stats stats) {
                         if (sample_idx >= (int)data.size()) sample_idx = (int)data.size() - 1;
 
                         const auto& f = data[sample_idx];
-                        float total = f.capture_ms + f.processing_ms + f.net_ms + f.dec_ms + f.disp_ms;
+                        float total = f.processing_ms + f.net_ms + f.dec_ms + f.disp_ms;
                         float total_dots = (total / max_ms) * (height_chars * 4);
                         
                         int row_start_dot = r * 4;
@@ -4552,8 +4561,7 @@ void OSD::update_stats(int current_framerate, latency_stats stats) {
                                 }
                                 
                                 float cur = 0;
-                                if (row_lat_base < (cur += f.capture_ms)) sample_color = BOLDGREEN;
-                                else if (row_lat_base < (cur += f.processing_ms)) sample_color = CYAN;
+                                if (row_lat_base < (cur += f.processing_ms)) sample_color = CYAN;
                                 else if (row_lat_base < (cur += f.net_ms)) sample_color = BOLDCYAN;
                                 else if (row_lat_base < (cur += f.dec_ms)) sample_color = BOLDYELLOW;
                                 else sample_color = RED;
@@ -4589,7 +4597,7 @@ void OSD::add_latency_frame(LatencyFrame frame) {
     static float smoothed_pace = 0.0f;
     uint64_t now_us = get_time_us();
     
-    bool is_dummy = (frame.capture_ms == 0.0f && frame.processing_ms == 0.0f && 
+    bool is_dummy = (frame.processing_ms == 0.0f && 
                      frame.net_ms == 0.0f && frame.dec_ms == 0.0f && frame.disp_ms == 0.0f);
     if (is_dummy) {
         frame.pace_ms = 0.0f;
@@ -4850,6 +4858,13 @@ void OSD::menu_plain_value(int tab, int i, char* out, size_t cap) {
     memcpy(out, b, n); out[n] = '\0';
 }
 
+// The Video tab's rows as the handlers below number them, from where they sit
+// on screen: Max Bitrate (10) is listed second, right after Video Mode.
+static int video_row(int shown) {
+    if (shown == 1) return 10;
+    return shown >= 2 && shown <= 10 ? shown - 1 : shown;
+}
+
 std::vector<OSD::MenuItem> OSD::menu_items(int tab) const {
     std::vector<MenuItem> items;
     if (tab == 0) { // Video Tab
@@ -4870,7 +4885,15 @@ std::vector<OSD::MenuItem> OSD::menu_items(int tab) const {
                 // Sharpness/Contrast/WB/Rotate/Ratio/3D DNR, confirmed
                 // against a photo of stock's UI) - it was never a real
                 // setting to expose, whatever cmd 0x1F does on the wire.
-                {"Video Mode", 1}, {"Rotate", 1},
+                // The air unit's video bitrate: AUTO follows the link; a cap is
+                // a kestrel-air command (sky cmd 0x40), ignored by stock. Next to
+                // Video Mode, the other setting that decides the stream; listed
+                // here, handled as row 10 (video_row).
+                {"Video Mode", 1},
+                {"Max Bitrate", 1, "Cap on the video bitrate. AUTO follows the link. A cap "
+                                   "below it gives a steadier picture and less time on the "
+                                   "air per frame. Kestrel air units only."},
+                {"Rotate", 1},
                 {"Scene", 1}, {"EV", 1}, {"White Balance", 1},
                 {"Saturation", 1}, {"Contrast", 1}, {"Sharpness", 1}, {"3D DNR", 1},
                 // Stock's own Display tab (photo-confirmed), not Camera - but
@@ -4878,12 +4901,7 @@ std::vector<OSD::MenuItem> OSD::menu_items(int tab) const {
                 // CMD_SET_CHN_FOCUS), so it lives with the other AR8030
                 // camera settings here rather than in our DISPLAY tab, which
                 // only holds goggle-local drawing settings.
-                {"Focus Mode", 1},
-                // The air unit's video bitrate: AUTO follows the link; a cap is
-                // a kestrel-air command (sky cmd 0x40), ignored by stock.
-                {"Max Bitrate", 1, "Cap on the video bitrate. AUTO follows the link. A cap "
-                                   "below it gives a steadier picture and less time on the "
-                                   "air per frame. Kestrel air units only."}
+                {"Focus Mode", 1}
             };
         }
     } else if (tab == 1) { // RF Tab
@@ -4906,6 +4924,10 @@ std::vector<OSD::MenuItem> OSD::menu_items(int tab) const {
                     "Radio output. More reaches further and runs hotter."}); break;
                 case 8: items.push_back({it.first, 1,
                     "Force the air unit's low-power standby on or off for now."}); break;
+                case 11: items.push_back({it.first, 1,
+                    "How wide the video link may go. At 40 it widens on a strong link "
+                    "for more bitrate; 20 keeps it narrower and steadier. "
+                    "Kestrel air units only."}); break;
                 default: items.push_back({it.first, 1}); break;
             }
         }
@@ -5244,7 +5266,7 @@ int OSD::menu_first_selectable_row(int tab) {
 void OSD::menu_apply_change(int tab, int index, int dir) {
     const int menu_tab = tab, menu_index = index;
             if (menu_tab == 0) {
-       switch (menu_index) {
+       switch (video_row(menu_index)) {
            case 0: {
                int n = video_mode_names.empty() ? 1 : (int)video_mode_names.size();
                menu_video_mode = menu_step(menu_video_mode, dir, n);
@@ -5276,6 +5298,7 @@ void OSD::menu_apply_change(int tab, int index, int dir) {
                    break;
                case 7: menu_ar_hop = menu_step(menu_ar_hop ? 1 : 0, dir, 2) != 0; break;
                case 8: menu_ar_standby = menu_step(menu_ar_standby ? 1 : 0, dir, 2) != 0; break;  // forced on Enter
+               case 11: menu_ar_maxbw = menu_step(menu_ar_maxbw, dir, kArMaxBwCount); break;  // applied on Enter
                default: break;
            }
        }
@@ -5437,7 +5460,7 @@ void OSD::menu_value_text(int tab, int i, char* val_buf, size_t cap) {
     val_buf[0] = '\0';
     
     if (menu_tab == 0) {
-        switch (i) {
+        switch (video_row(i)) {
             case 0: {
                 int idx = menu_video_mode;
                 if (video_mode_names.empty()) { sprintf(val_buf, "< -- >"); break; }
@@ -5495,6 +5518,9 @@ void OSD::menu_value_text(int tab, int i, char* val_buf, size_t cap) {
                     // (auto-parks when idle, exits when flying), so a force does
                     // not necessarily stick - see fpv_sky_standby_mode_thread.
                     sprintf(val_buf, "< %s >", menu_ar_standby ? "ON" : "OFF");
+                    break;
+                case 11:    // Max Bandwidth
+                    sprintf(val_buf, "< %s >", kArMaxBwLabels[menu_ar_maxbw]);
                     break;
                 default: break;
             }
@@ -5746,6 +5772,7 @@ void OSD::handle_key(int key) {
              menu_ar_standby = air_standby;   // start the row at the air's real state
              menu_ar_hop = Ar8030Source::chan_auto;
              menu_ar_maxbr = ar_maxbr_index(Ar8030Source::max_kbps);
+             menu_ar_maxbw = ar_maxbw_index(Ar8030Source::max_bw_mhz);
              menu_refresh_options();      // seeded: work out what row 0 shows
         }
         render_requested = true;
@@ -5941,7 +5968,7 @@ void OSD::handle_key(int key) {
                 // 0x01 = video mode (routed to SET_CHN_RES in main); 0x300+n are
                 // the AR8030 camera settings, kept out of the kestrel-air id space.
                 if (cmd_cb) {
-                    switch (menu_index) {
+                    switch (video_row(menu_index)) {
                         case 0: cmd_cb(0x01,  menu_video_mode); break;
                         case 3: cmd_cb(0x301, kEvSteps[menu_cam_ev]); break;
                         case 5: cmd_cb(0x302, menu_cam_sat); break;
@@ -5996,6 +6023,10 @@ void OSD::handle_key(int key) {
                             // (auto-parks when idle, exits when flying). Stock offers
                             // the same temporary force from its menu.
                             cmd_cb(0x308, menu_ar_standby ? 1 : 0);
+                            break;
+                        case 11:
+                            // Saved and sent to the air unit; again at every link-up.
+                            cmd_cb(0x30F, kArMaxBwVals[menu_ar_maxbw]);
                             break;
                         case 9:
                             // Bind. Parked for the RX thread - the menu runs on the

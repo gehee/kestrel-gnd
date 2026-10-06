@@ -37,7 +37,8 @@ float total_of(const StatsFrame& f) {
 // because a spike averaged over a column all but disappears). The last column is
 // the one still filling.
 void build_stats(const StatsFrame* frames, size_t n_frames, const StatsFlip* flips, size_t n_flips,
-                 uint64_t now_us, int window_s, bool pacing_valid, StatsView& out) {
+                 uint64_t now_us, int window_s, bool pacing_valid, StatsView& out, double period_us) {
+    (void)flips; (void)n_flips;
     out = StatsView();
     out.window_s = window_s;
     out.pacing = pacing_valid;
@@ -57,15 +58,16 @@ void build_stats(const StatsFrame* frames, size_t n_frames, const StatsFlip* fli
     };
 
     // ---- pictures ----
+    constexpr int S = StatsFrame::kStages;
     int   n[StatsView::kCols] = {0};
-    float st_sum[6][StatsView::kCols] = {{0}};
+    float st_sum[S][StatsView::kCols] = {{0}};
     float v_sum[StatsView::kCols] = {0}, l_sum[StatsView::kCols] = {0}, s_sum[StatsView::kCols] = {0};
     static thread_local uint32_t tot_hist[kTotBins];
-    static thread_local uint32_t stage_hist[6][kStageBins];
+    static thread_local uint32_t stage_hist[S][kStageBins];
     std::memset(tot_hist, 0, sizeof(tot_hist));
     std::memset(stage_hist, 0, sizeof(stage_hist));
     uint64_t n_pics = 0, n_recent = 0;
-    uint64_t stage_nonzero[6] = {0, 0, 0, 0, 0, 0};
+    uint64_t stage_nonzero[S] = {0, 0, 0, 0};
     uint32_t prev_lost = 0;
     bool have_prev = false;
     double v_all = 0, l_all = 0;
@@ -88,17 +90,18 @@ void build_stats(const StatsFrame* frames, size_t n_frames, const StatsFlip* fli
         if (tot <= 0.0f) continue;                  // a gap filler: no picture
         if (!first_t) first_t = f.t_us;
         n[c]++;
-        for (int k = 0; k < 6; k++) st_sum[k][c] += f.stage[k];
+        for (int k = 0; k < S; k++) st_sum[k][c] += f.stage[k];
         v_sum[c] += f.video_mbps;
         l_sum[c] += f.link_mbps;
         s_sum[c] += f.snr;
         out.tmax[c] = std::max(out.tmax[c], tot);
+        if (f.key) out.kmax[c] = std::max(out.kmax[c], tot);
         out.key[c] |= f.key;
         out.mcs[c] = f.mcs;
         n_pics++;
         if (f.t_us + 2000000 > now_us) n_recent++;
         tot_hist[std::min(kTotBins - 1, (int)(tot * 10.0f))]++;
-        for (int k = 0; k < 6; k++) {
+        for (int k = 0; k < S; k++) {
             stage_hist[k][std::min(kStageBins - 1, (int)(f.stage[k] * 10.0f))]++;
             if (f.stage[k] > 0.0f) stage_nonzero[k]++;
         }
@@ -115,7 +118,7 @@ void build_stats(const StatsFrame* frames, size_t n_frames, const StatsFlip* fli
         out.have[c] = 1;
         const float inv = 1.0f / (float)n[c];
         float tot = 0;
-        for (int k = 0; k < 6; k++) { out.stage[k][c] = st_sum[k][c] * inv; tot += out.stage[k][c]; }
+        for (int k = 0; k < S; k++) { out.stage[k][c] = st_sum[k][c] * inv; tot += out.stage[k][c]; }
         out.total[c] = tot;
         out.video[c] = v_sum[c] * inv;
         out.link[c] = l_sum[c] * inv;
@@ -126,7 +129,7 @@ void build_stats(const StatsFrame* frames, size_t n_frames, const StatsFlip* fli
         out.p50 = hist_pct(tot_hist, kTotBins, 0.1f, n_pics, 0.5);
         out.p99 = hist_pct(tot_hist, kTotBins, 0.1f, n_pics, 0.99);
         // A stage the link never reports is exactly zero, not the middle of the lowest bin.
-        for (int k = 0; k < 6; k++)
+        for (int k = 0; k < S; k++)
             out.stage_p50[k] = stage_nonzero[k] ? hist_pct(stage_hist[k], kStageBins, 0.1f, n_pics, 0.5) : 0.0f;
         // The 2 ms bins of the screen's histogram are 20 of the fine ones.
         for (int b = 0; b < kTotBins; b++)
@@ -140,42 +143,75 @@ void build_stats(const StatsFrame* frames, size_t n_frames, const StatsFlip* fli
         if (l_n) out.link_use = (float)(100.0 * (v_all / (double)n_pics) / (l_all / (double)l_n));
     }
 
-    // ---- flips ----
+    // ---- pacing: each picture's latency against the one before it ----
     if (!pacing_valid) { out.good_pct = 0; return; }
-    static thread_local uint32_t gap_hist[kGapBins];
+    const float P = (float)(period_us > 1000 ? period_us : 1e6 / 60.0) / 1000.0f;   // ms
+    const float on_time = P + 1.0f, late_max = 2.0f * P + 1.0f;
+    static thread_local uint32_t gap_hist[kGapBins];      // |latency change|, 50 us bins
     std::memset(gap_hist, 0, sizeof(gap_hist));
-    uint64_t n_gaps = 0;
-    for (size_t i = 0; i < n_flips; i++) {
-        const StatsFlip& f = flips[i];
-        if (f.t_us < t0 || f.gap_us == 0) continue;
-        gap_hist[std::min(kGapBins - 1, (int)(f.gap_us / 50))]++;
-        n_gaps++;
-    }
-    if (n_gaps < 10) { out.pacing = false; out.good_pct = 0; return; }
-    const float med = std::max(1.0f, hist_pct(gap_hist, kGapBins, 50.0f, n_gaps, 0.5));   // us
-    // Per column: how many flips, and how many of them late / stuttering.
     static thread_local uint16_t col_n[StatsView::kCols], col_late[StatsView::kCols], col_stut[StatsView::kCols];
     std::memset(col_n, 0, sizeof(col_n)); std::memset(col_late, 0, sizeof(col_late)); std::memset(col_stut, 0, sizeof(col_stut));
-    out.p99_gap_ms = hist_pct(gap_hist, kGapBins, 50.0f, n_gaps, 0.99) / 1000.0f;
+    uint64_t n_judged = 0, n_hist = 0, n_skipped = 0;
     int ok = 0;
-    for (size_t i = 0; i < n_flips; i++) {
-        const StatsFlip& f = flips[i];
-        if (f.t_us < t0 || f.gap_us == 0) continue;
-        const float g = (float)f.gap_us;
-        const uint8_t cls = g > 2.6f * med ? StatsView::kStutter : g > 1.6f * med ? StatsView::kLate : StatsView::kOnTime;
-        out.worst_gap_ms = std::max(out.worst_gap_ms, g / 1000.0f);
+    // The fastest latency of the last kFloorN pictures (a sliding minimum).
+    constexpr size_t kFloorN = 50;
+    static thread_local std::vector<std::pair<size_t, float>> mins;   // (index, latency), increasing
+    mins.clear();
+    size_t head = 0, k = 0;
+    for (size_t fi = 0; fi < n_frames; fi++) {
+        const StatsFrame& f = frames[fi];
+        const float tot = total_of(f);
+        if (tot <= 0.0f) { mins.clear(); head = 0; continue; }   // a gap filler: video stalled
+        const bool in = f.t_us >= t0;
+        const int c = in ? col_of(f.t_us) : -1;
+        if (in && f.skipped) {                              // never shown: each a stutter
+            n_judged += f.skipped;
+            n_skipped += f.skipped;
+            out.stutters += f.skipped;
+            if (c >= 0) {
+                col_n[c] = (uint16_t)std::min<uint32_t>(65535, col_n[c] + f.skipped);
+                col_stut[c] = (uint16_t)std::min<uint32_t>(65535, col_stut[c] + f.skipped);
+            }
+        }
+        while (mins.size() > head && mins.back().second >= tot) mins.pop_back();
+        if (head > mins.size()) head = mins.size();
+        mins.emplace_back(k, tot);
+        while (mins[head].first + kFloorN <= k) head++;
+        const float floor_ms = mins[head].second;
+        const bool warm = k >= 10;
+        k++;
+        if (!in || !warm) continue;
+        const float d = tot - floor_ms;
+        gap_hist[std::min(kGapBins - 1, (int)(d * 1000.0f / 50.0f))]++;
+        n_hist++;
+        const uint8_t cls = d > late_max ? StatsView::kStutter : d > on_time ? StatsView::kLate : StatsView::kOnTime;
+        out.worst_gap_ms = std::max(out.worst_gap_ms, d);
+        n_judged++;
         if (cls == StatsView::kOnTime) ok++;
         else if (cls == StatsView::kLate) out.late++;
         else out.stutters++;
-        const int c = col_of(f.t_us);
-        if (c < 0) continue;
-        if (col_n[c] < 65535) col_n[c]++;
-        if (cls == StatsView::kLate && col_late[c] < 65535) col_late[c]++;
-        if (cls == StatsView::kStutter && col_stut[c] < 65535) col_stut[c]++;
+        if (c >= 0) {
+            if (col_n[c] < 65535) col_n[c]++;
+            if (cls == StatsView::kLate && col_late[c] < 65535) col_late[c]++;
+            if (cls == StatsView::kStutter && col_stut[c] < 65535) col_stut[c]++;
+        }
     }
+    if (n_judged < 10) { out.pacing = false; out.good_pct = 0; return; }
+    // A screen slower than the video cannot show every picture: that share of
+    // them never shown is the screen, not a stutter (100 fps on 60 Hz: 40%).
+    if (n_skipped && out.fps > 0) {
+        const double refresh = 1000.0 / P;
+        const double shown_rate = (double)out.fps;                       // pictures shown a second
+        const double video_rate = shown_rate * (double)(n_judged) / (double)std::max<uint64_t>(1, n_judged - n_skipped);
+        const double share = std::max(0.0, 1.0 - refresh / video_rate);
+        const uint64_t allowed = std::min<uint64_t>(n_skipped, (uint64_t)(share * (double)n_judged + 0.5));
+        ok += (int)allowed;
+        out.stutters -= (int)allowed;
+    }
+    out.p99_gap_ms = n_hist ? hist_pct(gap_hist, kGapBins, 50.0f, n_hist, 0.99) / 1000.0f : 0.0f;
     // A column is coloured by how much of it was bad, so the same figure means the same
-    // whether it is 40 ms wide (a handful of flips: one stutter is red) or 750 ms (about
-    // seventy: one stutter is amber, a few are red). A column with no flips stays no-data.
+    // whether it is 40 ms wide (a handful of pictures: one stutter is red) or 750 ms (about
+    // seventy: one stutter is amber, a few are red). A column with no pictures stays no-data.
     for (int c = 0; c < StatsView::kCols; c++) {
         if (!col_n[c]) continue;
         const float n = (float)col_n[c];
@@ -183,5 +219,5 @@ void build_stats(const StatsFrame* frames, size_t n_frames, const StatsFlip* fli
                     : (col_stut[c] > 0 || (float)col_late[c] >= 0.10f * n) ? StatsView::kLate
                     : StatsView::kOnTime;
     }
-    out.good_pct = 100.0f * (float)ok / (float)n_gaps;
+    out.good_pct = 100.0f * (float)ok / (float)n_judged;
 }

@@ -53,19 +53,15 @@ typedef struct  {
 	stats proc_latency;
 	stats decoding_latency;
 	stats display_latency;
-	stats capture_latency;
     stats tx_latency;
 	stats total_latency;
 	stats frame_pace;
-	stats reassemble_latency;
-    float proc_latency_worst, decoding_latency_worst, display_latency_worst, tx_latency_worst, capture_latency_worst, reassemble_latency_worst;
+    float proc_latency_worst, decoding_latency_worst, display_latency_worst, tx_latency_worst;
 } latency_stats;
 
 typedef struct {
-    float capture_ms;
     float processing_ms;
     float net_ms;
-    float reassemble_ms;
     float dec_ms;
     float disp_ms;
     float pace_ms;    // Time since last frame (frame interval)
@@ -77,6 +73,7 @@ typedef struct {
     int8_t   snr = 0;    // link SNR, dB
     uint8_t  mcs = 0;    // receive MCS
     uint8_t  key = 0;    // this picture was a keyframe
+    uint16_t skipped = 0;   // pictures before this one that were never shown
 } LatencyFrame;
 
 #include "utils/latency_ring.hpp"
@@ -99,11 +96,7 @@ struct osd_vars {
     std::vector<float> total_latency_values;
 	float frame_pace_avg, frame_pace_min, frame_pace_max;
     std::vector<float> frame_pace_values;
-    float capture_latency_avg, capture_latency_min, capture_latency_max;
-    std::vector<float> capture_latency_values;
-    float reassemble_latency_avg, reassemble_latency_min, reassemble_latency_max;
-    std::vector<float> reassemble_latency_values;
-    float proc_latency_worst, decoding_latency_worst, display_latency_worst, tx_latency_worst, capture_latency_worst, reassemble_latency_worst;
+    float proc_latency_worst, decoding_latency_worst, display_latency_worst, tx_latency_worst;
 	float video_bandwidth;
 	uint32_t video_width;
 	uint32_t video_height;
@@ -508,6 +501,7 @@ class OSD {
         int menu_ar_chan  = -1;   // -1 = AUTO
         bool menu_ar_hop  = true;  // channel hopping (AUTO/ACS)
         int menu_ar_maxbr = 0;     // index into kArMaxBrVals (0 = AUTO, no cap)
+        int menu_ar_maxbw = 1;     // index into kArMaxBwVals (1 = 40 MHz)
         int menu_cam_ev       = 3;  // index into kEvSteps below (3 = 0.0 EV)
         int menu_cam_sat      = 0;
         int menu_cam_contrast = 0;  // 0-15: the config packs it into a nibble
@@ -925,6 +919,9 @@ class OSD {
         // video header's capture timestamp against the BB_GET_AP_TIME clock -
         // the half stock shows that the baseband SDK does not expose.
         void set_air_delay(float ms) { air_delay_ms = ms; air_delay_valid = true; }
+        // The air unit takes the Max Bandwidth cap (kestrel-air with the feature).
+        void set_air_max_bw(bool yes) { air_max_bw_ = yes; }
+        std::atomic<bool> air_max_bw_{false};
         // RF tab contents for the AR8030, built from rf_caps: {label, field id}.
         std::vector<std::pair<const char*, int>> ar_rf_items() const;
 
@@ -984,6 +981,9 @@ class OSD {
         // Link state alone, for callers that run on a timer rather than on
         // frame arrival - see the definition.
         void update_artosyn_link_state(int state);
+        // The receive MCS alone, from the radio's MCS-change event; the rest
+        // of the link figures follow with the next update_artosyn_stats().
+        void update_artosyn_rx_mcs(int mcs);
         // The air handshake has gone out. Only the acquiring screen reads it,
         // to tell "link up, nothing asked for yet" from "asked, nothing back".
         void notify_handshake_sent();

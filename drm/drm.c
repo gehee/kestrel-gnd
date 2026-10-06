@@ -272,6 +272,12 @@ const char* drm_fourcc_to_string(uint32_t fourcc) {
 
 int modeset_find_plane(int fd, struct modeset_output *out, struct drm_object *plane_out, uint32_t plane_format, int exclude_plane_id)
 {
+	return modeset_find_plane_avoiding(fd, out, plane_out, plane_format, exclude_plane_id, 0);
+}
+
+int modeset_find_plane_avoiding(int fd, struct modeset_output *out, struct drm_object *plane_out,
+                                uint32_t plane_format, int exclude_plane_id, uint32_t avoid_format)
+{
 	drmModePlaneResPtr plane_res;
 	bool found_plane = false;
 	int i, ret = -EINVAL;
@@ -322,13 +328,20 @@ int modeset_find_plane(int fd, struct modeset_output *out, struct drm_object *pl
 
 		drmModeFreeObjectProperties(props);
 
-// 		if (is_cursor) {
-// 			drmModeFreePlane(plane);
-// 			continue;
-// 		}
+		/* Not the cursor plane for a full-screen layer (the OSD): on drivers
+		 * where every other plane takes the video format it would be the
+		 * first left, and it is far too small. */
+		if (is_cursor && avoid_format) {
+			drmModeFreePlane(plane);
+			continue;
+		}
+
+		bool avoided = false;
+		for (uint32_t j = 0; avoid_format && j < plane->count_formats; j++)
+			if (plane->formats[j] == avoid_format) avoided = true;
 
 		// CRTC compatibility and format support
-		if (plane->possible_crtcs & (1 << out->crtc_index)) {
+		if (!avoided && (plane->possible_crtcs & (1 << out->crtc_index))) {
             // Get plane type to prefer primary/overlay as needed
             uint64_t type_val = 0;
             drmModeObjectPropertiesPtr props = drmModeObjectGetProperties(fd, plane_id, DRM_MODE_OBJECT_PLANE);
@@ -442,6 +455,11 @@ int modeset_setup_objects(int fd, struct modeset_output *out)
 	modeset_get_object_properties(fd, plane_osd, DRM_MODE_OBJECT_PLANE);
 	if (!plane_osd->props)
 		goto out_plane;
+	if (out->video2_plane.id) {
+		modeset_get_object_properties(fd, &out->video2_plane, DRM_MODE_OBJECT_PLANE);
+		if (!out->video2_plane.props)
+			out->video2_plane.id = 0;
+	}
 	return 0;
 
 out_plane:
@@ -459,6 +477,8 @@ void modeset_destroy_objects(int fd, struct modeset_output *out)
 	modeset_drm_object_fini(&out->crtc);
 	modeset_drm_object_fini(&out->video_plane);
 	modeset_drm_object_fini(&out->osd_plane);
+	if (out->video2_plane.id)
+		modeset_drm_object_fini(&out->video2_plane);
 }
 
 
@@ -777,12 +797,33 @@ struct modeset_output *modeset_output_create(int fd, drmModeRes *res, drmModeCon
 	fprintf(stdout, "Using plane %d (%c%c%c%c) for Video\n",  out->video_plane.id,
         (out->video_format)&0xff, (out->video_format>>8)&0xff, (out->video_format>>16)&0xff, (out->video_format>>24)&0xff);
 
-	ret = modeset_find_plane(fd, out, &out->osd_plane, OSD_PLANE_FMT, out->video_plane.id);
+	/* Not on a plane that can show video: those are for the picture (with
+	 * fpvOS's device tree the screen has two, one for each half of it). */
+	ret = modeset_find_plane_avoiding(fd, out, &out->osd_plane, OSD_PLANE_FMT, out->video_plane.id,
+	                                  out->video_format);
+	if (ret)
+		ret = modeset_find_plane(fd, out, &out->osd_plane, OSD_PLANE_FMT, out->video_plane.id);
 	if (ret) {
 		fprintf(stderr, "no valid osd plane with format RGB8888 for crtc %u\n", out->crtc.id);
 		goto out_blob;
 	}
 	fprintf(stdout, "Using plane %d (RGB8888) for OSD\n",  out->osd_plane.id);
+
+	/* The picture in halves is made for the Rockchip VOP2 (fpvOS moves a
+	 * second YUV window to the screen's video port); not elsewhere. */
+	memset(&out->video2_plane, 0, sizeof(out->video2_plane));
+	{
+		drmVersionPtr ver = drmGetVersion(fd);
+		const int rockchip = ver && ver->name && !strcmp(ver->name, "rockchip");
+		if (ver) drmFreeVersion(ver);
+		if (!rockchip ||
+		    modeset_find_plane(fd, out, &out->video2_plane, out->video_format, out->video_plane.id) ||
+		    out->video2_plane.id == out->osd_plane.id)
+			out->video2_plane.id = 0;
+	}
+	if (out->video2_plane.id)
+		fprintf(stdout, "Using plane %d for the lower part of a picture shown in halves\n",
+		        out->video2_plane.id);
 
 	ret = modeset_setup_objects(fd, out);
 	if (ret) {

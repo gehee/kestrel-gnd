@@ -57,7 +57,7 @@ typedef struct  {
 
 typedef struct {
     uint64_t recv_time_us;
-    uint32_t tx_capture_delay_us;
+    uint32_t tx_encode_delay_us;
     uint32_t tx_processing_delay_us;
     int8_t rssi[1];
     int8_t noise[1];
@@ -178,6 +178,13 @@ static inline int ar_pwr_mw_from_dbm(int dbm) {
     if (dbm <= 0) return 0;
     return (int)(25.0 * pow(10.0, (dbm - 11) / 10.0) + 0.5);
 }
+
+// bb_phy_mcs_e -> the MCS number Artosyn names it by. The radio reports the
+// enum's index, and the enum starts with two repeated-BPSK levels below MCS 0
+// (BB_PHY_MCS_NEG_2, _NEG_1), so index 12 is MCS 10 (64QAM 2/3): shown as such,
+// the rates line up (7.83 Mbps per coded bit per carrier at 20 MHz). Values
+// are kept as the index everywhere else; only what is printed is renamed.
+static inline int ar_mcs_label(int idx) { return idx - 2; }
 
 // bb_bandwidth_e gear -> display label. Not a number, because two of the six
 // gears are fractional MHz.

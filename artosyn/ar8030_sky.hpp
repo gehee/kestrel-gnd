@@ -72,6 +72,7 @@ enum Cmd : uint8_t {
     CMD_SET_VIDEO_STRATEGY= 0x25,  // u8
     CMD_SET_CONTRAST      = 0x27,  // u32 contrast
     CMD_KA_MAX_BITRATE    = 0x40,  // u32 kbps, 0 = none - kestrel-air only (stock logs and ignores it)
+    CMD_KA_MAX_BW         = 0x41,  // u8 MHz, 20 or 40 (0 = none) - kestrel-air only
 };
 
 // The FPV-channel (ch0) video modes this camera accepts, taken from the mode

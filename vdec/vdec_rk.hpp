@@ -5,6 +5,12 @@
 #include <rockchip/rk_mpi.h>
 #include <functional>
 #include <memory>
+#include <atomic>
+#include <condition_variable>
+#include <deque>
+#include <thread>
+#include <unordered_map>
+#include <vector>
 
 #include "vdec.hpp"
 #include "renderer.hpp"
@@ -67,21 +73,55 @@ class VdecRK : public Vdec {
         bool stream_ok_ = false;
         uint32_t next_packet_flags_ = 0;
 
+        // Early presentation: a streamed picture goes to the screen once its
+        // top half is decoded (MPP_DEC_GET_STREAM_TOP), if the renderer finds
+        // its bottom half will be decoded before the scan-out reaches it.
+        struct StrmPic {
+            uint64_t first_us = 0;     // first slice to the decoder
+            uint64_t last_us = 0;      // last slice to the decoder
+            std::shared_ptr<std::atomic<uint64_t>> eta;   // bottom half decoded, estimated
+        };
+        bool early_ok_ = false;
+        bool early_stop_ = false;
+        std::mutex early_mutex_;
+        std::condition_variable early_cv_;
+        std::deque<int64_t> early_q_;
+        std::unordered_map<int64_t, StrmPic> strm_pics_;
+        std::thread early_thread_;
+        // recent first -> last slice gaps and last slice -> picture out tails, us
+        std::vector<uint32_t> gaps_, tails_;
+        size_t gap_n_ = 0, tail_n_ = 0;
+        uint32_t gap_p90_ = 8000, tail_p90_ = 3000;   // the percentiles in use (names historical)
+        // Runtime tuning, /tmp/kestrel-early.conf: "gap_pct tail_pct" (90 90 by
+        // default) - which percentile of recent gaps and tails the estimate
+        // of a bottom half's decode takes. Lower: more early pictures, more late.
+        unsigned gap_pct_ = 90, tail_pct_ = 90;
+        // the decoder's output layout, from its last picture
+        std::atomic<uint32_t> out_w_{0}, out_h_{0}, out_hs_{0}, out_vs_{0};
+        void early_loop();
+        void strm_picture_out(int64_t pts, uint64_t now_us);
+
     public:
         void set_frame_sink(std::function<void(std::shared_ptr<DecodedUnit>)> cb) { frame_sink_ = std::move(cb); }
         // Bound the blocking output wait (default is infinite) so the run_frame
         // thread can notice *should_stop and exit promptly when the background
         // player is stopped mid-stream. parameter is in milliseconds.
         void set_output_timeout(RK_S64 ms) { mpi.mpi->control(mpi.ctx, MPP_SET_OUTPUT_TIMEOUT, &ms); }
-        void feed_packet_to_decoder(void* data_p, int data_len, int64_t pts, uint64_t recv_ts, uint8_t nal_type, uint32_t capture_delay_us, uint32_t processing_delay_us, bool is_key_override = false);
+        void feed_packet_to_decoder(void* data_p, int data_len, int64_t pts, uint64_t recv_ts, uint8_t nal_type, uint32_t encode_delay_us, uint32_t processing_delay_us, bool is_key_override = false);
         bool stream_supported() const override { return stream_ok_; }
-        void stream_start(void* data_p, int data_len, int64_t pts, uint64_t recv_ts, uint8_t nal_type, uint32_t capture_delay_us, uint32_t processing_delay_us, int slices) override;
+        void stream_start(void* data_p, int data_len, int64_t pts, uint64_t recv_ts, uint8_t nal_type, uint32_t encode_delay_us, uint32_t processing_delay_us, int slices) override;
         bool stream_append(const void* data, int len, int64_t pts, bool last) override;
         void stream_end(int64_t pts) override;
         void cleanup();
         void run_frame();
 
         virtual ~VdecRK() {
+            {
+                std::lock_guard<std::mutex> lock(early_mutex_);
+                early_stop_ = true;
+            }
+            early_cv_.notify_all();
+            if (early_thread_.joinable()) early_thread_.join();
             for (int i = 0; i < NUM_SLICES_BUFFERS; i++) {
                 if (slices_buffers[i]) {
                     free(slices_buffers[i]);
@@ -113,7 +153,7 @@ class VdecRK : public Vdec {
             ret = mpi.mpi->control(mpi.ctx, MPP_SET_OUTPUT_BLOCK, &param);
             assert(!ret);
 
-            probe_stream();
+            if (mpp_type == MPP_VIDEO_CodingHEVC) probe_stream();   // the H.264 HAL says yes to anything
 
             for (int i = 0; i < NUM_SLICES_BUFFERS; i++) {
                 slices_buffers[i] = (uint8_t*)malloc(READ_BUF_SIZE);

@@ -72,8 +72,8 @@ class LatencyRing {
         }
 
         static float total(const LatencyFrame& f) {
-            return f.capture_ms + f.processing_ms + f.net_ms +
-                   f.reassemble_ms + f.dec_ms + f.disp_ms;
+            return f.processing_ms + f.net_ms +
+                   f.dec_ms + f.disp_ms;
         }
         // Gap entries (all zero) carry no latency and stay out of the median,
         // as they did when it was computed by sorting.

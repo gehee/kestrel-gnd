@@ -1,5 +1,6 @@
 #include "vdec_rk.hpp"
 #include <atomic>
+#include <algorithm>
 #include "../utils/ltrace.hpp"
 
 #include <assert.h>
@@ -254,6 +255,28 @@ void VdecRK::run_frame()
                         }
                         ltrace::rec(ltrace::kDecOut, now_us, (uint32_t)pts, 0, grid, y ? 32 : 0);
                     }
+                    // What comes out of the decoder, every 5 s: pictures, how many
+                    // MPP flagged, and keyframes among them.
+                    {
+                        static uint64_t win_start = 0;
+                        static unsigned n_out = 0, n_err = 0, n_key = 0;
+                        n_out++;
+                        if (mpp_frame_get_errinfo(frame) || mpp_frame_get_discard(frame)) n_err++;
+                        if (!win_start) win_start = now_us;
+                        if (now_us - win_start >= 5000000) {
+                            printf("VdecRK: %u pictures out in 5 s, %u flagged with errors, %u keyframes%s\n",
+                                   n_out, n_err, n_key, stream_ok_ ? " (stream mode available)" : "");
+                            win_start = now_us; n_out = n_err = n_key = 0;
+                        }
+                        std::lock_guard<std::mutex> lock(decoding_stats_mutex);
+                        auto it = decoding_stats.find(pts);
+                        if (it != decoding_stats.end() && it->second.is_keyframe) n_key++;
+                    }
+                    out_w_ = frm_width;
+                    out_h_ = frm_height;
+                    out_hs_ = mpp_frame_get_hor_stride(frame);
+                    out_vs_ = mpp_frame_get_ver_stride(frame);
+                    if (early_ok_) strm_picture_out((int64_t)pts, now_us);
                     bool found_stats = false;
                     timing_stats_t t_stats = {};
                     {
@@ -274,9 +297,18 @@ void VdecRK::run_frame()
                         du_stat->recv_ts = t_stats.recv_start_us;
                         du_stat->dec_start_ts = t_stats.decode_start_us;
                         du_stat->dec_end_ts = now_us;
-                        du_stat->tx_capture_delay_us = t_stats.tx_capture_delay_us;
+                        du_stat->tx_encode_delay_us = t_stats.tx_encode_delay_us;
                         du_stat->tx_processing_delay_us = t_stats.tx_processing_delay_us;
                         du_stat->is_keyframe = t_stats.is_keyframe;
+                        // Its slices' rows are all decoded now - those not
+                        // already marked (a streamed picture's top half).
+                        if (t_stats.slices) {
+                            SliceTimes &st = *t_stats.slices;
+                            const int n = std::min(st.n.load(), SliceTimes::kMax);
+                            for (int i = 0; i < n; i++)
+                                if (!st.s[i].done_us.load()) st.s[i].done_us.store(now_us);
+                        }
+                        du_stat->slices = t_stats.slices;
                         
                         du_stat->has_prime_fd = true;
                         du_stat->prime_fd = info.fd;
@@ -352,7 +384,7 @@ void VdecRK::emit_decoded(std::shared_ptr<DecodedUnit> du, MppBuffer buffer) {
     }
 }
 
-void VdecRK::feed_packet_to_decoder(void* data_p, int data_len, int64_t pts, uint64_t recv_ts, uint8_t nal_type, uint32_t capture_delay_us, uint32_t processing_delay_us, bool is_key_override){
+void VdecRK::feed_packet_to_decoder(void* data_p, int data_len, int64_t pts, uint64_t recv_ts, uint8_t nal_type, uint32_t encode_delay_us, uint32_t processing_delay_us, bool is_key_override){
     if (data_len <= 0) return;
 
     // Cache H.265 VPS (32), SPS (33), PPS (34) or H.264 SPS (7), PPS (8)
@@ -463,7 +495,7 @@ void VdecRK::feed_packet_to_decoder(void* data_p, int data_len, int64_t pts, uin
         decoding_stats[pts] = timing_stats_t{ 
             .recv_start_us = recv_ts,
             .decode_start_us = get_time_us(), 
-            .tx_capture_delay_us = capture_delay_us,
+            .tx_encode_delay_us = encode_delay_us,
             .tx_processing_delay_us = processing_delay_us,
             // is_key, not is_key_override: the override is only a hint from the
             // caller. Recording the raw override here left is_keyframe false for
@@ -472,7 +504,9 @@ void VdecRK::feed_packet_to_decoder(void* data_p, int data_len, int64_t pts, uin
             // a keyframe had landed, the OSD stayed in BACKGROUND state, and the
             // fps/resolution/bitrate labels were never drawn.
             .is_keyframe = is_key,
+            .slices = std::move(next_slice_times_),
         };
+        next_slice_times_.reset();
         // MPP drops the pictures it cannot decode, and their entries were
         // never collected: over a broken stream this grew by every picture
         // sent. No picture spends 128 others inside the decoder.
@@ -546,14 +580,158 @@ void VdecRK::probe_stream() {
     printf("VdecRK: %s\n", stream_ok_
            ? "pictures can be decoded as their slices arrive (stream mode)"
            : "no stream mode in this MPP or kernel: pictures go whole");
+    if (!stream_ok_) return;
+
+    // Early presentation, on unless KESTREL_EARLY_PRESENT=0; it needs an MPP
+    // with MPP_DEC_GET_STREAM_TOP.
+#ifdef MPP_STREAM_TOP_READY
+    const char *early = getenv("KESTREL_EARLY_PRESENT");
+    MppDecStreamTop probe = {};
+    probe.pts = -1;
+    early_ok_ = !(early && atoi(early) == 0) && renderer &&
+                mpi.mpi->control(mpi.ctx, MPP_DEC_GET_STREAM_TOP, &probe) == MPP_OK;
+#endif
+    printf("VdecRK: early presentation %s\n", early_ok_
+           ? "on: a picture's top half may go to the screen before its bottom half"
+           : "off");
+    if (early_ok_) early_thread_ = std::thread(&VdecRK::early_loop, this);
+}
+
+// One streamed picture at a time: wait until its top half is decoded, then
+// hand the renderer the picture as it stands, with the estimate of when the
+// rest will be decoded.
+void VdecRK::early_loop() {
+#ifdef MPP_STREAM_TOP_READY
+    SchedulingHelper::set_thread_params_max_realtime("VDEC_EARLY", 10);
+    for (;;) {
+        int64_t pts;
+        {
+            std::unique_lock<std::mutex> lock(early_mutex_);
+            early_cv_.wait(lock, [this] { return early_stop_ || !early_q_.empty(); });
+            if (early_stop_) return;
+            pts = early_q_.front();
+            early_q_.pop_front();
+            // behind: only the newest is worth showing early
+            if (!early_q_.empty()) continue;
+        }
+        MppDecStreamTop t = {};
+        t.pts = pts;
+        t.timeout_ms = 40;
+        if (mpi.mpi->control(mpi.ctx, MPP_DEC_GET_STREAM_TOP, &t) != MPP_OK ||
+            t.state != MPP_STREAM_TOP_READY || t.buf_fd < 0)
+            continue;
+        auto du = std::make_shared<DecodedUnit>();
+        {
+            std::lock_guard<std::mutex> lock(decoding_stats_mutex);
+            auto it = decoding_stats.find(pts);
+            if (it == decoding_stats.end()) continue;
+            du->recv_ts = it->second.recv_start_us;
+            du->dec_start_ts = it->second.decode_start_us;
+            du->tx_encode_delay_us = it->second.tx_encode_delay_us;
+            du->tx_processing_delay_us = it->second.tx_processing_delay_us;
+            du->is_keyframe = it->second.is_keyframe;
+            du->slices = it->second.slices;
+        }
+        // The first slice's rows are decoded: the top of the picture - its
+        // own latency, whether or not it goes up early.
+        if (du->slices && du->slices->n.load() > 0) {
+            uint64_t z = 0;
+            du->slices->s[0].done_us.compare_exchange_strong(z, (uint64_t)t.time_us);
+        }
+        if (ltrace::on()) ltrace::rec(ltrace::kTopDone, get_time_us(), (uint32_t)pts, (uint64_t)t.time_us);
+        if (access("/tmp/kestrel-early-off", F_OK) == 0) continue;
+        const uint32_t w = out_w_, h = out_h_, hs = out_hs_, vs = out_vs_;
+        if (!w || !h || !hs || !vs) continue;
+        du->pts = pts;
+        du->width = w;
+        du->height = h;
+        du->dec_end_ts = (uint64_t)t.time_us;
+        {
+            std::lock_guard<std::mutex> lock(early_mutex_);
+            auto it = strm_pics_.find(pts);
+            if (it == strm_pics_.end()) continue;
+            du->bottom_eta_us = it->second.eta;
+        }
+        du->has_prime_fd = true;
+        du->prime_fd = t.buf_fd;
+        du->drm_pixel_format = DRM_FORMAT_NV12;
+        du->pitches[0] = du->pitches[1] = hs;
+        du->offsets[0] = 0;
+        du->offsets[1] = hs * vs;
+        du->early = true;
+        du->buf_epoch = s_buf_epoch.load(std::memory_order_relaxed);
+        renderer->queue_frame(du);
+    }
+#endif
+}
+
+// A percentile of a ring of samples.
+static uint32_t pct_of(const std::vector<uint32_t> &v, unsigned pct) {
+    std::vector<uint32_t> s(v);
+    std::sort(s.begin(), s.end());
+    return s.empty() ? 0 : s[std::min(s.size() - 1, s.size() * pct / 100)];
+}
+
+// A streamed picture came out: what its slices' gap and its tail were, for
+// the estimates of the next ones.
+void VdecRK::strm_picture_out(int64_t pts, uint64_t now_us) {
+    std::lock_guard<std::mutex> lock(early_mutex_);
+    auto it = strm_pics_.find(pts);
+    if (it == strm_pics_.end()) return;
+    const StrmPic p = it->second;
+    strm_pics_.erase(it);
+    for (auto i = strm_pics_.begin(); i != strm_pics_.end();)
+        i = (i->first < pts - 64) ? strm_pics_.erase(i) : std::next(i);
+    if (!p.last_us || p.last_us < p.first_us || now_us < p.last_us) return;
+    const size_t kRing = 256;
+    auto push = [&](std::vector<uint32_t> &v, size_t &n, uint32_t x) {
+        if (v.size() < kRing) v.push_back(x); else v[n % kRing] = x;
+        n++;
+    };
+    push(gaps_, gap_n_, (uint32_t)std::min<uint64_t>(p.last_us - p.first_us, 1000000));
+    push(tails_, tail_n_, (uint32_t)std::min<uint64_t>(now_us - p.last_us, 1000000));
+    if (tail_n_ % 32 == 0) {
+        FILE *f = fopen("/tmp/kestrel-early.conf", "r");
+        unsigned g = 90, t = 90;
+        if (f) {
+            if (fscanf(f, "%u %u", &g, &t) != 2) { g = 90; t = 90; }
+            fclose(f);
+        }
+        if (g != gap_pct_ || t != tail_pct_)
+            printf("VdecRK: early presentation estimates now gap p%u, tail p%u\n", g, t);
+        gap_pct_ = std::min(g, 100u);
+        tail_pct_ = std::min(t, 100u);
+        gap_p90_ = pct_of(gaps_, gap_pct_);
+        tail_p90_ = pct_of(tails_, tail_pct_);
+        if (tail_n_ % 512 == 0)
+            printf("VdecRK: streamed pictures: slice gap p%u %.2f ms, last slice -> picture out p%u %.2f ms\n",
+                   gap_pct_, gap_p90_ / 1000.0, tail_pct_, tail_p90_ / 1000.0);
+    }
 }
 
 void VdecRK::stream_start(void* data_p, int data_len, int64_t pts, uint64_t recv_ts, uint8_t nal_type,
-                          uint32_t capture_delay_us, uint32_t processing_delay_us, int slices) {
+                          uint32_t encode_delay_us, uint32_t processing_delay_us, int slices) {
     next_packet_flags_ = (stream_ok_ && slices > 1)
         ? (MPP_PACKET_FLAG_STREAM_START | MPP_PACKET_STREAM_SLICES(slices)) : 0;
-    feed_packet_to_decoder(data_p, data_len, pts, recv_ts, nal_type, capture_delay_us, processing_delay_us);
+    const bool streamed = next_packet_flags_ != 0;
+    if (streamed && early_ok_) {
+        // until the last slice comes, the bottom half is due when the slices'
+        // gap and the decoder's tail usually end
+        std::lock_guard<std::mutex> lock(early_mutex_);
+        StrmPic &p = strm_pics_[pts];
+        p.first_us = get_time_us();
+        p.last_us = 0;
+        p.eta = std::make_shared<std::atomic<uint64_t>>(p.first_us + gap_p90_ + tail_p90_);
+    }
+    feed_packet_to_decoder(data_p, data_len, pts, recv_ts, nal_type, encode_delay_us, processing_delay_us);
     next_packet_flags_ = 0;
+    if (streamed && early_ok_) {
+        {
+            std::lock_guard<std::mutex> lock(early_mutex_);
+            early_q_.push_back(pts);
+        }
+        early_cv_.notify_one();
+    }
 }
 
 bool VdecRK::stream_append(const void* data, int len, int64_t pts, bool last) {
@@ -564,6 +742,15 @@ bool VdecRK::stream_append(const void* data, int len, int64_t pts, bool last) {
     a.flags = last ? MPP_STREAM_APPEND_LAST : 0;
     a.pts = pts;
     const bool ok = mpi.mpi->control(mpi.ctx, MPP_DEC_SET_STREAM_APPEND, &a) == MPP_OK;
+    if (last && early_ok_) {
+        // the whole picture is in: its bottom half is due a tail from now
+        std::lock_guard<std::mutex> lock(early_mutex_);
+        auto it = strm_pics_.find(pts);
+        if (it != strm_pics_.end()) {
+            it->second.last_us = get_time_us();
+            if (it->second.eta) it->second.eta->store(it->second.last_us + tail_p90_);
+        }
+    }
     if (last) {
         // The picture is all here: what the decoder takes from now on is its
         // decode time proper, as for a picture fed whole.
@@ -586,10 +773,14 @@ void VdecRK::stream_end(int64_t pts) {
 #else
 void VdecRK::probe_stream() { stream_ok_ = false; }
 
+void VdecRK::early_loop() {}
+
+void VdecRK::strm_picture_out(int64_t, uint64_t) {}
+
 void VdecRK::stream_start(void* data_p, int data_len, int64_t pts, uint64_t recv_ts, uint8_t nal_type,
-                          uint32_t capture_delay_us, uint32_t processing_delay_us, int slices) {
+                          uint32_t encode_delay_us, uint32_t processing_delay_us, int slices) {
     (void)slices;
-    feed_packet_to_decoder(data_p, data_len, pts, recv_ts, nal_type, capture_delay_us, processing_delay_us);
+    feed_packet_to_decoder(data_p, data_len, pts, recv_ts, nal_type, encode_delay_us, processing_delay_us);
 }
 
 bool VdecRK::stream_append(const void*, int, int64_t, bool) { return false; }

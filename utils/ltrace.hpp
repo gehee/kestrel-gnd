@@ -25,6 +25,11 @@ enum : uint8_t {
     kRender,      // a: pts, b: fb id - the frame's flip is being submitted
     kFlipDone,    // a: fb id, b: kernel vblank time of the flip
     kClock = 10,  // b: CLOCK_REALTIME (us) at t - for usbmon, which stamps realtime
+    kTopDone = 11,  // a: pts, b: when the decoder had its first slice's rows (MPP's time)
+    kHalves = 12,   // a: pts on the video plane, b: lower part's pts | cut << 32 | kind << 48
+                    //    (kind 1 whole, 2 top over an older lower part, 3 lower part alone, 4 older whole first)
+    kHold = 13,     // a: pts of the top waiting, b: reason | to-vblank us << 8 - nothing put up at a deadline
+    kCap = 14,      // a: pts, b: its capture stamp on our clock (by the radio clock; row 0), t: first slice here
 };
 
 struct Rec {

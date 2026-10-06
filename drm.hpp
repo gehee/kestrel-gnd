@@ -11,6 +11,7 @@
 #include <mutex>
 
 #include "screen_tap.hpp"
+#include "utils/slice_times.hpp"
 
 extern "C" {
     #include "drm/drm.h"
@@ -30,6 +31,18 @@ struct FlipStats {
     uint64_t submission_start_ts;
     uint32_t tx_age_us;
     uint32_t fb_id;
+    SliceTimesPtr slices;      // the picture's slices, each timed on its own
+    // Shown in halves: rows from split_row down are bottom's (0: not split).
+    uint32_t split_row = 0;
+    SliceTimesPtr bottom_slices;
+};
+
+// A picture with per-slice timing that a flip landing at vblank_us showed
+// some rows of (SliceTimes::shown says which slices).
+struct SliceFlip {
+    uint64_t vblank_us;
+    SliceTimesPtr slices;
+    unsigned skipped = 0;      // (the renderer's) pictures before it never shown
 };
 
 struct CompletedStats {
@@ -120,6 +133,9 @@ private:
     pthread_cond_t flip_cond;
     FlipStats pending_stats;
     CompletedStats latest_stats = {0};
+    std::deque<SliceFlip> slice_flips_;   // under stats_mutex
+    std::atomic<bool> split_on_{false};   // the second video plane is showing something
+    void note_slice_flip(uint64_t vblank_us);   // stats_mutex held
     uint64_t last_flip_submit_ts = 0;
     bool enable_vrr = true;
 
@@ -195,8 +211,22 @@ public:
     void cond_signal();
     // video
     void perform_modeset_video(int fb_id);
-    bool page_flip(int fb_id, uint64_t recv_ts = 0, uint64_t dec_start_ts = 0, uint64_t dec_end_ts = 0, uint64_t sub_start_ts = 0, uint32_t tx_age_us = 0);
+    // split_row > 0 with bottom_fb: the picture in halves - fb_id's rows above
+    // split_row (picture rows) on the video plane, bottom_fb's from there down
+    // on the second one (has_split_plane). Otherwise fb_id whole.
+    bool page_flip(int fb_id, uint64_t recv_ts = 0, uint64_t dec_start_ts = 0, uint64_t dec_end_ts = 0, uint64_t sub_start_ts = 0, uint32_t tx_age_us = 0, SliceTimesPtr slices = nullptr,
+                   uint32_t split_row = 0, int bottom_fb = 0, SliceTimesPtr bottom_slices = nullptr);
+    bool has_split_plane() const { return output_list && output_list->video2_plane.id != 0; }
+    // A picture can go up in halves: the second plane is there (full-screen
+    // or in a gallery tile, each half scaled the same way).
+    bool split_possible() { return has_split_plane(); }
+    // The screen row a picture row of a pic_h-row picture is shown on now,
+    // with the gallery tile or Picture Size the video plane has.
+    int screen_row_of(uint32_t row, uint32_t pic_h);
     CompletedStats get_latest_stats();
+    // The flips that landed since the last call, of pictures with per-slice
+    // timing (page_flip's slices), oldest first.
+    void take_slice_flips(std::vector<SliceFlip>& out);
     RenderCadence get_render_cadence();
 
     // What the screen showed, for the screen recorder (screen_tap.hpp).
@@ -292,6 +322,14 @@ public:
     bool is_flip_pending() { return flip_pending; }
     // Kernel timestamp (CLOCK_MONOTONIC us) of the last vblank on our CRTC.
     bool last_vblank(uint64_t *ts_us, uint32_t *seq = nullptr);
+    // How long after a vblank the scan-out reaches a screen row, in
+    // microseconds. The vblank's time is taken as the start of the active
+    // area, which is when it is earliest.
+    double row_time_us(int row) const {
+        return output_list && output_list->mode.clock
+            ? (double)output_list->mode.htotal * row * 1000.0 / output_list->mode.clock : 0;
+    }
+    int screen_rows() const { return output_list ? output_list->mode.vdisplay : 0; }
     // One refresh of the current mode, in microseconds.
     double frame_period_us() const {
         return output_list && output_list->mode.clock

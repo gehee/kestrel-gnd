@@ -228,6 +228,7 @@ void BgVideoPlayer::decode_loop() {
     // without B-frames (IPPP) — otherwise B-frames present in decode order and
     // appear to play backwards. background.mp4 is encoded -bf 0 accordingly.
     vdec_.reset(new VdecRK(vcodec, nullptr, dev_, &vdec_stop_));
+    Vdec::stream_holds()++;              // live pictures go whole while this one decodes
     vdec_->set_output_timeout(100); // ms, so run_frame can notice stop()
 
     vdec_->set_frame_sink([this](std::shared_ptr<DecodedUnit> du) {
@@ -392,6 +393,7 @@ void BgVideoPlayer::decode_loop() {
     running_   = false;
     vdec_stop_ = true;                      // ensure VdecRK::run_frame exits
     if (vdec_thread_) { pthread_join(vdec_thread_, nullptr); vdec_thread_ = 0; }
+    if (vdec_) Vdec::stream_holds()--;
     vdec_.reset();
     av_packet_free(&pkt);
     av_bsf_free(&bsf_ctx);

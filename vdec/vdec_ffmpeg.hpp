@@ -87,7 +87,7 @@ class VdecFfmpeg : public Vdec {
 #ifdef USE_VAAPI
         bool populate_drm_from_vaapi(AVFrame* frame, DecodedUnit* du);
 #endif
-        void process_avframe(AVFrame* frame, uint64_t dec_start_ts, uint64_t dec_end_ts, uint64_t recvts, uint32_t capture_delay_us, uint32_t processing_delay_us, bool is_keyframe);
+        void process_avframe(AVFrame* frame, uint64_t dec_start_ts, uint64_t dec_end_ts, uint64_t recvts, uint32_t encode_delay_us, uint32_t processing_delay_us, bool is_keyframe);
         void run_frame();
         void receive_avframe();
         AVFrame* next_frame_slot();
@@ -175,7 +175,7 @@ class VdecFfmpeg : public Vdec {
         }; 
 
         bool init_decoder(void* data_p,int data_len);
-        void feed_packet_to_decoder(void* data_p, int data_len, int64_t pts, uint64_t recv_ts, uint8_t nal_type, uint32_t capture_delay_us, uint32_t processing_delay_us, bool is_key_override = false) override;
+        void feed_packet_to_decoder(void* data_p, int data_len, int64_t pts, uint64_t recv_ts, uint8_t nal_type, uint32_t encode_delay_us, uint32_t processing_delay_us, bool is_key_override = false) override;
         void update_decoding_stats(uint64_t feed_data_ts);
         void cleanup();
         void cleanup_device();

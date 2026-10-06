@@ -188,7 +188,6 @@ void DrmDevice::handle_events() {
             // `frame` is the vblank the flip landed on - the counter
             // drmWaitVBlank returns, which the screen recorder samples by.
             self->tap.landed(frame);
-            self->flip_pending = false;
             last_flip_complete = completion_ts;
             
             pthread_mutex_lock(&self->stats_mutex);
@@ -201,6 +200,7 @@ void DrmDevice::handle_events() {
                 self->latest_stats.available = true;
                 self->pending_stats.recv_ts = 0;
             }
+            self->note_slice_flip(completion_ts);
 
             // Render cadence: gap between hardware flip completions. The EWMA of
             // normal gaps is the expected frame period (self-adapts to 60/90/120fps);
@@ -231,6 +231,9 @@ void DrmDevice::handle_events() {
             self->cadence_last_flip_us = completion_ts;
             pthread_mutex_unlock(&self->stats_mutex);
 
+            // Free for the next flip only now, with this one's figures taken: a
+            // commit in between would put its picture in pending_stats first.
+            self->flip_pending = false;
             pthread_mutex_lock(&self->flip_mutex);
             pthread_cond_broadcast(&self->flip_cond);
             pthread_mutex_unlock(&self->flip_mutex);
@@ -519,8 +522,16 @@ void DrmDevice::sync_frozen_video_rect() {
     set_drm_object_property(req, &output_list->video_plane, "CRTC_Y", vy);
     set_drm_object_property(req, &output_list->video_plane, "CRTC_W", vw);
     set_drm_object_property(req, &output_list->video_plane, "CRTC_H", vh);
+    // A picture in halves: the frozen one goes whole on the video plane, the
+    // second plane off (its part would stay where it was, a stale strip).
+    const bool had_split = split_on_.load();
+    if (had_split) {
+        set_drm_object_property(req, &output_list->video2_plane, "FB_ID", 0);
+        set_drm_object_property(req, &output_list->video2_plane, "CRTC_ID", 0);
+    }
     int ret = drmModeAtomicCommit(drm_fd, req, DRM_MODE_ATOMIC_ALLOW_MODESET, NULL);
     drmModeAtomicFree(req);
+    if (ret == 0 && had_split) split_on_ = false;
     if (ret == 0) {
         {
             std::lock_guard<std::mutex> lk(shown_m_);
@@ -661,7 +672,8 @@ void DrmDevice::record_direct_frame(uint64_t recv_ts, uint64_t dec_start_ts,
     (void)dec_start_ts;
 }
 
-bool DrmDevice::page_flip(int fb_id, uint64_t recv_ts, uint64_t dec_start_ts, uint64_t dec_end_ts, uint64_t sub_start_ts, uint32_t tx_age_us) {
+bool DrmDevice::page_flip(int fb_id, uint64_t recv_ts, uint64_t dec_start_ts, uint64_t dec_end_ts, uint64_t sub_start_ts, uint32_t tx_age_us, SliceTimesPtr slices,
+                          uint32_t split_row, int bottom_fb, SliceTimesPtr bottom_slices) {
     uint64_t page_flip_start = get_time_us();
     
     if (flip_pending) {
@@ -670,7 +682,7 @@ bool DrmDevice::page_flip(int fb_id, uint64_t recv_ts, uint64_t dec_start_ts, ui
 
     // Store stats for this flip
     pthread_mutex_lock(&stats_mutex);
-    pending_stats = {recv_ts, dec_start_ts, dec_end_ts, sub_start_ts, tx_age_us, (uint32_t)fb_id};
+    pending_stats = {recv_ts, dec_start_ts, dec_end_ts, sub_start_ts, tx_age_us, (uint32_t)fb_id, std::move(slices)};
     pthread_mutex_unlock(&stats_mutex);
 
     // Two commit styles, selectable at runtime so they can be A/B'd against the
@@ -735,17 +747,59 @@ bool DrmDevice::page_flip(int fb_id, uint64_t recv_ts, uint64_t dec_start_ts, ui
     int vx, vy, vw, vh, sx, sy, sw, sh;
     video_geometry(tile, vx, vy, vw, vh, sx, sy, sw, sh);
 
+    // In halves: the top of this picture on the video plane, the rest of an
+    // older, whole one on the second plane below it - each half up as soon as
+    // it is decoded. Also in a gallery tile: the part of the picture the tile
+    // shows is cut at the same row and each plane scales its own part. Both
+    // planes keep at least two rows, so the second one never goes off (that
+    // costs the VOP2 a frame).
+    // The VOP2 makes a plane under 4x4 invisible (and says so on every commit):
+    // each keeps at least 4 rows of source and of screen.
+    const bool split = split_row >= 2 && bottom_fb > 0 && has_split_plane() && sh >= 16 && vh >= 8;
+    uint32_t srow = split_row & ~1u;
+    int top_sh = sh, top_vh = vh;
+    if (split) {
+        srow = std::max(srow, (uint32_t)(sy + 4));
+        srow = std::min(srow, (uint32_t)(sy + sh - 4)) & ~1u;
+        top_sh = (int)srow - sy;
+        top_vh = (int)((int64_t)top_sh * vh / sh) & ~1;
+        top_vh = std::max(4, std::min(top_vh, vh - 4));
+    }
+    {
+        pthread_mutex_lock(&stats_mutex);
+        pending_stats.split_row = split ? srow : 0;
+        pending_stats.bottom_slices = split ? std::move(bottom_slices) : nullptr;
+        pthread_mutex_unlock(&stats_mutex);
+    }
+    struct drm_object *p2 = &output_list->video2_plane;
+    if (split) {
+        set_drm_object_property(output_list->video_request, p2, "FB_ID", bottom_fb);
+        set_drm_object_property(output_list->video_request, p2, "CRTC_ID", output_list->crtc.id);
+        set_drm_object_property(output_list->video_request, p2, "SRC_X", (uint64_t)sx << 16);
+        set_drm_object_property(output_list->video_request, p2, "SRC_Y", (uint64_t)srow << 16);
+        set_drm_object_property(output_list->video_request, p2, "SRC_W", (uint64_t)sw << 16);
+        set_drm_object_property(output_list->video_request, p2, "SRC_H", (uint64_t)(sy + sh - (int)srow) << 16);
+        set_drm_object_property(output_list->video_request, p2, "CRTC_X", vx);
+        set_drm_object_property(output_list->video_request, p2, "CRTC_Y", vy + top_vh);
+        set_drm_object_property(output_list->video_request, p2, "CRTC_W", vw);
+        set_drm_object_property(output_list->video_request, p2, "CRTC_H", vh - top_vh);
+        set_drm_object_property(output_list->video_request, p2, "zpos", video_zpos);
+    } else if (split_on_) {
+        set_drm_object_property(output_list->video_request, p2, "FB_ID", 0);
+        set_drm_object_property(output_list->video_request, p2, "CRTC_ID", 0);
+    }
+
     // Always set video plane properties
     set_drm_object_property(output_list->video_request, &output_list->video_plane, "FB_ID", fb_id);
     set_drm_object_property(output_list->video_request, &output_list->video_plane, "CRTC_ID", output_list->crtc.id);
     set_drm_object_property(output_list->video_request, &output_list->video_plane, "SRC_X", (uint64_t)sx << 16);
     set_drm_object_property(output_list->video_request, &output_list->video_plane, "SRC_Y", (uint64_t)sy << 16);
     set_drm_object_property(output_list->video_request, &output_list->video_plane, "SRC_W", (uint64_t)sw << 16);
-    set_drm_object_property(output_list->video_request, &output_list->video_plane, "SRC_H", (uint64_t)sh << 16);
+    set_drm_object_property(output_list->video_request, &output_list->video_plane, "SRC_H", (uint64_t)top_sh << 16);
     set_drm_object_property(output_list->video_request, &output_list->video_plane, "CRTC_X", vx);
     set_drm_object_property(output_list->video_request, &output_list->video_plane, "CRTC_Y", vy);
     set_drm_object_property(output_list->video_request, &output_list->video_plane, "CRTC_W", vw);
-    set_drm_object_property(output_list->video_request, &output_list->video_plane, "CRTC_H", vh);
+    set_drm_object_property(output_list->video_request, &output_list->video_plane, "CRTC_H", top_vh);
     set_drm_object_property(output_list->video_request, &output_list->video_plane, "zpos", video_zpos);
 
     if (osd_fb > 0) {
@@ -782,6 +836,7 @@ bool DrmDevice::page_flip(int fb_id, uint64_t recv_ts, uint64_t dec_start_ts, ui
         last_shown_ = std::move(pic);
     }
     if (ret == 0) {
+        split_on_ = split;
         last_video_flip_us = flip_submit_us;
         if (blocking_flip) {
             pthread_mutex_lock(&osd_mutex);
@@ -815,6 +870,12 @@ bool DrmDevice::page_flip(int fb_id, uint64_t recv_ts, uint64_t dec_start_ts, ui
             latest_stats.completion_ts = completion_ts;
             latest_stats.available = true;
             pending_stats.recv_ts = 0;
+        }
+        if (pending_stats.slices || pending_stats.bottom_slices) {
+            // The commit returned after the vblank: take the vblank's own time.
+            uint64_t vb = 0;
+            if (!last_vblank(&vb) || vb > completion_ts) vb = completion_ts;
+            note_slice_flip(vb);
         }
         pthread_mutex_unlock(&stats_mutex);
         // Same cadence bookkeeping the event handler does, so the stutter
@@ -888,6 +949,44 @@ bool DrmDevice::page_flip(int fb_id, uint64_t recv_ts, uint64_t dec_start_ts, ui
     last_flip_submit = now;
     
     return true;
+}
+
+// The flip that landed at vblank_us put up the pending picture's rows - all of
+// them, or those above split_row with the bottom picture's below: each of
+// those slices is on screen from this vblank (if not already).
+void DrmDevice::note_slice_flip(uint64_t vblank_us) {
+    const uint32_t split = pending_stats.split_row;
+    if (pending_stats.slices) {
+        pending_stats.slices->shown(vblank_us, 0, split ? split : UINT32_MAX);
+        if (slice_flips_.size() >= 64) slice_flips_.pop_front();
+        slice_flips_.push_back({vblank_us, std::move(pending_stats.slices)});
+        pending_stats.slices.reset();
+    }
+    if (pending_stats.bottom_slices) {
+        pending_stats.bottom_slices->shown(vblank_us, split, UINT32_MAX);
+        pending_stats.bottom_slices.reset();
+    }
+    pending_stats.split_row = 0;
+}
+
+int DrmDevice::screen_row_of(uint32_t row, uint32_t pic_h) {
+    pthread_mutex_lock(&osd_mutex);
+    const Tile tile = current_tile_;
+    pthread_mutex_unlock(&osd_mutex);
+    int vx, vy, vw, vh, sx, sy, sw, sh;
+    video_geometry(tile, vx, vy, vw, vh, sx, sy, sw, sh);
+    (void)vx; (void)vw; (void)sx; (void)sw;
+    const int rows = screen_rows();
+    if (sh <= 0 || vh <= 0 || rows <= 0) return pic_h ? (int)((uint64_t)rows * row / pic_h) : 0;
+    const int r = vy + (int)(((int64_t)row - sy) * vh / sh);
+    return std::max(0, std::min(rows - 1, r));
+}
+
+void DrmDevice::take_slice_flips(std::vector<SliceFlip>& out) {
+    pthread_mutex_lock(&stats_mutex);
+    for (auto& f : slice_flips_) out.push_back(std::move(f));
+    slice_flips_.clear();
+    pthread_mutex_unlock(&stats_mutex);
 }
 
 CompletedStats DrmDevice::get_latest_stats() {

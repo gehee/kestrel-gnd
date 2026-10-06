@@ -76,6 +76,14 @@ def main():
               ('first slice -> vblank', 'first', 'flip')]
     for name, a, b in stages:
         row(name, [(p[b] - p[a]) / 1e3 for p in P if a in p and b in p])
+    # Early presentation: a picture flipped before the decoder handed it out
+    # went up with only its top half decoded.
+    shown = [p for p in P if 'first' in p and 'flip' in p and 'render' in p]
+    early = [p for p in shown if 'out' in p and p['render'] < p['out']]
+    if early:
+        whole = [p for p in shown if p not in early]
+        row('first slice -> vblank, early', [(p['flip'] - p['first']) / 1e3 for p in early])
+        row('first slice -> vblank, whole', [(p['flip'] - p['first']) / 1e3 for p in whole])
 
 
 if __name__ == '__main__':

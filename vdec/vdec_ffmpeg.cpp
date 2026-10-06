@@ -214,7 +214,7 @@ std::string av_error_to_string(int errnum) {
     return std::string(errbuf);
 }
 
-void VdecFfmpeg::feed_packet_to_decoder(void* data_p,int data_len, int64_t pts, uint64_t recv_ts, uint8_t nal_type, uint32_t capture_delay_us, uint32_t processing_delay_us, bool is_key_override){	
+void VdecFfmpeg::feed_packet_to_decoder(void* data_p,int data_len, int64_t pts, uint64_t recv_ts, uint8_t nal_type, uint32_t encode_delay_us, uint32_t processing_delay_us, bool is_key_override){	
 
     // Update stats immediately
     {
@@ -222,7 +222,7 @@ void VdecFfmpeg::feed_packet_to_decoder(void* data_p,int data_len, int64_t pts, 
         decoding_stats[pts] = timing_stats_t{ 
             .recv_start_us = recv_ts,
             .decode_start_us = get_time_us(),
-            .tx_capture_delay_us = capture_delay_us,
+            .tx_encode_delay_us = encode_delay_us,
             .tx_processing_delay_us = processing_delay_us,
             .is_keyframe = is_key_override,
         };
@@ -345,7 +345,7 @@ void VdecFfmpeg::receive_avframe() {
         uint64_t dec_end = get_time_us();
         uint64_t d_start = 0;
         uint64_t r_start = 0;
-        uint32_t cap_delay = 0;
+        uint32_t enc_delay = 0;
         uint32_t proc_delay = 0;
         bool is_keyframe = false;
 
@@ -364,19 +364,19 @@ void VdecFfmpeg::receive_avframe() {
         if (found_stats) {
             d_start = t_stats.decode_start_us;
             r_start = t_stats.recv_start_us;
-            cap_delay = t_stats.tx_capture_delay_us;
+            enc_delay = t_stats.tx_encode_delay_us;
             proc_delay = t_stats.tx_processing_delay_us;
             is_keyframe = t_stats.is_keyframe;
         }
 
-        process_avframe(frame, d_start, dec_end, r_start, cap_delay, proc_delay, is_keyframe);
+        process_avframe(frame, d_start, dec_end, r_start, enc_delay, proc_delay, is_keyframe);
         
         // Advance to the next slot for the potentially next frame in this same call
         // (already at next slot because process_avframe just uses the frame we gave it)
     }
 }
 
-void VdecFfmpeg::process_avframe(AVFrame* frame, uint64_t dec_start_ts, uint64_t dec_end_ts, uint64_t recvts, uint32_t capture_delay_us, uint32_t processing_delay_us, bool is_keyframe) {
+void VdecFfmpeg::process_avframe(AVFrame* frame, uint64_t dec_start_ts, uint64_t dec_end_ts, uint64_t recvts, uint32_t encode_delay_us, uint32_t processing_delay_us, bool is_keyframe) {
     DecodedUnit du;
     memset(&du, 0, sizeof(du));
     du.frame_ref = NULL;
@@ -388,7 +388,7 @@ void VdecFfmpeg::process_avframe(AVFrame* frame, uint64_t dec_start_ts, uint64_t
     du.recv_ts = recvts;
     du.dec_start_ts = dec_start_ts;
     du.dec_end_ts = dec_end_ts;
-    du.tx_capture_delay_us = capture_delay_us;
+    du.tx_encode_delay_us = encode_delay_us;
     du.tx_processing_delay_us = processing_delay_us;
     du.is_keyframe = is_keyframe;
 

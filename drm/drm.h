@@ -70,6 +70,9 @@ struct modeset_output {
 	// Video variables
 	drmModeAtomicReq *video_request;
 	struct drm_object video_plane;
+	/* A second plane that takes the picture's format, or id 0: the picture's
+	 * lower part, when its top half goes up before the rest (DrmDevice::page_flip). */
+	struct drm_object video2_plane;
 	uint32_t video_format;
 	uint32_t video_frm_width;
 	uint32_t video_frm_height;
@@ -107,6 +110,9 @@ int modeset_find_crtc(int fd, drmModeRes *res, drmModeConnector *conn, struct mo
 const char* drm_fourcc_to_string(uint32_t fourcc);
 
 int modeset_find_plane(int fd, struct modeset_output *out, struct drm_object *plane_out, uint32_t plane_format, int exclude_plane_id);
+/* The same, passing over planes that also take avoid_format (0: none). */
+int modeset_find_plane_avoiding(int fd, struct modeset_output *out, struct drm_object *plane_out,
+                                uint32_t plane_format, int exclude_plane_id, uint32_t avoid_format);
 
 void modeset_drm_object_fini(struct drm_object *obj);
 

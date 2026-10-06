@@ -477,6 +477,17 @@ int main(int argc, char **argv)
 	{
 		const char *cfg = getenv("KESTREL_CONFIG");
 		Settings::getInstance().load(cfg && *cfg ? cfg : "/etc/kestrel/kestrel-gnd.yaml");
+		// The low-latency video features, each with a switch that survives a
+		// reboot (the KESTREL_* variables and the /tmp files still work too):
+		//   stream_decode: 0   pictures go to the decoder whole
+		//   early_present: 0   no picture goes up before it is all decoded
+		//   video_halves: 0    no picture in halves on two planes
+		if (Settings::getInstance().getInt("stream_decode", 1) == 0) {
+			setenv("KESTREL_STREAM_DECODE", "0", 1);
+			Ar8030Source::stream_decode = false;
+		}
+		if (Settings::getInstance().getInt("early_present", 1) == 0) setenv("KESTREL_EARLY_PRESENT", "0", 1);
+		if (Settings::getInstance().getInt("video_halves", 1) == 0) setenv("KESTREL_SPLIT", "0", 1);
 	}
 
 	uint16_t mode_width = 0;
@@ -569,12 +580,6 @@ int main(int argc, char **argv)
 	// kArPwrLevels in common.hpp for the levels this board accepts.
 	Ar8030Source::tx_power_mw = Settings::getInstance().getInt("tx_power_mw", kArPwrDefaultMw);
 	Ar8030Source::tx_power_dbm = kArPwrLevels[ar_pwr_index(Ar8030Source::tx_power_mw)].dbm;
-	// The screen's own share, added to the latency shown if set. 0 by
-	// default: the screen is whatever the VRX is plugged into, so the figure
-	// stops at the vblank the picture goes out on. Measure a screen (vblank
-	// to light) and set this to turn the figure into glass to glass.
-	Ar8030Source::panel_latency_us =
-		(int)(Settings::getInstance().getFloat("panel_latency_ms", 0.0f) * 1000.0f);
 	// The fastest capture -> arrival the air delay is pinned to (see
 	// air_delay_for). Measure it for a setup with both clocks synced.
 	Ar8030Source::air_floor_us =
@@ -598,6 +603,8 @@ int main(int argc, char **argv)
 	Ar8030Source::air_bw        = Settings::getInstance().getInt("air_bw", -1);
 	// The cap on kestrel-air's video bitrate (RF menu, Max Bitrate), kbps, 0 = none.
 	Ar8030Source::max_kbps      = Settings::getInstance().getInt("ar8030_max_kbps", 0);
+	// The cap on the video link's bandwidth (RF menu, Max Bandwidth): 20 or 40 MHz.
+	Ar8030Source::max_bw_mhz    = Settings::getInstance().getInt("ar8030_max_bw_mhz", 40) == 20 ? 20 : 40;
 	Ar8030Source::replay_stock_rf = Settings::getInstance().getInt("replay_stock_rf", 1);
 	std::string decoder_name = Settings::getInstance().getString("decoder_name", "rkmpp");
 	bool enable_vrr = Settings::getInstance().getBool("enable_vrr", true);
@@ -1063,6 +1070,12 @@ int main(int argc, char **argv)
                     Ar8030Source::max_kbps = val;
                     Settings::getInstance().set("ar8030_max_kbps", val);
                     Ar8030Source::request_setting(Ar8030Source::CAM_MAX_KBPS, val);
+                    return;
+                case 0x30F:
+                    // RF menu, Max Bandwidth: kept here and sent at every link-up.
+                    Ar8030Source::max_bw_mhz = (val == 20) ? 20 : 40;
+                    Settings::getInstance().set("ar8030_max_bw_mhz", Ar8030Source::max_bw_mhz);
+                    Ar8030Source::request_setting(Ar8030Source::CAM_MAX_BW, Ar8030Source::max_bw_mhz);
                     return;
                 case 0x301: case 0x302: case 0x303: case 0x304:
                 case 0x305: case 0x306: case 0x307: case 0x308:

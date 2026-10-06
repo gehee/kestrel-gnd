@@ -234,10 +234,10 @@ void OSD::stats_history_update(uint64_t now) {
         if (f.t_us == 0 || f.t_us <= stats_frames_t_ || f.t_us < cutoff) break;
         StatsFrame sf;
         sf.t_us = f.t_us;
-        sf.stage[0] = f.capture_ms; sf.stage[1] = f.processing_ms; sf.stage[2] = f.net_ms;
-        sf.stage[3] = f.reassemble_ms; sf.stage[4] = f.dec_ms; sf.stage[5] = f.disp_ms;
+        sf.stage[0] = f.processing_ms; sf.stage[1] = f.net_ms;
+        sf.stage[2] = f.dec_ms; sf.stage[3] = f.disp_ms;
         sf.video_mbps = f.video_mbps; sf.link_mbps = f.rf_mbps;
-        sf.lost = f.lost; sf.snr = f.snr; sf.mcs = f.mcs; sf.key = f.key;
+        sf.lost = f.lost; sf.snr = f.snr; sf.mcs = f.mcs; sf.key = f.key; sf.skipped = f.skipped;
         fresh.push_back(sf);
     }
     pthread_mutex_unlock(&osd_mutex);
@@ -286,7 +286,10 @@ void OSD::stats_refresh(int window_idx, uint64_t now) {
     const StatsFlip* lb = stats_flips_.data() + stats_flips_head_;
     const size_t ln = stats_flips_.size() - stats_flips_head_;
     const StatsFlip* l0 = std::lower_bound(lb, lb + ln, t0, [](const StatsFlip& f, uint64_t t) { return f.t_us < t; });
-    build_stats(f0, (size_t)(fb + fn - f0), l0, (size_t)(lb + ln - l0), now, ws, dev->flips_are_frames, stats_view_);
+    build_stats(f0, (size_t)(fb + fn - f0), l0, (size_t)(lb + ln - l0), now, ws, dev->flips_are_frames, stats_view_,
+                dev->frame_period_us());
+    stats_view_.freq_mhz = osd_vars.artosyn.state == 2 ? osd_vars.artosyn.tx_freq : 0;
+    stats_view_.bw_idx = osd_vars.artosyn.state == 2 ? osd_vars.artosyn.rf_bw_idx : -1;
     stats_view_window_ = ws;
     stats_view_us_ = now;
     if (stats_shown_us_ == 0 || now - stats_shown_us_ >= 500000 || stats_shown_.window_s != ws) {
@@ -397,7 +400,7 @@ void OSD::gallery_prewarm() {
         "CANCEL", "DELETE",
         "STATS", "Latency, frame pacing and link, live", "LATENCY", "SMOOTH", "FPS", "LOST",
         "MCS / SNR", "VIDEO", "LINK USE", "STALLS", "WORST", "latency distribution",
-        "Cap", "Enc", "Net", "Rsm", "Dec", "Disp", "ms", "I", "F", "Mb", "link", "p50", "p99", "now",
+        "Enc", "RF", "Dec", "Disp", "ms", "I", "F", "Mb", "link", "p50", "p99", "now",
         "0", "20", "40", "60", "80", "100", "-10 s", "-1 min", "-3 min", "WAITING FOR VIDEO",
         "pacing: n/a (needs vsync)", "--",
         "UP / DOWN  WINDOW 10 S      BACK  GALLERY",
@@ -451,6 +454,10 @@ bool OSD::render_gallery(int W, int H) {
     const float u = (float)H / 1080.0f;                  // 1.0 at 1080p
     const float k = s.k, pt = s.play_t;
     const float strip_a = k * (1.0f - pt);               // what belongs to the strip alone
+    // The stats screen open (or opening): its live picture is the video plane
+    // itself, moved into its slot - not a copy drawn here, which showed the
+    // picture already on screen a frame or two later than the live view does.
+    const bool pip_on_plane = stats_sel && pt > 0.003f;
     const HudTheme& th = hud_theme_current();
     const float ink[3]    = { th.text[0],  th.text[1],  th.text[2]  };
     const float quiet[3]  = { th.quiet[0], th.quiet[1], th.quiet[2] };
@@ -630,10 +637,10 @@ bool OSD::render_gallery(int W, int H) {
     // charts - is drawn every frame, as one batch of coloured triangles. A frame that
     // drew all of it, every time, took ~10 ms, and one that is not done well before the
     // next video flip misses it and reaches the screen a whole frame late.
-    static const float kStageCol[6][3] = {
-        {0.31f, 0.56f, 0.84f}, {1.00f, 0.42f, 0.42f}, {0.10f, 0.83f, 0.64f},
-        {0.71f, 0.44f, 0.91f}, {0.95f, 0.79f, 0.30f}, {1.00f, 0.54f, 0.30f} };
-    static const char* const kStageName[6] = { "Cap", "Enc", "Air+Net", "Rsm", "Dec", "Disp" };
+    static const float kStageCol[StatsFrame::kStages][3] = {
+        {1.00f, 0.42f, 0.42f}, {0.10f, 0.83f, 0.64f},
+        {0.95f, 0.79f, 0.30f}, {1.00f, 0.54f, 0.30f} };
+    static const char* const kStageName[StatsFrame::kStages] = { "Enc", "RF", "Dec", "Disp" };
     static const char* const kWinTime[3]   = { "-10 s", "-1 min", "-3 min" };
     static const char* const kWinHint[3]   = {
         "UP / DOWN  WINDOW 10 S      BACK  GALLERY",
@@ -719,16 +726,24 @@ bool OSD::render_gallery(int W, int H) {
         };
         snprintf(b, sizeof(b), "%.1f", sh.fps_now);        // now, not the window's average
         chip(150, "FPS", b);
-        text("SMOOTH", X(200), Yd(16), 11 * fs, 0, quiet, A);
-        fill(X(200), Yd(28), 9 * m, 9 * m, !sh.pacing ? quiet : sh.good_pct >= 99.0f ? lime : sh.good_pct >= 95.0f ? amber : red, A);
+        snprintf(b, sizeof(b), "%.1f", sh.video_now);      // the video's, Mbps
+        chip(196, "BITRATE", b);
+        text("SMOOTH", X(250), Yd(16), 11 * fs, 0, quiet, A);
+        fill(X(250), Yd(28), 9 * m, 9 * m, !sh.pacing ? quiet : sh.good_pct >= 99.0f ? lime : sh.good_pct >= 95.0f ? amber : red, A);
         if (sh.pacing) snprintf(b, sizeof(b), "%.1f%%", sh.good_pct); else snprintf(b, sizeof(b), "--");
-        text(b, X(214), Yd(40), 16 * fs, 0, ink, A);
-        snprintf(b, sizeof(b), "%u", (unsigned)sh.lost_total);
-        chip(280, "LOST", b);
-        snprintf(b, sizeof(b), "%d / %d", sh.mcs_now, (int)sh.snr_now);
-        chip(328, "MCS / SNR", b);
-        snprintf(b, sizeof(b), "%.1f", sh.video_now);
-        chip(396, "VIDEO", b);
+        text(b, X(264), Yd(40), 16 * fs, 0, ink, A);
+        // (LOST is in the right column.)
+        if (sh.freq_mhz > 0) snprintf(b, sizeof(b), "%d / %d", ar_mcs_label(sh.mcs_now), (int)sh.snr_now);
+        else snprintf(b, sizeof(b), "--");
+        chip(316, "MCS / SNR", b);
+        // The channel, and how wide the video link is on it now.
+        if (sh.freq_mhz > 0) snprintf(b, sizeof(b), "%d", sh.freq_mhz); else snprintf(b, sizeof(b), "--");
+        chip(378, "CHANNEL", b);
+        if (sh.freq_mhz > 0 && sh.bw_idx >= 0) {
+            char w[24];
+            snprintf(w, sizeof(w), "%s MHz", ar_bw_label(sh.bw_idx));
+            text(w, X(378) + text_width(b, 16 * fs) + 4 * m, Yd(40), 11 * fs, 0, quiet, A);
+        }
 
         // the latency chart's axes
         const float mx = stats_ymax_;
@@ -748,10 +763,17 @@ bool OSD::render_gallery(int W, int H) {
         text("I", X(kx0 - 5), Yd(227), 11 * fs, 2, quiet, A);
         text("F", X(kx0 - 5), Yd(248), 11 * fs, 2, quiet, A);
         if (sh.pacing)
-            snprintf(b, sizeof(b), "pacing: on time %.1f%%   p99 gap %.1f ms   stutters %d", sh.good_pct, sh.p99_gap_ms, sh.stutters);
+            snprintf(b, sizeof(b), "pacing: on time %.1f%%   p99 lateness %.1f ms   stutters %d", sh.good_pct, sh.p99_gap_ms, sh.stutters);
         else
             snprintf(b, sizeof(b), "pacing: n/a (needs vsync)");
         text(b, X(kx0), Yd(270), 11 * fs, 0, quiet, A);
+        // What the stems over the chart are.
+        {
+            const float kw = text_width("keyframe", 11 * fs) / m;
+            text("keyframe", X(kx1), Yd(100), 11 * fs, 2, quiet, A);
+            fill(X(kx1 - kw - 8.5f), Yd(100 - 7), 1.0f * m, 7 * m, amber, 0.7f * A);
+            fill(X(kx1 - kw - 11), Yd(100 - 10.5f), 6 * m, 4 * m, amber, A);
+        }
 
         // the link lane: what it means, said in words - the scale in Mbps (a line at the
         // top, one halfway) and a key with the numbers as they are now
@@ -842,7 +864,7 @@ bool OSD::render_gallery(int W, int H) {
         text("stage medians, ms", X(464), Yd(324), 11 * fs, 0, quiet, A);
         // Only the stages this link reports: one that reads zero all the time is left out.
         int shown = 0;
-        for (int i = 0; i < 6; i++) {
+        for (int i = 0; i < StatsFrame::kStages; i++) {
             if (sh.stage_p50[i] < 0.05f) continue;
             const float lx = 464 + (float)(shown % 2) * 104, ly = 338 + (float)(shown / 2) * 14;
             fill(X(lx), Yd(ly - 9), 9 * m, 9 * m, kStageCol[i], A);
@@ -898,11 +920,11 @@ bool OSD::render_gallery(int W, int H) {
                 i = j + 1;
             }
         }
-        // six stages stacked, the total over them
+        // the stages stacked, the total over them
         {
             float acc[StatsView::kCols];
             for (int i = 0; i < C; i++) acc[i] = 0;
-            for (int k2 = 0; k2 < 6; k2++) {
+            for (int k2 = 0; k2 < StatsFrame::kStages; k2++) {
                 for (int i = 0; i < Cd; i++) {
                     const float lo = acc[i], hi = lo + (v.have[i] ? v.stage[k2][i] : 0.0f);
                     // Held out to the chart's edges: its ends do not move with the columns.
@@ -921,6 +943,24 @@ bool OSD::render_gallery(int W, int H) {
             if (i == Cd - 1) { vtx(X(kx1), y - 0.6f * m); vtx(X(kx1), y + 0.6f * m); }
         }
         flush(GL_TRIANGLE_STRIP, white, 0.9f * A);
+        // Each keyframe as a stem from its column's mean up to its own latency (a
+        // column's mean all but hides a keyframe among its pictures), a dot on top.
+        {
+            auto in_chart = [&](float x) { return x - 2.0f * m >= X(kx0) && x + 2.0f * m <= X(kx1); };
+            for (int i = 0; i < Cd; i++)
+                if (v.have[i] && v.kmax[i] > v.total[i] && in_chart(colx(i))) {
+                    const float yt = Yl(v.kmax[i]), yb = Yl(v.total[i]);
+                    rect_v(colx(i) - 0.5f * m, yt, 1.0f * m, yb - yt);
+                }
+            flush(GL_TRIANGLES, amber, 0.7f * A);
+            for (int i = 0; i < Cd; i++)
+                if (v.have[i] && v.kmax[i] > 0.0f && in_chart(colx(i))) {
+                    const float x = colx(i), y = Yl(v.kmax[i]);
+                    rect_v(x - 2.2f * m, y - 1.3f * m, 4.4f * m, 2.6f * m);   // two bars across: a round-ish dot
+                    rect_v(x - 1.3f * m, y - 2.2f * m, 2.6f * m, 4.4f * m);
+                }
+            flush(GL_TRIANGLES, amber, A);
+        }
         dashed_h(X(kx0), X(kx1), Yl(stats_p50_), 1.2f * m, 7 * m, 4 * m);
         flush(GL_TRIANGLES, data, A);
         dashed_h(X(kx0), X(kx1), Yl(stats_p99_), 1.2f * m, 7 * m, 4 * m);
@@ -976,7 +1016,7 @@ bool OSD::render_gallery(int W, int H) {
         gflush();
         // what is written over the data
         for (int i = 0; i < nlab; i++) {
-            snprintf(b, sizeof(b), "MCS %d", mlab[i].mcs);
+            snprintf(b, sizeof(b), "MCS %d", ar_mcs_label(mlab[i].mcs));
             text(b, X(mlab[i].x + 5), Yd(80), 11 * fs, 0, quiet, A);
         }
         text("p50", X(kx1 + 4), Yl(stats_p50_) + 4 * m, 11 * fs, 0, data, A);
@@ -1046,10 +1086,30 @@ bool OSD::render_gallery(int W, int H) {
             pm_quad(stats_layer_tex_, Gallery::Rect{ ox + (W * 0.5f - fox) * sc, oy + (H * 0.5f - foy) * sc, W * sc, H * sc }, A);
         } else stats_layer_static(ox, oy, m, A);
         stats_layer_dynamic(ox, oy, m, A);
-        // The live picture in its slot, drawn from the same frames the video plane shows.
+        // The live picture in its slot. On the open stats screen that is the video
+        // plane, scaled into it by the display controller, through a hole: as late
+        // as the live view, and nothing to redraw for it. The stats tile on the
+        // strip, too small to judge latency by, draws a copy of the picture on screen.
         {
             const Gallery::Rect pip{ ox + (464.0f + 104.0f) * m, oy + (10.0f + 58.5f) * m, 208.0f * m, 117.0f * m };
-            if (live_pic && import_live_picture()) {
+            if (live_pic && pip_on_plane) {
+                DrmDevice::Tile t;
+                t.active = true;
+                t.x = (int)std::lround(pip.x - pip.w * 0.5f);
+                t.y = (int)std::lround(pip.y - pip.h * 0.5f);
+                t.w = (int)std::lround(pip.w);
+                t.h = (int)std::lround(pip.h);
+                int x0, y0, x1, y1;
+                if (DrmDevice::tile_on_screen(t, W, H, x0, y0, x1, y1)) {
+                    glEnable(GL_SCISSOR_TEST);
+                    glScissor(x0, H - y1, x1 - x0, y1 - y0);
+                    glClearColor(0, 0, 0, 0);
+                    glClear(GL_COLOR_BUFFER_BIT);   // the hole the picture shows through
+                    glDisable(GL_SCISSOR_TEST);
+                }
+                frame_tile_ = t;
+                if (A < 0.999f) fill(pip.x - pip.w * 0.5f, pip.y - pip.h * 0.5f, pip.w, pip.h, panel, 1.0f - A);
+            } else if (live_pic && import_live_picture()) {
                 ext_quad(pip, live_ext_tex_);
                 if (A < 0.999f) fill(pip.x - pip.w * 0.5f, pip.y - pip.h * 0.5f, pip.w, pip.h, panel, 1.0f - A);
             } else {
@@ -1160,7 +1220,7 @@ bool OSD::render_gallery(int W, int H) {
         t.h = (int)std::lround(lr.h);
         int x0, y0, x1, y1;
         const bool visible = DrmDevice::tile_on_screen(t, W, H, x0, y0, x1, y1);
-        if (live_pic) {
+        if (live_pic && !pip_on_plane) {
             frame_tile_ = t;
             if (visible) {
                 glEnable(GL_SCISSOR_TEST);
@@ -1170,6 +1230,7 @@ bool OSD::render_gallery(int W, int H) {
                 glDisable(GL_SCISSOR_TEST);
             }
         } else if (visible) {
+            // no picture here: it is in the stats screen's slot (pip_on_plane), or there is none
             fill(lx, ly, lr.w, lr.h, tile_bg, 1.0f);   // nothing on the video plane: a base for the copy
         }
         if (gallery_snap_valid_) {
