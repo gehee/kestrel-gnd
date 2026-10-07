@@ -1,5 +1,6 @@
 #include <algorithm>
 #include "ar8030_source.hpp"
+#include "frame_mode.hpp"
 #include "../utils/ltrace.hpp"
 #include "bb_watchdog.hpp"
 #include "ar8030_handshake.h"
@@ -354,6 +355,7 @@ int Ar8030Source::ap_index = 0;
 bool Ar8030Source::chan_auto = true;
 bool Ar8030Source::chan_manual_cli = false;
 int Ar8030Source::tx_power_mw  = kArPwrDefaultMw;
+std::atomic<int> Ar8030Source::air_prj{0};
 int Ar8030Source::tx_power_dbm = kArPwrLevels[ar_pwr_index(kArPwrDefaultMw)].dbm;
 bool Ar8030Source::tx_power_auto = false;
 bool Ar8030Source::skip_handshake = false;
@@ -478,7 +480,10 @@ void Ar8030Source::on_link_event(const uint8_t* p) {
     // step an event 12. A drop that a bandwidth change caused re-forms the same
     // link on its new width, so it keeps the gear.
     if (p[1] == 2 && video_bw_idx_.load() < 0) video_bw_idx_.store(2);
-    else if (p[1] == 0 && now_ms() - bw_change_ms_.load() > 2000) video_bw_idx_.store(-1);
+    else if (p[1] == 0 && now_ms() - bw_change_ms_.load() > 2000) {
+        video_bw_idx_.store(-1);
+        air_prj.store(0);          // the next air unit says what it is
+    }
     printf("ar8030: event: link state %u -> %u\n", p[2], p[1]);
     if (osd) {
         osd->update_artosyn_link_state(p[1]);
@@ -1207,6 +1212,7 @@ bool Ar8030Source::read_sky_ack(uint8_t want_cmd, int timeout_ms) {
         if (*should_stop) return false;
         int n = bb_socket_read(ctrl_sockfd, buf, sizeof(buf), 50);
         if (n <= 0) continue;   // -1 is a plain timeout, not an error
+        scan_air_status(buf, n);   // the air's reports, read here, are not lost
         // Frames can be batched in one read; walk every FE A5 boundary.
         for (int i = 0; i + 12 <= n; i++) {
             if (buf[i] != 0xFE || buf[i + 1] != 0xA5) continue;
@@ -1397,6 +1403,24 @@ void Ar8030Source::scan_air_status(const uint8_t *buf, int n) {
                            air.dnr_3d, air.focus_en);
                 }
             }
+        }
+
+        // What the air unit is decides which power levels it is offered, as on
+        // stock. A power it is not offered (a Lite still set to 500mW) is
+        // brought down to the nearest one it is, and sent to it.
+        int prj = sky::Proto::find_tlv(pl, pl_len, sky::Proto::TLV_SKY_PRJ_NAME);
+        if (prj > 0 && prj != air_prj.load()) {
+            air_prj.store(prj);
+            ar_pwr_offer o = ar_pwr_offered(prj);
+            printf("ar8030: air unit is an %s (prj %d): power up to %s\n", ar_air_name(prj), prj,
+                   kArPwrLevels[ar_pwr_index(o.mw[o.n - 1])].label);
+            int fit = ar_pwr_fit(prj, tx_power_mw);
+            if (fit != tx_power_mw) {
+                printf("ar8030: power %s is not offered to it: %s\n",
+                       kArPwrLevels[ar_pwr_index(tx_power_mw)].label, kArPwrLevels[ar_pwr_index(fit)].label);
+                request_rf(RF_TX_POWER, fit);
+            }
+            if (osd) osd->set_air_power_levels();
         }
 
         int sb = sky::Proto::find_tlv(pl, pl_len, sky::Proto::TLV_STANDBY_MODE);
@@ -1654,6 +1678,7 @@ int Ar8030Source::wait_sky_status(uint8_t want_cmd, int timeout_ms) {
         drain_video_socket();
         int n = bb_socket_read(ctrl_sockfd, buf, sizeof(buf), 20);
         if (n <= 0) continue;
+        scan_air_status(buf, n);   // the air's reports, read here, are not lost
         for (int i = 0; i + 12 <= n; i++) {
             if (buf[i] != 0xFE || buf[i + 1] != 0xA5) continue;
             unsigned len = ((buf[i + 4] | (buf[i + 5] << 8)) >> 4) + 11;
@@ -3379,9 +3404,11 @@ void Ar8030Source::emit_nal(const uint8_t* nal, size_t len) {
             static bool stream_paused = false;
             static unsigned pause_check = 0;
             if (first_slice && (pause_check++ % 50) == 0) {
-                const bool off = access("/tmp/kestrel-stream-off", F_OK) == 0;
+                const bool off = access("/tmp/kestrel-stream-off", F_OK) == 0 ||
+                                 g_frame_mode.load(std::memory_order_relaxed) == kFrameWholeDecode;
                 if (off != stream_paused)
-                    printf("ar8030: stream decode %s (/tmp/kestrel-stream-off)\n", off ? "paused" : "resumed");
+                    printf("ar8030: stream decode %s (frame mode %s, /tmp/kestrel-stream-off)\n",
+                           off ? "paused" : "resumed", frame_mode_label(g_frame_mode.load()));
                 stream_paused = off;
             }
             if (first_slice) {
@@ -3395,12 +3422,11 @@ void Ar8030Source::emit_nal(const uint8_t* nal, size_t len) {
                     au_streamed = true;
                 }
             } else if (au_streamed && !au_stream_done) {
-                if (!vdec->stream_append(unit.data(), (int)unit.size(), au_pts, last) &&
-                    (++stream_refused <= 3 || (stream_refused % 1000) == 0))
-                    printf("ar8030: the decoder did not take a slice of picture %lld "
-                           "(%llu so far)\n", (long long)au_pts,
-                           (unsigned long long)stream_refused);
-                au_stream_done = last;
+                // Held to the end of this read (send_held_slices); the last
+                // slice goes at once, with any held before it.
+                if (held_pts_ != au_pts) { held_slices_.clear(); held_pts_ = au_pts; }
+                held_slices_.insert(held_slices_.end(), unit.begin(), unit.end());
+                if (last) send_held_slices(true);
             }
             // The picture's last slice: decode it now, not when the next
             // picture's first slice turns up - a frame interval later (10 ms
@@ -3726,6 +3752,7 @@ void Ar8030Source::flush_access_unit(uint64_t recv_us) {
         if (!au_streamed) {
             feed_au(au_slices.data(), au_slices.size(), 0);
         } else if (!au_stream_done) {
+            send_held_slices();
             vdec->stream_end(au_pts);
             if (++stream_ended <= 3 || (stream_ended % 1000) == 0)
                 printf("ar8030: picture %lld ended without its last slice "
@@ -3852,7 +3879,34 @@ void Ar8030Source::run_replay() {
 // the packet's last NAL goes on at once, with the same bytes the next start
 // code would have given it. A header that does not add up, or a trailer that
 // is not there, leaves it to the start code.
+// One read of the radio's video: its NALs, then the slices held from it.
 void Ar8030Source::consume(const uint8_t* data, size_t len) {
+    consume_bytes(data, len);
+    send_held_slices();
+}
+
+// Two appends of the same picture within microseconds (its middle slices in
+// one read, the last one later) made the RK3568 end the picture before its
+// last slice now and then (11 of 78 such pictures at 1080p60): that slice was
+// refused and the picture's lower part stayed wrong until the intra refresh
+// passed. So the slices of one read go in one append - as a whole picture
+// goes, all its slices in one part - and the last slice takes the held ones
+// with it.
+void Ar8030Source::send_held_slices(bool last) {
+    if (held_slices_.empty() && !last) return;
+    if (held_pts_ == au_pts && au_streamed && !au_stream_done && vdec) {
+        if (!vdec->stream_append(held_slices_.data(), (int)held_slices_.size(), au_pts, last) &&
+            (++stream_refused <= 3 || (stream_refused % 1000) == 0))
+            printf("ar8030: the decoder did not take a slice of picture %lld "
+                   "(%llu so far)\n", (long long)au_pts,
+                   (unsigned long long)stream_refused);
+        au_stream_done = last;
+    }
+    held_slices_.clear();
+    held_pts_ = -1;
+}
+
+void Ar8030Source::consume_bytes(const uint8_t* data, size_t len) {
     accum.insert(accum.end(), data, data + len);
 
     if (accum.size() > AR_MAX_ACCUM) {

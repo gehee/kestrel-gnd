@@ -75,6 +75,9 @@ class Ar8030Source {
         static bool chan_manual_cli;   // --ar8030-chan-manual: pinned to freq_khz from the start
         static int tx_power_dbm;
         static int tx_power_mw;   // stock's encoding: N = hold N mW, N+1 = auto capped at N
+        // The air unit's project number (TLV 0x11: 4 Lite, 6 RC, 7 Lite+), 0 until
+        // it reports; picks the power levels it is offered (ar_pwr_offered).
+        static std::atomic<int> air_prj;
         static int air_floor_us;       // fastest capture -> first slice (air_floor_ms), see air_delay_for
         static bool tx_power_auto;
         void apply_tx_power(int mw); // PA output; stock uses 24
@@ -595,6 +598,13 @@ class Ar8030Source {
         void disconnect_bb();
         void run_replay();
         void consume(const uint8_t* data, size_t len);
+        void consume_bytes(const uint8_t* data, size_t len);   // consume() without the flush
+        // A streamed picture's slices that came in one read go to the decoder as
+        // one part, at the end of the read (send_held_slices): two parts back to
+        // back sometimes made it end the picture before its last slice.
+        std::vector<uint8_t> held_slices_;
+        int64_t held_pts_ = -1;
+        void send_held_slices(bool last = false);
         void emit_nal(const uint8_t* nal, size_t len);
         void flush_access_unit(uint64_t recv_us);
         void update_stats(size_t frame_size);

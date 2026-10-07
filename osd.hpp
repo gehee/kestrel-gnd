@@ -74,6 +74,10 @@ typedef struct {
     uint8_t  mcs = 0;    // receive MCS
     uint8_t  key = 0;    // this picture was a keyframe
     uint16_t skipped = 0;   // pictures before this one that were never shown
+    // Each slice, top to bottom, from its own first row's capture to that row
+    // lit (ms); nslices 0: not timed slice by slice (see kLatSlices).
+    uint8_t nslices = 0;
+    float slice_ms[kLatSlices] = {0, 0, 0, 0};
 } LatencyFrame;
 
 #include "utils/latency_ring.hpp"
@@ -512,8 +516,8 @@ class OSD {
         int rf_bw_applied = -1;  // bandwidth re-asserted this link session (-1 = pending)
         bool rf_chan_asserted = false; // channel re-asserted this link session
         int  air_chan_mode = -1;       // AIR-owned chan mode from broadcast (1=auto 0=force)
-        bool menu_scan_open = false;   // RF tab: channel-scan (spectrum) sub-screen open
-        int  menu_scan_sel = 0;        // channel-scan: highlighted channel (sorted by freq)
+        bool menu_scan_open = false;   // AR8030 > Channel: the channel page is open
+        int  menu_scan_sel = 0;        // its cursor: 0 AUTO, r + 1 the r-th channel by frequency
         bool air_standby = false;      // as REPORTED by the air unit (TLV 0x12)
         bool menu_ar_standby = false;  // the menu's value: seeded from air_standby,
                                        // toggled to force standby on/off (momentary,
@@ -527,10 +531,11 @@ class OSD {
         // vtx-standby-detection-via-cmd05-bytes2930.md.
         bool vtx_low_power = false;
         int  menu_brightness = 50;     // HDMI connector brightness, 0..100
-        int      scan_peak_dbm[32] = {0}; // 30s decaying max-hold energy per channel index
-        uint64_t scan_peak_ts[32]  = {0}; // µs timestamp the peak was last (re)set (0=unset)
-        int  pinned_ci = -1;           // radio channel index the AP is pinned to (-1 = AUTO/ACS)
-        int  menu_pin_pending = -2;    // scan Enter confirm: -2=none, -1=pending release, >=0=pending pin
+        // 30 s max-hold energy per radio channel index, and when it was last set
+        // (0: never). As many as chan_scan_info carries: at 32 the radio's 42
+        // channels wrote past the end of both arrays.
+        int      scan_peak_dbm[64] = {0};
+        uint64_t scan_peak_ts[64]  = {0};
         int menu_fec_idx = 0; // Index into [1:1, 8:10, 8:12, 8:14, 1:2]
         int menu_ack = 0; // 0: OFF, 1: ON
         int menu_chan_auto = 1; // 1: AUTO channel hop, 0: FORCE fixed channel
@@ -555,6 +560,7 @@ class OSD {
         float menu_ui_scale = 1.0f;
         float applied_ui_scale = -1.0f;
         int menu_picture_scale = 100;   // whole-picture scale, percent (100 = full)
+        int menu_frame_mode = 0;        // FrameMode (frame_mode.hpp)
 
         int menu_tab = 0; // 0: Video, 1: RF
 
@@ -584,8 +590,17 @@ class OSD {
         // by index in half a dozen places, so the order lives here once and
         // the dispatchers name the row rather than count to it.
         enum DisplayRow {
-            kDispTheme = 0, kDispBgVideo, kDispPicture, kDispUiScale, kDispBrightness
+            kDispTheme = 0, kDispBgVideo, kDispPicture, kDispUiScale, kDispBrightness, kDispFrameMode
         };
+        // SYSTEM rows, headers included, in the order they are listed.
+        enum SysRow {
+            kSysBuild = 0, kSysVersion, kSysDecoder, kSysScreen, kSysWifi,
+            kSysHdrZone, kSysLicence, kSysArea, kSysCountry, kSysTimezone
+        };
+        int  menu_licence_ = 0;   // SYSTEM > Amateur Licence's mirror (zones::licensed())
+        // One step on the Area, Country or Timezone row: the zone it lands on.
+        // Timezone is only listed for a country with more than one zone.
+        int  menu_step_zone(int row, int dir);
         // HUD rows, headers included, in the order they are listed.
         enum HudRow {
             kHudHdrOverlay = 0, kHudRowStyle, kHudRowBfOsd,
@@ -675,12 +690,80 @@ class OSD {
         void menu_apply_change(int tab, int index, int dir);
         // What one row's value reads as. See the definition.
         void menu_value_text(int tab, int i, char* out, size_t cap);
-        void draw_menu(math::Mat4& mvp, float fw, float fh);
-        // The three-column body of it (hud_menu.cpp).
-        void draw_menu_columns(math::Mat4& mvp, float fw, float fh);
-        // Channel-scan sub-screen: spectrum of per-channel busy-ness. Drawn inside
-        // the menu panel frame (mx,my,mw,mh) when menu_scan_open is set.
-        void draw_chan_scan(float mx, float my, float mw, float mh, float s_menu);
+
+        // ---- the canopy is the settings (render_gl, hud_menu.cpp) ----
+        // OK on the live picture wakes the canopy: its two blades lift, and
+        // Left/Right picks one. The left blade shows the goggle and the pilot,
+        // so it holds the goggle's settings (HUD, DISPLAY, DVR, SYSTEM); the
+        // right one shows the link and the air unit, so it holds the air
+        // unit's (VIDEO, RADIO). OK unfolds the picked blade up its side of the
+        // screen into its settings, the middle of the picture left clear; on
+        // RADIO > Channel, OK unfolds it the other way, along the bottom, into
+        // the channel band (menu_scan_open). Back folds one step at a time.
+        // Back on the live picture still pulls out to the gallery.
+        int      ui_stage_ = 0;         // 0 a blade picked, 1 its settings unfolded
+        int      ui_side_ = 1;          // 0 the left blade (goggle), 1 the right (air unit)
+        int      ui_side_tab_[2] = { 2, 1 };   // each side's section last open (menu_tab)
+        // The motion, each eased toward its target the gallery's way.
+        float    ui_wake_ = 0.0f;       // the canopy awake (menu_open)
+        float    ui_lift_[2] = { 0.0f, 0.0f };   // a blade lifted (picked) or lowered (not)
+        float    ui_open_[2] = { 0.0f, 0.0f };   // a blade unfolded into its settings
+        float    ui_band_ = 0.0f;       // the right blade unfolded into the channel band
+        uint64_t menu_anim_us_ = 0;
+        // The sections each side holds, in order (menu_tab numbers); VIDEO is
+        // left out while nothing is linked.
+        std::vector<int> ui_side_tabs(int side) const;
+        // The picture's rectangle and where each blade is, in pixels.
+        void ui_blade_rect(int side, int W, int H, float fh, float& x, float& y, float& w, float& h);
+        // (draw_canopy_ui and draw_canopy_pick are with draw_canopy_hud: they
+        // take its CanopyIn for the panel matrices.)
+        void draw_side_panel(int side, float x, float y, float w, float h, float u);
+
+        // ---- the channel page (osd_channel.cpp) ----
+        int  chan_order_[64] = {};      // radio channel indices by frequency
+        int  chan_order_n_ = 0;
+        void chan_open();
+        void chan_close();
+        void chan_key(int key);
+        int  chan_quietest() const;
+        int  chan_bw_mhz() const;
+        int  chan_tx_mw() const;
+        // Draws the band in the rectangle (pixels); true while something on it
+        // is still gliding.
+        bool draw_channel_band(int W, int H, float band_x, float band_y, float band_w, float band_hp, float t);
+        // Its motion (eased toward where things belong) and the numbers it
+        // prints, taken twice a second rather than at every scan update.
+        float    chan_cursor_x_ = -1.0f, chan_link_x_ = -1.0f;   // slots; -1: place at once
+        float    chan_bar_[64] = {}, chan_peak_[64] = {};        // dBm, by radio channel index
+        bool     chan_bars_set_ = false;
+        uint64_t chan_anim_us_ = 0, chan_shown_us_ = 0;
+        int      chan_shown_now_[64] = {}, chan_shown_peak_[64] = {};
+        int      chan_shown_snr_ = 0, chan_shown_mcs_ = 0;
+        bool     chan_shown_linked_ = false;
+        // SYSTEM > Time Zone (zones.hpp): the menu's mirror of the zone in force
+        // (-1 not set), walked by its Area / Country / Timezone rows, and the
+        // zones::generation() it was last seeded from.
+        int      menu_zone_ = -1;
+        uint32_t menu_zone_gen_ = 0;
+
+        // ---- pixel-space pages (osd_screen.cpp) ----
+        int   px_W_ = 0, px_H_ = 0;
+        float px_cx_ = 0, px_cy_ = 0, px_sc_ = 1, px_a_ = 1;
+        float px_mvp_[16] = {};
+        void  px_begin(int W, int H, float cx, float cy, float sc, float alpha);
+        std::vector<float> px_batch_;   // gathered flat shapes (px_flush draws them)
+        void  px_submit(const float* v, int n, GLint pos, GLint uv);
+        void  px_flush();
+        void  px_vertex(float x, float y, const float* c, float a);
+        void  px_fill(float x, float y, float w, float h, const float* c, float a);
+        void  px_poly(const float* p, int n, const float* c, float a);
+        void  px_quad(const float* p, const float* c, float a);
+        void  px_frame(float x, float y, float w, float h, float t, const float* c, float a);
+        void  px_hatch(float x, float y, float w, float h, const float* c, float a, float pitch, float stripe);
+        float px_text(const char* s, float x, float baseline, float font_px, int align, const float* c, float a);
+        float px_text_w(const char* s, float font_px);
+        float px_pill(const char* s, float x, float y, float font_px, const float* bg, const float* fg, float a, bool outline);
+        bool  px_live(float x, float y, float w, float h);
     public:
         int refresh_frequency_ms;
         void update_menu_from_tx(int cmd, int val);
@@ -797,6 +880,9 @@ class OSD {
             float mbps = 0.0f;
             bool  have_lat = false;
             float lat_med_ms = 0.0f;
+            // SPLIT: each slice of the picture on its own, top to bottom (0: none).
+            int   lat_nslices = 0;
+            float lat_slice_ms[kLatSlices] = {0, 0, 0, 0};
             bool  vtx_temp_valid = false;
             float vtx_temp_c = 0.0f;
             // Live standby, not the TLV enable/disable setting - see
@@ -813,6 +899,11 @@ class OSD {
             float vrx_volts  = 0.0f;
         };
         void draw_canopy_hud(const CanopyIn& in);
+        // The canopy awake (osd.cpp), and the blades' names while a side is
+        // being picked (hud_canopy.cpp), in the blades' own slanted space.
+        // Only the frame and the panel matrices of `geo` are read.
+        void draw_canopy_ui(int W, int H, const CanopyIn& geo);
+        void draw_canopy_pick(const CanopyIn& in, float pick);
         // A run of tapering blocks, the canopy's only gauge form. `edge_left`
         // puts the tall end at the left (screen) edge and fills rightwards;
         // false mirrors it. `filled` is 0..1 of the run.
@@ -901,6 +992,9 @@ class OSD {
         // the current status - but not while the menu is open, so a force the
         // user is dialling in is not clobbered by an incoming status frame.
         void set_air_standby(bool on) { air_standby = on; if (!menu_open) menu_ar_standby = on; }
+        // The air unit's power levels changed (it said what it is): the menu
+        // shows the level it now runs, from its list.
+        void set_air_power_levels();
         void set_vtx_low_power(bool on) { vtx_low_power = on; }
         // Air<->ground distance from the baseband's time-of-flight ranging,
         // metres; -1 when it has no fix. Published by Ar8030Source.

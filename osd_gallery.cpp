@@ -9,6 +9,7 @@
 // Everything else - the backdrop, the recordings' thumbnails, text - is on the
 // OSD plane around it.
 
+#include "frame_mode.hpp"
 #include "osd.hpp"
 #include "dvr_library.hpp"
 #include "hud_theme.hpp"
@@ -238,6 +239,8 @@ void OSD::stats_history_update(uint64_t now) {
         sf.stage[2] = f.dec_ms; sf.stage[3] = f.disp_ms;
         sf.video_mbps = f.video_mbps; sf.link_mbps = f.rf_mbps;
         sf.lost = f.lost; sf.snr = f.snr; sf.mcs = f.mcs; sf.key = f.key; sf.skipped = f.skipped;
+        sf.nslices = f.nslices;
+        for (int s = 0; s < kLatSlices; s++) sf.slice_ms[s] = f.slice_ms[s];
         fresh.push_back(sf);
     }
     pthread_mutex_unlock(&osd_mutex);
@@ -290,6 +293,8 @@ void OSD::stats_refresh(int window_idx, uint64_t now) {
                 dev->frame_period_us());
     stats_view_.freq_mhz = osd_vars.artosyn.state == 2 ? osd_vars.artosyn.tx_freq : 0;
     stats_view_.bw_idx = osd_vars.artosyn.state == 2 ? osd_vars.artosyn.rf_bw_idx : -1;
+    stats_view_.vtx_temp_c = vtx_temp_valid && osd_vars.artosyn.state == 2 ? vtx_cpu_c : -1;
+    stats_view_.vrx_temp_c = vrx_temp_cached_ > 0 ? vrx_temp_cached_ : -1;
     stats_view_window_ = ws;
     stats_view_us_ = now;
     if (stats_shown_us_ == 0 || now - stats_shown_us_ >= 500000 || stats_shown_.window_s != ws) {
@@ -473,7 +478,11 @@ bool OSD::render_gallery(int W, int H) {
     vs = video_state_;
     last_frame_us = last_fpv_frame_us_;
     pthread_mutex_unlock(&osd_mutex);
-    const bool live_pic = (vs == VideoState::LIVE);
+    // TRANSITION is live too: the warp into the live picture is the HUD's, and the
+    // HUD is not drawn while the gallery is open - a picture that went live while
+    // the gallery was up stayed in TRANSITION, and the live tile stayed empty, until
+    // Back. The HUD finishes the transition when it is drawn again.
+    const bool live_pic = (vs == VideoState::LIVE || vs == VideoState::TRANSITION);
     const bool live_fresh = live_pic && now - last_frame_us < 1500000ULL;
 
     int px, py, pw, ph;
@@ -718,7 +727,17 @@ bool OSD::render_gallery(int W, int H) {
         snprintf(b, sizeof(b), "%.1f", sh.p50);
         text(b, X(10), Yd(46), 30 * fs, 0, ink, A);
         text("ms", X(10) + text_width(b, 30 * fs) + 6 * m, Yd(46), 13 * fs, 0, quiet, A);
-        snprintf(b, sizeof(b), "p50 %.1f   p99 %.1f", sh.p50, sh.p99);
+        // SPLIT: the top of the picture goes up before the bottom - each one's
+        // median, from its own rows' capture to those rows lit.
+        if (g_frame_mode.load(std::memory_order_relaxed) == kFrameSplit && sh.nslices >= 2) {
+            // Each slice's median, top to bottom.
+            int o = snprintf(b, sizeof(b), "slices");
+            for (int s = 0; s < sh.nslices; s++)
+                o += snprintf(b + o, sizeof(b) - o, s ? " | %.1f" : " %.1f", sh.slice_p50[s]);
+            snprintf(b + o, sizeof(b) - o, "   p99 %.1f", sh.p99);
+        }
+        else
+            snprintf(b, sizeof(b), "p50 %.1f   p99 %.1f", sh.p50, sh.p99);
         text(b, X(10), Yd(62), 11 * fs, 0, quiet, A);
         auto chip = [&](float x, const char* label, const char* val) {
             text(label, X(x), Yd(16), 11 * fs, 0, quiet, A);
@@ -848,18 +867,28 @@ bool OSD::render_gallery(int W, int H) {
                 text(b, X(khx + (float)ms / 60.0f * khw), Yd(khy + khh + 13), 9.5f * fs, ms == 60 ? 2 : ms == 0 ? 0 : 1, quiet, A);
             }
         }
-        auto readout = [&](float x, float y, const char* label, const char* val) {
+        auto readout = [&](float x, float y, const char* label, const char* val, const float* col = nullptr) {
             text(label, X(x), Yd(y), 11 * fs, 0, quiet, A);
-            text(val, X(x), Yd(y + 22), 19 * fs, 0, ink, A);
+            text(val, X(x), Yd(y + 22), 19 * fs, 0, col ? col : ink, A);
         };
+        // A temperature, coloured as it nears what the unit can take (90 C, the
+        // HUD's placeholder limit); -- when there is none.
+        auto temp = [&](float x, float y, const char* label, float c) {
+            if (c < 0) { readout(x, y, label, "--"); return; }
+            snprintf(b, sizeof(b), "%.0f C", c);
+            readout(x, y, label, b, c >= 90 ? red : c >= 80 ? amber : ink);
+        };
+        // Three columns: the link, the picture, the two units' temperatures.
         snprintf(b, sizeof(b), "%.0f%%", sh.link_use);
         readout(464, 246, "LINK USE", b);
         snprintf(b, sizeof(b), "%u", (unsigned)sh.lost_total);
-        readout(560, 246, "LOST", b);
+        readout(534, 246, "LOST", b);
+        temp(604, 246, "VTX TEMP", sh.vtx_temp_c);
         snprintf(b, sizeof(b), "%d", sh.stutters);
         readout(464, 284, "STALLS", b);
         snprintf(b, sizeof(b), "%.0f ms", sh.worst_ms);
-        readout(560, 284, "WORST", b);
+        readout(534, 284, "WORST", b);
+        temp(604, 284, "VRX TEMP", sh.vrx_temp_c);
         // The stages, each with its median over the window in ms.
         text("stage medians, ms", X(464), Yd(324), 11 * fs, 0, quiet, A);
         // Only the stages this link reports: one that reads zero all the time is left out.

@@ -86,6 +86,8 @@ class VdecRK : public Vdec {
         std::mutex early_mutex_;
         std::condition_variable early_cv_;
         std::deque<int64_t> early_q_;
+        // Early tops in the 5 s window: handed out, and refused as stale (see early_loop).
+        std::atomic<unsigned> early_tops_{0}, early_stale_{0};
         std::unordered_map<int64_t, StrmPic> strm_pics_;
         std::thread early_thread_;
         // recent first -> last slice gaps and last slice -> picture out tails, us

@@ -106,6 +106,101 @@ constexpr float kLinkAllUs   = 420000.0f;   // ...then the blocks sweep in
 constexpr int kSegsMain = 20;
 constexpr int kSegsThin = 7;      // the MCS ladder's seven rungs
 
+// Mockup y (from the top of its 620px frame) -> frustum y.
+// The panels sat 24 design px clear of the bottom edge. Half that reads
+// better - they are anchored to the frame, and a wide margin under them
+// makes them look like they are floating rather than sitting on it.
+constexpr float kDrop = 12.0f;
+
+// Where a mockup pixel lands in a panel's own space, before the panel yaw and
+// the slant. Worked out in one place because the labels over the blades while
+// a side is being picked (draw_canopy_pick) are drawn in it too.
+struct CanopyFrame {
+    float sd = 1.0f;          // the UI scale, damped
+    float UX = 0, U = 0;      // one mockup column, one mockup row
+    float LX = 0, RX = 0;     // the screen edges
+    float BY = 0;             // the bottom
+    float MY(float y) const  { return BY + (620.0f - kDrop - y) * U; }
+    float LXo(float x) const { return LX + x * UX; }    // inward from the left
+    float RXo(float x) const { return RX - x * UX; }    // inward from the right
+};
+
+CanopyFrame canopy_frame(float frustum_w, float frustum_h, float overscan, float s, float depth) {
+    CanopyFrame F;
+    // Both wings are drawn through a matrix that rotates them 0.26 rad about
+    // Y, which swings their outer edge towards the camera - so a vertex at the
+    // frustum's half-width does NOT project to the screen edge, it projects
+    // well past it. Solve for the model-space x that lands on the edge:
+    //
+    //   project(x) = x*cos0 * D / (D - x*sin0) = target
+    //   =>      x  = target*D / (cos0*D + target*sin0)
+    //
+    // and take the magnification there, which every other dimension is divided
+    // by so the panel is the size it was designed at once projected. The
+    // magnification falls off inboard, which is the depth the layout wants:
+    // elements shrink as they approach the centre rather than being dimmed.
+    const float kTilt = 0.26f;
+    const float ct = cosf(kTilt), st = sinf(kTilt);
+    const float D  = depth;
+    const float target_x = frustum_w - overscan;
+    const float ex = target_x * D / (ct * D + target_x * st);
+    const float mag = D / (D - st * ex);
+
+    // One mockup pixel, mapped through the height so the panels keep the
+    // design's proportions; a wider screen widens the gap between them, which
+    // is the whole point of anchoring to the edges.
+    //
+    // The two axes are mapped differently, and deliberately.
+    //
+    // Vertically, one mockup pixel is 1/620 of the frame height and takes the
+    // UI scale: bigger type needs proportionally more room between rows.
+    //
+    // Horizontally, one mockup pixel is 1/1200 of the frame WIDTH and ignores
+    // the UI scale entirely. Two reasons. Mapping x through the height would
+    // tie the composition to the aspect ratio, so the same layout would claim
+    // more of a 16:9 frame than of the 1200x620 it was drawn on. And scaling x
+    // with the UI setting means asking for legible type also buys a wider
+    // panel - at 1.3x that pushed each wing from 23% of the width to 34%, so
+    // the two of them ate more of the frame than the video kept. Turning the
+    // scale up is a request for bigger text, not for a bigger HUD; the centre
+    // of the screen is the thing the whole layout exists to protect.
+    // The UI scale is damped rather than applied outright. The canopy is drawn
+    // at a fixed fraction of the frame, so a scale that grows type by a third
+    // grows nothing to put it in - the headline simply runs off the end of its
+    // own track. A third of the setting keeps the panel recognisably the shape
+    // it was designed as while still answering "make it bigger".
+    F.sd = 1.0f + (s - 1.0f) * 0.35f;
+    const float base = (frustum_h * 2.0f) / 620.0f;
+    F.UX = ((frustum_w * 2.0f) / 1200.0f) / mag;  // columns
+    F.U  = (base * F.sd) / mag;                         // rows
+    F.LX = -ex;                                   // left screen edge
+    F.RX =  ex;                                   // right screen edge
+    F.BY = (-frustum_h + overscan) / mag;    // bottom
+    return F;
+}
+
+// The slant, as a matrix rather than a transform threaded through every
+// draw call: rotate in the panel's own plane about a pivot on its outer
+// edge, then hand the result to the existing model/view/projection chain.
+// Everything drawn under it - wedge, rules, blocks, glyph quads - takes the
+// same angle by construction, which is the only way the frame and the
+// content cannot disagree.
+void slant_mvp(const float* model, const float* vp, float pivot_x, float pivot_y,
+               float angle, math::Mat4& out) {
+    math::Mat4 tneg, tpos, rz, a, b, m;
+    memset(tneg, 0, sizeof(math::Mat4));
+    tneg[0] = tneg[5] = tneg[10] = tneg[15] = 1.0f;
+    memcpy(tpos, tneg, sizeof(math::Mat4));
+    tneg[12] = -pivot_x; tneg[13] = -pivot_y;
+    tpos[12] =  pivot_x; tpos[13] =  pivot_y;
+    math::rotateZ(rz, angle);
+    math::multiply(a, tneg, rz);    // to the pivot, then rotate
+    math::multiply(b, a, tpos);     // and back
+    math::multiply(m, b, model);    // the slant sits inside the panel yaw
+    math::multiply(out, m, vp);
+}
+
+
 }  // namespace
 
 // Edge feathering: a cheap stand-in for multisampling. The canopy's shapes
@@ -340,70 +435,19 @@ void OSD::draw_canopy_hud(const CanopyIn& in) {
                           ? (int)dev->output_list->mode.vdisplay : 1080;
     const float s = in.s;
 
-    // Both wings are drawn through a matrix that rotates them 0.26 rad about
-    // Y, which swings their outer edge towards the camera - so a vertex at the
-    // frustum's half-width does NOT project to the screen edge, it projects
-    // well past it. Solve for the model-space x that lands on the edge:
-    //
-    //   project(x) = x*cos0 * D / (D - x*sin0) = target
-    //   =>      x  = target*D / (cos0*D + target*sin0)
-    //
-    // and take the magnification there, which every other dimension is divided
-    // by so the panel is the size it was designed at once projected. The
-    // magnification falls off inboard, which is the depth the layout wants:
-    // elements shrink as they approach the centre rather than being dimmed.
-    const float kTilt = 0.26f;
-    const float ct = cosf(kTilt), st = sinf(kTilt);
-    const float D  = wrap_depth;
-    const float target_x = in.frustum_w - in.overscan;
-    const float ex = target_x * D / (ct * D + target_x * st);
-    const float mag = D / (D - st * ex);
-
-    // One mockup pixel, mapped through the height so the panels keep the
-    // design's proportions; a wider screen widens the gap between them, which
-    // is the whole point of anchoring to the edges.
-    //
-    // The two axes are mapped differently, and deliberately.
-    //
-    // Vertically, one mockup pixel is 1/620 of the frame height and takes the
-    // UI scale: bigger type needs proportionally more room between rows.
-    //
-    // Horizontally, one mockup pixel is 1/1200 of the frame WIDTH and ignores
-    // the UI scale entirely. Two reasons. Mapping x through the height would
-    // tie the composition to the aspect ratio, so the same layout would claim
-    // more of a 16:9 frame than of the 1200x620 it was drawn on. And scaling x
-    // with the UI setting means asking for legible type also buys a wider
-    // panel - at 1.3x that pushed each wing from 23% of the width to 34%, so
-    // the two of them ate more of the frame than the video kept. Turning the
-    // scale up is a request for bigger text, not for a bigger HUD; the centre
-    // of the screen is the thing the whole layout exists to protect.
-    // The UI scale is damped rather than applied outright. The canopy is drawn
-    // at a fixed fraction of the frame, so a scale that grows type by a third
-    // grows nothing to put it in - the headline simply runs off the end of its
-    // own track. A third of the setting keeps the panel recognisably the shape
-    // it was designed as while still answering "make it bigger".
-    const float sd = 1.0f + (s - 1.0f) * 0.35f;
-    const float base = (in.frustum_h * 2.0f) / 620.0f;
-    const float UX = ((in.frustum_w * 2.0f) / 1200.0f) / mag;  // columns
-    const float U  = (base * sd) / mag;                         // rows
-    const float LX = -ex;                                   // left screen edge
-    const float RX =  ex;                                   // right screen edge
-    const float BY = (-in.frustum_h + in.overscan) / mag;    // bottom
-
-    // Mockup y (from the top of its 620px frame) -> frustum y.
-    // The panels sat 24 design px clear of the bottom edge. Half that reads
-    // better - they are anchored to the frame, and a wide margin under them
-    // makes them look like they are floating rather than sitting on it.
-    constexpr float kDrop = 12.0f;
-    auto MY = [&](float y) { return BY + (620.0f - kDrop - y) * U; };
+    // The panels' frame in mockup pixels; canopy_frame() says why each axis
+    // is mapped the way it is.
+    const CanopyFrame F = canopy_frame(in.frustum_w, in.frustum_h, in.overscan, s, wrap_depth);
+    const float sd = F.sd, UX = F.UX, U = F.U, LX = F.LX;
+    auto MY = [&](float y) { return F.MY(y); };
 
     // The highest thing the blades draw. Published because the menu has to
     // sit clear of it, and it moves: the panels are laid out in mockup pixels
     // scaled by the UI setting, so a bigger HUD pushes this up the screen.
     // A menu with a constant margin baked in is only ever right at 1.0x.
     canopy_top_y_ = MY(456.0f);
-    auto LXo = [&](float x) { return LX + x * UX; };    // inward from the left
-    auto RXo = [&](float x) { return RX - x * UX; };    // inward from the right
+    auto LXo = [&](float x) { return F.LXo(x); };
+    auto RXo = [&](float x) { return F.RXo(x); };
 
     const uint64_t now_us = get_time_us();
 
@@ -662,29 +706,9 @@ void OSD::draw_canopy_hud(const CanopyIn& in) {
         }
     };
 
-    // The slant, as a matrix rather than a transform threaded through every
-    // draw call: rotate in the panel's own plane about a pivot on its outer
-    // edge, then hand the result to the existing model/view/projection chain.
-    // Everything drawn under it - wedge, rules, blocks, glyph quads - takes the
-    // same angle by construction, which is the only way the frame and the
-    // content cannot disagree.
-    auto slanted = [&](const float* model, float pivot_x, float pivot_y,
-                       float angle, math::Mat4& out) {
-        math::Mat4 tneg, tpos, rz, a, b, m;
-        memset(tneg, 0, sizeof(math::Mat4));
-        tneg[0] = tneg[5] = tneg[10] = tneg[15] = 1.0f;
-        memcpy(tpos, tneg, sizeof(math::Mat4));
-        tneg[12] = -pivot_x; tneg[13] = -pivot_y;
-        tpos[12] =  pivot_x; tpos[13] =  pivot_y;
-        math::rotateZ(rz, angle);
-        math::multiply(a, tneg, rz);    // to the pivot, then rotate
-        math::multiply(b, a, tpos);     // and back
-        math::multiply(m, b, model);    // the slant sits inside the panel yaw
-        math::multiply(out, m, in.vp);
-    };
     math::Mat4 mvp_ls, mvp_rs;
-    slanted(in.model_l, LXo(56.0f), MY(502.0f),  kSlantRad, mvp_ls);
-    slanted(in.model_r, RXo(56.0f), MY(502.0f), -kSlantRad, mvp_rs);
+    slant_mvp(in.model_l, in.vp, LXo(56.0f), MY(502.0f),  kSlantRad, mvp_ls);
+    slant_mvp(in.model_r, in.vp, RXo(56.0f), MY(502.0f), -kSlantRad, mvp_rs);
 
     // ---------------- LEFT PANEL — the aircraft ----------------
     glUniformMatrix4fv(u_mvp_, 1, GL_FALSE, mvp_ls);
@@ -1241,6 +1265,14 @@ void OSD::draw_canopy_hud(const CanopyIn& in) {
         else if (in.v_h > 0)          snprintf(mode, sizeof(mode), "%dp", in.v_h);
         if (in.mbps > 0.05f)          snprintf(rate, sizeof(rate), "%.1fMbps", in.mbps);
         if (in.have_lat)              snprintf(lat, sizeof(lat), "%.0fms", in.lat_med_ms);
+        // SPLIT: the top half goes up before the bottom - both, top first.
+        if (in.lat_nslices >= 2) {
+            // Each slice, top to bottom: 23|27ms, 22|24|26ms.
+            int o = 0;
+            for (int s = 0; s < in.lat_nslices && o < (int)sizeof(lat) - 8; s++)
+                o += snprintf(lat + o, sizeof(lat) - o, s ? "|%.0f" : "%.0f", in.lat_slice_ms[s]);
+            snprintf(lat + o, sizeof(lat) - o, "ms");
+        }
         // Rate, latency, then mode - not mode first. The row is right-aligned,
         // so whatever sits at the right end is the one thing that never moves;
         // giving that slot to the video mode (which changes only when the
@@ -1254,4 +1286,37 @@ void OSD::draw_canopy_hud(const CanopyIn& in) {
         x -= igap;
         draw_text(buf, x, BL(base, T_ROW), T_ROW, true, ltr, ltg, ltb);
     }
+}
+
+// While a side is being picked: each blade's name over it, the picked one in
+// the accent, and under it the sections it holds. Set in the blade's own
+// space, so the names take its slant and its depth like everything on it; the
+// blade's lift is in the panel matrices already. pick: their opacity.
+void OSD::draw_canopy_pick(const CanopyIn& in, float pick) {
+    const HudTheme& TH = hud_theme_current();
+    const CanopyFrame F = canopy_frame(in.frustum_w, in.frustum_h, in.overscan, in.s, wrap_depth);
+    const float T_NAME = 0.125f * F.sd;   // the size of the blades' state word (T_STATE)
+    const float T_LIST = 0.082f * F.sd;   // T_UNIT
+    // Above the top rail (456), and clear of the REC marker sitting on it (431-442).
+    const float name_base = F.MY(407.0f), list_base = F.MY(427.0f);
+    auto BL = [](float baseline, float size) { return baseline - 0.25f * size; };
+    glUseProgram(shader_program);
+    for (int side = 0; side < 2; side++) {
+        const bool left = (side == 0);
+        math::Mat4 mvp;
+        slant_mvp(left ? in.model_l : in.model_r, in.vp, left ? F.LXo(56.0f) : F.RXo(56.0f), F.MY(502.0f),
+                  left ? kSlantRad : -kSlantRad, mvp);
+        glUniformMatrix4fv(u_mvp_, 1, GL_FALSE, mvp);
+        const bool on = (ui_side_ == side);
+        const float* nc = on ? TH.accent : TH.quiet;
+        const float* lc = on ? TH.text : TH.quiet;
+        const float x = left ? F.LXo(kEdge) : F.RXo(kEdge);
+        if (a_alpha_factor_ != -1) glVertexAttrib1f(a_alpha_factor_, pick);
+        draw_text(left ? "<  GOGGLE" : "AIR UNIT  >", x, BL(name_base, T_NAME), T_NAME, !left,
+                  nc[0], nc[1], nc[2]);
+        if (a_alpha_factor_ != -1) glVertexAttrib1f(a_alpha_factor_, pick * (on ? 0.85f : 0.6f));
+        draw_text(left ? "HUD   DISPLAY   DVR   SYSTEM" : "VIDEO   RADIO", x, BL(list_base, T_LIST), T_LIST, !left,
+                  lc[0], lc[1], lc[2]);
+    }
+    if (a_alpha_factor_ != -1) glVertexAttrib1f(a_alpha_factor_, 1.0f);
 }

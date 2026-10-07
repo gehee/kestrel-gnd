@@ -2,12 +2,14 @@
 #include <poll.h>
 #include <sys/statvfs.h>
 #include "artosyn/ar8030_source.hpp"
+#include "frame_mode.hpp"
 #include "osd.hpp"
 #include "hud_theme.hpp"
 #include "dvr.hpp"
 #include "wifi_ap.hpp"
 #include "renderer.hpp"
 #include "settings.hpp"
+#include "zones.hpp"
 #include <iostream>
 #include <unistd.h>
 #include <xf86drm.h>
@@ -37,8 +39,13 @@ extern "C" uint64_t gbm_bo_get_modifier(struct gbm_bo *bo);
 #include "kestrel_gnd_config.h"
 
 
-// AR8030 RF menu. The rows are Channel, Channel Hop, TX Power and Standby
-// Mode; MCS, Bandwidth and LNA Mode were removed - see ar_rf_items().
+void OSD::set_air_power_levels() {
+    if (!menu_open) menu_ar_power = ar_pwr_fit(Ar8030Source::air_prj.load(), Ar8030Source::tx_power_mw);
+}
+
+// AR8030 RF menu. The rows are Channel (the channel page, where AUTO is the
+// old Channel Hop), TX Power and Standby Mode; MCS, Bandwidth and LNA Mode were
+// removed - see ar_rf_items().
 //
 // Power levels live in common.hpp (kArPwrLevels): mW, with the dBm the radio
 // wants and stock's "N+1 means auto capped at N" encoding, taken from
@@ -80,11 +87,11 @@ std::vector<std::pair<const char*, int>> OSD::ar_rf_items() const {
         v.push_back({"Bind", 9});
         return v;
     }
-    // Channel and Channel Hop are two halves of one decision - picking a channel
-    // forces manual mode - so they sit together. Every consumer switches on the
-    // item id (.second), not the row index, so this order is free to change.
-    if (rf_caps & 16) v.push_back({"Channel",   5});  // RF_CHAN
-    if (rf_caps & 16) v.push_back({"Channel Hop", 7});  // RF_HOP
+    // Channel opens the channel page. Channel Hop (id 7) was the other half of
+    // the same decision - picking a channel turns hopping off - and is AUTO on
+    // that page now. Every consumer switches on the item id (.second), not the
+    // row index, so this order is free to change.
+    if (rf_caps & 16) v.push_back({"Channel",   5});  // RF_CHAN, RF_HOP
     if (rf_caps & 1)  v.push_back({"TX Power",  1});  // RF_TX_POWER
     // A kestrel-air command (sky cmd 0x41), not an rf_caps bit: only for an air
     // unit that says it takes it.
@@ -558,6 +565,7 @@ OSD::OSD(std::shared_ptr<DrmDevice> dev_, int refresh_frequency_ms_, volatile bo
     menu_show_latency_graph = show_latency_graph;
     menu_show_all_adapters = true;
     menu_bg_video = bg_video_enabled;
+    menu_frame_mode = g_frame_mode.load();
     menu_hud_reactivity = hud_reactivity;
 
     // Restore picture size. 100 is the untouched full-screen path.
@@ -567,9 +575,8 @@ OSD::OSD(std::shared_ptr<DrmDevice> dev_, int refresh_frequency_ms_, volatile bo
         dev->set_picture_scale(saved_scale);
     }
 
-    // Restore pinned channel (the gnd radio's own bb_config is the source of truth
-    // for the actual pin; this is just so the scan screen shows it correctly).
-    pinned_ci = Settings::getInstance().getInt("pinned_chan", -1);
+    menu_zone_ = zones::selected();
+    menu_zone_gen_ = zones::generation();
 }
 
 void OSD::on_flip() {
@@ -2498,6 +2505,27 @@ void OSD::render_gl() {
                 + osd_vars.decoding_latency_avg + osd_vars.display_latency_avg;
         if (lat_max < lat_avg) lat_max = lat_avg;
     }
+    // SYSTEM > Time Zone, picked in the menu or from a phone: its TZ goes into
+    // force here, on the thread that draws the clock (setenv() must not race
+    // the time functions), and the menu's mirror follows a change made elsewhere.
+    zones::apply_pending_tz();
+    if (zones::generation() != menu_zone_gen_) {
+        menu_zone_gen_ = zones::generation();
+        if (menu_zone_ != zones::selected()) {
+            menu_zone_ = zones::selected();
+            menu_opt_tab_ = -1;
+            // A zone picked elsewhere (the web page) can take the Timezone row
+            // away from under the selection.
+            if (menu_open && menu_tab == kTabSystem) {
+                const int n = (int)menu_items(kTabSystem).size();
+                if (menu_index >= n) {
+                    menu_index = n - 1;
+                    if (menu_focus == 2) menu_focus = 1;
+                }
+            }
+            if (menu_open) menu_refresh_options();
+        }
+    }
     // A screen mode on trial that nobody kept: back to the screen's kept mode.
     if (screen_confirm_ && screen_confirm_left_s() <= 0) {
         screen_confirm_ = false;
@@ -2520,12 +2548,43 @@ void OSD::render_gl() {
             menu_index = 0;
             menu_focus = 0;
         }
+        // Straight onto the goggle's blade, unfolded, on SYSTEM.
+        ui_side_ = 0;
+        ui_side_tab_[0] = menu_tab = kTabSystem;
+        ui_stage_ = 1;
+        if (menu_focus == 0) menu_focus = 1;
         // --menu opens without a keypress, so nothing has worked out the value
         // column yet. Safe to do from here: this runs under the same lock the
         // key handler takes, so no press can be halfway through a row.
         menu_refresh_options();
     }
-    bool is_menu_open = menu_open;
+    // The canopy's motion (ui_* in osd.hpp), eased the way the gallery's zoom
+    // is - each value closes the gap to its target by 1 - e^(-dt/tau) a frame -
+    // and kept moving a frame at a time, started right after a flip as the
+    // gallery's are.
+    bool menu_moving = false;
+    {
+        const uint64_t t_us = get_time_us();
+        float dt = menu_anim_us_ ? (float)(t_us - menu_anim_us_) / 1e6f : 1.0f / 60.0f;
+        menu_anim_us_ = t_us;
+        if (dt < 0.0f) dt = 0.0f;
+        if (dt > 1.0f / 30.0f) dt = 1.0f / 30.0f;   // a stall is not a leap
+        auto follow = [&](float& v, float target, float tau) {
+            v += (target - v) * (1.0f - std::exp(-dt / tau));
+            if (std::fabs(target - v) < 0.002f) v = target;
+            if (v != target) menu_moving = true;
+        };
+        const bool band = menu_open && menu_scan_open;
+        follow(ui_wake_, menu_open ? 1.0f : 0.0f, 0.09f);
+        for (int i = 0; i < 2; i++) {
+            const bool picking = menu_open && ui_stage_ == 0;
+            follow(ui_lift_[i], picking ? (ui_side_ == i ? 1.0f : -0.6f) : 0.0f, 0.08f);
+            follow(ui_open_[i], (menu_open && ui_stage_ == 1 && ui_side_ == i && !(band && i == 1)) ? 1.0f : 0.0f, 0.09f);
+        }
+        follow(ui_band_, band ? 1.0f : 0.0f, 0.09f);
+    }
+    // Drawn while it wakes or settles, not only while it has the keys.
+    const bool is_menu_open = menu_open || ui_wake_ > 0.0f;
     float s = osd_vars.ui_scale;
 
     // Which overlay. OFF leaves the screen to the Betaflight OSD; CANOPY
@@ -2545,6 +2604,17 @@ void OSD::render_gl() {
     adapt_stats adapt_copy = osd_vars.adapt;
     pthread_mutex_unlock(&osd_mutex);
     prof::mark(prof::kSnapshot);
+    if (menu_moving) {
+        phase_lock_.store(true, std::memory_order_relaxed);
+        signal_render(prof::kWakeAnim);
+    }
+    // What sits along the top: the clock strip stays; the latency graph is
+    // wide enough to reach an unfolded blade, so it lifts off while one is open.
+    math::Mat4 model_top, mvp_top, mvp_graph;
+    std::copy(model_hud_c, model_hud_c + 16, model_top);
+    math::multiply(mvp_top, model_top, tmp);
+    model_top[13] += std::max(std::max(ui_open_[0], ui_open_[1]), ui_band_) * frustum_h * 0.6f;
+    math::multiply(mvp_graph, model_top, tmp);
     
     msp_osd.set_scale(s);
     // The panel layout's cell size. Full-canvas mode overrides it below, so it
@@ -2670,7 +2740,7 @@ void OSD::render_gl() {
     // of fixing this fight; fixed here instead). Every later reconnect
     // finds vs already at LIVE, since it never reverts, so acquiring still
     // plays on every one of those - only the very first connection skips it.
-    const bool acquiring = hud_connected_ && !seen_this_link && !menu_open &&
+    const bool acquiring = hud_connected_ && !seen_this_link && !is_menu_open &&
                             vs == VideoState::LIVE;
     // ...and once video does arrive, the screen still owes the eye a moment.
     // It fades out over the live picture rather than being cut mid-animation,
@@ -2744,11 +2814,28 @@ void OSD::render_gl() {
         lock_since_us_ = 0;
     }
 
-    if (idle_title_tex_ && !lock_screen && !menu_open) {
+    // It stays with the canopy awake: a blade unfolding up its side moves the
+    // wordmark into the part of the picture it leaves free, and back as it
+    // folds (draw_canopy_ui: an unfolded blade is 0.34 of the width).
+    // "Ready" sits where the channel band unfolds, so it goes while that is up.
+    if (idle_title_tex_ && !lock_screen) {
         const HudTheme& TT = hud_theme_current();
+        auto ease = [](float t) { return t * t * (3.0f - 2.0f * t); };
+        const float open_l = ease(ui_open_[0]), open_r = ease(ui_open_[1]);
+        const float ready_a = 1.0f - ease(ui_band_);
+        const float kPanel = 0.34f;
+        const float title_dx = (open_l - open_r) * kPanel * frustum_w;
         float base_h = frustum_h * 0.663f;
         float base_w = base_h * (float)idle_title_w_ / (float)idle_title_h_;
-        float cx = -base_w * 0.5f;
+        {
+            // The ink is half the texture's width (render_idle_title); fit it
+            // to 80% of what the panel leaves.
+            const float fit = std::min(1.0f, 0.8f * (1.0f - kPanel) * 2.0f * frustum_w / (base_w * 0.5f));
+            const float s = 1.0f + (fit - 1.0f) * std::max(open_l, open_r);
+            base_h *= s;
+            base_w *= s;
+        }
+        float cx = title_dx - base_w * 0.5f;
         float cy = -base_h * 0.5f + frustum_h * 0.08f; // slightly above centre
 
         if (vs == VideoState::BACKGROUND) {
@@ -2782,11 +2869,11 @@ void OSD::render_gl() {
             // progress bar does (splash.c: 85% down the frame) - so the
             // splash's loading bar and this label read as the same spot
             // finishing its job, not two unrelated elements.
-            {
+            if (ready_a > 0.003f) {
                 float ready_scale    = 0.18f * osd_vars.ui_scale;   // 3x - the first size read too small
                 float ready_y_centre = -frustum_h * 0.7f;
                 float ready_w        = text_width("Ready", ready_scale);
-                float ready_x        = -ready_w * 0.5f;
+                float ready_x        = title_dx - ready_w * 0.5f;
                 float ready_y        = ready_y_centre - ready_scale * 0.5f;
 
                 // Same soft two-pass shadow as the wordmark above, scaled to
@@ -2801,12 +2888,13 @@ void OSD::render_gl() {
                     { rsh,        -rsh,        0.00f, 0.00f, 0.03f, 0.60f },
                 };
                 for (auto& p : ready_shadow) {
-                    if (alpha_loc != -1) glVertexAttrib1f(alpha_loc, p.a);
+                    if (alpha_loc != -1) glVertexAttrib1f(alpha_loc, p.a * ready_a);
                     draw_text("Ready", ready_x + p.dx, ready_y + p.dy, ready_scale, false, p.r, p.g, p.b);
                 }
-                if (alpha_loc != -1) glVertexAttrib1f(alpha_loc, 1.0f);
+                if (alpha_loc != -1) glVertexAttrib1f(alpha_loc, ready_a);
                 draw_text("Ready", ready_x, ready_y, ready_scale, false,
                           TT.accent[0], TT.accent[1], TT.accent[2]);
+                if (alpha_loc != -1) glVertexAttrib1f(alpha_loc, 1.0f);
             }
 
             glUseProgram(shader_program);
@@ -2821,15 +2909,18 @@ void OSD::render_gl() {
             //     is no visual pop at the moment the transition starts.
             //   - Height grows slowly so letters become taller too.
             //
-            // u_half: at t=0 = 0.335 (shows the same UV slice as BACKGROUND does
-            //         via the large overflowing quad).  Shrinks as 1/(1+8t²) so
-            //         letters are ≈2× wider at t=0.4, ≈5× at t=0.7.
+            // u_half: at t=0 = frustum_w / base_w (0.335 at 16:9 with no blade
+            //         unfolded: the same UV slice BACKGROUND shows via its large
+            //         overflowing quad), centred where BACKGROUND has the word
+            //         (title_dx). Shrinks as 1/(1+8t²) so letters are ≈2× wider
+            //         at t=0.4, ≈5× at t=0.7.
             float t2 = trans_t * trans_t;
             float title_alpha = std::max(0.0f, 1.0f - t2 * 1.35f);
 
-            float u_half = 0.335f / (1.0f + t2 * 8.0f);
-            float u0 = 0.5f - u_half;
-            float u1 = 0.5f + u_half;
+            float u_half = (frustum_w / base_w) / (1.0f + t2 * 8.0f);
+            float u_mid  = 0.5f - title_dx / base_w;
+            float u0 = u_mid - u_half;
+            float u1 = u_mid + u_half;
 
             // Full-screen-width quad; height grows
             float tw = frustum_w * 2.0f;
@@ -2898,15 +2989,23 @@ void OSD::render_gl() {
         math::Mat4 yaw_l;
         math::rotateY(yaw_l, 0.26f);
         math::multiply(model_l, yaw_l, bank_m);
+        // The canopy awake: the picked blade lifts a little and the other one
+        // sinks; a blade unfolding into its settings (or the right one into
+        // the channel band, which takes the whole bottom) sinks out of the way
+        // under them, since what unfolds is that blade.
+        const float lift_l = ui_lift_[0] * 0.06f * frustum_h -
+                             std::max(ui_open_[0], ui_band_) * 0.9f * frustum_h;
+        const float lift_r = ui_lift_[1] * 0.06f * frustum_h -
+                             std::max(ui_open_[1], ui_band_) * 0.9f * frustum_h;
         model_l[12] = hud_dx;
-        model_l[13] = hud_dy;
+        model_l[13] = hud_dy + lift_l;
         math::multiply(mvp_l, model_l, tmp);
 
         math::Mat4 yaw_r;
         math::rotateY(yaw_r, -0.26f);
         math::multiply(model_r, yaw_r, bank_m);
         model_r[12] = hud_dx;
-        model_r[13] = hud_dy;
+        model_r[13] = hud_dy + lift_r;
         math::multiply(mvp_r, model_r, tmp);
     }
     
@@ -3202,7 +3301,7 @@ void OSD::render_gl() {
             if (rec_now) total += dot_w + icon_gap + rec_w;
 
             float x = -total * 0.5f;
-            glUniformMatrix4fv(u_mvp_, 1, GL_FALSE, mvp_hud_c);
+            glUniformMatrix4fv(u_mvp_, 1, GL_FALSE, mvp_top);
             if (want_clock) {
                 draw_icon(clock_tex, x, clk_y, icon_sz, icon_sz, 1.0f, 1.0f, 1.0f);
                 x += icon_sz + icon_gap;
@@ -3225,9 +3324,6 @@ void OSD::render_gl() {
 
     }
 
-    if (is_menu_open) {
-        draw_menu(mvp_hud_c, frustum_w, frustum_h);
-    }
 
     // --- Binding ---------------------------------------------------------
     //
@@ -3293,7 +3389,7 @@ void OSD::render_gl() {
     // which the menu never said, so ON with any other level drew nothing.
     // Detail is due a rework; until then the graph obeys its own switch.
     if (show_latency_graph) {
-        glUniformMatrix4fv(u_mvp_, 1, GL_FALSE, mvp_hud_c);
+        glUniformMatrix4fv(u_mvp_, 1, GL_FALSE, mvp_graph);
         float graph_w = fmin(4.9f * s, (frustum_w * 2.0f) - 0.4f);
         float graph_x = -graph_w / 2.0f;
         
@@ -3772,6 +3868,8 @@ void OSD::render_gl() {
         // link normally feels like.
         if (video_active && have_latency_median) {
             canopy.lat_med_ms = latency_median_ms;
+            canopy.lat_nslices = g_frame_mode.load(std::memory_order_relaxed) == kFrameSplit
+                ? osd_vars.latency_ring.slice_medians(canopy.lat_slice_ms) : 0;
             canopy.have_lat = true;
         }
         prof::mark(prof::kDrawPre);
@@ -3787,8 +3885,8 @@ void OSD::render_gl() {
     // blank, so a figure is never on screen twice. With the HUD off the
     // canvas is drawn whole - it is the whole picture then.
     //
-    // Never while the menu is open: draw_menu ran above this and its panels
-    // are meant to be the topmost thing on screen, but this canvas is 53x20
+    // Never while the canopy is awake: its unfolded blades are meant to be
+    // the topmost thing on screen, but this canvas is 53x20
     // cells of dense text with no gaps to read through - over the menu it
     // just looked like noise laid across it. The FC's own OSD is still
     // running underneath; it comes back the moment the menu closes.
@@ -3865,6 +3963,22 @@ void OSD::render_gl() {
         if ((link_edge_a_ > 0.001f && link_edge_a_ < 0.999f) ||
             (link_edge_a_ > 0.001f && link_edge_shown_ >= 2))
             signal_render(prof::kWakeAnim);
+    }
+
+    // The canopy awake: labels over the blades, a blade unfolded into its
+    // settings, the channel band. Last, over the HUD.
+    if (is_menu_open) {
+        CanopyIn geo;
+        geo.frustum_w = frustum_w;
+        geo.frustum_h = frustum_h;
+        geo.overscan  = 0.02f;
+        geo.s         = s;
+        geo.model_l   = model_l;
+        geo.model_r   = model_r;
+        geo.vp        = tmp;
+        draw_canopy_ui(screen_w, screen_h, geo);
+        glUseProgram(shader_program);
+        if (a_alpha_factor_ != -1) glVertexAttrib1f(a_alpha_factor_, 1.0f);
     }
 
     if (gallery_capture_) gallery_capture_frame(screen_w, screen_h);   // before the swap
@@ -4216,179 +4330,6 @@ void OSD::update_adapt_stats(adapt_stats v) {
     pthread_mutex_unlock(&osd_mutex);
 }
 
-void OSD::set_chan_scan(const chan_scan_info& sc) {
-    pthread_mutex_lock(&osd_mutex);
-    osd_vars.chan_scan = sc;
-    // 30s decaying max-hold per channel: raise immediately when a sample is as
-    // busy or busier, hold that peak for 30s, then let it decay to the current
-    // level. The faded "ghost" bar this drives exposes a channel that reads free
-    // right now but spikes intermittently — i.e. which channel is *really* free.
-    uint64_t now = get_time_us();
-    for (int i = 0; i < sc.chan_num && i < 64; i++) {
-        if (scan_peak_ts[i] == 0 || sc.power_dbm[i] >= scan_peak_dbm[i] ||
-            (now - scan_peak_ts[i]) > 30ULL * 1000000ULL) {
-            scan_peak_dbm[i] = sc.power_dbm[i];
-            scan_peak_ts[i]  = now;
-        }
-    }
-    // Keep the scan-screen cursor in range if the channel count changed.
-    if (menu_scan_sel >= sc.chan_num) menu_scan_sel = (sc.chan_num > 0) ? sc.chan_num - 1 : 0;
-    if (menu_scan_open) { render_requested = true; pthread_cond_signal(&osd_cond); }
-    pthread_mutex_unlock(&osd_mutex);
-}
-
-// Channel-scan spectrum: one vertical bar per channel (sorted low→high frequency),
-// bar height and colour = how busy that channel is (from the radio's averaged
-// per-channel scan energy). The current link channel and the highlighted channel
-// are marked. Read-only: forcing a single channel wedges a 1v1 link, so this is a
-// monitor to inform the AUTO/ACS hop set, not a picker.
-void OSD::draw_chan_scan(float mx, float my, float mw, float mh, float s) {
-    const chan_scan_info& sc = osd_vars.chan_scan;
-
-    auto clampf = [](float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); };
-    // Map averaged scan energy (dBm) to busy-ness 0..1: -100 dBm ≈ clean, -70 ≈ full.
-    auto busyness = [&](int dbm) { return clampf((dbm + 100.0f) / 30.0f, 0.0f, 1.0f); };
-    // Green (clean) → yellow → red (busy).
-    auto busy_color = [&](float t, float& r, float& g, float& b) {
-        if (t < 0.5f) { float u = t / 0.5f;        r = 0.10f + 0.90f * u; g = 0.90f;            b = 0.15f * (1.0f - u); }
-        else          { float u = (t - 0.5f) / 0.5f; r = 1.0f;             g = 0.90f - 0.78f * u; b = 0.10f; }
-    };
-
-    float title_y = my + mh - 0.16f * s;
-    draw_text("CHANNEL SCAN", mx + 0.12f * s, title_y, 0.075f * s, false, 0.0f, 0.9f, 1.0f);
-    {
-        char hdr[48];
-        if (!sc.auto_mode && sc.work_chan >= 0 && sc.work_chan < sc.chan_num) {
-            snprintf(hdr, sizeof(hdr), "MANUAL %d MHz", sc.freq_mhz[sc.work_chan]);
-            draw_text(hdr, mx + mw - 0.12f * s, title_y, 0.06f * s, true, 1.0f, 0.4f, 0.9f);
-        } else {
-            draw_text("AUTO / ACS", mx + mw - 0.12f * s, title_y, 0.06f * s, true, 0.5f, 0.55f, 0.6f);
-        }
-    }
-
-    int n = sc.chan_num;
-    if (n <= 0) {
-        draw_text("SCANNING...", mx + mw / 2.0f - 0.18f * s, my + mh / 2.0f, 0.08f * s, false, 0.6f, 0.6f, 0.6f);
-        draw_text("M: back", mx + 0.12f * s, my + 0.06f * s, 0.06f * s, false, 0.5f, 0.5f, 0.5f);
-        return;
-    }
-    // The radio reports 42 channels and chan_scan_info carries 64; the old
-    // 32 cap silently hid the top ten AND made them unselectable.
-    if (n > 64) n = 64;
-
-    // Sort channel indices by ascending frequency.
-    int order[64];
-    for (int i = 0; i < n; i++) order[i] = i;
-    for (int a = 0; a < n - 1; a++)
-        for (int c = 0; c < n - 1 - a; c++)
-            if (sc.freq_mhz[order[c]] > sc.freq_mhz[order[c + 1]]) {
-                int t = order[c]; order[c] = order[c + 1]; order[c + 1] = t;
-            }
-
-    if (menu_scan_sel < 0) menu_scan_sel = 0;
-    if (menu_scan_sel >= n) menu_scan_sel = n - 1;
-    int sel_ci = order[menu_scan_sel];
-
-    // Detail line — or a pin/release confirm banner when one is armed.
-    {
-        float dy = my + mh - 0.28f * s;
-        if (false && menu_pin_pending != -2) {   // pinning disabled, see handle_key
-            char buf[112];
-            if (menu_pin_pending >= 0)
-                snprintf(buf, sizeof(buf), "PIN %d MHz?  ENTER = confirm (link drops ~30s)   M = cancel",
-                         sc.freq_mhz[menu_pin_pending]);
-            else
-                snprintf(buf, sizeof(buf), "RELEASE TO AUTO?  ENTER = confirm (link drops ~30s)   M = cancel");
-            draw_text(buf, mx + 0.12f * s, dy, 0.058f * s, false, 1.0f, 0.85f, 0.1f);
-        } else {
-            char buf[96];
-            const char* tag = (sel_ci == pinned_ci)   ? "  [PINNED]" :
-                              (sel_ci == sc.work_chan) ? "  [LINK]"   :
-                              (sel_ci == sc.acs_chan)  ? "  [ACS]"    : "";
-            int busy_pct = (int)(busyness(sc.power_dbm[sel_ci]) * 100.0f + 0.5f);
-            snprintf(buf, sizeof(buf), "%d MHz   %d dBm   %d%% busy%s",
-                     sc.freq_mhz[sel_ci], sc.power_dbm[sel_ci], busy_pct, tag);
-            float sr, sg, sb; busy_color(busyness(sc.power_dbm[sel_ci]), sr, sg, sb);
-            draw_text(buf, mx + 0.12f * s, dy, 0.065f * s, false, sr, sg, sb);
-        }
-    }
-
-    // Chart geometry. Leaves room below the baseline for two staggered rows of
-    // per-channel frequency labels.
-    float x0 = mx + 0.13f * s, x1 = mx + mw - 0.13f * s;
-    float base_y = my + 0.34f * s;
-    float top_y  = my + mh - 0.40f * s;
-    float chart_h = top_y - base_y;
-    float slot_w  = (x1 - x0) / (float)n;
-    float half_w  = slot_w * 0.34f;
-
-    // Baseline.
-    draw_poly({{x0, base_y - 0.004f}, {x1, base_y - 0.004f}, {x1, base_y}, {x0, base_y}}, 0.5f, 0.3f, 0.35f, 0.4f);
-
-    for (int rank = 0; rank < n; rank++) {
-        int ci = order[rank];
-        float cx = x0 + slot_w * (rank + 0.5f);
-        float t  = busyness(sc.power_dbm[ci]);
-        float h  = std::max(0.012f, chart_h * t);
-        float r, g, b; busy_color(t, r, g, b);
-        bool is_work = (ci == sc.work_chan);
-        bool is_sel  = (rank == menu_scan_sel);
-
-        // Selection column highlight behind everything.
-        if (is_sel)
-            draw_poly({{cx - slot_w * 0.48f, base_y}, {cx + slot_w * 0.48f, base_y},
-                       {cx + slot_w * 0.48f, top_y}, {cx - slot_w * 0.48f, top_y}}, 0.18f, 0.0f, 0.7f, 1.0f);
-
-        // 30s max-hold "ghost" bar (faded) behind the live bar.
-        float pt = busyness(scan_peak_dbm[ci]);
-        float ph = std::max(0.012f, chart_h * pt);
-        if (ph > h + 0.002f) {
-            float pr, pg, pb; busy_color(pt, pr, pg, pb);
-            draw_poly({{cx - half_w, base_y}, {cx + half_w, base_y},
-                       {cx + half_w, base_y + ph}, {cx - half_w, base_y + ph}},
-                      0.30f, pr, pg, pb);
-        }
-
-        // Live bar.
-        draw_poly({{cx - half_w, base_y}, {cx + half_w, base_y},
-                   {cx + half_w, base_y + h}, {cx - half_w, base_y + h}},
-                  is_sel ? 1.0f : 0.85f, r, g, b);
-
-        bool is_pin = (ci == pinned_ci);
-
-        // Current link channel: cyan cap on top of the live bar.
-        if (is_work)
-            draw_poly({{cx - half_w, base_y + h}, {cx + half_w, base_y + h},
-                       {cx + half_w, base_y + h + 0.012f}, {cx - half_w, base_y + h + 0.012f}},
-                      1.0f, 0.0f, 0.95f, 1.0f);
-
-        // Pinned channel: magenta "P" marker above the bar + magenta top cap.
-        if (is_pin) {
-            draw_poly({{cx - half_w, top_y}, {cx + half_w, top_y},
-                       {cx + half_w, top_y + 0.012f}, {cx - half_w, top_y + 0.012f}},
-                      1.0f, 1.0f, 0.3f, 0.9f);
-            draw_text("P", cx - 0.012f * s, top_y + 0.02f * s, 0.05f * s, false, 1.0f, 0.4f, 0.9f);
-        }
-
-        // Per-channel frequency label, staggered on two rows to avoid overlap.
-        char fl[8];
-        snprintf(fl, sizeof(fl), "%d", sc.freq_mhz[ci]);
-        float ly = (rank & 1) ? (base_y - 0.090f * s) : (base_y - 0.047f * s);
-        float lr = 0.5f, lg = 0.5f, lb = 0.55f;
-        if (is_work) { lr = 0.0f; lg = 0.95f; lb = 1.0f; }
-        if (is_pin)  { lr = 1.0f; lg = 0.4f;  lb = 0.9f; }
-        if (is_sel)  { lr = 1.0f; lg = 1.0f;  lb = 1.0f; }
-        draw_text(fl, cx - 0.040f * s, ly, 0.038f * s, false, lr, lg, lb);
-    }
-
-    // Legend + footer hint.
-    char foot[112];
-    snprintf(foot, sizeof(foot), "%d ch   cyan=link   faded=30s max   green=free/red=busy", n);
-    draw_text(foot, mx + 0.12f * s, my + 0.14f * s, 0.05f * s, false, 0.45f, 0.5f, 0.55f);
-    draw_text("LEFT/RIGHT: select     ENTER: switch to channel     M: back",
-              mx + 0.12f * s, my + 0.055f * s, 0.058f * s, false, 0.55f, 0.55f, 0.6f);
-}
-
 // Append one row correlating the RF link (RX MCS/throughput/SNR), the result
 // (received video Mbps, latency, loss) and the air's adaptation decisions
 // (tier, applied bitrate, water-level drops/latency). Pull /tmp/kestrel-adapt.csv
@@ -4655,6 +4596,39 @@ void OSD::menu_mark_dirty(bool on) {
     if (!on) menu_pending_from[menu_tab][menu_index][0] = '\0';
 }
 
+// One step on SYSTEM > Time Zone's Area, Country or Timezone row, from the zone
+// in menu_zone_: the zone it lands on. Area walks NOT SET and the areas and
+// lands on the area's first country and zone; Country walks the area's
+// countries and lands on its first zone; Timezone walks the country's zones.
+int OSD::menu_step_zone(int row, int dir) {
+    const int z = menu_zone_;
+    if (row == kSysArea) {
+        const int cur = z < 0 ? 0 : zones::zone(z).area + 1;
+        const int v = menu_step(cur, dir, zones::area_count() + 1);
+        if (v == cur) return z;
+        if (v == 0) return -1;
+        const std::vector<int> cs = zones::countries_in(v - 1);
+        if (cs.empty()) return z;
+        const std::vector<int> zs = zones::zones_in(v - 1, cs[0]);
+        return zs.empty() ? z : zs[0];
+    }
+    if (z < 0) return z;
+    const int area = zones::zone(z).area, c = zones::zone(z).country;
+    if (row == kSysCountry) {
+        const std::vector<int> cs = zones::countries_in(area);
+        const int cur = (int)(std::find(cs.begin(), cs.end(), c) - cs.begin());
+        if (cur >= (int)cs.size()) return z;
+        const int v = menu_step(cur, dir, (int)cs.size());
+        if (v == cur) return z;
+        const std::vector<int> zs = zones::zones_in(area, cs[v]);
+        return zs.empty() ? z : zs[0];
+    }
+    const std::vector<int> zs = zones::zones_in(area, c);
+    const int cur = (int)(std::find(zs.begin(), zs.end(), z) - zs.begin());
+    if (cur >= (int)zs.size()) return z;
+    return zs[menu_step(cur, dir, (int)zs.size())];
+}
+
 // One press on a row that holds a set of values. For the arrows it wraps, so
 // a row never dead-ends. While a row is being enumerated (menu_stepping_) it
 // stops at the ends instead: that is what lets menu_options walk to the start
@@ -4808,6 +4782,20 @@ int OSD::dvr_source_now() const {
 }
 
 const char* OSD::menu_help_text(int tab, int i, const char* fallback) {
+    if (tab == 3 && i == kDispFrameMode) {
+        // Lowest latency first; what each one costs.
+        switch (menu_frame_mode) {
+        case kFrameSplit:
+            return "Lowest latency: the top of the picture goes up before the bottom.\n"
+                   "May tear in the middle on fast motion. No gain on a screen that buffers frames.";
+        case kFrameWholeDecode:
+            return "Highest latency, the most conservative: the decoder only gets\n"
+                   "whole pictures.";
+        default:
+            return "Low latency, whole pictures: slices are decoded as they land, and\n"
+                   "only whole pictures go up. No tearing. The default.";
+        }
+    }
     if (tab == kTabDvr && i == 0) {
         switch (menu_dvr_source) {
         case 1:  return "Records the screen - video and HUD, as you see them - 60 times a second.\n"
@@ -4825,6 +4813,16 @@ const char* OSD::menu_help_text(int tab, int i, const char* fallback) {
                      dev->output_list->mode.vdisplay, dev->output_list->mode.vrefresh);
         mode = std::string("Showing ") + now + ". Auto picks the highest refresh the screen offers.";
         return mode.c_str();
+    }
+    if (tab == kTabSystem && i == kSysTimezone && menu_zone_ >= 0) {
+        // Which zone exactly, and whose rules the channel page uses.
+        static std::string zone_help;
+        const zones::Zone& z = zones::zone(menu_zone_);
+        const zones::Country& c = zones::country(z.country);
+        zone_help = std::string(z.name) + ". Only the clock follows this; the channel rules are " +
+                    c.name + "'s either way" +
+                    (zones::has_rules(z.country) ? "." : std::string(", and none are known for it yet."));
+        return zone_help.c_str();
     }
     if (tab == kTabSystem && i == 4) {
         // While a change is pending, the "Pending: OFF -> ON" line says it
@@ -4915,11 +4913,9 @@ std::vector<OSD::MenuItem> OSD::menu_items(int tab) const {
                     "pairing mode first: hold its bind button until the LED turns red.",
                     "ENTER: BIND"}); break;
                 case 5: items.push_back({it.first, 3,
-                    "Where the link sits. The air unit owns the channel; the scan "
-                    "shows what is on each one.",
-                    "ENTER: SCAN"}); break;
-                case 7: items.push_back({it.first, 1,
-                    "Let the link move channels on its own."}); break;
+                    "Where the link sits, what is on every channel and what your "
+                    "country allows. AUTO there lets the link hop by itself.",
+                    "ENTER: OPEN"}); break;
                 case 1: items.push_back({it.first, 1,
                     "Radio output. More reaches further and runs hotter."}); break;
                 case 8: items.push_back({it.first, 1,
@@ -4961,7 +4957,8 @@ std::vector<OSD::MenuItem> OSD::menu_items(int tab) const {
             {"Background Video", 1, "Play the idle scene when nothing is linked."},
             {"Picture Size", 1, "Shrink the whole picture if your optics clip the edges."},
             {"UI Scaling", 1, "Size of the HUD's type. The panels stay put."},
-            {"Brightness", 1, "Panel backlight. Lifts video and HUD together."}
+            {"Brightness", 1, "Panel backlight. Lifts video and HUD together."},
+            {"Frame Mode", 1, "How pictures go from the radio to the screen."}   // see menu_help_text
         };
     } else if (tab == kTabDvr) {
         items = {
@@ -4979,6 +4976,25 @@ std::vector<OSD::MenuItem> OSD::menu_items(int tab) const {
         };
         // Help is built live by menu_help_text: name, password, channel.
         items.push_back({"WiFi AP", 1, ""});
+        // Where you fly: the clock's time zone and the country whose rules the
+        // channel page shows. Order matches SysRow in osd.hpp.
+        items.push_back({"WHERE YOU FLY", 2});
+        items.push_back({"Amateur Licence", 1, "Whether you hold an amateur radio licence. With it, the amateur "
+                                               "band of your country's ITU region reads OK on the channel page; "
+                                               "your licence sets the power."});
+        items.push_back({"Area", 1, "Where you fly, starting with the part of the world. Sets the clock and "
+                                    "which channels the channel page allows. Or set it from a phone, on the "
+                                    "goggle's web page."});
+        items.push_back({"Country", 1, "The country you fly in: its rules for the radio's channels."});
+        // Only where the country has more than one time zone (in this area):
+        // which one the clock shows. The channel rules are per country and do
+        // not depend on it. Last, so hiding it moves no other row.
+        if (menu_zone_ >= 0) {
+            const zones::Zone& z = zones::zone(menu_zone_);
+            if (zones::zones_in(z.area, z.country).size() > 1)
+                items.push_back({"Timezone", 1, "Which of the country's time zones the clock shows. "
+                                                "The channel rules are the country's either way."});
+        }
     }
     return items;
 }
@@ -5009,6 +5025,10 @@ int OSD::menu_options(int tab, int index, char out[kMenuOptMax][kMenuOptLen], in
     // to hear about the values it passed through on the way.
     const bool was_stepping = menu_stepping_;
     menu_stepping_ = true;
+    // Stepping back is not undoing for the time zone rows (a step on Area or
+    // Country starts the next one over at its first zone), so its walk puts
+    // the zone itself back.
+    const int zone_before = menu_zone_;
 
     // Stepping stops at the ends while menu_stepping_ is set (menu_step), so
     // a set and a clamped range look the same from here: walk down until the
@@ -5042,6 +5062,7 @@ int OSD::menu_options(int tab, int index, char out[kMenuOptMax][kMenuOptLen], in
     // start, and the value in force is back steps up from it.
     for (; fwd > back; fwd--) menu_apply_change(tab, index, -1);
     for (; fwd < back; fwd++) menu_apply_change(tab, index, +1);
+    menu_zone_ = zone_before;
     menu_stepping_ = was_stepping;
 
     menu_opt_tab_ = tab; menu_opt_idx_ = index;
@@ -5113,6 +5134,7 @@ int OSD::menu_range_ladder(int tab, int index, int span,
 
     const bool was_stepping = menu_stepping_;
     menu_stepping_ = true;
+    const int zone_before = menu_zone_;   // see menu_options
 
     char centre[64];
     menu_value_text(tab, index, centre, sizeof(centre));
@@ -5141,6 +5163,7 @@ int OSD::menu_range_ladder(int tab, int index, int span,
             snprintf(prev, sizeof(prev), "%s", t);
         }
         while (steps-- > 0) menu_apply_change(tab, index, -dir);
+        menu_zone_ = zone_before;
     }
     menu_stepping_ = was_stepping;
     return n;
@@ -5243,6 +5266,8 @@ bool OSD::menu_row_applies_live(int tab, int index) {
         return index != kDispBgVideo;
     // SYSTEM: Screen Mode restarts the app and WiFi AP waits for Enter, after
     // its antenna warning has been shown; neither applies as it is stepped.
+    // The time zone applies as it is walked: the clock follows it.
+    if (tab == kTabSystem) return index >= kSysLicence && index <= kSysTimezone;
     return false;
 }
 
@@ -5291,12 +5316,14 @@ void OSD::menu_apply_change(int tab, int index, int dir) {
                case 5: break;   // Channel is read-only (see above)
                case 1:
                    {
-                       int i = ar_pwr_index(menu_ar_power);
-                       i = menu_step(i, dir, kArPwrCount);
-                       menu_ar_power = kArPwrLevels[i].mw;
+                       // The levels this air unit is offered (common.hpp).
+                       const int prj = Ar8030Source::air_prj.load();
+                       ar_pwr_offer o = ar_pwr_offered(prj);
+                       int i = ar_pwr_offer_index(prj, ar_pwr_fit(prj, menu_ar_power));
+                       i = menu_step(i < 0 ? 0 : i, dir, o.n);
+                       menu_ar_power = o.mw[i];
                    }
                    break;
-               case 7: menu_ar_hop = menu_step(menu_ar_hop ? 1 : 0, dir, 2) != 0; break;
                case 8: menu_ar_standby = menu_step(menu_ar_standby ? 1 : 0, dir, 2) != 0; break;  // forced on Enter
                case 11: menu_ar_maxbw = menu_step(menu_ar_maxbw, dir, kArMaxBwCount); break;  // applied on Enter
                default: break;
@@ -5397,6 +5424,14 @@ void OSD::menu_apply_change(int tab, int index, int dir) {
                 dev->set_picture_scale(menu_picture_scale);
                 Settings::getInstance().set("picture_scale", menu_picture_scale);
             }
+        } else if (menu_index == kDispFrameMode) {
+            // Applied as it is stepped: the difference is seen in the video.
+            menu_frame_mode = menu_step(menu_frame_mode, dir, kFrameModeCount);
+            if (!menu_stepping_) {
+                g_frame_mode = menu_frame_mode;
+                Settings::getInstance().set("frame_mode", menu_frame_mode);
+                printf("menu: frame mode %s\n", frame_mode_label(menu_frame_mode));
+            }
         }
     } else if (menu_tab == kTabDvr) {
         if (menu_index == 0) {
@@ -5412,6 +5447,15 @@ void OSD::menu_apply_change(int tab, int index, int dir) {
             // Source), so turning the radio on always passes through the
             // pending state, whose help line is the antenna warning.
             menu_wifi_ap = menu_step(menu_wifi_ap ? 1 : 0, dir, 2) != 0;
+        } else if (menu_index == kSysLicence) {
+            menu_licence_ = menu_step(menu_licence_, dir, 2);
+            if (!menu_stepping_) zones::set_licensed(menu_licence_ != 0);
+        } else if (menu_index >= kSysArea && menu_index <= kSysTimezone) {
+            menu_zone_ = menu_step_zone(menu_index, dir);
+            if (!menu_stepping_) {
+                zones::select(menu_zone_);
+                menu_opt_tab_ = -1;   // Country's and Timezone's lists follow the zone
+            }
         }
     }
 }
@@ -5490,27 +5534,24 @@ void OSD::menu_value_text(int tab, int i, char* val_buf, size_t cap) {
                     // animation's.
                     val_buf[0] = '\0';
                     break;
-                case 5: {   // Channel - read-only.
-                    // Switching is not offered: the VRX is the DEV, the air
-                    // unit is the AP and owns the channel, and no sky command
-                    // carries a frequency - so the ground can only choose
-                    // where to listen, never move the link. No chevrons, so
-                    // it does not look adjustable; Enter opens the scan.
+                case 5: {   // Channel: where the link is, and whether it hops.
+                    // No chevrons, so it does not look adjustable; Enter opens
+                    // the channel page, where it is moved.
                     const chan_scan_info &cs = osd_vars.chan_scan;
                     int f = 0;
-                    if (cs.last_update_ms && cs.work_chan < cs.chan_num)
+                    bool hop = Ar8030Source::chan_auto;
+                    if (cs.last_update_ms && cs.work_chan < cs.chan_num) {
                         f = cs.freq_mhz[cs.work_chan];
+                        hop = cs.auto_mode != 0;
+                    }
                     if (!f) f = osd_vars.artosyn.tx_freq;
-                    if (f) sprintf(val_buf, "%d MHz", f);
+                    if (f) sprintf(val_buf, "%d MHz  %s", f, hop ? "AUTO" : "FIXED");
                     else   sprintf(val_buf, "--");
                     break;
                 }
                 case 1:     // TX power
                     sprintf(val_buf, "< %s >",
                             kArPwrLevels[ar_pwr_index(menu_ar_power)].label);
-                    break;
-                case 7:     // Channel Hop
-                    sprintf(val_buf, "< %s >", menu_ar_hop ? "ON" : "OFF");
                     break;
                 case 8:     // Standby. Shows the air's current state (menu value is
                     // seeded from it); the arrows + Enter force it on/off as a
@@ -5560,6 +5601,8 @@ void OSD::menu_value_text(int tab, int i, char* val_buf, size_t cap) {
             } else if (i == kDispPicture) {
                 if (menu_picture_scale >= 100) sprintf(val_buf, "< FULL >");
                 else                           sprintf(val_buf, "< %d%% >", menu_picture_scale);
+            } else if (i == kDispFrameMode) {
+                sprintf(val_buf, "< %s >", frame_mode_label(menu_frame_mode));
             }
         } else if (menu_tab == kTabDvr) {
             if (i == 0) {
@@ -5590,6 +5633,14 @@ void OSD::menu_value_text(int tab, int i, char* val_buf, size_t cap) {
                     sprintf(val_buf, "< %s >", menu_wifi_ap ? "ON" : "OFF");
                 else
                     sprintf(val_buf, "N/A");
+            } else if (i == kSysLicence) {
+                sprintf(val_buf, "< %s >", menu_licence_ ? "YES" : "NO");
+            } else if (i >= kSysArea && i <= kSysTimezone) {
+                const int z = menu_zone_;
+                if (z < 0) sprintf(val_buf, i == kSysArea ? "< NOT SET >" : "--");
+                else if (i == kSysArea) snprintf(val_buf, cap, "< %s >", zones::area_name(zones::zone(z).area));
+                else if (i == kSysCountry) snprintf(val_buf, cap, "< %s >", zones::country(zones::zone(z).country).name);
+                else snprintf(val_buf, cap, "< %s >", zones::zone(z).city);
             }
         }
 
@@ -5607,37 +5658,100 @@ void OSD::menu_value_text(int tab, int i, char* val_buf, size_t cap) {
 
 }
 
-void OSD::draw_menu(math::Mat4& mvp, float fw, float fh) {
-    glUniformMatrix4fv(u_mvp_, 1, GL_FALSE, mvp);
+// The sections each blade holds, as menu_tab numbers, in the order its tabs
+// are listed. VIDEO is the air unit's camera and needs a link to reach.
+std::vector<int> OSD::ui_side_tabs(int side) const {
+    if (side == 0) return { 2, 3, kTabDvr, kTabSystem };
+    std::vector<int> v;
+    if (osd_vars.artosyn.state == 2) v.push_back(0);
+    v.push_back(1);
+    return v;
+}
 
-    bool connected = (osd_vars.artosyn.state == 2);
-    // Only VIDEO needs a link. AR8030 is reachable without one because it is
-    // where Bind lives - and Bind is precisely the thing you do unlinked.
-    if (!connected && menu_tab < 1) {
-        // Moving the selection is menu state, not drawing, so it is done under
-        // the lock the key handler uses - and the value column is worked out
-        // again for wherever we landed. Without that the column stayed keyed
-        // to the tab we were sent away from and drew nothing: --menu=1 with no
-        // link put us on SYSTEM with an empty VALUE panel.
+// Where a folded blade is, in pixels from the top left: its side of the
+// picture, from the canopy's top rail (canopy_top_y_, frustum units) down.
+void OSD::ui_blade_rect(int side, int W, int H, float fh, float& x, float& y, float& w, float& h) {
+    int px, py, pw, ph;
+    dev->picture_rect(W, H, px, py, pw, ph);
+    const float top = py + (fh - canopy_top_y_) / (2.0f * fh) * ph;
+    w = 0.31f * pw;
+    x = side == 0 ? (float)px : px + pw - w;
+    y = top;
+    h = py + ph - top;
+}
+
+// The canopy awake, drawn over the HUD: a light dimming, the two blades'
+// names while one is being picked, a blade unfolded into its settings, the
+// right blade unfolded into the channel band. fh is the frustum's half height.
+void OSD::draw_canopy_ui(int W, int H, const CanopyIn& geo) {
+    const float fh = geo.frustum_h;
+    // VIDEO needs a link: unlinked, the air unit's side holds RADIO (Bind) only.
+    if (osd_vars.artosyn.state != 2 && menu_tab == 0) {
         pthread_mutex_lock(&osd_mutex);
-        menu_tab = kTabSystem;   // default to SYSTEM/ABOUT when disconnected
-        menu_index = 0;
+        menu_tab = ui_side_tab_[1] = 1;
+        menu_index = menu_first_selectable_row(menu_tab);
         menu_refresh_options();
         pthread_mutex_unlock(&osd_mutex);
     }
     if (menu_index < 0) menu_index = 0;
 
-    // The channel scan still owns the whole panel while it is open.
-    if (menu_scan_open) {
-        float s_menu = osd_vars.ui_scale;
-        float mw = 1.7f * s_menu, mh = 1.45f * s_menu;
-        float mx = -mw / 2.0f, my = -1.35f + 0.17f * s_menu;
-        draw_hex_panel(mx, my, mw, mh, 0.7f, 0.005f, 0.015f, 0.04f, true, 19, 16, -1.0f, -1.0f, true);
-        draw_chan_scan(mx, my, mw, mh, s_menu);
-        return;
+    const HudTheme& T = hud_theme_current();
+    int px, py, pw, ph;
+    dev->picture_rect(W, H, px, py, pw, ph);
+    const float u0 = ph / 1080.0f;
+    const float u = u0 * osd_vars.ui_scale;
+    auto ease = [](float t) { return t * t * (3.0f - 2.0f * t); };
+    auto mix = [](float a, float b, float t) { return a + (b - a) * t; };
+    const float open_any = std::max(ui_open_[0], ui_open_[1]);
+
+    px_begin(W, H, px + pw * 0.5f, py + ph * 0.5f, 1.0f, 1.0f);
+    // The picture stays the thing to look at: dimmed only a little.
+    px_fill(px, py, pw, ph, T.ground, ui_wake_ * 0.10f + open_any * 0.06f);
+
+    // Picking: each blade's name over it, slanted and in depth with it
+    // (draw_canopy_pick), between the dimming and anything unfolding.
+    const float pick = ui_wake_ * (1.0f - open_any) * (1.0f - ui_band_);
+    if (pick > 0.003f) {
+        px_flush();
+        draw_canopy_pick(geo, pick);
+        px_begin(W, H, px + pw * 0.5f, py + ph * 0.5f, 1.0f, 1.0f);
     }
 
-    draw_menu_columns(mvp, fw, fh);
+    // A blade unfolded up its side into its settings.
+    for (int side = 0; side < 2; side++) {
+        const float t = ui_open_[side];
+        if (t <= 0.003f) continue;
+        float bx, by, bw, bh;
+        ui_blade_rect(side, W, H, fh, bx, by, bw, bh);
+        const float ow = 0.34f * pw, oy = py + 0.06f * ph, oh = 0.92f * ph;
+        const float ox = side == 0 ? (float)px : px + pw - ow;
+        const float e = ease(t);
+        const float x = mix(bx, ox, e), y = mix(by, oy, e), w = mix(bw, ow, e), h = mix(bh, oh, e);
+        px_fill(x, y, w, h, T.ground, 0.94f * std::min(1.0f, t * 1.6f));
+        px_fill(x, y, w, 3 * u0, T.accent, t);
+        if (t > 0.5f) {
+            px_begin(W, H, px + pw * 0.5f, py + ph * 0.5f, 1.0f, (t - 0.5f) * 2.0f);
+            draw_side_panel(side, x, y, w, h, u);
+            px_begin(W, H, px + pw * 0.5f, py + ph * 0.5f, 1.0f, 1.0f);
+        }
+    }
+
+    // The right blade unfolded along the bottom, into the channel band.
+    if (ui_band_ > 0.003f) {
+        const float t = ui_band_, e = ease(t);
+        const float ow = 0.34f * pw, fx = px + pw - ow, fy = py + 0.06f * ph, fh2 = 0.92f * ph;   // from the unfolded blade
+        const float bx = (float)px, by = py + 0.59f * ph, bw = (float)pw, bh = 0.41f * ph;
+        const float x = mix(fx, bx, e), y = mix(fy, by, e), w = mix(ow, bw, e), h = mix(fh2, bh, e);
+        // Soft at the top, so the picture runs into it.
+        px_fill(x, y, w, h * 0.14f, T.ground, 0.45f * t);
+        px_fill(x, y + h * 0.14f, w, h * 0.86f, T.ground, 0.9f * t);
+        if (t > 0.5f && draw_channel_band(W, H, x, y, w, h, (t - 0.5f) * 2.0f)) {
+            phase_lock_.store(true, std::memory_order_relaxed);
+            signal_render(prof::kWakeAnim);
+        }
+        px_begin(W, H, px + pw * 0.5f, py + ph * 0.5f, 1.0f, 1.0f);
+    }
+    px_flush();
 }
 
 
@@ -5684,6 +5798,13 @@ void OSD::handle_key(int key) {
         pthread_mutex_unlock(&osd_mutex);
         return;
     }
+    if (menu_open && menu_scan_open) {
+        chan_key(key);
+        render_requested = true;
+        pthread_cond_signal(&osd_cond);
+        pthread_mutex_unlock(&osd_mutex);
+        return;
+    }
     if (key == kKeyBack || key == 27) {
         if (!menu_open) {
             // The next frame copies the screen, then opens the gallery on it
@@ -5694,26 +5815,28 @@ void OSD::handle_key(int key) {
             pthread_mutex_unlock(&osd_mutex);
             return;
         }
-        key = 'm';   // the menu (or the channel scan in it) closes
-    } else if ((key == 13 || key == '\n') && !menu_open) {
-        key = 'm';   // Enter on the live picture opens the menu
-    }
-
-    if (key == 'm' || key == 'M') {
-        // In the channel-scan sub-screen, M/Back closes it and returns to the RF
-        // menu. It used to cancel an armed pin-confirm first, but that flow is
-        // gone and the leftover state only ever ate the first Back press.
-        if (menu_open && menu_scan_open) {
-            menu_pin_pending = -2;
-            menu_scan_open = false;
-            if (cmd_cb) cmd_cb(0x200, 0);   // scan closed → slow background polling
+        // The canopy folds one step at a time: a value being changed (its
+        // pending change stays, as it always has), then the blade.
+        if (ui_stage_ == 1) {
+            if (menu_focus == 2) menu_focus = 1;
+            else ui_stage_ = 0;
+            menu_refresh_options();
             render_requested = true;
             pthread_cond_signal(&osd_cond);
             pthread_mutex_unlock(&osd_mutex);
             return;
         }
+        key = 'm';   // the canopy goes back to sleep
+    } else if ((key == 13 || key == '\n') && !menu_open) {
+        key = 'm';   // Enter on the live picture opens the menu
+    }
+
+    if (key == 'm' || key == 'M') {
         menu_open = !menu_open;
         if (menu_open) {
+             // The canopy wakes with a blade picked - the one used last - and
+             // nothing unfolded yet.
+             ui_stage_ = 0;
              // SYSTEM > Screen Mode lists what the connector offers at this
              // open: a display plugged in since brings modes of its own. A
              // choice staged against the old list goes with it.
@@ -5758,11 +5881,15 @@ void OSD::handle_key(int key) {
              menu_clock_mode = clock_mode;
              menu_clock_show = clock_show;
              menu_hud_theme = hud_theme_idx;
+             menu_zone_ = zones::selected();
+             menu_zone_gen_ = zones::generation();
+             menu_licence_ = zones::licensed() ? 1 : 0;
              menu_hud_style = hud_style;
              menu_volt_mode = volt_mode;
              menu_ui_scale = osd_vars.ui_scale;
              menu_picture_scale = dev->picture_scale_pct;
              menu_bg_video = bg_video_enabled;
+             menu_frame_mode = g_frame_mode.load();
              menu_hud_reactivity = hud_reactivity;
              menu_dvr_source = dvr_source_now();
              // Seed the RF rows from what the radio and the air unit report.
@@ -5795,60 +5922,68 @@ void OSD::handle_key(int key) {
         return;
     }
 
-    // Channel-scan sub-screen: LEFT/RIGHT (or UP/DOWN) move the cursor across the
-    // spectrum (sorted low→high freq); ENTER pins/releases (two presses: arm then
-    // confirm); M backs out / cancels a pending confirm (handled above).
-    if (menu_scan_open) {
-        bool right = (key == 'd' || key == 'D' || key == KEY_RIGHT || key == 0x103 ||
-                      key == 'w' || key == 'W' || key == KEY_UP    || key == 0x101);
-        bool left  = (key == 'a' || key == 'A' || key == KEY_LEFT  || key == 0x104 ||
-                      key == 's' || key == 'S' || key == KEY_DOWN  || key == 0x102);
-        bool enter = (key == 13 || key == 10);
-        int nn = osd_vars.chan_scan.chan_num;
-        if (right || left) {
-            menu_pin_pending = -2;  // navigating cancels a pending confirm
-            if (nn > 0) {
-                if (right) menu_scan_sel = (menu_scan_sel + 1) % nn;
-                if (left)  menu_scan_sel = (menu_scan_sel - 1 + nn) % nn;
+    // The canopy (osd.hpp, ui_*). Picking: Left and Right are the two blades,
+    // OK unfolds one. Unfolded: Left and Right walk its sections; Up and Down
+    // its rows; OK on a setting starts changing it (Up/Down) and OK again
+    // applies it; OK on an action (Bind, Calib Distance, Channel) does it.
+    {
+        const bool up    = (key == 'w' || key == 'W' || key == KEY_UP    || key == 0x101);
+        const bool down  = (key == 's' || key == 'S' || key == KEY_DOWN  || key == 0x102);
+        const bool left  = (key == 'a' || key == 'A' || key == KEY_LEFT  || key == 0x104);
+        const bool right = (key == 'd' || key == 'D' || key == KEY_RIGHT || key == 0x103);
+        const bool enter = (key == 13 || key == '\n');
+        auto done = [&]() {
+            render_requested = true;
+            pthread_cond_signal(&osd_cond);
+            pthread_mutex_unlock(&osd_mutex);
+        };
+        if (ui_stage_ == 0) {
+            if (left) ui_side_ = 0;
+            else if (right) ui_side_ = 1;
+            else if (enter) {
+                const std::vector<int> tabs = ui_side_tabs(ui_side_);
+                int t = ui_side_tab_[ui_side_];
+                if (std::find(tabs.begin(), tabs.end(), t) == tabs.end()) t = tabs[0];
+                ui_side_tab_[ui_side_] = menu_tab = t;
+                menu_index = menu_first_selectable_row(menu_tab);
+                menu_focus = 1;
+                ui_stage_ = 1;
+                menu_refresh_options();
             }
-        } else if (enter && nn > 0) {
-            // Map cursor (rank in freq-sorted order) → radio channel index.
-            int m = nn > 64 ? 64 : nn, ord[64];
-            for (int i = 0; i < m; i++) ord[i] = i;
-            for (int a = 0; a < m - 1; a++)
-                for (int c = 0; c < m - 1 - a; c++)
-                    if (osd_vars.chan_scan.freq_mhz[ord[c]] > osd_vars.chan_scan.freq_mhz[ord[c + 1]]) {
-                        int t = ord[c]; ord[c] = ord[c + 1]; ord[c + 1] = t;
-                    }
-            int rank = menu_scan_sel; if (rank < 0) rank = 0; if (rank >= m) rank = m - 1;
-            int sel_ci = ord[rank];
-            // Move the link to the highlighted channel. Both ends change: the
-            // air unit is told over the sky link (it is the AP and owns the
-            // channel) and the ground is retuned to match. Requires the air
-            // unit to be told the channel is permitted first - see
-            // Ar8030Source::set_rf_channel().
-            int mhz = osd_vars.chan_scan.freq_mhz[sel_ci];
-            if (mhz > 0) {
-                Ar8030Source::request_rf(Ar8030Source::RF_CHAN, mhz * 1000);
-                // Pinning a channel means manual mode - the radio only honours
-                // BB_SET_CHAN with channel adaptation off. Reflect that in the
-                // Channel Hop row, else the menu shows "ON" over a radio that
-                // is no longer hopping. Not saved: the next start searches.
-                menu_ar_hop = false;   // for this session: the air unit decides at the next start
-                // Deliberately NOT arming menu_pin_pending here. It is left
-                // over from the removed pin/release confirm, nothing renders it
-                // any more (the banner is dead code), and a non -2 value makes
-                // the 'm' handler below swallow the first Back press as a
-                // "cancel the confirm" - so Back appeared not to close the scan.
-                menu_pin_pending = -2;
-            } else {
-                menu_pin_pending = -2;
-            }
+            (void)up; (void)down;
+            done();
+            return;
         }
-        render_requested = true;
-        pthread_cond_signal(&osd_cond);
-        pthread_mutex_unlock(&osd_mutex);
-        return;
+        if (left || right) {
+            if (menu_focus == 2) {
+                if (left) menu_focus = 1;            // out of the value, the change stays pending
+            } else {
+                const std::vector<int> tabs = ui_side_tabs(ui_side_);
+                int i = (int)(std::find(tabs.begin(), tabs.end(), menu_tab) - tabs.begin());
+                if (i >= (int)tabs.size()) i = 0;
+                i = std::max(0, std::min((int)tabs.size() - 1, i + (right ? 1 : -1)));
+                ui_side_tab_[ui_side_] = menu_tab = tabs[i];
+                menu_index = menu_first_selectable_row(menu_tab);
+            }
+            menu_refresh_options();
+            done();
+            return;
+        }
+        if (enter && menu_focus == 1) {
+            std::vector<MenuItem> rows = menu_items(menu_tab);
+            const int type = (menu_index >= 0 && menu_index < (int)rows.size()) ? rows[menu_index].type : 0;
+            if (type == 1) {                          // a setting: start changing it
+                menu_focus = 2;
+                menu_refresh_options();
+                done();
+                return;
+            }
+            if (type != 3) { done(); return; }        // a reading or a group's name
+            // An action: Enter below does it.
+        } else if (enter && menu_focus == 2) {
+            menu_focus = 1;                           // OK applies (below) and the row closes
+        }
+        // Up and Down go on below: the row with menu_focus 1, the value with 2.
     }
 
     if (key == 9) {
@@ -5863,34 +5998,10 @@ void OSD::handle_key(int key) {
     // Derived, never hardcoded - see OSD::menu_items().
     int items_count = (int)menu_items(menu_tab).size();
 
-    // Three columns, and the focus walks between them. Up and down always move
-    // within whichever column has focus; left and right always move between
-    // columns. The old menu spent left/right on nudging a value, which made the
-    // same key mean different things depending on the row - with four buttons
-    // and no pointer, one meaning per key is worth the extra press.
+    // Up and down move within the list (menu_focus 1) or change the value
+    // being edited (2); left and right are the canopy's (above).
     const bool k_up    = (key == 'w' || key == 'W' || key == KEY_UP    || key == 0x101);
     const bool k_down  = (key == 's' || key == 'S' || key == KEY_DOWN  || key == 0x102);
-    const bool k_left  = (key == 'a' || key == 'A' || key == KEY_LEFT  || key == 0x104);
-    const bool k_right = (key == 'd' || key == 'D' || key == KEY_RIGHT || key == 0x103);
-
-    if (k_left || k_right) {
-        int want = menu_focus + (k_right ? 1 : -1);
-        if (want < 0) want = 0;
-        if (want > 2) want = 2;
-        // A reading is not a setting: Build, Version, Decoder and Display have
-        // no value column, so focus stops at the setting column rather than
-        // landing on an empty panel with nothing to move.
-        if (want == 2) {
-            std::vector<MenuItem> rows = menu_items(menu_tab);
-            if (menu_index >= 0 && menu_index < (int)rows.size() && rows[menu_index].type != 1)
-                want = 1;
-        }
-        menu_focus = want;
-        render_requested = true;
-        pthread_cond_signal(&osd_cond);
-        pthread_mutex_unlock(&osd_mutex);
-        return;
-    }
 
     if (k_up || k_down) {
         const int dir = k_down ? -1 : 1;   // rows ascend, so UP increments
@@ -6005,16 +6116,10 @@ void OSD::handle_key(int key) {
                 if (cmd_cb && menu_index >= 0 && menu_index < (int)rfi.size()) {
                     switch (rfi[menu_index].second) {
                         case 5:
-                            menu_scan_open = true;
-                            menu_scan_sel  = 0;
-                            menu_pin_pending = -2;
-                            cmd_cb(0x200, 1);   // scan open -> poll fast
+                            chan_open();
                             break;
                         case 1:
                             cmd_cb(0x311, menu_ar_power);   // saved per air unit there
-                            break;
-                        case 7:
-                            cmd_cb(0x316, menu_ar_hop ? 1 : 0);   // this session only
                             break;
                         case 8:
                             // Force standby on/off (sky cmd 0x23 via the queue that
@@ -6129,10 +6234,10 @@ void OSD::update_menu_from_tx(int cmd, int val) {
     else if (cmd == 0x08) osd_vars.sky_framerate = val;
     else if (cmd == 0x17) {
         // AIR-owned channel MODE (1=auto hop, 0=force). Arrives before 0x11.
-        // Channel is now GND-owned (pin lives in the gnd radio's bb_config), so
-        // never force AUTO here while a pin is active — that would un-pin it.
+        // (This used to skip a goggle-side "pin", read from a pinned_chan
+        // setting nothing has written since pinning was removed.)
         air_chan_mode = val;
-        if (val == 1 && pinned_ci < 0) {
+        if (val == 1) {
             if (!rf_chan_asserted && cmd_cb) {
                 rf_chan_asserted = true;
                 cmd_cb(0x107, 1);                 // re-assert AUTO on the AP

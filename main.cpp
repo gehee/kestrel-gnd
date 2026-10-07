@@ -22,6 +22,7 @@ extern "C" {
     bool verbose_rf  = false;
 }
 
+#include "frame_mode.hpp"
 #include "webstream.hpp"
 #include "main.hpp"
 #include "drm.hpp"
@@ -41,6 +42,7 @@ extern "C" {
 #define MODULE_TAG "kestrel-gnd"
 #include "kestrel_gnd_config.h"
 #include "settings.hpp"
+#include "zones.hpp"
 #include "utils/screen_id.h"
 
 using namespace std;
@@ -477,6 +479,8 @@ int main(int argc, char **argv)
 	{
 		const char *cfg = getenv("KESTREL_CONFIG");
 		Settings::getInstance().load(cfg && *cfg ? cfg : "/etc/kestrel/kestrel-gnd.yaml");
+		// SYSTEM > Time Zone: its TZ, before any thread reads the time.
+		zones::load();
 		// The low-latency video features, each with a switch that survives a
 		// reboot (the KESTREL_* variables and the /tmp files still work too):
 		//   stream_decode: 0   pictures go to the decoder whole
@@ -579,6 +583,11 @@ int main(int argc, char **argv)
 	// mW, in stock's encoding (N = hold, N+1 = auto capped at N). See
 	// kArPwrLevels in common.hpp for the levels this board accepts.
 	Ar8030Source::tx_power_mw = Settings::getInstance().getInt("tx_power_mw", kArPwrDefaultMw);
+	{
+		int fm = Settings::getInstance().getInt("frame_mode", kFrameWhole);
+		g_frame_mode = (fm >= 0 && fm < kFrameModeCount) ? fm : kFrameWhole;
+		printf("frame mode: %s\n", frame_mode_label(g_frame_mode.load()));
+	}
 	Ar8030Source::tx_power_dbm = kArPwrLevels[ar_pwr_index(Ar8030Source::tx_power_mw)].dbm;
 	// The fastest capture -> arrival the air delay is pinned to (see
 	// air_delay_for). Measure it for a setup with both clocks synced.

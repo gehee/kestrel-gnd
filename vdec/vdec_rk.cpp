@@ -9,6 +9,7 @@
 #include <sys/ioctl.h>
 
 #include "common.hpp"
+#include "frame_mode.hpp"
 #include "utils/scheduling_helper.hpp"
 #include "utils/time_util.h"
 
@@ -264,8 +265,10 @@ void VdecRK::run_frame()
                         if (mpp_frame_get_errinfo(frame) || mpp_frame_get_discard(frame)) n_err++;
                         if (!win_start) win_start = now_us;
                         if (now_us - win_start >= 5000000) {
-                            printf("VdecRK: %u pictures out in 5 s, %u flagged with errors, %u keyframes%s\n",
-                                   n_out, n_err, n_key, stream_ok_ ? " (stream mode available)" : "");
+                            printf("VdecRK: %u pictures out in 5 s, %u flagged with errors, %u keyframes%s, "
+                                   "%u early tops, %u refused as stale\n",
+                                   n_out, n_err, n_key, stream_ok_ ? " (stream mode available)" : "",
+                                   early_tops_.exchange(0), early_stale_.exchange(0));
                             win_start = now_us; n_out = n_err = n_key = 0;
                         }
                         std::lock_guard<std::mutex> lock(decoding_stats_mutex);
@@ -632,6 +635,14 @@ void VdecRK::early_loop() {
             du->is_keyframe = it->second.is_keyframe;
             du->slices = it->second.slices;
         }
+        // A top "decoded" before this picture's first slice was even handed to
+        // the decoder is another picture's: its buffer has not been decoded
+        // into yet and still holds whatever picture was in it before.
+        if (t.time_us > 0 && du->dec_start_ts && (uint64_t)t.time_us + 200 < du->dec_start_ts) {
+            early_stale_++;
+            if (ltrace::on()) ltrace::rec(ltrace::kTopDone, get_time_us(), (uint32_t)pts, 1ULL << 63);
+            continue;
+        }
         // The first slice's rows are decoded: the top of the picture - its
         // own latency, whether or not it goes up early.
         if (du->slices && du->slices->n.load() > 0) {
@@ -639,7 +650,9 @@ void VdecRK::early_loop() {
             du->slices->s[0].done_us.compare_exchange_strong(z, (uint64_t)t.time_us);
         }
         if (ltrace::on()) ltrace::rec(ltrace::kTopDone, get_time_us(), (uint32_t)pts, (uint64_t)t.time_us);
-        if (access("/tmp/kestrel-early-off", F_OK) == 0) continue;
+        // Tops early only in SPLIT (and not with /tmp/kestrel-early-off).
+        if (g_frame_mode.load(std::memory_order_relaxed) != kFrameSplit ||
+            access("/tmp/kestrel-early-off", F_OK) == 0) continue;
         const uint32_t w = out_w_, h = out_h_, hs = out_hs_, vs = out_vs_;
         if (!w || !h || !hs || !vs) continue;
         du->pts = pts;
@@ -660,6 +673,7 @@ void VdecRK::early_loop() {
         du->offsets[1] = hs * vs;
         du->early = true;
         du->buf_epoch = s_buf_epoch.load(std::memory_order_relaxed);
+        early_tops_++;
         renderer->queue_frame(du);
     }
 #endif
@@ -715,13 +729,17 @@ void VdecRK::stream_start(void* data_p, int data_len, int64_t pts, uint64_t recv
         ? (MPP_PACKET_FLAG_STREAM_START | MPP_PACKET_STREAM_SLICES(slices)) : 0;
     const bool streamed = next_packet_flags_ != 0;
     if (streamed && early_ok_) {
-        // until the last slice comes, the bottom half is due when the slices'
-        // gap and the decoder's tail usually end
+        // Not known until the last slice is in (stream_append): only then is the
+        // bottom half due a decoder's tail later. Guessed from the usual gap
+        // between slices, it went up too soon for kestrel-air's intra-refresh
+        // restarts - a 2-row first slice, the rest in a slice six times the
+        // usual size, never marked last - and the rows below the first slice
+        // showed whatever picture the buffer held before.
         std::lock_guard<std::mutex> lock(early_mutex_);
         StrmPic &p = strm_pics_[pts];
         p.first_us = get_time_us();
         p.last_us = 0;
-        p.eta = std::make_shared<std::atomic<uint64_t>>(p.first_us + gap_p90_ + tail_p90_);
+        p.eta = std::make_shared<std::atomic<uint64_t>>(UINT64_MAX);
     }
     feed_packet_to_decoder(data_p, data_len, pts, recv_ts, nal_type, encode_delay_us, processing_delay_us);
     next_packet_flags_ = 0;
@@ -771,7 +789,14 @@ void VdecRK::stream_end(int64_t pts) {
     mpi.mpi->control(mpi.ctx, MPP_DEC_SET_STREAM_APPEND, &a);
 }
 #else
-void VdecRK::probe_stream() { stream_ok_ = false; }
+// Built against MPP headers without the stream patch (fpvOS's rockchip-mpp
+// 0002): every Frame Mode then decodes whole pictures. Said once, loudly - a
+// build from a sysroot without it looked like a latency regression.
+void VdecRK::probe_stream() {
+    stream_ok_ = false;
+    printf("VdecRK: WARNING: built without stream decode (MPP headers lack MPP_STREAM_TOP_READY):\n"
+           "VdecRK: every Frame Mode decodes whole pictures - build against fpvOS's rockchip-mpp\n");
+}
 
 void VdecRK::early_loop() {}
 

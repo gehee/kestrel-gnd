@@ -270,7 +270,8 @@ class Renderer {
             uint64_t since = 0;
         } slice_log_;
         void add_latency_sample(uint64_t enc, uint64_t rf, uint64_t dec, uint64_t disp,
-                                uint64_t total, bool key, unsigned skipped = 0);
+                                uint64_t total, bool key, unsigned skipped = 0,
+                                const float* slice_ms = nullptr, int nslices = 0);
         template <typename RowTime>
         bool whole_picture_sample(const SliceTimes &st, double period, int rows, RowTime row_us, unsigned skipped);
         int64_t last_shown_pts_ = -1;      // the last picture that reached the screen (per-slice path)

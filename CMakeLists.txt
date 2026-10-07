@@ -28,6 +28,11 @@ set(SOURCE_FILES
         gallery.cpp
         gallery_stats.cpp
         osd_gallery.cpp
+        osd_screen.cpp
+        osd_channel.cpp
+        zones.cpp
+        zones_data.cpp
+        fpv_rules.cpp
         dvr_recover.cpp
         screen_tap.cpp
         rga_compositor.cpp

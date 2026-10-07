@@ -10,6 +10,10 @@
 // One entry of the latency history (OSD::add_latency_frame), reduced to what the
 // screen needs. t_us is CLOCK_MONOTONIC; entries with every stage at zero are the
 // gap fillers the OSD pushes while video is stalled and carry no latency.
+// Each slice's own latency is kept for at most this many slices; a picture
+// with more keeps this many, spread from the first to the last.
+static constexpr int kLatSlices = 4;
+
 struct StatsFrame {
     static constexpr int kStages = 4;         // the slowest slice's: encode, rf, decode, display
     uint64_t t_us = 0;
@@ -20,6 +24,8 @@ struct StatsFrame {
     uint8_t  mcs = 0;
     uint8_t  key = 0;                         // the picture was a keyframe
     uint16_t skipped = 0;                     // pictures before it never shown
+    uint8_t  nslices = 0;                     // slices timed on their own (0: none), top to bottom
+    float    slice_ms[kLatSlices] = {0, 0, 0, 0};
 };
 
 // One display flip: when it completed, and the time since the one before.
@@ -52,11 +58,15 @@ struct StatsView {
     // Summary of the window.
     float stage_p50[StatsFrame::kStages] = {0, 0, 0, 0};   // median of each stage over the window (ms)
     float p50 = 0, p99 = 0, worst_ms = 0, fps = 0;
+    int   nslices = 0;                        // each slice's median, top to bottom (0: not timed so)
+    float slice_p50[kLatSlices] = {0, 0, 0, 0};
     float fps_now = 0;                        // pictures a second over the last two seconds, whatever the window
     int   worst_col = -1;
     float video_now = 0, link_now = 0, snr_now = 0, link_use = 0;
     int   mcs_now = 0;
     int   freq_mhz = 0, bw_idx = -1;          // the link's channel and bandwidth gear now (0 / -1: no link)
+    float vtx_temp_c = -1;                    // the air unit's SoC temperature now (cmd 0x05), -1: not known
+    float vrx_temp_c = -1;                    // this goggle's SoC temperature now, -1: not known
     uint32_t lost_total = 0;
     // Pacing, as the motion is seen: each picture's latency against the fastest
     // of the half second before it (its motion's lateness against the camera's).

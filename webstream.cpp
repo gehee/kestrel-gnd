@@ -21,6 +21,7 @@
 #include "utils/time_util.h"
 #include "dvr.hpp"         // also brings utils/minimp4.h, which must be included once
 #include "dvr_library.hpp"
+#include "zones.hpp"
 #include "hud_theme.hpp"
 #include "settings.hpp"
 
@@ -72,6 +73,7 @@ section{display:none}section.on{display:block}
 #b{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);display:none;padding:12px 22px;
   font:600 15px Chakra,system-ui;letter-spacing:.1em;border:0;border-radius:10px;background:var(--accent);color:var(--ground)}
 .status{margin-top:10px;color:var(--quiet);font-size:13px;line-height:1.4}
+.tz{margin-top:14px;display:flex;flex-wrap:wrap;align-items:center;gap:10px;color:var(--quiet);font-size:13px}
 #list{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px}
 .rec{border-radius:12px;overflow:hidden;background:color-mix(in srgb,var(--quiet) 12%,transparent)}
 .shot{position:relative;aspect-ratio:16/9;background:color-mix(in srgb,var(--quiet) 18%,transparent)}
@@ -105,6 +107,7 @@ section{display:none}section.on{display:block}
   <div class="frame"><video id="v" muted playsinline autoplay disableremoteplayback></video>
   <button id="b">TAP TO PLAY</button></div>
   <div class="status" id="s">connecting...</div>
+  <div class="tz" id="tz"></div>
 </section>
 <section id="gallery"><div id="list"></div></section>
 </main>
@@ -310,6 +313,39 @@ $('pc').onclick = () => {
   $('player').classList.remove('on');
 };
 
+// ---- time zone ----------------------------------------------------------------
+// SYSTEM > Time Zone sets the goggle's clock and the country whose channel rules
+// its channel page shows. A phone knows its own zone, so one tap copies it over.
+async function tz() {
+  const el = $('tz');
+  let mine = '';
+  try { mine = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch (e) {}
+  let cur;
+  try {
+    cur = await (await fetch('/api/timezone?phone=' + encodeURIComponent(mine), { cache: 'no-store' })).json();
+  } catch (e) { return; }
+  el.textContent = '';
+  const t = document.createElement('span');
+  t.textContent = 'Goggle time zone: ' + (cur.zone ? cur.zone + ' (' + cur.country_name + ')' : 'not set');
+  el.appendChild(t);
+  if (!mine) return;
+  if (!cur.phone) {
+    const n = document.createElement('span');
+    n.textContent = '(this phone\'s, ' + mine + ', is not in the goggle\'s list)';
+    el.appendChild(n);
+  } else if (cur.phone !== cur.zone) {
+    const btn = document.createElement('button');
+    btn.className = 'btn';
+    btn.textContent = 'USE THIS PHONE\'S: ' + cur.phone;
+    btn.onclick = async () => {
+      btn.disabled = true;
+      try { await fetch('/api/timezone?zone=' + encodeURIComponent(cur.phone), { method: 'POST' }); } catch (e) {}
+      tz();
+    };
+    el.appendChild(btn);
+  }
+}
+
 // ---- tabs ---------------------------------------------------------------------
 function show(tab) {
   for (const [btn, sec] of [['tl', 'live'], ['tg', 'gallery']]) {
@@ -317,7 +353,7 @@ function show(tab) {
     $(sec).classList.toggle('on', sec === tab);
   }
   theme();
-  if (tab === 'live') live.start(); else { live.stop(); gallery(); }
+  if (tab === 'live') { live.start(); tz(); } else { live.stop(); gallery(); }
   history.replaceState(null, '', location.pathname + location.search + (tab === 'gallery' ? '#gallery' : ''));
 }
 $('tl').onclick = () => show('live');
@@ -685,6 +721,56 @@ void WebStream::Impl::on_request(Client* c, const std::string& method, const std
               std::string("{\"name\":\"") + t.name + "\",\"text\":\"" + hex_colour(t.text) +
               "\",\"data\":\"" + hex_colour(t.data) + "\",\"accent\":\"" + hex_colour(t.accent) +
               "\",\"ground\":\"" + hex_colour(t.ground) + "\",\"quiet\":\"" + hex_colour(t.quiet) + "\"}");
+    } else if (path == "/api/timezone") {
+        // SYSTEM > Time Zone. GET: the zone in force, and with ?phone= the zone a
+        // phone reports as the goggle names it ("" when it has no such zone).
+        // POST ?zone=: pick it (old names like Asia/Calcutta are found too).
+        auto arg = [&](const char* key) {
+            const std::string k = std::string(key) + "=";
+            size_t p = 0;
+            while (p < query.size()) {
+                size_t e = query.find('&', p);
+                if (e == std::string::npos) e = query.size();
+                if (query.compare(p, k.size(), k) == 0) {
+                    std::string v;
+                    for (size_t i = p + k.size(); i < e; i++) {
+                        if (query[i] == '%' && i + 2 < e) {
+                            v += (char)strtol(query.substr(i + 1, 2).c_str(), nullptr, 16);
+                            i += 2;
+                        } else v += query[i] == '+' ? ' ' : query[i];
+                    }
+                    return v;
+                }
+                p = e + 1;
+            }
+            return std::string();
+        };
+        auto json_str = [](const std::string& t) {
+            std::string o;
+            for (char ch : t) { if (ch == '"' || ch == '\\') o += '\\'; o += ch; }
+            return o;
+        };
+        if (method == "POST") {
+            const int z = zones::find(arg("zone"));
+            if (z < 0) {
+                reply("404 Not Found", "application/json", "{\"error\":\"no such time zone\"}");
+                return;
+            }
+            zones::select(z);
+            printf("webstream: time zone set to %s from the web page\n", zones::zone(z).name);
+        }
+        const int z = zones::selected();
+        const int pz = zones::find(arg("phone"));
+        std::string j = "{\"zone\":\"";
+        if (z >= 0) {
+            const zones::Country& c = zones::country(zones::zone(z).country);
+            j += json_str(zones::zone(z).name) + "\",\"country\":\"" + c.code +
+                 "\",\"country_name\":\"" + json_str(c.name);
+        } else {
+            j += "\",\"country\":\"\",\"country_name\":\"";
+        }
+        j += "\",\"phone\":\"" + std::string(pz >= 0 ? zones::zone(pz).name : "") + "\"}";
+        reply("200 OK", "application/json", j);
     } else if (path == "/api/recordings") {
         reply("200 OK", "application/json", recordings_json());
     } else if (path.compare(0, 5, "/dvr/") == 0) {

@@ -7,6 +7,9 @@ extern "C"{
 #include <iomanip>
 
 #include "renderer.hpp"
+#include "frame_mode.hpp"
+
+std::atomic<int> g_frame_mode{kFrameWhole};
 #include "settings.hpp"
 #include <cmath>
 #include <time.h>
@@ -650,7 +653,8 @@ bool Renderer::early_safe(const DecodedUnit *du, double to_next_us, uint64_t now
     if (du->slices && du->slices->expected > 2) return false;
     const uint64_t eta = du->bottom_eta_us ? du->bottom_eta_us->load() : 0;
     const int rows = dev->screen_rows();
-    if (!eta || rows <= 0 || !du->height) return false;
+    // 0 or UINT64_MAX: not known yet (its last slice is not in)
+    if (!eta || eta == UINT64_MAX || rows <= 0 || !du->height) return false;
     // a few rows above where the first slice ends (the middle, unless the
     // source says otherwise): the deblocking across the slice boundary
     // changes them once the rest is decoded
@@ -680,7 +684,8 @@ bool Renderer::adopt_early(std::shared_ptr<DecodedUnit> &du) {
 bool Renderer::split_active() const {
     // Not while the screen is recorded: the recorder copies the video plane's
     // picture only, whose lower part may not be decoded yet.
-    return split_enabled_ && !split_off_ && render_mode == Atomic && dev->has_split_plane() &&
+    return split_enabled_ && !split_off_ && g_frame_mode.load(std::memory_order_relaxed) == kFrameSplit &&
+           render_mode == Atomic && dev->has_split_plane() &&
            !dev->tap.recording();
 }
 
@@ -1450,8 +1455,27 @@ void Renderer::update_stats(DecodedUnit *du, uint64_t display_start_ts) {
         const int rows = dev->screen_rows();
         SliceLatency l;
         int which = 0;
+        // Each slice on its own, top to bottom (the HUD and the stats in SPLIT;
+        // the first and the last also for the log): kLatSlices of them at most,
+        // spread from the first to the last when there are more.
+        float slice_ms[kLatSlices] = {0, 0, 0, 0};
+        int nslices = 0;
+        if (n >= 2) {
+            const int m = std::min(n, kLatSlices);
+            bool all = true;
+            for (int k = 0; k < m; k++) {
+                const int i = m == n ? k : (int)std::lround((double)k * (n - 1) / (m - 1));
+                SliceLatency e;
+                if (!slice_latency(st, i, period, rows, row_us, e)) { all = false; continue; }
+                slice_ms[k] = e.total() / 1000.0f;
+                if (i == 0) slice_log_.v[0].push_back(e);
+                if (i == n - 1) slice_log_.v[1].push_back(e);
+            }
+            nslices = all ? m : 0;
+        }
         if (slowest_slice(st, period, rows, row_us, l, &which)) {
-            add_latency_sample(l.enc, l.rf, l.dec, l.disp, l.total(), st.key, skipped_pending_ + f.skipped);
+            add_latency_sample(l.enc, l.rf, l.dec, l.disp, l.total(), st.key, skipped_pending_ + f.skipped,
+                               slice_ms, nslices);
             skipped_pending_ = 0;
             samples_sliced_++;
             slice_log_.slowest[which == 0 ? 0 : which == n - 1 ? 2 : 1]++;
@@ -1471,12 +1495,6 @@ void Renderer::update_stats(DecodedUnit *du, uint64_t display_start_ts) {
                          s.here_us < s.out_us || s.done_us.load() < s.here_us) why = 3;
             }
             slice_fail_[why]++;
-        }
-        // The first and the last slice, each on its own, for the log.
-        for (int k = 0; k < 2 && n >= 2; k++) {
-            SliceLatency e;
-            if (slice_latency(st, k ? n - 1 : 0, period, rows, row_us, e))
-                slice_log_.v[k].push_back(e);
         }
         it = slice_wait_.erase(it);
     }
@@ -1543,7 +1561,8 @@ bool Renderer::whole_picture_sample(const SliceTimes &st, double period, int row
 }
 
 void Renderer::add_latency_sample(uint64_t tx_enc, uint64_t tx_proc, uint64_t dec_lat,
-                                  uint64_t disp_lat, uint64_t total_lat, bool key, unsigned skipped) {
+                                  uint64_t disp_lat, uint64_t total_lat, bool key, unsigned skipped,
+                                  const float* slice_ms, int nslices) {
     if (stats_.frame_counter >= Stats::kMaxFrames) return;
     const uint64_t now = get_time_us();
     uint64_t pace_lat = (stats_.last_frame_ts > 0 && now > stats_.last_frame_ts) ? now - stats_.last_frame_ts : 0;
@@ -1567,14 +1586,19 @@ void Renderer::add_latency_sample(uint64_t tx_enc, uint64_t tx_proc, uint64_t de
 
     // Feed the per-frame graph
     if (osd) {
-        osd->add_latency_frame({
+        LatencyFrame lf = {
             .processing_ms = (float)tx_enc / 1000.0f,
             .net_ms = (float)tx_proc / 1000.0f,
             .dec_ms = (float)dec_lat / 1000.0f,
             .disp_ms = (float)disp_lat / 1000.0f,
             .key = (uint8_t)(key ? 1 : 0),
-            .skipped = (uint16_t)std::min(skipped, 65535u)
-        });
+            .skipped = (uint16_t)std::min(skipped, 65535u),
+        };
+        if (slice_ms && nslices >= 2 && nslices <= kLatSlices) {
+            lf.nslices = (uint8_t)nslices;
+            for (int k = 0; k < nslices; k++) lf.slice_ms[k] = slice_ms[k];
+        }
+        osd->add_latency_frame(lf);
     }
 
     stats_.frame_counter++; 

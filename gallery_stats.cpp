@@ -63,8 +63,13 @@ void build_stats(const StatsFrame* frames, size_t n_frames, const StatsFlip* fli
     float st_sum[S][StatsView::kCols] = {{0}};
     float v_sum[StatsView::kCols] = {0}, l_sum[StatsView::kCols] = {0}, s_sum[StatsView::kCols] = {0};
     static thread_local uint32_t tot_hist[kTotBins];
+    static thread_local uint32_t slice_hist[kLatSlices][kTotBins];
+    uint32_t n_sliced = 0;
+    // The newest picture's number of slices: only pictures cut the same way count.
+    const int ns = n_frames ? frames[n_frames - 1].nslices : 0;
     static thread_local uint32_t stage_hist[S][kStageBins];
     std::memset(tot_hist, 0, sizeof(tot_hist));
+    std::memset(slice_hist, 0, sizeof(slice_hist));
     std::memset(stage_hist, 0, sizeof(stage_hist));
     uint64_t n_pics = 0, n_recent = 0;
     uint64_t stage_nonzero[S] = {0, 0, 0, 0};
@@ -101,6 +106,11 @@ void build_stats(const StatsFrame* frames, size_t n_frames, const StatsFlip* fli
         n_pics++;
         if (f.t_us + 2000000 > now_us) n_recent++;
         tot_hist[std::min(kTotBins - 1, (int)(tot * 10.0f))]++;
+        if (ns >= 2 && f.nslices == ns) {
+            for (int s = 0; s < ns; s++)
+                slice_hist[s][std::min(kTotBins - 1, (int)(f.slice_ms[s] * 10.0f))]++;
+            n_sliced++;
+        }
         for (int k = 0; k < S; k++) {
             stage_hist[k][std::min(kStageBins - 1, (int)(f.stage[k] * 10.0f))]++;
             if (f.stage[k] > 0.0f) stage_nonzero[k]++;
@@ -128,6 +138,10 @@ void build_stats(const StatsFrame* frames, size_t n_frames, const StatsFlip* fli
         out.any = true;
         out.p50 = hist_pct(tot_hist, kTotBins, 0.1f, n_pics, 0.5);
         out.p99 = hist_pct(tot_hist, kTotBins, 0.1f, n_pics, 0.99);
+        if (n_sliced) {
+            out.nslices = ns;
+            for (int s = 0; s < ns; s++) out.slice_p50[s] = hist_pct(slice_hist[s], kTotBins, 0.1f, n_sliced, 0.5);
+        }
         // A stage the link never reports is exactly zero, not the middle of the lowest bin.
         for (int k = 0; k < S; k++)
             out.stage_p50[k] = stage_nonzero[k] ? hist_pct(stage_hist[k], kStageBins, 0.1f, n_pics, 0.5) : 0.0f;

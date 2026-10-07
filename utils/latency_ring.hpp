@@ -13,6 +13,7 @@
 // bins. The canopy prints it to the whole millisecond; the bins are 0.5 ms up
 // to 200 ms, then 5 ms up to 6 s for a link that is badly off.
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -58,6 +59,29 @@ class LatencyRing {
             }
             ms = bin_centre(kBins - 1);
             return true;
+        }
+
+        // Each slice's median latency (slice_ms), top to bottom, over the newest
+        // n entries with the newest one's number of slices; that number, or 0.
+        int slice_medians(float* out, size_t n = 200) const {
+            static float v[kLatSlices][256];
+            int ns = 0;
+            size_t k = 0;
+            if (n > 256) n = 256;
+            for (size_t i = 0; i < count_ && k < n; i++) {
+                const LatencyFrame& f = at(count_ - 1 - i);
+                if (f.nslices < 2) continue;
+                if (!ns) ns = f.nslices;
+                if (f.nslices != ns) continue;          // another layout (before a change)
+                for (int s = 0; s < ns; s++) v[s][k] = f.slice_ms[s];
+                k++;
+            }
+            if (k == 0) return 0;
+            for (int s = 0; s < ns; s++) {
+                std::nth_element(v[s], v[s] + k / 2, v[s] + k);
+                out[s] = v[s][k / 2];
+            }
+            return ns;
         }
 
     private:
