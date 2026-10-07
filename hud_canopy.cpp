@@ -1313,7 +1313,7 @@ void OSD::draw_canopy_pick(const CanopyIn& in, float pick) {
         draw_text(left ? "<  GOGGLE" : "AIR UNIT  >", x, BL(name_base, T_NAME), T_NAME, !left,
                   nc[0], nc[1], nc[2]);
         if (a_alpha_factor_ != -1) glVertexAttrib1f(a_alpha_factor_, pick * (on ? 0.85f : 0.6f));
-        draw_text(left ? "HUD   DISPLAY   DVR   SYSTEM" : "VIDEO   RADIO   INFO   SERIAL", x, BL(list_base, T_LIST), T_LIST, !left,
+        draw_text(left ? "HUD   DISPLAY   DVR   SYSTEM" : "VIDEO   RADIO   SERIAL   INFO", x, BL(list_base, T_LIST), T_LIST, !left,
                   lc[0], lc[1], lc[2]);
     }
     if (a_alpha_factor_ != -1) glVertexAttrib1f(a_alpha_factor_, 1.0f);

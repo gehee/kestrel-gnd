@@ -8,6 +8,7 @@
 #include "utils/math_utils.hpp"
 #include <functional>
 #include "msp_telem.hpp"
+#include "cam_tilt.hpp"
 
 // MSP DisplayPort Commands (0-based index in payload[0])
 #define MSP_DP_HEARTBEAT 0
@@ -99,12 +100,17 @@ class MspOsd {
         bool hud_moving_ = false;   // spring not yet settled (update_physics)
         std::atomic<bool> motion_wanted_{false};   // reactive HUD on: attitude is news
 
-        // Raw IMU accelerometer readings (typically 2048 = 1G). Only populated
-        // if the air unit ever relays MSP_RAW_IMU (102), which this one does
-        // not - kept as a fallback for an air/FC pairing that does.
+        // MSP_RAW_IMU (102): kestrel-air polls it 20 times a second when it has no IMU on
+        // its camera (fc-imu, the Lite+). Accelerometer: raw (typically 2048 = 1 g).
         int16_t raw_acc_x = 0;
         int16_t raw_acc_y = 0;
         int16_t raw_acc_z = 2048;
+        // Its gyro, deg/s, in Betaflight's axes: roll (+ right side down), pitch (+ nose
+        // down), yaw (+ nose left), and when it came. The reactive HUD's input when no
+        // camera IMU is sending (fc_rate_locked).
+        int16_t  fc_gyro_[3] = {0, 0, 0};
+        uint64_t fc_gyro_us_ = 0;
+        bool fc_rate_locked(double w[3]) const;
 
         // Pitch/roll in degrees, scraped from the FC's own "Pitch Angle" /
         // "Roll Angle" OSD text elements (glyph 0x15 / 0x14, a number reading
@@ -161,6 +167,9 @@ class MspOsd {
         uint64_t msp_frame_us_ = 0;
         std::atomic<uint32_t> n_msp_{0}, n_msp_bytes_{0};
         void apply_polled_locked(unsigned groups);
+        // The camera's tilt on the airframe, taken each time the aircraft is armed (cam_tilt.hpp).
+        CamTilt tilt_;
+        bool tilt_save_ = false;
         void scrape_locked();
         void handle_status(const uint8_t* p, size_t n);
         void handle_analog(const uint8_t* p, size_t n);
@@ -183,6 +192,9 @@ class MspOsd {
         // Also what the camera's IMU says (the reactive HUD's input): any turning is news. Polled
         // here, from the OSD thread's own loop.
         uint32_t content_version();
+        // The camera's saved tilt, degrees up (settings), and the tilt to save when arming has changed it.
+        void set_cam_tilt(int deg) { std::lock_guard<std::mutex> l(mtx); tilt_.set(deg); }
+        bool take_cam_tilt_to_save(int* deg);
         MspOsd();
         void parse_byte(uint8_t b);
         void parse_bytes(const uint8_t* p, size_t size);

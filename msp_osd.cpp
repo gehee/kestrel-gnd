@@ -684,6 +684,17 @@ void MspOsd::handle_status(const uint8_t* p, size_t n) {
     // out of Betaflight's timer element - so it exists whether or not the
     // pilot enabled that element, which this aircraft had not.
     if (armed && msp_arm_ != 1) msp_armed_since_ = now;
+    // The camera's tilt: disarmed and still, note the camera's pitch against gravity; the moment it
+    // goes from disarmed to armed the aircraft is level, so that is the tilt (and is saved).
+    if (!armed) {
+        double down[3];
+        if (stab::ImuStream::get().resting_down(down)) {
+            const double z = down[2] < -1.0 ? -1.0 : down[2] > 1.0 ? 1.0 : down[2];
+            tilt_.rest(asin(-z) * 180.0 / 3.14159265358979323846, now);
+        }
+    } else if (msp_arm_ == 0) {
+        if (tilt_.armed(now)) tilt_save_ = true;
+    }
     if (armed != msp_arm_) content_ver_++;
     msp_arm_ = armed;
     msp_status_us_ = now;
@@ -731,6 +742,14 @@ uint32_t MspOsd::content_version() {
     return content_ver_.load(std::memory_order_relaxed);
 }
 
+bool MspOsd::take_cam_tilt_to_save(int* deg) {
+    std::lock_guard<std::mutex> lock(mtx);
+    if (!tilt_save_) return false;
+    tilt_save_ = false;
+    *deg = (int)lround(tilt_.deg());
+    return true;
+}
+
 MspOsd::MspCounts MspOsd::msp_counts() {
     std::lock_guard<std::mutex> lock(mtx);
     MspCounts c;
@@ -752,9 +771,13 @@ void MspOsd::apply_polled_locked(unsigned groups) {
         const stab::ImuStream::Status is = stab::ImuStream::get().status();
         double wl[3] = {0, 0, 0};
         stab::ImuStream::get().recent_rate_dps(20000, wl);
-        printf("imu: %s %.0f samples/s, %llu messages, rate pitch %.1f pan %.1f roll %.1f deg/s, gyro offset %.2f %.2f %.2f deg/s\n",
-               is.live ? "live" : "NOT live", is.rate_hz, (unsigned long long)is.messages, wl[0], wl[1], wl[2],
+        printf("imu: %s %.0f samples/s, %llu messages, camera rate pitch %.1f pan %.1f roll %.1f deg/s, tilt %.1f deg, gyro offset %.2f %.2f %.2f deg/s\n",
+               is.live ? "live" : "NOT live", is.rate_hz, (unsigned long long)is.messages, wl[0], wl[1], wl[2], tilt_.deg(),
                is.bias_dps[0], is.bias_dps[1], is.bias_dps[2]);
+        double wf[3] = {0, 0, 0};
+        if (fc_rate_locked(wf))
+            printf("fc imu: rate pitch %.0f yaw %.0f roll %.0f deg/s (raw roll %d pitch %d yaw %d), acc %d %d %d\n",
+                   wf[0], wf[1], wf[2], fc_gyro_[0], fc_gyro_[1], fc_gyro_[2], raw_acc_x, raw_acc_y, raw_acc_z);
         printf("msp: batt %s%.2fV %s%.2fA %dmAh cells=%d | alt=%s%.1fm | gps=%s fix=%d sats=%d | home=%s%dm@%d | mode=%s armed=%d\n",
                s.have_batt ? "" : "-", s.pack_v, s.have_batt ? "" : "-", s.amps, s.mah_drawn, s.cells,
                s.have_alt ? "" : "-", s.alt_m, s.have_gps ? "yes" : "no", s.fix, s.sats,
@@ -838,6 +861,14 @@ void MspOsd::handle_msp_frame(uint16_t function, const uint8_t* payload, size_t 
             raw_acc_x = ax;
             raw_acc_y = ay;
             raw_acc_z = az;
+            if (size >= 12) {
+                for (int i = 0; i < 3; i++)
+                    fc_gyro_[i] = (int16_t)(payload[6 + 2 * i] | (payload[7 + 2 * i] << 8));
+                fc_gyro_us_ = get_time_us();
+                // Turning at all is news for the reactive HUD, as with the camera's IMU.
+                if (motion_wanted_ && (abs(fc_gyro_[0]) > 3 || abs(fc_gyro_[1]) > 3 || abs(fc_gyro_[2]) > 3))
+                    content_ver_++;
+            }
         }
     }
 }
@@ -921,9 +952,22 @@ void MspOsd::draw_region(int r_start, int c_start, int r_cnt, int c_cnt, float x
                 float px = x + (float)(c - c_start) * cell_w;
                 float py = y - (float)(r - r_start) * cell_h;
                 
+                // Text: a single space between two text characters stays inside the run, so a
+                // phrase ("LOW BATTERY") is laid out as one string. An icon, or two or more
+                // spaces, ends it.
+                auto is_text = [&](uint16_t ch) { return ch >= 0x21 && ch <= 0x5F && ch != '$'; };
                 while (c < c_start + c_cnt && c < GRID_W) {
                     uint16_t current_ch = grid[r][c].char_idx;
-                    if (blank(r, c)) break;
+                    if (blank(r, c)) {
+                        if (current_ch == ' ' && !span.empty() && is_text(span.back()) &&
+                            c + 1 < c_start + c_cnt && c + 1 < GRID_W &&
+                            is_text(grid[r][c + 1].char_idx)) {
+                            span.push_back(' ');
+                            c++;
+                            continue;
+                        }
+                        break;
+                    }
                     span.push_back(current_ch);
                     c++;
                 }
@@ -968,6 +1012,18 @@ void MspOsd::simulate_startup() {
     }
 }
 
+// The flight controller's gyro (MSP_RAW_IMU, polled ~20 a second) as the reactive HUD's rates:
+// x pitch (+ nose up), y yaw (+ turning right), z roll (+ right side down), deg/s. Betaflight's
+// axes are already the aircraft's (after its board alignment); only the signs differ. Stale after
+// 200 ms: a few polls missed.
+bool MspOsd::fc_rate_locked(double w[3]) const {
+    if (!fc_gyro_us_ || get_time_us() - fc_gyro_us_ > 200000ULL) return false;
+    w[0] = -fc_gyro_[1];
+    w[1] = -fc_gyro_[2];
+    w[2] = fc_gyro_[0];
+    return true;
+}
+
 void MspOsd::update_physics(float dt_sec) {
     if (dt_sec <= 0.0f) return;
     if (dt_sec > 0.1f) dt_sec = 0.1f; // Clamp to avoid dynamic instability on lags
@@ -975,10 +1031,20 @@ void MspOsd::update_physics(float dt_sec) {
     // The HUD answers MOVEMENT, not attitude: the camera's angular rates (the air unit's IMU,
     // 1 kHz) push it, and the spring brings it back to centre when nothing moves - held at a
     // steady tilt it sits at rest. Without the IMU it stays centred.
-    // x: pitch rate (+ nose up), y: pan (+ turning right), z: roll rate (+ right side down), deg/s,
-    // in the camera's own axes.
-    double w[3] = {0, 0, 0};
-    const bool imu = stab::ImuStream::get().recent_rate_dps(20000, w);
+    // The camera's rates, put into the AIRCRAFT's axes by the camera's tilt on the airframe: a yaw seen
+    // by a camera tilted up is partly a turn about its lens, and would bank the HUD. x: pitch rate
+    // (+ nose up), y: yaw (+ turning right), z: roll rate (+ right side down), deg/s.
+    double wc[3] = {0, 0, 0}, w[3];
+    bool imu = stab::ImuStream::get().recent_rate_dps(20000, wc);
+    stab::to_aircraft_rates(wc, tilt_.deg(), w);
+    // No camera IMU sending (the Lite+ has none, fc-imu): the flight controller's gyro, already in
+    // the aircraft's axes, at its 20 a second.
+    bool fc = false;
+    if (!imu) imu = fc = fc_rate_locked(w);
+    // The flight controller's rates are single readings 20 a second, not the camera IMU's 20 ms
+    // average at 1 kHz: at the same gain the HUD moved too much and too jerkily. Half, at every level.
+    const float kFcImuScale = 0.5f;
+    const float src_scale = fc ? kFcImuScale : 1.0f;
     // A rate to an offset: against the motion (the HUD lags behind it), nothing under 3 deg/s (the
     // gyro's noise and what is left of its offset), full at 360 deg/s, never past the maximum.
     auto slide = [](double rate_dps, float max) {
@@ -987,7 +1053,7 @@ void MspOsd::update_physics(float dt_sec) {
         return v > max ? max : v < -max ? -max : v;
     };
     // 0.12 is what a turn felt right at; the SMALL/MEDIUM/EXTREME setting scales it.
-    const float kMaxOffset = 0.12f * reactivity_scale_;
+    const float kMaxOffset = 0.12f * reactivity_scale_ * src_scale;
     // Pitch moves the HUD up and down, yaw sideways. Roll does not slide it: a banking aircraft
     // tilts the HUD, below.
     const float target_y = imu ? slide(w[0], kMaxOffset) : 0.0f;
@@ -997,7 +1063,7 @@ void MspOsd::update_physics(float dt_sec) {
     // swing the panels through 90 deg and read as the HUD falling over, where the point is to
     // suggest the bank.
     const float kDegToRad   = 3.14159265f / 180.0f;
-    const float kMaxBankRad = 3.5f * kDegToRad * reactivity_scale_;   // never tilt further than this
+    const float kMaxBankRad = 3.5f * kDegToRad * reactivity_scale_ * src_scale;   // never tilt further than this
     const float target_bank = imu ? slide(w[2], kMaxBankRad) : 0.0f;
 
     // Mass-spring-damper constants

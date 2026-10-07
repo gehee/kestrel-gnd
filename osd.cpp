@@ -467,7 +467,6 @@ OSD::OSD(std::shared_ptr<DrmDevice> dev_, int refresh_frequency_ms_, volatile bo
     // Standby is not persisted or commanded: the air unit dictates it (auto-parks
     // to low power when disarmed/idle). The menu row reflects the air's reported
     // air_standby state, read-only.
-    show_latency_graph = Settings::getInstance().getBool("show_latency_graph", false);
     // The OSD keeps its own copy of dvr_screen for the menu row. It was never
     // loaded from settings, so the menu could read OFF while DvrRecorder (which
     // main() does initialise from the same key) was in screen mode - two views
@@ -498,6 +497,9 @@ OSD::OSD(std::shared_ptr<DrmDevice> dev_, int refresh_frequency_ms_, volatile bo
         else if (hr == "false") hud_reactivity = 0;
         else                    hud_reactivity = Settings::getInstance().getInt("hud_reactivity", 2);
         if (hud_reactivity < 0 || hud_reactivity > 3) hud_reactivity = 2;
+        // How far up the air unit's camera is tilted on the airframe: found each time the aircraft is
+        // armed (it is level then), saved, and used to put the camera's rates into the aircraft's axes.
+        msp_osd.set_cam_tilt(Settings::getInstance().getInt("imu_cam_tilt_deg", 0));
     }
 
     // The clock has two independent questions - WHEN it shows and WHAT FORMAT
@@ -564,7 +566,6 @@ OSD::OSD(std::shared_ptr<DrmDevice> dev_, int refresh_frequency_ms_, volatile bo
     menu_hud_style = hud_style;
     menu_volt_mode = volt_mode;
     menu_wifi_ap = wifi_ap_on() ? 1 : 0;   // off after boot; see wifi_ap.hpp
-    menu_show_latency_graph = show_latency_graph;
     menu_show_all_adapters = true;
     menu_bg_video = bg_video_enabled;
     menu_frame_mode = g_frame_mode.load();
@@ -1101,7 +1102,7 @@ void OSD::draw_panel(float x, float y, float w, float h, float alpha, float r, f
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 }
 
-void OSD::draw_icon(GLuint tex, float x, float y, float w, float h, float r, float g, float b) {
+void OSD::draw_icon(GLuint tex, float x, float y, float w, float h, float r, float g, float b, float alpha) {
     if (tex == 0) return;
     float verts[] = {
         x,   y,   0,   0, 1,
@@ -1116,7 +1117,7 @@ void OSD::draw_icon(GLuint tex, float x, float y, float w, float h, float r, flo
     glUniform1i(u_is_text_, 1);
     glUniform1i(u_use_shading_, 0);
     glUniform4f(u_color_, r, g, b, 1.0); 
-    glUniform1f(u_alpha_, 1.0);
+    glUniform1f(u_alpha_, alpha);
     
     glBindBuffer(GL_ARRAY_BUFFER, vbo);
     glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_DYNAMIC_DRAW);
@@ -1916,352 +1917,6 @@ void OSD::draw_text_wipe(const char* text, float x, float y, float scale,
 }
 
 
-void OSD::draw_graph(float x, float y, float w, float h, const std::vector<float>& data, float max_val, float r, float g, float b) {
-    if (data.empty()) return;
-    
-    // Background
-    draw_panel(x, y, w, h, 0.4f, 0, 0, 0);
-
-    int count = data.size();
-    float step = w / (count > 1 ? count - 1 : 1);
-    
-    for (int i = 0; i < count; ++i) {
-        float val = data[i];
-        float bar_h = (val / max_val) * h;
-        if (bar_h > h) bar_h = h;
-        
-        // Use draw_panel as a thin vertical line/bar
-        draw_panel(x + i * step, y, step * 0.8f, bar_h, 0.9f, r, g, b);
-    }
-}
-
-void OSD::draw_latency_graph(float x, float y, float w, float h, const std::vector<LatencyFrame>& data, float max_val, int fps) {
-    float bg_r = 0.005f, bg_g = 0.015f, bg_b = 0.04f;
-    bool slices_received = osd_vars.slices_received;
-
-    const int max_history = 1200;
-    int total_count = (int)data.size();
-    int count = std::min(total_count, 1200);
-    if (count < 2) return;
-    float step = w / (float)max_history;
-
-    // Draw unified background panel and border for both graph and legend
-    float leg_h = 0.14f;
-    float pad = 0.02f;
-    float bx1 = x - pad;
-    float bx2 = x + w + pad;
-    float by1 = y - leg_h - pad;
-    float by2 = y + h + pad;
-    float br = 0.0f, bg = 0.9f, bb = 1.0f; // Cyan
-
-    // Flat semi-transparent dark background (Overwatch 2 style)
-    draw_panel(bx1, by1, bx2 - bx1, by2 - by1, 0.65f, bg_r, bg_g, bg_b);
-    
-    // Clean outline border
-    {
-        float border_t = 0.0025f * osd_vars.ui_scale;
-        float border_a = 0.35f;
-        float border_r = 0.8f, border_g = 0.85f, border_b = 0.9f;
-        draw_panel(bx1, by2 - border_t, bx2 - bx1, border_t, border_a, border_r, border_g, border_b);
-        draw_panel(bx1, by1, bx2 - bx1, border_t, border_a, border_r, border_g, border_b);
-        draw_panel(bx1, by1, border_t, by2 - by1, border_a, border_r, border_g, border_b);
-        draw_panel(bx2 - border_t, by1, border_t, by2 - by1, border_a, border_r, border_g, border_b);
-    }
-
-    // Helper: upload a vertex array (stride 5: x,y,z,u,v) and draw as TRIANGLE_STRIP.
-    auto upload_and_draw_strip = [&](const std::vector<float>& verts, float r_c, float g_c, float b_c, float alpha) {
-        if (verts.empty()) return;
-        glUniform1i(u_is_text_, 0);
-        glUniform4f(u_color_, r_c, g_c, b_c, alpha);
-        glUniform1f(u_alpha_, alpha);
-        glBindBuffer(GL_ARRAY_BUFFER, vbo);
-        glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(float), verts.data(), GL_DYNAMIC_DRAW);
-        GLint pos_loc = a_pos_;
-        glEnableVertexAttribArray(pos_loc);
-        glVertexAttribPointer(pos_loc, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), 0);
-        GLint uv_loc = a_uv_;
-        glEnableVertexAttribArray(uv_loc);
-        glVertexAttribPointer(uv_loc, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
-        glDrawArrays(GL_TRIANGLE_STRIP, 0, (int)verts.size() / 5);
-    };
-
-    // Smooth area band for one stacked latency component.
-    std::vector<math::Vec2> top_points;
-    auto draw_component = [&](int layer_idx, float r_c, float g_c, float b_c) {
-        std::vector<float> verts;
-        top_points.clear();
-        verts.reserve(count * 2 * 5);
-        top_points.reserve(count);
-        for (int i = 0; i < count; ++i) {
-            const auto& frame = data[total_count - count + i];
-            float cur_sum = 0;
-            float val = 0;
-            if (layer_idx > 0) cur_sum += frame.processing_ms;
-            if (layer_idx > 1) cur_sum += frame.net_ms;
-            if (layer_idx > 2) cur_sum += frame.dec_ms;
-            
-            if      (layer_idx == 0) val = frame.processing_ms;
-            else if (layer_idx == 1) val = frame.net_ms;
-            else if (layer_idx == 2) val = frame.dec_ms;
-            else if (layer_idx == 3) val = frame.disp_ms;
-
-            float xp     = x + (max_history - count + i) * step;
-            float base_y = y + std::min(cur_sum / max_val, 1.0f) * h;
-            float top_y  = y + std::min((cur_sum + val) / max_val, 1.0f) * h;
-            verts.insert(verts.end(), {xp, base_y, 0, 0, 0});
-            verts.insert(verts.end(), {xp, top_y,  0, 0, 1});
-            top_points.push_back({xp, top_y});
-        }
-        // Draw soft translucent area
-        upload_and_draw_strip(verts, r_c, g_c, b_c, 0.65f);
-        // Draw thin glowing topline accent
-        draw_glow_line(top_points, 1.8f, 0.9f, r_c, g_c, b_c);
-    };
-
-    draw_component(0, 0.816f, 0.000f, 0.000f);   // Encoder    (Red)
-    draw_component(1, 0.012f, 0.808f, 0.643f);   // RF         (Teal)
-    draw_component(2, 0.918f, 0.769f, 0.208f);   // Decoding   (Yellow)
-    draw_component(3, 0.984f, 0.302f, 0.239f);   // Display    (Red/Orange)
-    
-    // Draw total delay glowing sweeper dot at the top layer
-    if (!top_points.empty()) {
-        draw_panel(top_points.back().x - 0.007f, top_points.back().y - 0.007f, 0.014f, 0.014f, 1.0f, 1.0f, 0.2f, 0.2f); // Red active sweeper dot
-    }
-
-    // --- SMOOTH GLOW LINES ---
-    const int stride = (count > 300) ? 2 : 1;
-
-    // Pace line (purple)
-    {
-        std::vector<math::Vec2> pts;
-        pts.reserve(count / stride + 1);
-        for (int i = 0; i < count; i += stride) {
-            float xp  = x + (max_history - count + i) * step;
-            float val = std::min(data[total_count - count + i].pace_ms, max_val);
-            pts.push_back({xp, y + (val / max_val) * h});
-        }
-        draw_glow_line(pts, 1.8f, 0.9f, 0.8f, 0.0f, 1.0f);  // purple
-        if (!pts.empty()) {
-            draw_panel(pts.back().x - 0.006f, pts.back().y - 0.006f, 0.012f, 0.012f, 1.0f, 0.8f, 0.0f, 1.0f); // Purple active sweeper dot
-        }
-    }
-
-    // --- DOTTED GRIDLINES ---
-    if (fps > 0) {
-        for (int i = max_history - fps; i >= 0; i -= fps) {
-            float tick_x = x + i * step;
-            for (float cur_y = y; cur_y < y + h; cur_y += 0.03f) {
-                draw_panel(tick_x, cur_y, 0.0015f, 0.006f, 0.12f, 0.0f, 0.9f, 1.0f);
-            }
-        }
-    }
-    for (float ms = 0.0f; ms <= max_val; ms += 10.0f) {
-        float line_y = y + (ms / max_val) * h;
-        if (line_y > y + h + 0.001f) continue;
-        if (ms > 0.0f) {
-            float tick_w = 0.015f;
-            float spacing = 0.025f;
-            for (float cur_x = x; cur_x < x + w; cur_x += tick_w + spacing) {
-                draw_panel(cur_x, line_y, tick_w, 0.0015f, 0.12f, 0.0f, 0.9f, 1.0f); // Dimmed cyan ticks
-            }
-        }
-        char lbuf[16]; snprintf(lbuf, sizeof(lbuf), "%d", (int)ms);
-        draw_text(lbuf, x - 0.015f * osd_vars.ui_scale, line_y - 0.03f * osd_vars.ui_scale, 0.07f * osd_vars.ui_scale, true);
-    }
-    // Unit label in the bottom legend section under the 0 axis on the left
-    draw_text("ms", x - 0.015f * osd_vars.ui_scale, y - 0.115f, 0.07f * osd_vars.ui_scale, true);
-    
-    // Duration label on the bottom left
-    char dur_buf[32];
-    sprintf(dur_buf, "%ds", (int)(1200 / fps));
-    draw_text(dur_buf, x, y - 0.115f, 0.07f * osd_vars.ui_scale, false);
-
-    // --- LEGEND ---
-    leg_h    = 0.09f;
-    float leg_y    = y - 0.07f;
-    int num_items = 5;
-    float leg_item_w = 0.43f;
-    float leg_x   = x + (w - leg_item_w * num_items) / 2.0f;
-
-    auto draw_leg = [&](int idx, const char* txt, float r_c, float g_c, float b_c) {
-        float ix = leg_x + idx * leg_item_w;
-        draw_panel(ix, leg_y, 0.03f, 0.03f, 1.0f, r_c, g_c, b_c);
-        draw_text(txt, ix + 0.05f, leg_y, 0.065f);
-    };
-
-    draw_leg(0, "Enc",      0.816f, 0.000f, 0.000f);
-    draw_leg(1, "RF",       0.012f, 0.808f, 0.643f);
-    draw_leg(2, "Dec",      0.918f, 0.769f, 0.208f);
-    draw_leg(3, "Disp",     0.984f, 0.302f, 0.239f);
-    draw_leg(4, "Pace",     0.8f, 0.0f, 1.0f);
-}
-
-void OSD::draw_bitrate_graph(float x, float y, float w, float h, const std::vector<LatencyFrame>& data, float max_val) {
-    float bg_r = 0.005f, bg_g = 0.015f, bg_b = 0.04f;
-
-    const int max_history = 21600; // 3 minutes at 120fps
-    int count = (int)data.size();
-    if (count < 2) return;
-    float step = w / (float)max_history;
-
-    // Draw unified background panel and border for both graph and legend
-    float leg_h = 0.14f;
-    float pad = 0.02f;
-    float bx1 = x - pad;
-    float bx2 = x + w + pad;
-    float by1 = y - leg_h - pad;
-    float by2 = y + h + pad;
-    float br = 0.0f, bg = 0.9f, bb = 1.0f; // Cyan
-
-    // Flat semi-transparent dark background (Overwatch 2 style)
-    draw_panel(bx1, by1, bx2 - bx1, by2 - by1, 0.65f, bg_r, bg_g, bg_b);
-    
-    // Clean outline border
-    {
-        float border_t = 0.0025f * osd_vars.ui_scale;
-        float border_a = 0.35f;
-        float border_r = 0.8f, border_g = 0.85f, border_b = 0.9f;
-        draw_panel(bx1, by2 - border_t, bx2 - bx1, border_t, border_a, border_r, border_g, border_b);
-        draw_panel(bx1, by1, bx2 - bx1, border_t, border_a, border_r, border_g, border_b);
-        draw_panel(bx1, by1, border_t, by2 - by1, border_a, border_r, border_g, border_b);
-        draw_panel(bx2 - border_t, by1, border_t, by2 - by1, border_a, border_r, border_g, border_b);
-    }
-
-    // Helper: upload a vertex array (stride 5: x,y,z,u,v) and draw as TRIANGLE_STRIP.
-    auto upload_and_draw_strip = [&](const std::vector<float>& verts, float r_c, float g_c, float b_c, float alpha) {
-        if (verts.empty()) return;
-        glUniform1i(u_is_text_, 0);
-        glUniform4f(u_color_, r_c, g_c, b_c, alpha);
-        glUniform1f(u_alpha_, alpha);
-        glBindBuffer(GL_ARRAY_BUFFER, vbo);
-        glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(float), verts.data(), GL_DYNAMIC_DRAW);
-        GLint pos_loc = a_pos_;
-        glEnableVertexAttribArray(pos_loc);
-        glVertexAttribPointer(pos_loc, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), 0);
-        GLint uv_loc = a_uv_;
-        glEnableVertexAttribArray(uv_loc);
-        glVertexAttribPointer(uv_loc, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
-        glDrawArrays(GL_TRIANGLE_STRIP, 0, (int)verts.size() / 5);
-    };
-
-    const int stride = (count > 10000) ? 32 : (count > 5000) ? 16 : (count > 2000) ? 8 : (count > 300) ? 2 : 1;
-
-    // Faint translucent area helper
-    auto draw_bitrate_area = [&](float (*selector)(const LatencyFrame&), float r_c, float g_c, float b_c, float alpha) {
-        std::vector<float> verts;
-        verts.reserve(count * 2 * 5);
-        for (int i = 0; i < count; ++i) {
-            float xp = x + (max_history - count + i) * step;
-            float val = std::min(selector(data[i]), max_val);
-            float top_y = y + (val / max_val) * h;
-            verts.insert(verts.end(), {xp, y, 0, 0, 0});
-            verts.insert(verts.end(), {xp, top_y, 0, 0, 1});
-        }
-        upload_and_draw_strip(verts, r_c, g_c, b_c, alpha);
-    };
-
-    // Video bitrate area fill (orange)
-    draw_bitrate_area([](const LatencyFrame& f) { return f.video_mbps; }, 1.0f, 0.5f, 0.0f, 0.60f);
-    // RF link bitrate area fill (sky blue)
-    draw_bitrate_area([](const LatencyFrame& f) { return f.rf_mbps; }, 0.3f, 0.8f, 1.0f, 0.60f);
-
-    // Video bitrate line (orange) — scale: 0-40 Mbps
-    {
-        std::vector<math::Vec2> pts;
-        pts.reserve(count / stride + 1);
-        for (int i = 0; i < count; i += stride) {
-            float xp  = x + (max_history - count + i) * step;
-            float val = std::min(data[i].video_mbps, max_val);
-            pts.push_back({xp, y + (val / max_val) * h});
-        }
-        draw_glow_line(pts, 2.0f, 0.9f, 1.0f, 0.5f, 0.0f);  // orange
-        if (!pts.empty()) {
-            draw_panel(pts.back().x - 0.006f, pts.back().y - 0.006f, 0.012f, 0.012f, 1.0f, 1.0f, 0.5f, 0.0f); // Orange active sweeper dot
-        }
-    }
-
-    // RF link bitrate line (sky blue) — scale: 0-40 Mbps
-    {
-        std::vector<math::Vec2> pts;
-        pts.reserve(count / stride + 1);
-        for (int i = 0; i < count; i += stride) {
-            float xp  = x + (max_history - count + i) * step;
-            float val = std::min(data[i].rf_mbps, max_val);
-            pts.push_back({xp, y + (val / max_val) * h});
-        }
-        draw_glow_line(pts, 2.0f, 0.9f, 0.3f, 0.8f, 1.0f);  // sky blue
-        if (!pts.empty()) {
-            draw_panel(pts.back().x - 0.006f, pts.back().y - 0.006f, 0.012f, 0.012f, 1.0f, 0.3f, 0.8f, 1.0f); // Sky blue active sweeper dot
-        }
-    }
-
-    // --- DOTTED GRIDLINES ---
-    for (float mbps = 0.0f; mbps <= max_val; mbps += 10.0f) {
-        float line_y = y + (mbps / max_val) * h;
-        if (line_y > y + h + 0.001f) continue;
-        if (mbps > 0.0f) {
-            float tick_w = 0.015f;
-            float spacing = 0.025f;
-            for (float cur_x = x; cur_x < x + w; cur_x += tick_w + spacing) {
-                draw_panel(cur_x, line_y, tick_w, 0.0015f, 0.12f, 0.0f, 0.9f, 1.0f); // Dimmed cyan ticks
-            }
-        }
-        char lbuf[16]; snprintf(lbuf, sizeof(lbuf), "%d", (int)mbps);
-        draw_text(lbuf, x - 0.015f * osd_vars.ui_scale, line_y - 0.03f * osd_vars.ui_scale, 0.07f * osd_vars.ui_scale, true);
-    }
-    // Unit label in the bottom legend section under the 0 axis on the left
-    draw_text("Mbps", x - 0.015f * osd_vars.ui_scale, y - 0.115f, 0.07f * osd_vars.ui_scale, true);
-
-    // Duration label on the bottom left
-    draw_text("3m", x, y - 0.115f, 0.07f * osd_vars.ui_scale, false);
-
-    // --- LEGEND ---
-    leg_h    = 0.09f;
-    float leg_y    = y - 0.07f;
-    float leg_item_w = 0.60f;
-    float leg_x   = x + (w - leg_item_w * 2) / 2.0f;
-
-    auto draw_leg = [&](int idx, const char* txt, float r_c, float g_c, float b_c) {
-        float ix = leg_x + idx * leg_item_w;
-        draw_panel(ix, leg_y, 0.03f, 0.03f, 1.0f, r_c, g_c, b_c);
-        draw_text(txt, ix + 0.05f, leg_y, 0.065f);
-    };
-
-    draw_leg(0, "Vid Mbps", 1.0f, 0.5f, 0.0f);
-    draw_leg(1, "RF Mbps",  0.3f, 0.8f, 1.0f);
-}
-
-void OSD::draw_latency_health_bar(float x, float y, float h, const LatencyFrame& frame) {
-    float bar_width = 0.03f;
-    float spacing = 0.005f;
-    float slant = 0.0f; // Rectangular (no slant)
-    float current_x = x;
-    
-    // Total Latency Visualization
-    // Background Track moved to render_gl to integrate with text
-    // draw_trapezoid(x, y, 1.5f, h, 1.0f, slant, 0.4f, 0.2f, 0.2f, 0.2f); // REMOVED
-
-    auto draw_segments = [&](float val, float r, float g, float b) {
-        int num_segments = (int)(val / 2.0f); // 1 segment per 2ms
-        if (num_segments < 1 && val > 0.5f) num_segments = 1; // Minimum 1 segment if some latency exists
-        
-        for (int i = 0; i < num_segments; i++) {
-            // Draw a single slanted segment (parallelogram)
-            draw_trapezoid(current_x, y, bar_width, h, 1.0f, 0.0f, 0.9f, r, g, b);
-            current_x += bar_width + spacing;
-        }
-        // Add a small divider gap between components
-        current_x += spacing * 2.0f;
-    };
-
-    // Draw ordered components
-    // Encoder (Red) -> RF (Teal) -> Decoding (Yellow) -> Display (Red/Orange)
-    draw_segments(frame.processing_ms, 0.816f, 0.000f, 0.000f);      // Enc: Red (#D00000)
-    draw_segments(frame.net_ms, 0.012f, 0.808f, 0.643f);             // RF: Teal (#03CEB2)
-    draw_segments(frame.dec_ms, 0.918f, 0.769f, 0.208f);            // Dec: Yellow (#EAC435)
-    draw_segments(frame.disp_ms, 0.984f, 0.302f, 0.239f);           // Disp: Orange-Red (#FB4D3D)
-}
-
 void OSD::draw_stacked_bar(float x, float y, float w, float h, float slant, bool reverse, float val1, float r1, float g1, float b1, float val2, float r2, float g2, float b2, float val3, float r3, float g3, float b3, float val4, float r4, float g4, float b4, float val5, float r5, float g5, float b5, float val6, float r6, float g6, float b6) {
     float seg_w = 0.02f;
     float spacing = 0.005f;
@@ -2482,16 +2137,12 @@ void OSD::render_gl() {
             osd_vars.latency_history_last_us = now_us;
         }
     }
-    // Only what this frame shows: the newest entry and the median, plus the
-    // whole history only while the debug graphs are on (they draw all of it).
+    // Only what this frame shows: the newest entry and the median.
     LatencyFrame last_latency_frame{};
     const bool have_latency_frame = !osd_vars.latency_ring.empty();
     if (have_latency_frame) last_latency_frame = osd_vars.latency_ring.back();
     float latency_median_ms = 0.0f;
     const bool have_latency_median = osd_vars.latency_ring.median(latency_median_ms);
-    static std::vector<LatencyFrame> frames_copy;   // reused: no per-frame allocation
-    if (show_latency_graph) osd_vars.latency_ring.copy_to(frames_copy);
-    else frames_copy.clear();
     packets_stats link_stats_copy = osd_vars.link_stats;
     uint32_t v_width = osd_vars.video_width;
     uint32_t v_height = osd_vars.video_height;
@@ -2542,6 +2193,13 @@ void OSD::render_gl() {
             serial_bps_ = (dt > 0.0f && g.bytes >= serial_prev_bytes_) ? (g.bytes - serial_prev_bytes_) / dt : 0.0f;
             serial_prev_bytes_ = g.bytes;
             serial_rate_us_ = t;
+        }
+    }
+    {
+        int tilt_deg;
+        if (msp_osd.take_cam_tilt_to_save(&tilt_deg)) {
+            Settings::getInstance().set("imu_cam_tilt_deg", tilt_deg);
+            printf("hud: camera tilt %d deg, taken at arming, saved\n", tilt_deg);
         }
     }
     // A screen mode on trial that nobody kept: back to the screen's kept mode.
@@ -2626,13 +2284,10 @@ void OSD::render_gl() {
         phase_lock_.store(true, std::memory_order_relaxed);
         signal_render(prof::kWakeAnim);
     }
-    // What sits along the top: the clock strip stays; the latency graph is
-    // wide enough to reach an unfolded blade, so it lifts off while one is open.
-    math::Mat4 model_top, mvp_top, mvp_graph;
+    // What sits along the top: the clock strip.
+    math::Mat4 model_top, mvp_top;
     std::copy(model_hud_c, model_hud_c + 16, model_top);
     math::multiply(mvp_top, model_top, tmp);
-    model_top[13] += std::max(std::max(ui_open_[0], ui_open_[1]), ui_band_) * frustum_h * 0.6f;
-    math::multiply(mvp_graph, model_top, tmp);
     
     msp_osd.set_scale(s);
     // The panel layout's cell size. Full-canvas mode overrides it below, so it
@@ -3039,81 +2694,106 @@ void OSD::render_gl() {
     auto draw_msp_span_func = [&](float x, float y, const std::vector<uint16_t>& span) {
         float cw, ch;
         msp_osd.get_cell_size(cw, ch);
-        float current_x = x;
-        float scale_h = ch;
-        float scale_w = cw;
 
-        for (uint16_t char_idx : span) {
-            if (char_idx >= 1024) { current_x += cw; continue; }
+        // Each cell's texture is rendered at the size it is drawn at, on screen: a 64x64
+        // texture squashed into a cell 36x54 (a third narrower than tall) made the letters
+        // condensed and soft, next to the canopy's, which are drawn at their own pixel size.
+        // The canvas spans the picture, so a cell is the picture's pixels over the grid.
+        const float pic = dev ? dev->picture_scale_pct / 100.0f : 1.0f;
+        const float px_per_unit_x = (float)screen_w * pic / (2.0f * frustum_w);
+        const float px_per_unit_y = (float)screen_h * pic / (2.0f * frustum_h);
+        const int tw = std::max(8, (int)lroundf(cw * px_per_unit_x));
+        const int th = std::max(8, (int)lroundf(ch * px_per_unit_y));
+        if (tw != char_tex_w_ || th != char_tex_h_) {      // a new size: draw them all again
+            for (int i = 0; i < 1024; i++)
+                if (char_tex_cache[i]) { glDeleteTextures(1, &char_tex_cache[i]); char_tex_cache[i] = 0; }
+            char_tex_w_ = tw;
+            char_tex_h_ = th;
+            for (int i = 0; i < 1024; i++) { char_w_px_[i] = 0; char_adv_px_[i] = 0; }
+        }
 
-            // Ensure character is in cache (ASCII or Glyph)
-            if (char_tex_cache[char_idx] == 0) {
-                int w = 64, h = 64;
-                cairo_surface_t *surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
-                cairo_t *cr = cairo_create(surface);
-                
-                // Try the glyph table first, for every char_idx, not just the
-                // ones outside 32-126: a few reserved codes Betaflight uses
-                // as icon markers (0x77-0x7B - arrows, link quality) land
-                // inside that range, and a blanket range check here sent them
-                // straight to literal ASCII before draw_glyph ever saw them -
-                // a right-arrow icon rendered as the letter 'z', an LQ marker
-                // as a bare '{'. draw_glyph knows which in-range codes are
-                // actually reserved and declines (returns false) for
-                // everything else, so this is the one place that decides.
-                bool drawn = BetaflightGlyphs::draw_glyph(cr, char_idx, w, h);
-                if (!drawn) {
-                    // Every character's own texture is one grid cell, stretched
-                    // to cell size independently of its neighbours - there is
-                    // no shared baseline across a span the way a real text
-                    // layout would give one. Centering each glyph on ITS OWN
-                    // measured width used to fill that gap: a narrow one like
-                    // "1" or "." got padded out to the same visual width as a
-                    // wide one like "M" before either was stretched into an
-                    // (already fixed-size) cell, so the narrow, common
-                    // characters read as adrift in the middle of their cell
-                    // rather than sitting at a consistent position the way a
-                    // real monospace font does. Left-aligned at a fixed inset
-                    // instead - every glyph's ink starts at the same x - reads
-                    // as one continuous row of text instead of a grid of
-                    // separately-centred tiles.
-                    cairo_select_font_face(cr, "Chakra Petch SemiBold",
-                                           CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
-                    cairo_matrix_t font_matrix;
-                    cairo_matrix_init_scale(&font_matrix, 1.0, 1.0);
-                    cairo_matrix_scale(&font_matrix, 56.0, 56.0);
-                    cairo_set_font_matrix(cr, &font_matrix);
-
-                    cairo_text_extents_t extents;
-                    char buf[2] = {(char)char_idx, 0};
-                    cairo_text_extents(cr, buf, &extents);
-
-                    cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 1.0);
-                    cairo_move_to(cr, 6.0 - extents.x_bearing, 50);
-                    cairo_show_text(cr, buf);
-                    drawn = true;
-                }
-
-                if (drawn) {
-                    unsigned char* data = cairo_image_surface_get_data(surface);
-                    GLuint tex;
-                    glGenTextures(1, &tex);
-                    glBindTexture(GL_TEXTURE_2D, tex);
-                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
-                    char_tex_cache[char_idx] = tex;
-                }
-                cairo_destroy(cr);
-                cairo_surface_destroy(surface);
+        auto ensure = [&](uint16_t char_idx) {
+            if (char_adv_px_[char_idx] != 0) return;           // done (a blank one has an advance too)
+            // The glyph table first, for every char_idx, not just the ones outside 32-126: a few
+            // reserved codes Betaflight uses as icon markers (0x77-0x7B - arrows, link quality)
+            // land inside that range. draw_glyph knows which in-range codes are really reserved
+            // and declines (returns false) for everything else, so it is the one place that decides.
+            // An icon is a whole cell wide. Text is as wide as the letter itself.
+            double adv = 0;
+            int w = tw;
+            cairo_surface_t *probe = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 4, 4);
+            cairo_t *pc = cairo_create(probe);
+            const bool icon = BetaflightGlyphs::draw_glyph(pc, char_idx, tw, th);
+            cairo_destroy(pc);
+            cairo_surface_destroy(probe);
+            cairo_text_extents_t extents;
+            char buf[2] = {(char)char_idx, 0};
+            if (icon) {
+                adv = tw;
+            } else {
+                // Text: the canopy's face, sized to the cell's height and never stretched, spaced
+                // as the rest of the HUD spaces it - each letter its own advance, a space its own
+                // width - not one cell apiece.
+                cairo_surface_t *m = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 4, 4);
+                cairo_t *mc = cairo_create(m);
+                cairo_select_font_face(mc, "Chakra Petch SemiBold", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+                cairo_set_font_size(mc, 0.84 * th);
+                cairo_text_extents(mc, buf, &extents);
+                cairo_destroy(mc);
+                cairo_surface_destroy(m);
+                adv = extents.x_advance;
+                if (char_idx == ' ') adv = std::max(adv, 0.30 * th);
+                w = std::max(4, (int)std::ceil(std::max(adv, extents.x_bearing + extents.width)) + 3);
             }
-            
-            if (char_tex_cache[char_idx] != 0) {
-                draw_icon(char_tex_cache[char_idx], current_x, y, scale_w, scale_h,
-                          msp_theme.text[0], msp_theme.text[1], msp_theme.text[2]);
+            char_w_px_[char_idx] = w;
+            char_adv_px_[char_idx] = (float)std::max(adv, 1.0);
+            if (char_idx == ' ') return;                        // nothing to draw
+
+            cairo_surface_t *surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, th);
+            cairo_t *cr = cairo_create(surface);
+            if (icon) {
+                BetaflightGlyphs::draw_glyph(cr, char_idx, tw, th);
+            } else {
+                cairo_select_font_face(cr, "Chakra Petch SemiBold", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+                cairo_set_font_size(cr, 0.84 * th);
+                cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 1.0);
+                cairo_move_to(cr, 1.0, 0.78 * th);              // the pen, as in any line of text
+                cairo_show_text(cr, buf);
             }
-            
-            current_x += cw;
+            unsigned char* data = cairo_image_surface_get_data(surface);
+            GLuint tex;
+            glGenTextures(1, &tex);
+            glBindTexture(GL_TEXTURE_2D, tex);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, th, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
+            char_tex_cache[char_idx] = tex;
+            cairo_destroy(cr);
+            cairo_surface_destroy(surface);
+        };
+
+        // A soft drop shadow, as the canopy's type has, so it reads on bright video; the whole
+        // span's shadows first, so a glyph's shadow never lies over its neighbour. Then the
+        // glyphs, slightly dimmed like the canopy's.
+        const float sx = 1.5f / px_per_unit_x, sy = 1.5f / px_per_unit_y;
+        for (int pass = 0; pass < 2; pass++) {
+            float pen_px = 0;                                    // along the run, pixels
+            for (uint16_t char_idx : span) {
+                if (char_idx >= 1024) { pen_px += tw; continue; }
+                ensure(char_idx);
+                const float cx = x + pen_px / px_per_unit_x;
+                if (char_tex_cache[char_idx] != 0) {
+                    const float qw = char_w_px_[char_idx] / px_per_unit_x;
+                    if (pass == 0)
+                        draw_icon(char_tex_cache[char_idx], cx + sx, y - sy, qw, ch, 0.0f, 0.0f, 0.0f, 0.55f);
+                    else
+                        draw_icon(char_tex_cache[char_idx], cx, y, qw, ch,
+                                  msp_theme.text[0], msp_theme.text[1], msp_theme.text[2], 0.92f);
+                }
+                pen_px += char_adv_px_[char_idx];
+            }
         }
     };
 
@@ -3398,30 +3078,6 @@ void OSD::render_gl() {
             bind_anim_us = 0;
             bind_locked_us = 0;
         }
-    }
-
-    // --- TOP: Split Latency & Bitrate History Graphs ---
-    // The largest single thing on screen, so it is FULL-only regardless of the
-    // Graph toggle - that toggle still turns it off within FULL.
-    // The Graph toggle stands alone. It used to also require HUD Detail FULL,
-    // which the menu never said, so ON with any other level drew nothing.
-    // Detail is due a rework; until then the graph obeys its own switch.
-    if (show_latency_graph) {
-        glUniformMatrix4fv(u_mvp_, 1, GL_FALSE, mvp_graph);
-        float graph_w = fmin(4.9f * s, (frustum_w * 2.0f) - 0.4f);
-        float graph_x = -graph_w / 2.0f;
-        
-        // 1. Latency Graph (Top) — 70ms ceiling at the same ms-per-pixel density
-        // as the old 45ms/0.30 scale; the extra height mostly grows UP into the
-        // former top margin (0.15 -> 0.05).
-        float lat_h = 0.30f * s * (70.0f / 45.0f);
-        float lat_y = frustum_h - 0.05f - lat_h;
-        draw_latency_graph(graph_x, lat_y, graph_w, lat_h, frames_copy, 70.0f, cur_fps);
-        
-        // 2. Bitrate Graph (Bottom)
-        float bit_h = 0.18f * s;
-        float bit_y = lat_y - 0.12f * s - bit_h;
-        draw_bitrate_graph(graph_x, bit_y, graph_w, bit_h, frames_copy, 40.0f);
     }
 
     // --- PANEL LAYOUT VARS ---
@@ -4244,11 +3900,8 @@ uint64_t OSD::next_render_interval_us() {
     if (anim) return 16667;                                  // animating: 60 Hz
 
     uint64_t us = (uint64_t)refresh_frequency_ms * 1000;    // idle: 1 s
-    // The scrolling debug graphs: continuous motion.
     // (The HUD moving with the craft asks for frames itself while its spring
     // is settling - see render_gl.)
-    if (show_latency_graph)
-        us = std::min<uint64_t>(us, 33333);
     // Connected: figures, freshness and stall detection (the red rails come
     // up 400 ms into a stall) - 10 Hz is ample for all of them.
     if (link_watch_ || hud_connected_)
@@ -4799,6 +4452,11 @@ int OSD::dvr_source_now() const {
     return dvr_screen ? 1 : 0;
 }
 
+int OSD::hud_row(int shown) const {
+    const bool voltage_listed = menu_hud_style == kHudCanopy;
+    return (!voltage_listed && shown >= kHudRowVoltage) ? shown + 1 : shown;
+}
+
 const char* OSD::menu_help_text(int tab, int i, const char* fallback) {
     if (tab == 3 && i == kDispFrameMode) {
         // Lowest latency first; what each one costs.
@@ -4851,12 +4509,10 @@ const char* OSD::menu_help_text(int tab, int i, const char* fallback) {
         return wifi.c_str();
     }
     if (tab == 2 && i == kHudRowStyle && menu_hud_style == kHudCanopy)
-        return "Reads its figures off Betaflight's OSD.\n"
-               "Enable these elements there: Battery voltage, Current draw, "
-               "Fly mode, Link quality, Pitch angle, Roll angle (for reactive "
-               "HUD), Ground speed.\n"
-               "Keep each clear of its neighbours: a voltage needs its battery "
-               "icon and V intact to be picked up.";
+        return "Battery, flight mode and GPS come from the flight controller "
+               "(polled over MSP) and the HUD's movement from the camera's IMU.\n"
+               "Link quality is still read off Betaflight's OSD: enable that "
+               "element there.";
     return fallback;
 }
 
@@ -4885,7 +4541,8 @@ static int video_row(int shown) {
 static const char kAirCapsHelp[] =
     "What this air unit's kestrel-air has on. Air Timing: its own times in each slice. "
     "Radio Clock: pictures stamped on the radio's clock. Intra Refresh: no keyframe spikes. "
-    "IMU Data: gyro samples with the video. Bandwidth Cap: takes RADIO > Max Bandwidth.";
+    "Camera IMU: the camera's gyro samples with the video. FC IMU: the flight controller's gyro, "
+    "polled, for an air unit with no IMU on its camera. Bandwidth Cap: takes RADIO > Max Bandwidth.";
 
 // A row label made at run time (the capabilities list), kept for good: a
 // MenuItem holds only the pointer, and a set's strings never move.
@@ -4961,25 +4618,18 @@ std::vector<OSD::MenuItem> OSD::menu_items(int tab) const {
             }
         }
     } else if (tab == 2) { // HUD Tab - what is drawn over the video
-        // Grouped under section headers (type 2: a label with no value column,
-        // and skipped over by the row cursor - see menu_first_selectable_row())
-        // so the list reads as four small decisions instead of one long scroll.
         items = {
             // Order matches HudRow in osd.hpp - change both together.
-            {"OVERLAY", 2},
             {"HUD Style", 1, "Which overlay is drawn over the video."},
-            {"Betaflight OSD", 1, "Draw Betaflight's own OSD across the screen. With the "
-                                  "canopy on, what the canopy already shows is left out."},
-            {"READOUTS", 2},
-            {"Voltage", 1, "A cell figure reads the same on any pack size."},
-            {"Graph", 1, "Latency and bitrate history across the top."},
+            {"Betaflight OSD", 1, "Draw Betaflight's own OSD across the screen."},
+            {"Canopy Voltage", 1, "The canopy's headline voltage: per cell reads the same on any pack size."},
             {"Calib Distance", 3, "Zero the range reading where you are standing. "
                                   "The arrows trim the offset by hand.", "ENTER: ZERO HERE"},
-            {"SCREEN", 2},
             {"Clock", 1, "When the time is shown at the top of the screen, and how it is written."},
-            {"ATTITUDE", 2},
             {"Dynamic HUD", 1, "Let the panels move with the aircraft."}
         };
+        // Only the canopy has a headline voltage to set; the rows after it close up (hud_row()).
+        if (menu_hud_style != kHudCanopy) items.erase(items.begin() + kHudRowVoltage);
     } else if (tab == 3) { // DISPLAY Tab - how the screen looks
         // This tab was PHYSICS, two cosmetic toggles on their own. The screen
         // and decoration settings that were scattered across HUD and SYSTEM
@@ -5086,7 +4736,7 @@ int OSD::menu_options(int tab, int index, char out[kMenuOptMax][kMenuOptLen], in
     if (cur) *cur = 0;
     const bool self_saving = (tab == 3 && index == kDispBrightness) ||
                              (tab == 3 && index == kDispUiScale) ||
-                             (tab == 2 && index == kHudRowCalib);
+                             (tab == 2 && hud_row(index) == kHudRowCalib);
     if (self_saving) return 0;
 
     if (tab == menu_opt_tab_ && index == menu_opt_idx_) {
@@ -5188,7 +4838,7 @@ int OSD::menu_range_ladder(int tab, int index, int span,
         }
     };
 
-    if (tab == 2 && index == kHudRowCalib) return 0;   // an action
+    if (tab == 2 && hud_row(index) == kHudRowCalib) return 0;   // an action
 
     if (tab == 3 && index == kDispBrightness) {   // 0..100 in fives
         for (int k = -span; k <= span; k++) {
@@ -5328,14 +4978,8 @@ bool OSD::menu_row_applies_live(int tab, int index) {
     if (tab == 2) {
         // Every HUD row writes as it goes, Calib Distance's arrows included;
         // its Enter is a capture, not an apply.
-        switch (index) {
-            case kHudRowStyle: case kHudRowBfOsd: case kHudRowVoltage:
-            case kHudRowGraph: case kHudRowCalib: case kHudRowClock:
-            case kHudRowDynamic:
-                return true;
-            default:
-                return false;
-        }
+        // (The headers cannot be selected, so which row `index` is makes no difference.)
+        return true;
     }
     if (tab == 3)   // DISPLAY: all but Background Video, which owns a player
         return index != kDispBgVideo;
@@ -5404,41 +5048,32 @@ void OSD::menu_apply_change(int tab, int index, int dir) {
                default: break;
            }
        }
-    } else if (menu_tab == 2) { // HUD - indices follow the grouped order in
-                                 // menu_items(): OVERLAY, READOUTS, SCREEN,
-                                 // ATTITUDE, with a header row (skipped by the
-                                 // cursor) opening each group.
-        if (menu_index == kHudRowStyle) {
+    } else if (menu_tab == 2) { // HUD - rows as listed in menu_items(), see hud_row()
+        if (hud_row(menu_index) == kHudRowStyle) {
             menu_hud_style = menu_step(menu_hud_style, dir, kHudStyleCount);
             if (!menu_stepping_) {
                 hud_style = menu_hud_style;
                 Settings::getInstance().set("hud_overlay", hud_style);
             }
-        } else if (menu_index == kHudRowBfOsd) {
+        } else if (hud_row(menu_index) == kHudRowBfOsd) {
             menu_bf_osd = menu_step(menu_bf_osd ? 1 : 0, dir, 2) != 0;
             if (!menu_stepping_) {
                 bf_osd = menu_bf_osd;
                 Settings::getInstance().set("bf_osd", bf_osd ? 1 : 0);
             }
-        } else if (menu_index == kHudRowVoltage) {
+        } else if (hud_row(menu_index) == kHudRowVoltage) {
             menu_volt_mode = menu_step(menu_volt_mode, dir, 2);
             if (!menu_stepping_) {
                 volt_mode = menu_volt_mode;
                 Settings::getInstance().set("volt_mode", volt_mode);
             }
-        } else if (menu_index == kHudRowGraph) {
-            menu_show_latency_graph = menu_step(menu_show_latency_graph ? 1 : 0, dir, 2) != 0;
-            if (!menu_stepping_) {
-                show_latency_graph = menu_show_latency_graph;
-                Settings::getInstance().set("show_latency_graph", show_latency_graph);
-            }
-        } else if (menu_index == kHudRowCalib) {
+        } else if (hud_row(menu_index) == kHudRowCalib) {
             // left/right nudges the calibration by 1
             if (!menu_stepping_) {
                 dist_offset = std::max(0, dist_offset + dir);
                 Settings::getInstance().set("dist_offset", dist_offset);
             }
-        } else if (menu_index == kHudRowClock) {
+        } else if (hud_row(menu_index) == kHudRowClock) {
             const int c = menu_step(clock_choice(menu_clock_show, menu_clock_mode), dir, kClockChoices);
             menu_clock_show = c == 0 ? 0 : 1 + (c - 1) / 2;
             if (c > 0) menu_clock_mode = ((c - 1) % 2) ? 2 : 1;
@@ -5448,7 +5083,7 @@ void OSD::menu_apply_change(int tab, int index, int dir) {
                 Settings::getInstance().set("clock_show", clock_show);
                 Settings::getInstance().set("clock_mode", clock_mode);
             }
-        } else if (menu_index == kHudRowDynamic) {
+        } else if (hud_row(menu_index) == kHudRowDynamic) {
             menu_hud_reactivity = menu_step(menu_hud_reactivity, dir, 4);
             if (!menu_stepping_) {
                 hud_reactivity = menu_hud_reactivity;
@@ -5641,25 +5276,23 @@ void OSD::menu_value_text(int tab, int i, char* val_buf, size_t cap) {
                 default: break;
             }
         }
-        } else if (menu_tab == 2) { // HUD Tab - grouped order, see menu_items()
-            if (i == kHudRowStyle) {
+        } else if (menu_tab == 2) { // HUD Tab - see menu_items() and hud_row()
+            if (hud_row(i) == kHudRowStyle) {
                 static const char* kStyleLabels[kHudStyleCount] = { "OFF", "CANOPY", "ARENA", "ARENA FULL" };
                 int m = (menu_hud_style >= 0 && menu_hud_style < kHudStyleCount) ? menu_hud_style : 0;
                 sprintf(val_buf, "< %s >", kStyleLabels[m]);
-            } else if (i == kHudRowBfOsd) {
+            } else if (hud_row(i) == kHudRowBfOsd) {
                 sprintf(val_buf, "< %s >", menu_bf_osd ? "ON" : "OFF");
-            } else if (i == kHudRowVoltage) {
+            } else if (hud_row(i) == kHudRowVoltage) {
                 sprintf(val_buf, "< %s >", menu_volt_mode == 1 ? "PACK" : "PER CELL");
-            } else if (i == kHudRowGraph) {
-                sprintf(val_buf, "< %s >", menu_show_latency_graph ? "ON" : "OFF");
-            } else if (i == kHudRowCalib) {
+            } else if (hud_row(i) == kHudRowCalib) {
                 // Enter zeroes the reading; show what is being subtracted.
                 if (link_distance_raw < 0) sprintf(val_buf, "ofs %d", dist_offset);
                 else sprintf(val_buf, "raw %d  ofs %d", link_distance_raw, dist_offset);
-            } else if (i == kHudRowClock) {
+            } else if (hud_row(i) == kHudRowClock) {
                 const int show = (menu_clock_show >= 0 && menu_clock_show < 3) ? menu_clock_show : 1;
                 sprintf(val_buf, "< %s >", kClockLabels[clock_choice(show, menu_clock_mode)]);
-            } else if (i == kHudRowDynamic) {
+            } else if (hud_row(i) == kHudRowDynamic) {
                 const char* react_labels[4] = { "OFF", "SMALL", "MEDIUM", "EXTREME" };
                 int r = (menu_hud_reactivity >= 0 && menu_hud_reactivity < 4) ? menu_hud_reactivity : 2;
                 sprintf(val_buf, "< %s >", react_labels[r]);
@@ -5800,8 +5433,8 @@ std::vector<int> OSD::ui_side_tabs(int side) const {
     std::vector<int> v;
     if (osd_vars.artosyn.state == 2) v.push_back(0);
     v.push_back(1);
-    v.push_back(+kTabAirInfo);   // by value: a static const int has no definition to bind to
-    v.push_back(+kTabAirSerial);
+    v.push_back(+kTabAirSerial);   // by value: a static const int has no definition to bind to
+    v.push_back(+kTabAirInfo);
     return v;
 }
 
@@ -6012,7 +5645,6 @@ void OSD::handle_key(int key) {
              menu_scan_open = false;
              menu_synced = false;
              if (cmd_cb) cmd_cb(0x0E, 0);
-             menu_show_latency_graph = show_latency_graph;
              memset(menu_dirty, 0, sizeof(menu_dirty));   // re-seeded = nothing pending
              menu_bf_osd = bf_osd;
              menu_clock_mode = clock_mode;
@@ -6039,15 +5671,6 @@ void OSD::handle_key(int key) {
              menu_ar_maxbw = ar_maxbw_index(Ar8030Source::max_bw_mhz);
              menu_refresh_options();      // seeded: work out what row 0 shows
         }
-        render_requested = true;
-        pthread_cond_signal(&osd_cond);
-        pthread_mutex_unlock(&osd_mutex);
-        return;
-    }
-    
-    if (key == 'g' || key == 'G') {
-        show_latency_graph = !show_latency_graph;
-        Settings::getInstance().set("show_latency_graph", show_latency_graph);
         render_requested = true;
         pthread_cond_signal(&osd_cond);
         pthread_mutex_unlock(&osd_mutex);
@@ -6283,10 +5906,10 @@ void OSD::handle_key(int key) {
                         default: break;
                     }
                 }
-            } else if (menu_tab == 2) { // HUD - grouped order, see menu_items()
+            } else if (menu_tab == 2) { // HUD - see menu_items() and hud_row()
                 // Only Calib Distance has anything for Enter to do. Every
                 // other row applies and saves as the arrows move it.
-                if (menu_index == kHudRowCalib) {
+                if (hud_row(menu_index) == kHudRowCalib) {
                     // Zero the ranging: with the units side by side, Enter
                     // captures the current reading as the new base value. The
                     // arrows nudge the same offset by hand.

@@ -190,6 +190,9 @@ class OSD {
         uint64_t text_cache_clock = 0;
         MspOsd msp_osd;
         GLuint char_tex_cache[1024] = {0};
+        int char_tex_w_ = 0, char_tex_h_ = 0;   // the pixel size char_tex_cache was rendered at
+        int   char_w_px_[1024] = {0};           // each cached texture's width, pixels
+        float char_adv_px_[1024] = {0};         // how far the pen moves after it: a letter's own advance, an icon's cell
 
         struct gbm_bo *locked_bo = nullptr;
         std::vector<struct gbm_bo*> bo_release_queue;
@@ -568,14 +571,12 @@ class OSD {
         int menu_tab = 0; // 0: Video, 1: RF
 
         bool menu_synced = false;
-        bool show_latency_graph = false; // Default OFF
         bool show_all_adapters = false; // Default OFF
         bool bg_video_enabled = true;   // Default ON — use background.mp4
         // Reactive HUD intensity: 0=OFF 1=SMALL 2=MEDIUM 3=EXTREME.
         // MEDIUM is the tuned default (see kBankGain/kMaxOffset in msp_osd).
         int  hud_reactivity = 2;
 
-        bool menu_show_latency_graph = false;
         // A row is "modified but not committed" from the moment left/right
         // changes it until Enter applies it. Tracked as a flag per row rather
         // than by diffing against the applied value: several rows have no
@@ -587,9 +588,8 @@ class OSD {
         // VIDEO, AR8030, HUD, DISPLAY, DVR, SYSTEM. DVR sits next to DISPLAY
         // because it is a thing you set; SYSTEM is last because it is a thing
         // you read.
-        // SERIAL (7) is the air unit's flight controller port, after INFO.
-        // INFO (6) came later: it is the air unit's, listed after RADIO on its
-        // blade (ui_side_tabs), and numbered last so no other tab moves.
+        // INFO (6) and SERIAL (7) came later: they are the air unit's, listed after RADIO on its
+        // blade (ui_side_tabs: SERIAL, then INFO), and numbered last so no other tab moves.
         static const int kMenuTabs = 8, kMenuRows = 24;
         static const int kTabDvr = 4, kTabSystem = 5, kTabAirInfo = 6, kTabAirSerial = 7;
         // DISPLAY rows, in the order they are listed. The tab is dispatched
@@ -607,16 +607,16 @@ class OSD {
         // One step on the Area, Country or Timezone row: the zone it lands on.
         // Timezone is only listed for a country with more than one zone.
         int  menu_step_zone(int row, int dir);
-        // HUD rows, headers included, in the order they are listed.
+        // HUD rows, in the order they are listed.
         enum HudRow {
-            kHudHdrOverlay = 0, kHudRowStyle, kHudRowBfOsd,
-            kHudHdrReadouts, kHudRowVoltage, kHudRowGraph, kHudRowCalib,
-            kHudHdrScreen, kHudRowClock,
-            kHudHdrAttitude, kHudRowDynamic
+            kHudRowStyle = 0, kHudRowBfOsd, kHudRowVoltage, kHudRowCalib, kHudRowClock, kHudRowDynamic
         };
         // A row's help line, which for a few rows depends on the value it is
         // showing; everything else gets its MenuItem::help back.
         const char* menu_help_text(int tab, int i, const char* fallback);
+        // The HUD tab lists Canopy Voltage only with the canopy up, which moves the rows after it:
+        // the HudRow a listed row is, whatever is shown above it.
+        int hud_row(int shown) const;
         // Amber line below a row's help, shown whatever its value; nullptr for none.
         const char* menu_help_warning(int tab, int i);
         bool menu_dirty[kMenuTabs][kMenuRows] = {};
@@ -795,7 +795,7 @@ class OSD {
         void draw_debug_chart();
         void draw_panel(float x, float y, float w, float h, float alpha, float r = 0.1f, float g = 0.1f, float b = 0.15f);
         void draw_trapezoid(float x, float y, float w, float h, float top_scale, float slant, float alpha, float r, float g, float b);
-        void draw_icon(GLuint tex, float x, float y, float w, float h, float r = 1.0f, float g = 1.0f, float b = 1.0f);
+        void draw_icon(GLuint tex, float x, float y, float w, float h, float r = 1.0f, float g = 1.0f, float b = 1.0f, float alpha = 1.0f);
         void ensure_text_texture(const char* text);
         // Rendered width of `text` at `scale`, in the same units draw_text uses
         // for right-alignment. Lets a right-aligned line be built from several
@@ -809,10 +809,6 @@ class OSD {
         void draw_icon_quad(GLuint tex, math::Vec2 bl, math::Vec2 br, math::Vec2 tr, math::Vec2 tl, float r = 1.0f, float g = 1.0f, float b = 1.0f);
         
         // Visual Telemetry Helpers
-        void draw_graph(float x, float y, float w, float h, const std::vector<float>& data, float max_val, float r, float g, float b);
-        void draw_latency_graph(float x, float y, float w, float h, const std::vector<LatencyFrame>& data, float max_val, int fps = 120);
-        void draw_bitrate_graph(float x, float y, float w, float h, const std::vector<LatencyFrame>& data, float max_val);
-        void draw_latency_health_bar(float x, float y, float h, const LatencyFrame& frame);
         void draw_stacked_bar(float x, float y, float w, float h, float slant, bool reverse, float val1, float r1, float g1, float b1, float val2 = 0, float r2 = 0, float g2 = 0, float b2 = 0, float val3 = 0, float r3 = 0, float g3 = 0, float b3 = 0, float val4 = 0, float r4 = 0, float g4 = 0, float b4 = 0, float val5 = 0, float r5 = 0, float g5 = 0, float b5 = 0, float val6 = 0, float r6 = 0, float g6 = 0, float b6 = 0);
         void draw_signal_bar(float x, float y, float w, float h, float value, float min_val, float max_val);
         

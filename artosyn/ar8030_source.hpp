@@ -102,7 +102,7 @@ class Ar8030Source {
         // kestrel-air's capabilities, named for the INFO tab, by the feature bit
         // that says the air unit has it on.
         struct AirCap { uint8_t bit; const char *key; const char *name; };
-        static const AirCap kAirCaps[5];
+        static const AirCap kAirCaps[6];
         // What the air unit has on, by name: its feature bits.
         static std::vector<std::string> air_cap_names(const AirInfo &a);
         static int air_floor_us;       // fastest capture -> first slice (air_floor_ms), see air_delay_for
@@ -435,10 +435,12 @@ class Ar8030Source {
         // the stock air app sends zeros there. Reset at every link-up, since the
         // next air unit may be the other kind. The feature bits are kestrel-air's
         // (sky.h there): 1 = per-slice air-side times in the header bytes 35..41,
-        // 2 = intra refresh (keyframes only when asked for), 4 = IMU SEI.
+        // 2 = intra refresh (keyframes only when asked for), 4 = the camera's IMU
+        // (samples as SEI in the video), 32 = the flight controller's IMU instead
+        // (MSP_RAW_IMU polled 20 a second, relayed as every MSP response is).
         static constexpr uint8_t kAirFeatLatInfo = 0x01;
         static constexpr uint8_t kAirFeatIntraRefresh = 0x02;
-        static constexpr uint8_t kAirFeatImu = 0x04;
+        static constexpr uint8_t kAirFeatCamImu = 0x04;
         bool     air_ver_seen_ = false;
         bool     air_kestrel_ = false;
         uint8_t  air_proto_ = 0;
@@ -462,6 +464,7 @@ class Ar8030Source {
         // instead of pinned to air_floor_us.
         static constexpr uint8_t kAirFeatApClock = 0x08;   // byte 2: the stamp's sub-ms part
         static constexpr uint8_t kAirFeatMaxBw = 0x10;     // takes the goggle's bandwidth cap (sky 0x41)
+        static constexpr uint8_t kAirFeatFcImu = 0x20;     // the flight controller's IMU (the Lite+: none on the camera)
         int64_t  ap_off_us_ = 0;
         bool     ap_off_valid_ = false;
         uint64_t ap_poll_ms_ = 0;

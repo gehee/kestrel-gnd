@@ -365,11 +365,12 @@ Ar8030Source::AirInfo Ar8030Source::air_info() {
     return air_info_;
 }
 
-const Ar8030Source::AirCap Ar8030Source::kAirCaps[5] = {
+const Ar8030Source::AirCap Ar8030Source::kAirCaps[6] = {
     { kAirFeatLatInfo,      "air-timing",    "Air Timing" },
     { kAirFeatApClock,      "radio-clock",   "Radio Clock" },
     { kAirFeatIntraRefresh, "intra-refresh", "Intra Refresh" },
-    { kAirFeatImu,          "imu",           "IMU Data" },
+    { kAirFeatCamImu,       "cam-imu",       "Camera IMU" },
+    { kAirFeatFcImu,        "fc-imu",        "FC IMU" },
     { kAirFeatMaxBw,        "bandwidth-cap", "Bandwidth Cap" },
 };
 
@@ -2935,10 +2936,11 @@ void Ar8030Source::note_air_announce(bool ka, uint8_t proto, uint8_t feat) {
     lat_enc_.clear(); lat_queue_.clear(); lat_write_.clear();
     lat_depth_max_ = 0;
     if (ka) {
-        printf("ar8030: the air unit is kestrel-air, protocol %u, features:%s%s%s%s%s\n", proto,
+        printf("ar8030: the air unit is kestrel-air, protocol %u, features:%s%s%s%s%s%s\n", proto,
                (feat & kAirFeatLatInfo) ? " air-side-times" : "",
                (feat & kAirFeatIntraRefresh) ? " intra-refresh" : "",
-               (feat & kAirFeatImu) ? " imu" : "",
+               (feat & kAirFeatCamImu) ? " cam-imu" : "",
+               (feat & kAirFeatFcImu) ? " fc-imu" : "",
                (feat & kAirFeatApClock) ? " us-radio-clock" : "",
                (feat & kAirFeatMaxBw) ? " max-bandwidth" : "");
         // Its own settings, which it keeps in RAM only: sent once it has said

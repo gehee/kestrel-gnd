@@ -33,6 +33,7 @@ void ImuStream::clear_locked() {
     head_ = 0;
     count_ = 0;
     q_ = Quat();
+    still_us_ = 0;
     blk_n_ = 0;
     blk_sq_ = 0;
     blk_sum_[0] = blk_sum_[1] = blk_sum_[2] = 0;
@@ -58,7 +59,7 @@ void ImuStream::test_fix_bias(const double dps[3]) {
 }
 
 // gyro_rad: the IMU's own axes, rad/s.
-void ImuStream::add_sample(int64_t t, const double g[3]) {
+void ImuStream::add_sample(int64_t t, const double g[3], const double a[3]) {
     // Learn the gyro's offset while the unit sits still: 250-sample blocks whose spread is tiny
     // and whose mean is small pull the bias estimate towards the block mean.
     if (!bias_fixed_) {
@@ -85,6 +86,28 @@ void ImuStream::add_sample(int64_t t, const double g[3]) {
     double u[3] = { g[0] - bias_[0], g[1] - bias_[1], g[2] - bias_[2] };
     double w[3] = { -u[0], u[1], -u[2] };
     if (angle_ == 180) { w[0] = -w[0]; w[1] = -w[1]; }
+
+    // The accelerometer in the camera's axes, the same flips as the gyro's. Resting gravity: while
+    // nothing turns and it reads 1 g, average it; any movement starts over.
+    double ac[3] = { -a[0], a[1], -a[2] };
+    if (angle_ == 180) { ac[0] = -ac[0]; ac[1] = -ac[1]; }
+    {
+        const double wn = std::sqrt(w[0] * w[0] + w[1] * w[1] + w[2] * w[2]) * 180.0 / kPi;
+        const double an = std::sqrt(ac[0] * ac[0] + ac[1] * ac[1] + ac[2] * ac[2]);
+        if (wn < 3.0 && std::fabs(an - 1.0) < 0.04) {
+            const int64_t dt = count_ ? t - at(count_ - 1).t : 0;
+            if (still_us_ == 0 || dt <= 0 || dt > kGapUs) {
+                for (int i = 0; i < 3; i++) acc_lp_[i] = ac[i];
+                still_us_ = 1;
+            } else {
+                const double k = std::min(1.0, dt * 1e-6 / 0.4);
+                for (int i = 0; i < 3; i++) acc_lp_[i] += k * (ac[i] - acc_lp_[i]);
+                still_us_ += dt;
+            }
+        } else {
+            still_us_ = 0;
+        }
+    }
 
     if (count_) {
         const Entry& last = at(count_ - 1);
@@ -147,7 +170,8 @@ bool ImuStream::on_sei_nal(const uint8_t* nal, size_t len) {
         if (p[16] != 1) continue;                      // a version this does not know
         const int n = rd16(p + 16 + 20);
         const double glsb = rd16(p + 16 + 22) / 10.0;  // LSB per degree per second
-        if (glsb <= 0 || (size_t)(16 + 26 + n * 14) > ps) continue;
+        const double alsb = rd16(p + 16 + 24);         // LSB per g
+        if (glsb <= 0 || alsb <= 0 || (size_t)(16 + 26 + n * 14) > ps) continue;
         const uint64_t t0 = rd64(p + 16 + 12);
         ours = true;
 
@@ -164,7 +188,9 @@ bool ImuStream::on_sei_nal(const uint8_t* nal, size_t len) {
             }
             double g[3];
             for (int j = 0; j < 3; j++) g[j] = rds16(s + 2 + 2 * j) / glsb * kPi / 180.0;
-            add_sample(t, g);
+            double a[3];
+            for (int j = 0; j < 3; j++) a[j] = rds16(s + 8 + 2 * j) / alsb;
+            add_sample(t, g, a);
         }
     }
     return ours;
@@ -210,6 +236,18 @@ bool ImuStream::recent_rate_dps(int64_t window_us, double w_dps[3]) const {
         for (int i = 0; i < 3; i++) sum[i] += at(k - 1).w[i];
     if (!n) return false;
     for (int i = 0; i < 3; i++) w_dps[i] = sum[i] / n * 180.0 / kPi;
+    return true;
+}
+
+bool ImuStream::resting_down(double down[3]) const {
+    std::lock_guard<std::mutex> l(mu_);
+    if (!count_ || last_rx_ms_ < 0 || still_us_ < 500000) return false;
+    const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (now_ms - last_rx_ms_ > 100) return false;
+    const double n = std::sqrt(acc_lp_[0] * acc_lp_[0] + acc_lp_[1] * acc_lp_[1] + acc_lp_[2] * acc_lp_[2]);
+    if (n < 0.5) return false;
+    for (int i = 0; i < 3; i++) down[i] = -acc_lp_[i] / n;       // the accelerometer reads up
     return true;
 }
 

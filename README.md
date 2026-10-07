@@ -29,8 +29,7 @@ refresh rate unless `--disable-vrr`. Screen mode overridable with
 `--screen-mode 1920x1080@120`.
 
 **OSD** — a separate DRM plane, so `--no-osd` leaves the video path untouched.
-Five menu tabs: VIDEO, RF LINK, HUD, PHYSICS, SYSTEM. Latency panel and
-history graph, link stats (SNR, MCS, frequency, bandwidth, gain), TX power,
+Five menu tabs: VIDEO, RF LINK, HUD, PHYSICS, SYSTEM. Latency panel, link stats (SNR, MCS, frequency, bandwidth, gain), TX power,
 LDPC error ratio, FPS/bitrate, and a Betaflight MSP grid fed from the telemetry
 socket.
 
