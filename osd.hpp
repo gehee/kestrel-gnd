@@ -584,8 +584,10 @@ class OSD {
         // VIDEO, AR8030, HUD, DISPLAY, DVR, SYSTEM. DVR sits next to DISPLAY
         // because it is a thing you set; SYSTEM is last because it is a thing
         // you read.
-        static const int kMenuTabs = 6, kMenuRows = 24;
-        static const int kTabDvr = 4, kTabSystem = 5;
+        // INFO (6) came later: it is the air unit's, listed after RADIO on its
+        // blade (ui_side_tabs), and numbered last so no other tab moves.
+        static const int kMenuTabs = 7, kMenuRows = 24;
+        static const int kTabDvr = 4, kTabSystem = 5, kTabAirInfo = 6;
         // DISPLAY rows, in the order they are listed. The tab is dispatched
         // by index in half a dozen places, so the order lives here once and
         // the dispatchers name the row rather than count to it.
@@ -1031,11 +1033,14 @@ class OSD {
         // type: 0 a reading, 1 a setting, 2 a section header, 3 an action.
         // An action has no values to walk; the value column shows what Enter
         // does (hint) and, for one that runs a while, how it is going.
+        // type: 0 a reading, 1 a setting, 2 a group's name, 3 an action, 4 a reading
+        // whose label is the text, wrapped at ", " over as many lines as it takes.
         struct MenuItem { const char* label; int type; const char* help = nullptr;
                           const char* hint = nullptr; };
         void menu_action_status(int tab, int i, char* hint, size_t hcap,
                                 char* status, size_t scap);
         std::vector<MenuItem> menu_items(int tab) const;
+        static const char* menu_intern(const std::string& s);
         void set_video_mode_names(const std::vector<std::string>& n, int current) {
             video_mode_names = n;
             if (current >= 0 && current < (int)n.size()) menu_video_mode = current;

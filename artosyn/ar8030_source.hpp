@@ -78,6 +78,33 @@ class Ar8030Source {
         // The air unit's project number (TLV 0x11: 4 Lite, 6 RC, 7 Lite+), 0 until
         // it reports; picks the power levels it is offered (ar_pwr_offered).
         static std::atomic<int> air_prj;
+        // What the air unit says it is and runs (AIR UNIT > INFO): from its version
+        // message (cmd 0x04, stock and kestrel-air) and kestrel-air's info message
+        // (0x50, "key=value" lines). Emptied when the link goes, so it is always
+        // the unit on the other end.
+        struct AirInfo {
+            bool version = false;       // a version message came
+            bool kestrel = false;       // ... saying kestrel-air
+            int  stock[3] = {0, 0, 0};  // the stock firmware's APP_VERSION, both apps
+            int  hw = -1;               // board-ID version byte (0x10..0x13)
+            uint32_t chipid = 0;        // bytes 1..4 from the stock app (it sends 0); the tag from kestrel-air
+            int  rf_hw = -1;            // the RF board's version, TLV 0x14 of cmd 0x03
+            int  proto = 0;             // kestrel-air's protocol and feature bits
+            uint8_t feat = 0;
+            std::vector<std::pair<std::string, std::string>> kv;   // from 0x50
+            std::string get(const char *k) const {
+                for (const auto &e : kv) if (e.first == k) return e.second;
+                return std::string();
+            }
+        };
+        static AirInfo air_info();
+        static void clear_air_info();
+        // kestrel-air's capabilities, named for the INFO tab, by the feature bit
+        // that says the air unit has it on.
+        struct AirCap { uint8_t bit; const char *key; const char *name; };
+        static const AirCap kAirCaps[5];
+        // What the air unit has on, by name: its feature bits.
+        static std::vector<std::string> air_cap_names(const AirInfo &a);
         static int air_floor_us;       // fastest capture -> first slice (air_floor_ms), see air_delay_for
         static bool tx_power_auto;
         void apply_tx_power(int mw); // PA output; stock uses 24
@@ -419,6 +446,9 @@ class Ar8030Source {
         unsigned air_untagged_ = 0;      // sane headers in a row without the tag
         bool     air_hdr_tag_ = false;   // seen in a slice header, which is more reliable than the message
         void note_air_version(const uint8_t *pl, size_t n);
+        void note_air_info(const uint8_t *pl, size_t n);
+        static std::mutex air_info_mtx_;
+        static AirInfo air_info_;
         void note_air_announce(bool ka, uint8_t proto, uint8_t feat);
         // Air-side times of each slice, us, over 5 s windows, from the header.
         std::vector<uint32_t> lat_enc_, lat_queue_, lat_write_;

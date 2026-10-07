@@ -116,7 +116,7 @@ constexpr float kDrop = 12.0f;
 // the slant. Worked out in one place because the labels over the blades while
 // a side is being picked (draw_canopy_pick) are drawn in it too.
 struct CanopyFrame {
-    float sd = 1.0f;          // the UI scale, damped
+    float sd = 1.0f;          // the UI scale
     float UX = 0, U = 0;      // one mockup column, one mockup row
     float LX = 0, RX = 0;     // the screen edges
     float BY = 0;             // the bottom
@@ -158,21 +158,19 @@ CanopyFrame canopy_frame(float frustum_w, float frustum_h, float overscan, float
     // Horizontally, one mockup pixel is 1/1200 of the frame WIDTH and ignores
     // the UI scale entirely. Two reasons. Mapping x through the height would
     // tie the composition to the aspect ratio, so the same layout would claim
-    // more of a 16:9 frame than of the 1200x620 it was drawn on. And scaling x
-    // with the UI setting means asking for legible type also buys a wider
-    // panel - at 1.3x that pushed each wing from 23% of the width to 34%, so
-    // the two of them ate more of the frame than the video kept. Turning the
-    // scale up is a request for bigger text, not for a bigger HUD; the centre
-    // of the screen is the thing the whole layout exists to protect.
-    // The UI scale is damped rather than applied outright. The canopy is drawn
-    // at a fixed fraction of the frame, so a scale that grows type by a third
-    // grows nothing to put it in - the headline simply runs off the end of its
-    // own track. A third of the setting keeps the panel recognisably the shape
-    // it was designed as while still answering "make it bigger".
-    F.sd = 1.0f + (s - 1.0f) * 0.35f;
+    // more of a 16:9 frame than of the 1200x620 it was drawn on.
+    //
+    // UI Scaling scales the whole canopy, both axes alike: type, rows, and the
+    // lengths of its tracks, graphs and grounds, anchored where it is (the
+    // screen edges and the bottom). It used to take a third of the setting,
+    // and only for rows and type, so the panels kept their size while the text
+    // in them changed - at 0.5x the type sat small in full-length bars. Larger
+    // settings widen the wings towards the centre in proportion (about 23% of
+    // the width each at 1.0x, so 2.0x brings them close to meeting).
+    F.sd = s;
     const float base = (frustum_h * 2.0f) / 620.0f;
-    F.UX = ((frustum_w * 2.0f) / 1200.0f) / mag;  // columns
-    F.U  = (base * F.sd) / mag;                         // rows
+    F.UX = ((frustum_w * 2.0f) / 1200.0f) * F.sd / mag;  // columns
+    F.U  = (base * F.sd) / mag;                          // rows
     F.LX = -ex;                                   // left screen edge
     F.RX =  ex;                                   // right screen edge
     F.BY = (-frustum_h + overscan) / mag;    // bottom
@@ -1315,7 +1313,7 @@ void OSD::draw_canopy_pick(const CanopyIn& in, float pick) {
         draw_text(left ? "<  GOGGLE" : "AIR UNIT  >", x, BL(name_base, T_NAME), T_NAME, !left,
                   nc[0], nc[1], nc[2]);
         if (a_alpha_factor_ != -1) glVertexAttrib1f(a_alpha_factor_, pick * (on ? 0.85f : 0.6f));
-        draw_text(left ? "HUD   DISPLAY   DVR   SYSTEM" : "VIDEO   RADIO", x, BL(list_base, T_LIST), T_LIST, !left,
+        draw_text(left ? "HUD   DISPLAY   DVR   SYSTEM" : "VIDEO   RADIO   INFO", x, BL(list_base, T_LIST), T_LIST, !left,
                   lc[0], lc[1], lc[2]);
     }
     if (a_alpha_factor_ != -1) glVertexAttrib1f(a_alpha_factor_, 1.0f);

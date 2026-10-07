@@ -356,6 +356,32 @@ bool Ar8030Source::chan_auto = true;
 bool Ar8030Source::chan_manual_cli = false;
 int Ar8030Source::tx_power_mw  = kArPwrDefaultMw;
 std::atomic<int> Ar8030Source::air_prj{0};
+std::mutex Ar8030Source::air_info_mtx_;
+Ar8030Source::AirInfo Ar8030Source::air_info_;
+
+Ar8030Source::AirInfo Ar8030Source::air_info() {
+    std::lock_guard<std::mutex> g(air_info_mtx_);
+    return air_info_;
+}
+
+const Ar8030Source::AirCap Ar8030Source::kAirCaps[5] = {
+    { kAirFeatLatInfo,      "air-timing",    "Air Timing" },
+    { kAirFeatApClock,      "radio-clock",   "Radio Clock" },
+    { kAirFeatIntraRefresh, "intra-refresh", "Intra Refresh" },
+    { kAirFeatImu,          "imu",           "IMU Data" },
+    { kAirFeatMaxBw,        "bandwidth-cap", "Bandwidth Cap" },
+};
+
+std::vector<std::string> Ar8030Source::air_cap_names(const AirInfo &a) {
+    std::vector<std::string> out;
+    for (const auto &c : kAirCaps) if (a.feat & c.bit) out.push_back(c.name);
+    return out;
+}
+
+void Ar8030Source::clear_air_info() {
+    std::lock_guard<std::mutex> g(air_info_mtx_);
+    air_info_ = AirInfo();
+}
 int Ar8030Source::tx_power_dbm = kArPwrLevels[ar_pwr_index(kArPwrDefaultMw)].dbm;
 bool Ar8030Source::tx_power_auto = false;
 bool Ar8030Source::skip_handshake = false;
@@ -483,6 +509,7 @@ void Ar8030Source::on_link_event(const uint8_t* p) {
     else if (p[1] == 0 && now_ms() - bw_change_ms_.load() > 2000) {
         video_bw_idx_.store(-1);
         air_prj.store(0);          // the next air unit says what it is
+        clear_air_info();
     }
     printf("ar8030: event: link state %u -> %u\n", p[2], p[1]);
     if (osd) {
@@ -1312,6 +1339,7 @@ void Ar8030Source::scan_air_status(const uint8_t *buf, int n) {
         // VTX temperature - whichever is closer to a thermal limit is the
         // number that matters. Log periodically for post-mortems.
         if (buf[i + 6] == 0x04) note_air_version(buf + i + 6, len - 6 - 5);
+        if (buf[i + 6] == 0x50) note_air_info(buf + i + 6, len - 6 - 5);
 
         if (buf[i + 6] == 0x05 && (len - 6 - 5) >= 34) {
             const uint8_t *pl = buf + i + 6;
@@ -1408,6 +1436,11 @@ void Ar8030Source::scan_air_status(const uint8_t *buf, int n) {
         // What the air unit is decides which power levels it is offered, as on
         // stock. A power it is not offered (a Lite still set to 500mW) is
         // brought down to the nearest one it is, and sent to it.
+        int rf_hw = sky::Proto::find_tlv(pl, pl_len, sky::Proto::TLV_SKY_RF_HWVER);
+        if (rf_hw >= 0) {
+            std::lock_guard<std::mutex> g(air_info_mtx_);
+            air_info_.rf_hw = rf_hw;
+        }
         int prj = sky::Proto::find_tlv(pl, pl_len, sky::Proto::TLV_SKY_PRJ_NAME);
         if (prj > 0 && prj != air_prj.load()) {
             air_prj.store(prj);
@@ -2844,11 +2877,53 @@ uint32_t Ar8030Source::air_delay_for(uint64_t recv_us) {
 void Ar8030Source::note_air_version(const uint8_t *pl, size_t n) {
     if (n < 8) return;
     const bool ka = pl[1] == 'K' && pl[2] == 'A';
+    if (n >= 14) {
+        // Bytes 9, 11, 13: the stock firmware's APP_VERSION; 5: the board-ID
+        // version (kestrel-air sends them as stock does).
+        std::lock_guard<std::mutex> g(air_info_mtx_);
+        air_info_.version = true;
+        air_info_.kestrel = ka;
+        air_info_.stock[0] = pl[9] | (pl[10] << 8);
+        air_info_.stock[1] = pl[11] | (pl[12] << 8);
+        air_info_.stock[2] = pl[13] | (pl[14] << 8);
+        air_info_.hw = pl[5];
+        air_info_.chipid = ka ? 0 : (uint32_t)(pl[1] | (pl[2] << 8) | (pl[3] << 16) | ((uint32_t)pl[4] << 24));
+    }
     if (!ka && air_hdr_tag_) return;
     note_air_announce(ka, ka ? pl[3] : 0, ka ? pl[4] : 0);
 }
 
+// 0x50, kestrel-air's info message: "key=value" lines (protocol/kestrel_air.h
+// there, KA_MSG_INFO). pl[0] is the cmd byte. Logged when it changes.
+void Ar8030Source::note_air_info(const uint8_t *pl, size_t n) {
+    std::vector<std::pair<std::string, std::string>> kv;
+    std::string text((const char *)pl + 1, n > 0 ? n - 1 : 0), line;
+    for (size_t a = 0; a < text.size();) {
+        size_t e = text.find('\n', a);
+        if (e == std::string::npos) e = text.size();
+        line = text.substr(a, e - a);
+        a = e + 1;
+        const size_t eq = line.find('=');
+        if (eq == std::string::npos || eq == 0) continue;
+        std::string v = line.substr(eq + 1);
+        for (char &c : v) if ((unsigned char)c < 0x20 || (unsigned char)c > 0x7e) c = '?';
+        kv.emplace_back(line.substr(0, eq), v);
+    }
+    std::lock_guard<std::mutex> g(air_info_mtx_);
+    if (kv == air_info_.kv) return;
+    air_info_.kv = kv;
+    printf("ar8030: air unit info:");
+    for (const auto &e : kv) printf(" %s=%s", e.first.c_str(), e.second.c_str());
+    printf("\n");
+}
+
 void Ar8030Source::note_air_announce(bool ka, uint8_t proto, uint8_t feat) {
+    {
+        std::lock_guard<std::mutex> g(air_info_mtx_);
+        air_info_.kestrel = ka;
+        air_info_.proto = ka ? proto : 0;
+        air_info_.feat = ka ? feat : 0;
+    }
     if (air_ver_seen_ && ka == air_kestrel_ && proto == air_proto_ && feat == air_feat_) return;
     air_ver_seen_ = true;
     air_kestrel_ = ka;
@@ -4114,6 +4189,7 @@ void Ar8030Source::run() {
                         resync_prev_cap_ = 0;
                         resync_start_ms_ = now_ms();
                         air_ver_seen_    = false;   // the next air unit may be the other kind
+                        clear_air_info();
                         air_hdr_tag_     = false;
                         air_kestrel_     = false;
                         air_feat_        = 0;

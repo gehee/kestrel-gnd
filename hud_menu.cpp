@@ -16,13 +16,15 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <string>
+#include <vector>
 
 namespace {
 
 constexpr int kVisibleMax = 16;
 
 // Tab names: AR8030 is the radio, and on the air unit's blade it says so.
-constexpr const char* kTabNames[6] = { "VIDEO", "RADIO", "HUD", "DISPLAY", "DVR", "SYSTEM" };
+constexpr const char* kTabNames[7] = { "VIDEO", "RADIO", "HUD", "DISPLAY", "DVR", "SYSTEM", "INFO" };
 
 // Keep the selection in the middle of the window where the list is long enough
 // to allow it, and pinned at the ends where it is not.
@@ -172,6 +174,30 @@ void OSD::draw_side_panel(int side, float x, float y, float w, float h, float u)
             continue;
         }
         const bool on = (idx == sel);
+        if (it.type == 4) {                            // a list, wrapped where ", " allows
+            const float lh = f_row * 1.4f, room = w - 2 * pad;
+            std::vector<std::string> lines(1);
+            const std::string text = it.label;
+            for (size_t p = 0; p < text.size();) {
+                size_t e = text.find(", ", p);
+                const std::string part = text.substr(p, e == std::string::npos ? std::string::npos : e + 1 - p);
+                p = e == std::string::npos ? text.size() : e + 2;
+                const std::string trial = lines.back().empty() ? part : lines.back() + " " + part;
+                if (!lines.back().empty() && px_text_w(trial.c_str(), f_row) > room) lines.push_back(part);
+                else lines.back() = trial;
+            }
+            const float rh = std::fmax(row_h, lh * (float)lines.size() + (row_h - lh));
+            if (ry + rh > list_bottom + 6 * u) break;  // no room for all of it: stop above the help
+            if (on) {
+                px_fill(x + pad * 0.5f, ry + 2 * u, w - pad, rh - 4 * u, lit_bg, 0.95f);
+                px_frame(x + pad * 0.5f, ry + 2 * u, w - pad, rh - 4 * u, ring, T.accent, 1.0f);
+            }
+            for (size_t l = 0; l < lines.size(); l++)
+                px_text(lines[l].c_str(), x + pad, ry + (row_h - lh) * 0.5f + lh * (float)l + lh * 0.5f + f_row * 0.36f,
+                        f_row, 0, scaled(T.text, on ? 1.0f : 0.82f), 1.0f);
+            ry += rh;
+            continue;
+        }
         const bool open_row = on && editing;
         const float rh = open_row ? row_h + open_extra : row_h;
         if (on) {

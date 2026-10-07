@@ -14,6 +14,8 @@
 #include <unistd.h>
 #include <xf86drm.h>
 #include <algorithm>
+#include <set>
+#include <mutex>
 #include <chrono>
 #include <iomanip>
 #include <cmath>
@@ -4863,6 +4865,21 @@ static int video_row(int shown) {
     return shown >= 2 && shown <= 10 ? shown - 1 : shown;
 }
 
+// AIR UNIT > INFO's capabilities rows: their help, which also marks them.
+static const char kAirCapsHelp[] =
+    "What this air unit's kestrel-air has on. Air Timing: its own times in each slice. "
+    "Radio Clock: pictures stamped on the radio's clock. Intra Refresh: no keyframe spikes. "
+    "IMU Data: gyro samples with the video. Bandwidth Cap: takes RADIO > Max Bandwidth.";
+
+// A row label made at run time (the capabilities list), kept for good: a
+// MenuItem holds only the pointer, and a set's strings never move.
+const char* OSD::menu_intern(const std::string& s) {
+    static std::mutex m;
+    static std::set<std::string> pool;
+    std::lock_guard<std::mutex> g(m);
+    return pool.insert(s).first->c_str();
+}
+
 std::vector<OSD::MenuItem> OSD::menu_items(int tab) const {
     std::vector<MenuItem> items;
     if (tab == 0) { // Video Tab
@@ -4966,6 +4983,39 @@ std::vector<OSD::MenuItem> OSD::menu_items(int tab) const {
             {"Folder", 0, "Where recordings are written."},
             {"Space Left", 0, "Room remaining on the recordings partition."}
         };
+    } else if (tab == kTabAirInfo) { // AIR UNIT > INFO - what the linked air unit says it is
+        // The first rows are stock's Device Info for the air unit (TX HW / SN / SW
+        // Version), worked out as stock does, so they read the same for either air
+        // app. The rest only when kestrel-air answers: what makes it fpvOS. Rows
+        // come and go with that, so the values go by label (menu_value_text).
+        const Ar8030Source::AirInfo a = Ar8030Source::air_info();
+        items = {
+            {"AIR UNIT", 2},
+            {"Model", 0, "The air unit on the other end of the link, as it reports itself."},
+            {"HW Version", 0, "As stock shows it: the board's version, then the RF board's."},
+            {"SN", 0, "As stock shows it: the model, then the radio chip's ID. Caddx's air app "
+                      "always reports 0 there, so an Ascent reads H_Sky_000000."},
+            {"SW Version", 0, "The Caddx firmware on the air unit, as stock shows it. With fpvOS it "
+                              "is the stock firmware fpvOS runs on."},
+        };
+        if (osd_vars.artosyn.state == 2 && (a.kestrel || !a.kv.empty())) {
+            items.push_back({"FPVOS", 2});
+            items.push_back({"fpvOS", 0, "The fpvOS air image the unit was flashed with."});
+            items.push_back({"kestrel-air", 0, "fpvOS's air app: it runs the camera and the radio in "
+                                               "place of Caddx's."});
+            items.push_back({"Radio Driver", 0, "What drives the AR8030 radio on the air unit."});
+            items.push_back({"Kernel", 0, "The air unit's Linux kernel (the stock one)."});
+            items.push_back({"Camera", 0, "The camera's image sensor."});
+            // What it has on, as one comma-separated list: a row of type 4,
+            // which the blade wraps over as many lines as it takes.
+            const std::vector<std::string> caps = Ar8030Source::air_cap_names(a);
+            if (!caps.empty()) {
+                items.push_back({"CAPABILITIES", 2});
+                std::string list;
+                for (size_t k = 0; k < caps.size(); k++) list += (k ? ", " : "") + caps[k];
+                items.push_back({menu_intern(list), 4, kAirCapsHelp});
+            }
+        }
     } else { // SYSTEM
         items = {
             {"Build", 0},
@@ -5616,6 +5666,49 @@ void OSD::menu_value_text(int tab, int i, char* val_buf, size_t cap) {
             } else if (i == 2) {
                 sprintf(val_buf, "%s", dvr_space_left());
             }
+        } else if (menu_tab == kTabAirInfo) {
+            // Stock's placeholders until the air unit has said ("-.-", "--------",
+            // "-.-.-"), and its formats after (GlassesUI's Device Info).
+            const std::vector<MenuItem> rows = menu_items(tab);
+            const char* L = (i >= 0 && i < (int)rows.size()) ? rows[i].label : "";
+            const bool linked = osd_vars.artosyn.state == 2;
+            const Ar8030Source::AirInfo a = linked ? Ar8030Source::air_info() : Ar8030Source::AirInfo();
+            const int prj = linked ? Ar8030Source::air_prj.load() : 0;
+            std::string v;
+            if (!strcmp(L, "Model")) {
+                v = a.get("model");
+                if (v.empty() && prj > 0) v = ar_air_name(prj);
+                if (v.empty()) v = "--";
+            } else if (!strcmp(L, "HW Version")) {
+                if (a.hw > 0 && a.rf_hw >= 0)
+                    snprintf(val_buf, cap, "%d.%d-%d.%d", a.hw >> 4, a.hw & 15, a.rf_hw >> 4, a.rf_hw & 15);
+                else
+                    snprintf(val_buf, cap, "-.-");
+                return;
+            } else if (!strcmp(L, "SN")) {
+                if (a.hw > 0 && prj > 0) snprintf(val_buf, cap, "%s%06X", ar_air_sn_prefix(prj), a.chipid & 0xffffff);
+                else snprintf(val_buf, cap, "--------");
+                return;
+            } else if (!strcmp(L, "SW Version")) {
+                if (a.hw > 0) snprintf(val_buf, cap, "%d.%d.%d", a.stock[0], a.stock[1], a.stock[2]);
+                else snprintf(val_buf, cap, "-.-.-");
+                return;
+            } else if (!strcmp(L, "fpvOS")) {
+                v = a.get("os");
+            } else if (!strcmp(L, "kestrel-air")) {
+                v = a.get("ver");
+                if (!v.empty() && a.proto) v += " (protocol " + std::to_string(a.proto) + ")";
+            } else if (!strcmp(L, "Radio Driver")) {
+                v = a.get("radio");
+                if (!v.empty()) v = "ar_libre " + v;
+            } else if (!strcmp(L, "Kernel")) {
+                v = a.get("kernel");
+            } else if (!strcmp(L, "Camera")) {
+                v = a.get("sensor");
+            } else if (i >= 0 && i < (int)rows.size() && rows[i].help == kAirCapsHelp) {
+                return;                                // a line of the capabilities list
+            }
+            snprintf(val_buf, cap, "%s", v.empty() ? "--" : v.c_str());
         } else if (menu_tab == kTabSystem) {
             if (i == 0) {
                 sprintf(val_buf, "%s", KESTREL_GND_BUILD_TIME);
@@ -5665,6 +5758,7 @@ std::vector<int> OSD::ui_side_tabs(int side) const {
     std::vector<int> v;
     if (osd_vars.artosyn.state == 2) v.push_back(0);
     v.push_back(1);
+    v.push_back(kTabAirInfo);
     return v;
 }
 

@@ -166,6 +166,20 @@ static inline const char *ar_air_name(int air_prj) {
         default: return "unknown";
     }
 }
+// The serial number's prefix stock's Device Info gives an air unit of this
+// project number (GlassesUI: "%s%06X" with the chip ID's low 24 bits).
+static inline const char *ar_air_sn_prefix(int air_prj) {
+    switch (air_prj) {
+        case 0: return "Avatar_";
+        case 1: return "AvatarSE_";
+        case 2: return "AvatarMini_";
+        case 3: return "L_Sky_";
+        case 4: case 6: case 7: return "H_Sky_";
+        case 5: return "G_Sky_";
+        case 8: return "GR_Sky_";
+        default: return "AvatarX_";
+    }
+}
 // mw's place in the air unit's list, or -1.
 static inline int ar_pwr_offer_index(int air_prj, int mw) {
     ar_pwr_offer o = ar_pwr_offered(air_prj);
