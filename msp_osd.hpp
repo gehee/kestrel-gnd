@@ -7,6 +7,7 @@
 #include <mutex>
 #include "utils/math_utils.hpp"
 #include <functional>
+#include "msp_telem.hpp"
 
 // MSP DisplayPort Commands (0-based index in payload[0])
 #define MSP_DP_HEARTBEAT 0
@@ -42,6 +43,12 @@ struct BfTelem {
     // matching Betaflight's own sign convention for these elements.
     bool  have_pitch  = false;  float pitch_deg = 0.0f;
     bool  have_roll   = false;  float roll_deg  = 0.0f;
+    // From the values the air unit polls (msp_telem.hpp); the OSD text has none of them.
+    // Nothing draws these yet.
+    bool  have_batt_pct = false; int batt_pct = 0;             // from mAh drawn and the pack's capacity
+    bool  have_gps      = false; int gps_fix = 0, sats = 0;    // fix: 0 none, 1 2D, 2 3D
+    bool  have_pos      = false; double lat = 0.0, lon = 0.0;
+    bool  have_home     = false; int home_dist_m = 0, home_dir_deg = 0;   // to home
     // -1 unknown (nothing in the OSD says either way), 0 disarmed, 1 armed.
     int   arm = -1;
     uint64_t stamp_us = 0;      // when this screen was committed
@@ -80,11 +87,6 @@ class MspOsd {
         static const int GRID_H = 20;
         Cell grid[GRID_H][GRID_W];
         Cell pending_grid[GRID_H][GRID_W]; // Back buffer for Double Buffering
-        // Cells the HUD's own overlay already accounts for: the elements the
-        // scrape reads (voltage, current, timer, mode, RSSI, attitude...).
-        // Filled alongside the scrape, so it always describes `grid`, and
-        // read by draw_region when asked to leave those cells blank.
-        bool owned[GRID_H][GRID_W] = {};
         
         // Double buffer?
         // MSP_DP_DRAW_SCREEN commits changes.
@@ -153,6 +155,12 @@ class MspOsd {
         // nothing else said; kept for links that carry no MSP_STATUS.
         int      last_timer_s   = -1;
         uint64_t timer_moved_us = 0;
+        // Polled values (msp_telem.hpp), each group stamped when it last came.
+        MspTelem mt_;
+        uint64_t mt_us_[6] = {0, 0, 0, 0, 0, 0};    // by MspTelem::Group, bit 0 first
+        uint64_t msp_frame_us_ = 0;
+        std::atomic<uint32_t> n_msp_{0}, n_msp_bytes_{0};
+        void apply_polled_locked(unsigned groups);
         void scrape_locked();
         void handle_status(const uint8_t* p, size_t n);
         void handle_analog(const uint8_t* p, size_t n);
@@ -172,17 +180,22 @@ class MspOsd {
         // Whether attitude changes are worth a redraw (the reactive HUD is
         // showing them). Set by the OSD every frame.
         void set_motion_wanted(bool on) { motion_wanted_ = on; }
-        uint32_t content_version() const { return content_ver_.load(std::memory_order_relaxed); }
+        // Also what the camera's IMU says (the reactive HUD's input): any turning is news. Polled
+        // here, from the OSD thread's own loop.
+        uint32_t content_version();
         MspOsd();
         void parse_byte(uint8_t b);
         void parse_bytes(const uint8_t* p, size_t size);
         
         void handle_msp_frame(uint16_t function, const uint8_t* payload, size_t size);
         BfTelem get_telem();
+        // What this end has received and understood, for AIR UNIT > SERIAL: MSP frames
+        // and their bytes, and whether one came in the last 3 s.
+        struct MspCounts { uint32_t frames = 0, bytes = 0; bool active = false; };
+        MspCounts msp_counts();
         
         void draw(math::Mat4& projection, math::Mat4& view, std::function<void(float x, float y, const std::vector<uint16_t>& span)> draw_span_cb);
-        // skip_owned: leave out the cells the HUD overlay already shows.
-        void draw_region(int r_start, int c_start, int r_cnt, int c_cnt, float x, float y, std::function<void(float x, float y, const std::vector<uint16_t>& span)> draw_span_cb, bool skip_owned = false);
+        void draw_region(int r_start, int c_start, int r_cnt, int c_cnt, float x, float y, std::function<void(float x, float y, const std::vector<uint16_t>& span)> draw_span_cb);
         void set_scale(float scale) { m_scale = scale; }
         void set_cell_size(float w, float h) { m_cell_w = w; m_cell_h = h; }
         void get_cell_size(float& w, float& h) { w = m_cell_w; h = m_cell_h; }

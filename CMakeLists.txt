@@ -49,6 +49,8 @@ set(SOURCE_FILES
         betaflight_glyphs.cpp
         settings.cpp
         msp_osd.cpp
+        msp_telem.cpp
+        stab/imu_stream.cpp
         webstream.cpp
         wifi_ap.cpp
         artosyn/ar8030_source.cpp

@@ -2528,6 +2528,22 @@ void OSD::render_gl() {
             if (menu_open) menu_refresh_options();
         }
     }
+    // AIR UNIT > SERIAL counts up while it is open: redraw four times a second.
+    if (menu_open && menu_tab == kTabAirSerial) {
+        const uint64_t t = get_time_us();
+        if (t - serial_tab_us_ >= 250000ULL) { serial_tab_us_ = t; render_requested = true; }
+        // The frame rate: the count a second apart.
+        if (t - serial_rate_us_ >= 500000ULL) {      // twice a second, and only with this tab open
+            const MspOsd::MspCounts g = msp_osd.msp_counts();
+            const uint32_t n = g.frames;
+            const float dt = serial_rate_us_ ? (t - serial_rate_us_) / 1e6f : 0.0f;
+            serial_rate_ = (dt > 0.0f && n >= serial_prev_) ? (n - serial_prev_) / dt : 0.0f;
+            serial_prev_ = n;
+            serial_bps_ = (dt > 0.0f && g.bytes >= serial_prev_bytes_) ? (g.bytes - serial_prev_bytes_) / dt : 0.0f;
+            serial_prev_bytes_ = g.bytes;
+            serial_rate_us_ = t;
+        }
+    }
     // A screen mode on trial that nobody kept: back to the screen's kept mode.
     if (screen_confirm_ && screen_confirm_left_s() <= 0) {
         screen_confirm_ = false;
@@ -3923,7 +3939,7 @@ void OSD::render_gl() {
         msp_osd.draw_region(0, 0, gh, gw,
                             -((float)gw * cw) / 2.0f,
                             ((float)gh * ch) / 2.0f - ch,
-                            draw_msp_span_func, canopy_on);
+                            draw_msp_span_func);
     }
 
     prof::mark(prof::kBfGrid);
@@ -5016,6 +5032,15 @@ std::vector<OSD::MenuItem> OSD::menu_items(int tab) const {
                 items.push_back({menu_intern(list), 4, kAirCapsHelp});
             }
         }
+    } else if (tab == kTabAirSerial) { // AIR UNIT > SERIAL - what the flight controller stream carries
+        // Read-only, and counted here at the goggle from the telemetry stream the air
+        // unit relays (nothing extra is sent for it). Values go by label (menu_value_text).
+        items = {
+            {"FLIGHT CONTROLLER", 2},
+            {"Receiving", 0, "Whether MSP frames from the flight controller are coming in now."},
+            {"Frames", 0, "MSP frames received and understood, with the rate."},
+            {"Data", 0, "Flight controller frames arriving, in bytes a second. Measured while this tab is open."},
+        };
     } else { // SYSTEM
         items = {
             {"Build", 0},
@@ -5709,6 +5734,23 @@ void OSD::menu_value_text(int tab, int i, char* val_buf, size_t cap) {
                 return;                                // a line of the capabilities list
             }
             snprintf(val_buf, cap, "%s", v.empty() ? "--" : v.c_str());
+        } else if (menu_tab == kTabAirSerial) {
+            const std::vector<MenuItem> rows = menu_items(tab);
+            const char* L = (i >= 0 && i < (int)rows.size()) ? rows[i].label : "";
+            const bool linked = osd_vars.artosyn.state == 2;
+            const MspOsd::MspCounts g = msp_osd.msp_counts();
+            snprintf(val_buf, cap, "--");
+            if (false) {
+            } else if (!strcmp(L, "Receiving")) {
+                if (linked) snprintf(val_buf, cap, "%s", g.active ? "MSP" : "NOTHING");
+            } else if (!strcmp(L, "Data")) {
+                if (linked) {
+                    if (serial_bps_ >= 1000.0f) snprintf(val_buf, cap, "%.1f KB/s", serial_bps_ / 1000.0f);
+                    else snprintf(val_buf, cap, "%.0f B/s", serial_bps_);
+                }
+            } else if (!strcmp(L, "Frames")) {
+                if (linked) snprintf(val_buf, cap, "%u  (%.0f/s)", (unsigned)g.frames, serial_rate_);
+            }
         } else if (menu_tab == kTabSystem) {
             if (i == 0) {
                 sprintf(val_buf, "%s", KESTREL_GND_BUILD_TIME);
@@ -5758,7 +5800,8 @@ std::vector<int> OSD::ui_side_tabs(int side) const {
     std::vector<int> v;
     if (osd_vars.artosyn.state == 2) v.push_back(0);
     v.push_back(1);
-    v.push_back(kTabAirInfo);
+    v.push_back(+kTabAirInfo);   // by value: a static const int has no definition to bind to
+    v.push_back(+kTabAirSerial);
     return v;
 }
 

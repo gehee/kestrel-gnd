@@ -24,7 +24,7 @@ namespace {
 constexpr int kVisibleMax = 16;
 
 // Tab names: AR8030 is the radio, and on the air unit's blade it says so.
-constexpr const char* kTabNames[7] = { "VIDEO", "RADIO", "HUD", "DISPLAY", "DVR", "SYSTEM", "INFO" };
+constexpr const char* kTabNames[8] = { "VIDEO", "RADIO", "HUD", "DISPLAY", "DVR", "SYSTEM", "INFO", "SERIAL" };
 
 // Keep the selection in the middle of the window where the list is long enough
 // to allow it, and pinned at the ends where it is not.

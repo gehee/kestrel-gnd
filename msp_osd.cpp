@@ -1,4 +1,5 @@
 #include "msp_osd.hpp"
+#include "stab/imu_stream.hpp"
 #include "utils/time_util.h"
 #include <cstdio>
 #include <cstring>
@@ -165,7 +166,7 @@ void MspOsd::parse_byte(uint8_t b) {
     }
 }
 
-// void MspOsd::handle_msp_frame(uint16_t function, const uint8_t* payload, size_t size) {
+// // void MspOsd::handle_msp_frame(uint16_t function, const uint8_t* payload, size_t size) {
 // The AR8030 air unit does not forward Betaflight's DisplayPort verbatim. It
 // re-encodes a whole screen refresh into one MSP v2 frame on function 182:
 //
@@ -397,23 +398,6 @@ void MspOsd::scrape_locked() {
     BfTelem t;
     t.stamp_us = get_time_us();
 
-    // Which cells the HUD overlay accounts for - see `owned`. Everything the
-    // scrape reads is claimed as it is read, glyph and figure together, so
-    // the mask and the values can never disagree about what was found.
-    memset(owned, 0, sizeof(owned));
-    auto own = [&](int r, int b, int e) {
-        if (b < 0) b = 0;
-        if (e >= GRID_W) e = GRID_W - 1;
-        for (int c = b; c <= e; c++) owned[r][c] = true;
-    };
-    // The run of non-space cells starting at b, for the elements whose
-    // figure follows the glyph.
-    auto run_end = [&](const char* line, int b) {
-        int e = b;
-        while (e + 1 < GRID_W && line[e + 1] != ' ') e++;
-        return e;
-    };
-
     // One row at a time, as a plain char string: every value Betaflight draws
     // sits on a single row, and the units are single glyphs beside the digits.
     char line[GRID_W + 1];
@@ -432,23 +416,7 @@ void MspOsd::scrape_locked() {
         for (int c = 0; c < GRID_W; c++) {
             uint16_t g = raw[c];
 
-            if (g == BF_SYM_DISARMED) { saw_disarmed_glyph = true; own(r, c, c); }
-
-            // A voltage element - pack or average cell, Betaflight draws both
-            // the same way - is masked whole when, and only when, it has the
-            // shape "<batt>3.83<V>": a battery-fill icon, the figure, the V.
-            // The shape decides, never the figure: pack and cell are not told
-            // apart by value here, so neither can slip through for reading on
-            // the wrong side of some threshold. Anything short of the whole
-            // shape - a lone icon, or "<batt>3.83" with its V blanked by an
-            // overlapping element - is left entirely on screen.
-            if (g >= 0x90 && g <= 0x96) {
-                int e = c;
-                while (e + 1 < GRID_W &&
-                       (isdigit((unsigned char)line[e + 1]) || line[e + 1] == '.')) e++;
-                if (e > c && e + 1 < GRID_W && raw[e + 1] == BF_SYM_VOLT)
-                    own(r, c, e + 1);
-            }
+            if (g == BF_SYM_DISARMED) { saw_disarmed_glyph = true; }
 
             // Number to the LEFT of a unit glyph: "16.4<V>", "18.4<A>".
             if (g == BF_SYM_VOLT || g == BF_SYM_AMP_A || g == BF_SYM_AMP_B ||
@@ -468,23 +436,19 @@ void MspOsd::scrape_locked() {
                         switch (g) {
                         case BF_SYM_VOLT:
                             // One glyph serves both the pack reading and the
-                            // average-cell one. 5V splits them for what value
-                            // canopy reports. Masking is not decided here:
-                            // the battery-icon rule above owns a voltage
-                            // element by its shape, whatever it reads.
+                            // average-cell one. 5V splits them.
                             if (v > 0.0f && v < 5.0f)  { t.have_cell_v = true; t.cell_v = v; }
                             else if (v >= 5.0f)        { t.have_pack_v = true; t.pack_v = v; }
                             break;
                         case BF_SYM_AMP_A:
                         case BF_SYM_AMP_B:
-                            t.have_amps = true; t.amps = v; own(r, b, c); break;
+                            t.have_amps = true; t.amps = v; break;
                         case BF_SYM_ALT_M:
-                            // Not owned: the canopy shows no altitude.
                             t.have_alt = true;  t.alt_m = v; break;
                         case BF_SYM_KMH:
-                            t.have_speed = true; t.speed_kmh = v; own(r, b, c); break;
+                            t.have_speed = true; t.speed_kmh = v; break;
                         case BF_SYM_MPH:
-                            t.have_speed = true; t.speed_kmh = v * 1.609344f; own(r, b, c); break;
+                            t.have_speed = true; t.speed_kmh = v * 1.609344f; break;
                         }
                     }
                 }
@@ -498,9 +462,6 @@ void MspOsd::scrape_locked() {
                     float v = strtof(line + c + 1, nullptr);
                     if (g == BF_SYM_PITCH) { t.have_pitch = true; t.pitch_deg = v; }
                     else                   { t.have_roll  = true; t.roll_deg  = v; }
-                    int b = c + 1;
-                    while (b < GRID_W && line[b] == ' ') b++;
-                    own(r, c, b < GRID_W ? run_end(line, b) : c);
                 }
             }
 
@@ -562,7 +523,7 @@ void MspOsd::scrape_locked() {
                         int v = atoi(num);
                         int e = (int)(num - line);
                         while (e + 1 < GRID_W && isdigit((unsigned char)line[e + 1])) e++;
-                        if (v >= 0 && v <= 100) { t.have_lq = true; t.lq_pct = v; own(r, c, e); }
+                        if (v >= 0 && v <= 100) { t.have_lq = true; t.lq_pct = v; }
                     }
                 }
             }
@@ -574,7 +535,6 @@ void MspOsd::scrape_locked() {
                 if (!hit) continue;
                 t.have_mode = true;
                 snprintf(t.mode, sizeof(t.mode), "%s", kBfModes[m]);
-                own(r, (int)(hit - line), (int)(hit - line) + (int)strlen(kBfModes[m]) - 1);
                 // "HOR " and "AIR " carry their trailing space in the table so
                 // they cannot match inside a longer word; the HUD does not
                 // want to draw it.
@@ -583,10 +543,7 @@ void MspOsd::scrape_locked() {
                 break;
             }
         }
-        if (const char* dz = strstr(line, "DISARMED")) {
-            saw_disarmed_text = true;
-            own(r, (int)(dz - line), (int)(dz - line) + 7);
-        }
+        if (strstr(line, "DISARMED")) saw_disarmed_text = true;
     }
 
     // Arm state. The flight timer is the only element that is unambiguous
@@ -619,6 +576,7 @@ BfTelem MspOsd::get_telem() {
     std::lock_guard<std::mutex> lock(mtx);
     BfTelem t = telem;      // whatever the last screen's glyphs yielded
     uint64_t now = get_time_us();
+
 
     // The structured replies win wherever they exist: more precision, no
     // dependency on the pilot having enabled an OSD element, and for arm state
@@ -664,6 +622,39 @@ BfTelem MspOsd::get_telem() {
         if (raw_have_pack_v_ && (raw_is_newer || !t.have_pack_v)) { t.have_pack_v = true; t.pack_v = raw_pack_v_; }
         if (raw_have_mode_   && (raw_is_newer || !t.have_mode))   { t.have_mode = true; snprintf(t.mode, sizeof(t.mode), "%s", raw_mode_); }
     }
+    // The polled values win over the OSD text: exact, and there whether or not the
+    // pilot enabled an OSD element. Each group goes stale after 2 s (GPS 4 s: it is
+    // asked for less often), so a dead link stops asserting.
+    {
+        const MspTelemState& s = mt_.state();
+        auto fresh = [&](unsigned g, uint64_t ms) {
+            for (int i = 0; i < 6; i++)
+                if (g == (1u << i)) return mt_us_[i] && now - mt_us_[i] < ms * 1000ULL;
+            return false;
+        };
+        if (s.have_batt && fresh(MspTelem::G_BATT, 2000)) {
+            if (s.pack_v > 0.5f) { t.have_pack_v = true; t.pack_v = s.pack_v; }
+            if (s.cells > 0 && s.pack_v > 0.5f) { t.have_cell_v = true; t.cell_v = s.pack_v / s.cells; }
+            t.have_amps = true; t.amps = s.amps;
+            if (s.capacity_mah > 0) {
+                int pct = 100 - (int)((100LL * s.mah_drawn) / s.capacity_mah);
+                t.have_batt_pct = true; t.batt_pct = pct < 0 ? 0 : pct > 100 ? 100 : pct;
+            }
+        }
+        if (s.have_alt && fresh(MspTelem::G_ALT, 2000)) { t.have_alt = true; t.alt_m = s.alt_m; }
+        if (s.have_gps && fresh(MspTelem::G_GPS, 4000)) {
+            t.have_gps = true; t.gps_fix = s.fix; t.sats = s.sats;
+            if (s.fix >= 1) {
+                t.have_pos = true; t.lat = s.lat; t.lon = s.lon;
+                t.have_speed = true; t.speed_kmh = s.gps_speed_kmh;
+            }
+        }
+        if (s.have_home && fresh(MspTelem::G_HOME, 4000)) {
+            t.have_home = true; t.home_dist_m = s.home_dist_m; t.home_dir_deg = s.home_dir_deg;
+        }
+        if (s.have_modes && fresh(MspTelem::G_MODES, 2000)) { t.have_mode = true; snprintf(t.mode, sizeof(t.mode), "%s", s.mode); }
+    }
+    for (int i = 0; i < 6; i++) if (mt_us_[i] > t.stamp_us) t.stamp_us = mt_us_[i];
     // t.stamp_us so far is only the last successful FULL grid parse
     // (scrape_locked, via handle_batched_displayport's all-or-nothing
     // validation - see its comment). Every consumer treats a stale stamp_us
@@ -730,7 +721,56 @@ void MspOsd::handle_analog(const uint8_t* p, size_t n) {
     msp_analog_us_ = get_time_us();
 }
 
+uint32_t MspOsd::content_version() {
+    // The camera's IMU is the reactive HUD's input: turning or tilting at all is news.
+    if (motion_wanted_) {
+        double w[3];
+        if (stab::ImuStream::get().recent_rate_dps(20000, w) && (fabs(w[0]) > 3.0 || fabs(w[1]) > 3.0 || fabs(w[2]) > 3.0))
+            content_ver_++;
+    }
+    return content_ver_.load(std::memory_order_relaxed);
+}
+
+MspOsd::MspCounts MspOsd::msp_counts() {
+    std::lock_guard<std::mutex> lock(mtx);
+    MspCounts c;
+    c.frames = n_msp_;
+    c.bytes = n_msp_bytes_;
+    c.active = msp_frame_us_ && get_time_us() - msp_frame_us_ < 3000000ULL;
+    return c;
+}
+
+// A polled response has just updated mt_. mtx is held.
+void MspOsd::apply_polled_locked(unsigned groups) {
+    const uint64_t now = get_time_us();
+    const MspTelemState& s = mt_.state();
+    for (int i = 0; i < 6; i++) if (groups & (1u << i)) mt_us_[i] = now;
+    if (groups & (MspTelem::G_BATT | MspTelem::G_MODES)) content_ver_++;
+    static uint64_t logged_us = 0;
+    if (now - logged_us >= 5000000ULL) {      // what the flight controller says, every 5 s
+        logged_us = now;
+        const stab::ImuStream::Status is = stab::ImuStream::get().status();
+        double wl[3] = {0, 0, 0};
+        stab::ImuStream::get().recent_rate_dps(20000, wl);
+        printf("imu: %s %.0f samples/s, %llu messages, rate pitch %.1f pan %.1f roll %.1f deg/s, gyro offset %.2f %.2f %.2f deg/s\n",
+               is.live ? "live" : "NOT live", is.rate_hz, (unsigned long long)is.messages, wl[0], wl[1], wl[2],
+               is.bias_dps[0], is.bias_dps[1], is.bias_dps[2]);
+        printf("msp: batt %s%.2fV %s%.2fA %dmAh cells=%d | alt=%s%.1fm | gps=%s fix=%d sats=%d | home=%s%dm@%d | mode=%s armed=%d\n",
+               s.have_batt ? "" : "-", s.pack_v, s.have_batt ? "" : "-", s.amps, s.mah_drawn, s.cells,
+               s.have_alt ? "" : "-", s.alt_m, s.have_gps ? "yes" : "no", s.fix, s.sats,
+               s.have_home ? "" : "-", s.home_dist_m, s.home_dir_deg, s.have_modes ? s.mode : "-", s.have_arm ? (int)s.armed : -1);
+    }
+}
+
 void MspOsd::handle_msp_frame(uint16_t function, const uint8_t* payload, size_t size) {
+    {
+        std::lock_guard<std::mutex> lock(mtx);
+        msp_frame_us_ = get_time_us();
+        n_msp_++;
+        n_msp_bytes_ += (uint32_t)size + (is_v2 ? 9 : 6);   // the frame: header and checksum too
+        const unsigned groups = mt_.handle(function, payload, size);
+        if (groups) apply_polled_locked(groups);
+    }
     if (function == 101 || function == 150) {   // MSP_STATUS / _EX
         std::lock_guard<std::mutex> lock(mtx);
         handle_status(payload, size);
@@ -864,16 +904,14 @@ void MspOsd::draw(math::Mat4& projection, math::Mat4& view, std::function<void(f
     }
 }
 
-void MspOsd::draw_region(int r_start, int c_start, int r_cnt, int c_cnt, float x, float y, std::function<void(float x, float y, const std::vector<uint16_t>& span)> draw_span_cb, bool skip_owned) {
+void MspOsd::draw_region(int r_start, int c_start, int r_cnt, int c_cnt, float x, float y, std::function<void(float x, float y, const std::vector<uint16_t>& span)> draw_span_cb) {
     std::lock_guard<std::mutex> lock(mtx);
 
     const float cell_w = m_cell_w;
     const float cell_h = m_cell_h;
-    // A cell the overlay already shows reads as blank here, so it neither
-    // draws nor joins the span either side of it.
     auto blank = [&](int r, int c) {
         uint16_t ch = grid[r][c].char_idx;
-        return ch == 0 || ch == ' ' || (skip_owned && owned[r][c]);
+        return ch == 0 || ch == ' ';
     };
     
     for(int r = r_start; r < r_start + r_cnt && r < GRID_H; r++) {
@@ -934,71 +972,33 @@ void MspOsd::update_physics(float dt_sec) {
     if (dt_sec <= 0.0f) return;
     if (dt_sec > 0.1f) dt_sec = 0.1f; // Clamp to avoid dynamic instability on lags
 
-    // The scraped Pitch/Roll Angle OSD elements are the primary source - this
-    // air unit never relays MSP_RAW_IMU, so raw_acc_x/y stay at their startup
-    // default (0) and would otherwise leave the HUD permanently at rest.
-    // "Fresh" is generous (30s), not a couple of refreshes: the air's
-    // re-encoder only resends a row when its value CHANGES, and a level,
-    // stationary aircraft can go a long stretch between updates - a short
-    // window kept snapping the HUD back to a hardcoded (0,0) every time it
-    // sat still for more than a couple of seconds, which looked exactly like
-    // "the HUD doesn't move" despite good telemetry. A stale-but-real
-    // attitude is a better default than that; only fall back to the (already
-    // known-dead) accel path if telemetry has been gone long enough that
-    // something else is actually wrong.
-    bool osd_fresh = osd_angles_us != 0 &&
-                     get_time_us() - osd_angles_us < 30000000ULL;
-    float target_x, target_y;
-    if (osd_fresh) {
-        // Degrees scaled to a visual offset, clamped so an extreme angle (a
-        // near-inverted roll reads up to ~169 deg handheld) cannot fling the
-        // HUD off-screen. 90 deg -> the clamp: a knife-edge or a full loop's
-        // peak pitch reads as "as far as this ever moves", not "keeps
-        // growing". kMaxOffset is generous on purpose - a first attempt at
-        // this same mapping scaled to match the (already known-dead) accel
-        // path's amplitude and came out under 2% of screen height at a hard
-        // 35-40 deg tilt, indistinguishable from "not moving" by eye. Sign
-        // and this constant are still a first cut - flip/retune once this is
-        // seen live, there is no bench way to check "does the HUD lean the
-        // right way" against a real horizon.
-        // 0.40, not 0.15. A translation reads far weaker than a rotation:
-        // measured live, 11 deg of pitch at 0.15 moved the HUD about 7px on a
-        // 1080p screen while 28 deg of roll gave a 1.5 deg tilt that was
-        // obvious - so pitch looked broken next to a working roll when both
-        // were in fact tracking. Sized so a normal 10-30 deg pitch is clearly
-        // visible; the clamp keeps an extreme attitude from throwing the HUD
-        // off-screen, and the SMALL/MEDIUM/EXTREME setting scales it.
-        const float kMaxOffset = 0.40f * reactivity_scale_;
-        // Pitch translates: nose up/down moves the HUD vertically.
-        target_y = -(osd_pitch_deg / 90.0f) * kMaxOffset;
-        if (target_y >  kMaxOffset) target_y =  kMaxOffset;
-        if (target_y < -kMaxOffset) target_y = -kMaxOffset;
-        // Roll does NOT translate. A banking aircraft should tilt the HUD, not
-        // slide it sideways - sliding left/right reads as yaw, which is a
-        // different axis we have no telemetry for anyway. Roll drives
-        // target_bank below instead.
-        target_x = 0.0f;
-    } else {
-        // Calculate dynamic forces based on accelerations (relative to gravity 2048)
-        // Map acceleration deviations to visual offsets (1G = 2048)
-        target_x = -((float)raw_acc_x / 2048.0f) * 0.025f;
-        target_y = -((float)raw_acc_y / 2048.0f) * 0.025f;
-    }
+    // The HUD answers MOVEMENT, not attitude: the camera's angular rates (the air unit's IMU,
+    // 1 kHz) push it, and the spring brings it back to centre when nothing moves - held at a
+    // steady tilt it sits at rest. Without the IMU it stays centred.
+    // x: pitch rate (+ nose up), y: pan (+ turning right), z: roll rate (+ right side down), deg/s,
+    // in the camera's own axes.
+    double w[3] = {0, 0, 0};
+    const bool imu = stab::ImuStream::get().recent_rate_dps(20000, w);
+    // A rate to an offset: against the motion (the HUD lags behind it), nothing under 3 deg/s (the
+    // gyro's noise and what is left of its offset), full at 360 deg/s, never past the maximum.
+    auto slide = [](double rate_dps, float max) {
+        if (fabs(rate_dps) < 3.0) return 0.0f;
+        float v = -(float)(rate_dps / 360.0) * max;
+        return v > max ? max : v < -max ? -max : v;
+    };
+    // 0.12 is what a turn felt right at; the SMALL/MEDIUM/EXTREME setting scales it.
+    const float kMaxOffset = 0.12f * reactivity_scale_;
+    // Pitch moves the HUD up and down, yaw sideways. Roll does not slide it: a banking aircraft
+    // tilts the HUD, below.
+    const float target_y = imu ? slide(w[0], kMaxOffset) : 0.0f;
+    const float target_x = imu ? slide(w[1], kMaxOffset) : 0.0f;
 
-    // Bank: a view-plane rotation from roll. Scaled well below 1:1 - matching
-    // the craft's roll exactly would swing the panels through 90 deg on a
-    // knife-edge and read as the HUD falling over, where the point is to
-    // suggest the bank. Clamped for the same reason the offsets are: handheld
-    // roll readings run past 90 deg.
+    // Bank: a view-plane rotation from the roll rate, scaled well below 1:1 - a full roll would
+    // swing the panels through 90 deg and read as the HUD falling over, where the point is to
+    // suggest the bank.
     const float kDegToRad   = 3.14159265f / 180.0f;
-    const float kBankGain   = 0.055f * reactivity_scale_;             // panel tilt per deg of roll
     const float kMaxBankRad = 3.5f * kDegToRad * reactivity_scale_;   // never tilt further than this
-    float target_bank = 0.0f;
-    if (osd_fresh) {
-        target_bank = -(osd_roll_deg * kDegToRad) * kBankGain;
-        if (target_bank >  kMaxBankRad) target_bank =  kMaxBankRad;
-        if (target_bank < -kMaxBankRad) target_bank = -kMaxBankRad;
-    }
+    const float target_bank = imu ? slide(w[2], kMaxBankRad) : 0.0f;
 
     // Mass-spring-damper constants
     float stiffness = 220.0f; // Spring constant (omega^2)
@@ -1088,6 +1088,9 @@ void MspOsd::reset_screen() {
     osd_pitch_deg = osd_roll_deg = 0.0f;
     osd_angles_us = 0;
     raw_acc_x = raw_acc_y = 0; raw_acc_z = 2048;
+
+    mt_.reset();
+    for (auto& u : mt_us_) u = 0;
 
     msp_arm_ = -1;
     msp_armed_since_ = 0;

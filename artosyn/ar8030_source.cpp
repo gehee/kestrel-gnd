@@ -3,6 +3,7 @@
 #include "frame_mode.hpp"
 #include "../utils/ltrace.hpp"
 #include "bb_watchdog.hpp"
+#include "../stab/imu_stream.hpp"
 #include "ar8030_handshake.h"
 #include "../settings.hpp"
 #include <cmath>
@@ -1418,6 +1419,7 @@ void Ar8030Source::scan_air_status(const uint8_t *buf, int n) {
                     air.focus_en != last_air_focus) {
                     air_cfg_logged = true;
                     last_air_angle = air.angle;
+                    stab::ImuStream::get().set_camera_angle(air.angle ? 180 : 0);   // the picture turns the gyro's axes too
                     last_air_w = air.ch0_w; last_air_h = air.ch0_h;
                     last_air_fps = air.ch0_fps;
                     last_air_dnr3d = air.dnr_3d;
@@ -3283,6 +3285,11 @@ void Ar8030Source::emit_nal(const uint8_t* nal, size_t len) {
                    (unsigned long long)foreign);
         return;
     }
+
+    // The air unit's IMU samples (kestrel-air --imu) ride in SEI after each picture's last
+    // slice. Taken whatever the state of the picture; the decoder drops the SEI itself below.
+    if (codec == VideoCodec::H265 && (nal_type == 39 || nal_type == 40))
+        stab::ImuStream::get().on_sei_nal(nal, len);
 
     // Everything up to the next header belongs to a stale picture's.
     if (hdr_stale_) return;

@@ -397,10 +397,7 @@ class OSD {
         enum HudStyle { kHudOff = 0, kHudCanopy, kHudArena, kHudArenaFull, kHudStyleCount };
         int  hud_style = kHudCanopy;
         int  menu_hud_style = kHudCanopy;
-        // Betaflight's own OSD canvas, drawn over whichever style is on.
-        // With the canopy up, the elements the canopy already shows are
-        // left out of it (MspOsd's owned-cell mask); with the HUD off it
-        // is drawn whole.
+        // Betaflight's own OSD canvas, drawn whole over whichever style is on.
         bool bf_osd = true;
         bool menu_bf_osd = true;
         // Canopy headline voltage: 0 per cell, 1 whole pack. Per cell by
@@ -504,6 +501,12 @@ class OSD {
         int menu_ar_power = 500;   // mW, stock's encoding (see kArPwrLevels)
         int menu_ar_chan  = -1;   // -1 = AUTO
         bool menu_ar_hop  = true;  // channel hopping (AUTO/ACS)
+        uint64_t serial_tab_us_ = 0;   // the SERIAL tab's last redraw
+        uint64_t serial_rate_us_ = 0;  // its rates: the last counts, a second apart
+        uint32_t serial_prev_ = 0;
+        uint32_t serial_prev_bytes_ = 0;
+        float    serial_bps_ = 0;               // bytes a second
+        float    serial_rate_ = 0;             // frames a second
         int menu_ar_maxbr = 0;     // index into kArMaxBrVals (0 = AUTO, no cap)
         int menu_ar_maxbw = 1;     // index into kArMaxBwVals (1 = 40 MHz)
         int menu_cam_ev       = 3;  // index into kEvSteps below (3 = 0.0 EV)
@@ -584,10 +587,11 @@ class OSD {
         // VIDEO, AR8030, HUD, DISPLAY, DVR, SYSTEM. DVR sits next to DISPLAY
         // because it is a thing you set; SYSTEM is last because it is a thing
         // you read.
+        // SERIAL (7) is the air unit's flight controller port, after INFO.
         // INFO (6) came later: it is the air unit's, listed after RADIO on its
         // blade (ui_side_tabs), and numbered last so no other tab moves.
-        static const int kMenuTabs = 7, kMenuRows = 24;
-        static const int kTabDvr = 4, kTabSystem = 5, kTabAirInfo = 6;
+        static const int kMenuTabs = 8, kMenuRows = 24;
+        static const int kTabDvr = 4, kTabSystem = 5, kTabAirInfo = 6, kTabAirSerial = 7;
         // DISPLAY rows, in the order they are listed. The tab is dispatched
         // by index in half a dozen places, so the order lives here once and
         // the dispatchers name the row rather than count to it.
