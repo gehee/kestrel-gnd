@@ -1063,6 +1063,10 @@ class OSD {
         void set_camera_config(int ev_x10, int sat, int contrast, int sharp,
                                int scene, int awb, int angle,
                                int dnr3d, int focus);
+        // The 3D DNR level the air unit reports running (its status, byte 35).
+        void set_camera_dnr(int dnr3d);
+        // The rotation it reports running (0 upright, else 180).
+        void set_camera_angle(int angle);
         void set_video_mode_current(int current) {
             pthread_mutex_lock(&osd_mutex);
             if (current >= 0 && current < (int)video_mode_names.size())

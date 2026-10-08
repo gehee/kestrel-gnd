@@ -4264,6 +4264,19 @@ void OSD::set_camera_config(int ev_x10, int sat, int contrast, int sharp,
     pthread_mutex_unlock(&osd_mutex);
 }
 
+void OSD::set_camera_angle(int angle) {
+    pthread_mutex_lock(&osd_mutex);
+    menu_cam_flip = angle ? 1 : 0;
+    pthread_mutex_unlock(&osd_mutex);
+}
+
+void OSD::set_camera_dnr(int dnr3d) {
+    pthread_mutex_lock(&osd_mutex);
+    for (int i = 0; i < kDnrCount; i++) if (kDnrVals[i] == dnr3d) menu_cam_3dnr = i;
+    if (dnr3d == 1) menu_cam_3dnr = 4;   // the bin's own: Auto
+    pthread_mutex_unlock(&osd_mutex);
+}
+
 void OSD::menu_mark_dirty(bool on) {
     if (menu_tab < 0 || menu_tab >= kMenuTabs) return;
     if (menu_index < 0 || menu_index >= kMenuRows) return;   // -1 is the tab strip

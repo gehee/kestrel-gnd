@@ -1091,6 +1091,7 @@ void Ar8030Source::load_sky_config() {
     sky_cfg.awb_cct     = (uint16_t)st.getInt(k + "awb",     sky_cfg.awb_cct);
     sky_cfg.anti_flicker= (uint8_t) st.getInt(k + "flicker", sky_cfg.anti_flicker);
     sky_cfg.angle       = (uint8_t) st.getInt(k + "flip",    sky_cfg.angle);
+    sky_cfg.dnr_3d      = (uint8_t) st.getInt(k + "dnr3d",   sky_cfg.dnr_3d);
     sky_cfg.focus_en    = (uint8_t) st.getInt(k + "focus",   sky_cfg.focus_en);
     printf("ar8030: [%s] restored camera cfg: ch0=%ux%u@%u ev=%d sat=%u sharp=%u "
            "contrast=%u scene=%u awb=%u flicker=%u angle=%u focus=%u\n",
@@ -1135,6 +1136,8 @@ void Ar8030Source::save_sky_config() {
     st.set(k + "contrast",(int)sky_cfg.contrast);
     st.set(k + "awb",     (int)sky_cfg.awb_cct);
     st.set(k + "flicker", (int)sky_cfg.anti_flicker);
+    st.set(k + "flip",    (int)sky_cfg.angle);     // read back as "flip" (load_sky_config)
+    st.set(k + "dnr3d",   (int)sky_cfg.dnr_3d);
     st.set(k + "focus",   (int)sky_cfg.focus_en);
 }
 
@@ -1472,6 +1475,18 @@ void Ar8030Source::scan_air_status(const uint8_t *buf, int n) {
                     last_air_fps = air.ch0_fps;
                     last_air_dnr3d = air.dnr_3d;
                     last_air_focus = air.focus_en;
+                    // The level it runs, which nothing on this side stores: the
+                    // menu showed the stock capture's byte instead (Auto, or Off
+                    // before) while the air unit ran its own (High by default).
+                    // Kept, as the menu's settings are: a handshake restores
+                    // the stored config, and the stock capture's byte would win.
+                    if (sky_cfg.dnr_3d != air.dnr_3d) {
+                        sky_cfg.dnr_3d = air.dnr_3d;
+                        save_sky_config();
+                    }
+                    if (osd) osd->set_camera_dnr(air.dnr_3d);
+                    // Its rotation likewise: the menu shows what it runs.
+                    if (osd) osd->set_camera_angle(air.angle);
                     printf("ar8030: air unit reports ch0=%ux%u@%u ev=%d sat=%u "
                            "sharp=%u contrast=%u scene=%u awb=%u flicker=%u "
                            "angle=%u dnr3d=%u focus=%u\n",
