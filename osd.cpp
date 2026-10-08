@@ -132,10 +132,13 @@ static const int   kEvCount        = 7;
 static const char* kSceneLabels[]  = { "Race", "Standard" };
 static const int   kSceneVals[]    = { 0, 2 };
 static const int   kSceneCount     = 2;
-// 3D DNR, sky cmd 0x1B. Five levels, 1-based; stock writes 0 only when the
-// setting has never been touched, which its UI renders as Off.
+// 3D DNR, sky cmd 0x1B. The stock goggle sends Off/Low/Mid/High/Auto as
+// 1/2/3/4/5, but the air unit - the stock app and kestrel-air alike - takes
+// 0 off, 1 its tuning bin's own noise reduction, 2/3/4 low/mid/high, and
+// anything else as 1: stock's Off (1) left it on. Off is 0 here, which both
+// turn off; Auto stays 5, the bin's.
 static const char* kDnrLabels[]    = { "Off", "Low", "Mid", "High", "Auto" };
-static const int   kDnrVals[]      = { 1, 2, 3, 4, 5 };
+static const int   kDnrVals[]      = { 0, 2, 3, 4, 5 };
 static const int   kDnrCount       = 5;
 // Anti-Flicker (sky cmd 0x1F) was here but is gone: stock's own Camera menu
 // has no such row at all - confirmed against a photo of the stock UI - so it
@@ -4256,6 +4259,7 @@ void OSD::set_camera_config(int ev_x10, int sat, int contrast, int sharp,
     for (int i = 0; i < kSceneCount; i++) if (kSceneVals[i] == scene) menu_cam_scene = i;
     menu_cam_flip = angle ? 1 : 0;
     for (int i = 0; i < kDnrCount; i++)   if (kDnrVals[i]   == dnr3d) menu_cam_3dnr  = i;
+    if (dnr3d == 1) menu_cam_3dnr = 4;   // the old Off: the air runs the bin's, as Auto
     menu_cam_focus = focus ? 1 : 0;
     pthread_mutex_unlock(&osd_mutex);
 }
@@ -5450,6 +5454,19 @@ void OSD::ui_blade_rect(int side, int W, int H, float fh, float& x, float& y, fl
     h = py + ph - top;
 }
 
+// The rows under the cursor change by themselves: the link dropping takes
+// VIDEO away (draw_canopy_ui) and RADIO down to Bind, and an air unit's
+// announce adds or removes a RADIO row. A value being changed acts only on
+// the row it started on - OK on whatever row is there now would do that
+// row's action instead: a bind that keeps the air unit out for 120 s, a
+// standby.
+bool OSD::menu_edit_row_intact() const {
+    const std::vector<MenuItem> rows = menu_items(menu_tab);
+    return menu_tab == menu_edit_tab_ && menu_index >= 0 && menu_index < (int)rows.size() &&
+           rows[menu_index].type == 1 && rows[menu_index].label &&
+           menu_edit_label_ == rows[menu_index].label;
+}
+
 // The canopy awake, drawn over the HUD: a light dimming, the two blades'
 // names while one is being picked, a blade unfolded into its settings, the
 // right blade unfolded into the channel band. fh is the frustum's half height.
@@ -5734,6 +5751,8 @@ void OSD::handle_key(int key) {
             const int type = (menu_index >= 0 && menu_index < (int)rows.size()) ? rows[menu_index].type : 0;
             if (type == 1) {                          // a setting: start changing it
                 menu_focus = 2;
+                menu_edit_tab_ = menu_tab;
+                menu_edit_label_ = rows[menu_index].label ? rows[menu_index].label : "";
                 menu_refresh_options();
                 done();
                 return;
@@ -5742,6 +5761,11 @@ void OSD::handle_key(int key) {
             // An action: Enter below does it.
         } else if (enter && menu_focus == 2) {
             menu_focus = 1;                           // OK applies (below) and the row closes
+            if (!menu_edit_row_intact()) {            // ...unless the row went: OK only closes it
+                menu_refresh_options();
+                done();
+                return;
+            }
         }
         // Up and Down go on below: the row with menu_focus 1, the value with 2.
     }
@@ -5783,6 +5807,8 @@ void OSD::handle_key(int key) {
                 for (int guard = 0; guard < n && rows[menu_index].type == 2; guard++)
                     menu_index = (menu_index - dir + n) % n;
             }
+        } else if (!menu_edit_row_intact()) {
+            menu_focus = 1;                           // the row being changed went: nothing to step
         } else {
             std::vector<MenuItem> rows = menu_items(menu_tab);
             const bool ro = (menu_index >= 0 && menu_index < (int)rows.size() &&

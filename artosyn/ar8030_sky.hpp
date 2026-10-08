@@ -47,7 +47,7 @@ enum Cmd : uint8_t {
     CMD_RECORD_TRIG       = 0x0F,  // 5 bytes
     CMD_SET_CONFIG        = 0x10,  // full 49-byte config + TLV tail
     CMD_SKY_CFG_RESET     = 0x1E,  // u32
-    CMD_SET_3DNR          = 0x1B,  // u32 Off/Low/Mid/High/Auto = 1/2/3/4/5
+    CMD_SET_3DNR          = 0x1B,  // u32 0 off, 1 bin's, 2/3/4 low/mid/high (osd.cpp kDnrVals)
     // u32 boolean enable flag. ar_ldy_gnd has a handler for it
     // (GUI_CMD_SET_CAM_ANTI_FLICKER at 0x88e74) and the air unit ACKs it, but
     // stock's own Camera menu has no Anti-Flicker row at all - confirmed
@@ -113,10 +113,12 @@ struct SkyConfig {
     uint8_t  anti_flicker  = 0;
     uint8_t  video_strategy= 0;
     uint8_t  contrast      = 0;   // 0-15: the body packs it into a nibble
-    // 3D DNR, body[35]. Levels, not a flag: stock stores Off/Low/Mid/High
-    // as 1/2/3/4 and writes 0 only when it has never been set (which the
-    // UI renders as Off). Proved on hardware - switching stock to High
-    // moved exactly this byte 0 -> 4 in the air unit's cmd 0x03 report.
+    // 3D DNR, body[35]. Levels, not a flag: the stock goggle stores
+    // Off/Low/Mid/High as 1/2/3/4 and writes 0 only when it has never been
+    // set (which its UI renders as Off) - though the air unit takes 1 as its
+    // tuning bin's own, not off (osd.cpp kDnrVals). Proved on hardware -
+    // switching stock to High moved exactly this byte 0 -> 4 in the air
+    // unit's cmd 0x03 report.
     uint8_t  dnr_3d        = 0;
 };
 

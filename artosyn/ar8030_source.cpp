@@ -1241,7 +1241,7 @@ bool Ar8030Source::read_sky_ack(uint8_t want_cmd, int timeout_ms) {
         if (*should_stop) return false;
         int n = bb_socket_read(ctrl_sockfd, buf, sizeof(buf), 50);
         if (n <= 0) continue;   // -1 is a plain timeout, not an error
-        scan_air_status(buf, n);   // the air's reports, read here, are not lost
+        on_ctrl_bytes(buf, n);     // the air's reports, MSP, an awaited ack: not lost here
         // Frames can be batched in one read; walk every FE A5 boundary.
         for (int i = 0; i + 12 <= n; i++) {
             if (buf[i] != 0xFE || buf[i + 1] != 0xA5) continue;
@@ -1273,9 +1273,7 @@ void Ar8030Source::drain_control_socket() {
     for (int i = 0; i < 64; i++) {          // bounded: never starve the video read
         int n = bb_socket_read(ctrl_sockfd, buf, sizeof(buf), 1);
         if (n <= 0) break;                  // -1 here is just "ring empty"
-        ctrl_bytes += (unsigned long long)n;
-        last_ctrl_ms = now_ms();            // the air unit is talking to us
-        scan_air_status(buf, n);
+        on_ctrl_bytes(buf, n);
 
         // Raw capture of whatever the air unit is sending, for offline
         // analysis. 4 MB is ~18 minutes at the measured 3.8 KB/s.
@@ -1291,15 +1289,64 @@ void Ar8030Source::drain_control_socket() {
                 dump_written += (unsigned long long)n;
             }
         }
+    }
+}
 
-        // --debug-msp-bb-port 2 means "the FC stream is inside the telemetry we
-        // already drain" - tee it rather than opening a second socket on a
-        // port this client already owns.
-        if (msp_bb_port == 2 && osd) {
-            msp_bytes += (unsigned long long)n;
-            osd->update_msp_data(buf, (size_t)n);
+// What the control socket brought in, wherever it was read (the main loop's
+// drain, or a wait for a mode change's ack): the air's reports, the flight
+// controller's MSP riding it, and the ack a camera setting is waiting for.
+void Ar8030Source::on_ctrl_bytes(const uint8_t *buf, int n) {
+    ctrl_bytes += (unsigned long long)n;
+    last_ctrl_ms = now_ms();            // the air unit is talking to us
+    scan_air_status(buf, n);
+    if (sky_ack_.field >= 0) {
+        // Frames can be batched in one read; walk every FE A5 boundary.
+        for (int i = 0; i + 12 <= n; i++) {
+            if (buf[i] != 0xFE || buf[i + 1] != 0xA5) continue;
+            unsigned len = ((buf[i + 4] | (buf[i + 5] << 8)) >> 4) + 11;
+            if (i + (int)len > n) continue;
+            uint8_t cmd = 0, status = 0; bool is_ack = false;
+            if (!sky::Proto::parse(buf + i, len, &cmd, &is_ack, &status)) continue;
+            if (is_ack && cmd == sky_ack_.cmd) {
+                sky_ack_done(status);
+                break;
+            }
         }
     }
+    // --debug-msp-bb-port 2 means "the FC stream is inside the telemetry we
+    // already drain" - tee it rather than opening a second socket on a
+    // port this client already owns.
+    if (msp_bb_port == 2 && osd) {
+        msp_bytes += (unsigned long long)n;
+        osd->update_msp_data(buf, (size_t)n);
+    }
+}
+
+// The awaited camera setting acknowledged: accepted, it goes into the stored
+// config, which every handshake sends the air unit again.
+void Ar8030Source::sky_ack_done(int status) {
+    printf("ar8030: sky ack cmd=0x%02X status=%d (%s)\n",
+           sky_ack_.cmd, status, status == 0 ? "accepted" : "REJECTED");
+    if (status == 0) {
+        const int v = sky_ack_.value;
+        switch (sky_ack_.field) {
+            case CAM_3DNR:      sky_cfg.dnr_3d       = (uint8_t)v;  break;
+            case CAM_EV:        sky_cfg.ev_x10       = (int8_t)v;   break;
+            case CAM_SAT:       sky_cfg.saturation   = (uint8_t)v;  break;
+            case CAM_CONTRAST:  sky_cfg.contrast     = (uint8_t)v;  break;
+            case CAM_SHARPNESS: sky_cfg.sharpness    = (uint8_t)v;  break;
+            case CAM_SCENE:     sky_cfg.scenes       = (uint8_t)v;  break;
+            case CAM_AWB:       sky_cfg.awb_cct      = (uint16_t)v; break;
+            case CAM_ANGLE:     sky_cfg.angle        = (uint8_t)v;  break;
+            case CAM_FOCUS:     sky_cfg.focus_en     = (uint8_t)v;  break;
+            // CAM_STANDBY deliberately absent: its offset inside the
+            // SET_CONFIG body is not known, so writing it there would
+            // corrupt a field we do not understand.
+            default: break;
+        }
+        save_sky_config();
+    }
+    sky_ack_ = SkyAckWait();
 }
 
 void Ar8030Source::scan_air_status(const uint8_t *buf, int n) {
@@ -1714,7 +1761,7 @@ int Ar8030Source::wait_sky_status(uint8_t want_cmd, int timeout_ms) {
         drain_video_socket();
         int n = bb_socket_read(ctrl_sockfd, buf, sizeof(buf), 20);
         if (n <= 0) continue;
-        scan_air_status(buf, n);   // the air's reports, read here, are not lost
+        on_ctrl_bytes(buf, n);     // the air's reports, MSP, an awaited ack: not lost here
         for (int i = 0; i + 12 <= n; i++) {
             if (buf[i] != 0xFE || buf[i + 1] != 0xA5) continue;
             unsigned len = ((buf[i + 4] | (buf[i + 5] << 8)) >> 4) + 11;
@@ -1730,17 +1777,31 @@ int Ar8030Source::wait_sky_status(uint8_t want_cmd, int timeout_ms) {
 // Drain whatever the menu parked and push it to the camera. Each of these is a
 // 4-byte little-endian value; the ids come from the GUI dispatcher in
 // ar_ldy_gnd.
+// One at a time, as when each waited here for its ack - the video thread
+// then stopped reading for up to a second per setting, the radio's ring
+// overflowed and the picture broke up until the next keyframe. Now the ack is
+// awaited between pictures (on_ctrl_bytes) and the next goes when it is in.
 void Ar8030Source::apply_pending_settings() {
-    std::vector<std::pair<int,int>> todo;
     {
         std::lock_guard<std::mutex> lk(pending_mtx);
-        if (pending_settings.empty()) return;
-        todo.swap(pending_settings);
+        settings_q_.insert(settings_q_.end(), pending_settings.begin(), pending_settings.end());
+        pending_settings.clear();
     }
-    if (ctrl_sockfd < 0) return;
-    for (size_t i = 0; i < todo.size(); i++) {
+    if (ctrl_sockfd < 0) {               // no link: dropped, as they always were
+        settings_q_.clear();
+        sky_ack_ = SkyAckWait();
+        return;
+    }
+    if (sky_ack_.field >= 0) {
+        if (now_ms() < sky_ack_.until_ms) return;
+        printf("ar8030: no ack for cmd 0x%02X within %d ms\n", sky_ack_.cmd, kSkyAckMs);
+        sky_ack_ = SkyAckWait();
+    }
+    while (!settings_q_.empty()) {
+        const std::pair<int,int> item = settings_q_.front();
+        settings_q_.pop_front();
         uint8_t cmd; const char* name;
-        switch (todo[i].first) {
+        switch (item.first) {
             case CAM_EV:        cmd = sky::CMD_SET_EV;           name = "EV";           break;
             case CAM_SAT:       cmd = sky::CMD_SET_SAT;          name = "saturation";   break;
             case CAM_CONTRAST:  cmd = sky::CMD_SET_CONTRAST;     name = "contrast";     break;
@@ -1759,8 +1820,8 @@ void Ar8030Source::apply_pending_settings() {
         }
         // kestrel-air's own commands: kept for when a kestrel-air announces
         // itself (note_air_announce sends them then), never to the stock app.
-        if ((todo[i].first == CAM_MAX_KBPS || todo[i].first == CAM_MAX_BW) && !air_kestrel_) {
-            printf("ar8030: %s = %d kept for a kestrel-air (this air unit %s)\n", name, todo[i].second,
+        if ((item.first == CAM_MAX_KBPS || item.first == CAM_MAX_BW) && !air_kestrel_) {
+            printf("ar8030: %s = %d kept for a kestrel-air (this air unit %s)\n", name, item.second,
                    air_ver_seen_ ? "is the stock app" : "has not said what it is yet");
             continue;
         }
@@ -1770,42 +1831,30 @@ void Ar8030Source::apply_pending_settings() {
         // as two little-endian bytes (len 2), 0x89060 writes standby as one,
         // and most camera settings are u32.
         std::vector<uint8_t> f;
-        if (todo[i].first == CAM_PWR) {
-            uint8_t v[2] = { (uint8_t)(todo[i].second & 0xFF),
-                             (uint8_t)((todo[i].second >> 8) & 0xFF) };
+        if (item.first == CAM_PWR) {
+            uint8_t v[2] = { (uint8_t)(item.second & 0xFF),
+                             (uint8_t)((item.second >> 8) & 0xFF) };
             f = sky_proto.build(cmd, v, sizeof(v));
-        } else if (todo[i].first == CAM_FOCUS) {
+        } else if (item.first == CAM_FOCUS) {
             // {u8 chn, u8 enable} - ar_ldy_gnd's own debug line for this
             // command is "GUI_CMD_SET_CHN_FOCUS, chn=%d, en=%d". chn 0 is
             // the FPV stream, the only channel this menu ever controls.
-            uint8_t v[2] = { 0, (uint8_t)todo[i].second };
+            uint8_t v[2] = { 0, (uint8_t)item.second };
             f = sky_proto.build(cmd, v, sizeof(v));
-        } else if (todo[i].first == CAM_STANDBY || todo[i].first == CAM_BW ||
-                   todo[i].first == CAM_MAX_BW) {
-            f = sky_proto.build_u8(cmd, (uint8_t)todo[i].second);
+        } else if (item.first == CAM_STANDBY || item.first == CAM_BW ||
+                   item.first == CAM_MAX_BW) {
+            f = sky_proto.build_u8(cmd, (uint8_t)item.second);
         } else {
-            f = sky_proto.build_u32(cmd, (uint32_t)todo[i].second);
+            f = sky_proto.build_u32(cmd, (uint32_t)item.second);
         }
         int w = bb_socket_write(ctrl_sockfd, f.data(), (uint32_t)f.size(), 500);
-        printf("ar8030: set %s = %d (cmd 0x%02X) -> %d\n", name, todo[i].second, cmd, w);
-        if (w > 0 && read_sky_ack(cmd, 1000)) {
-            const int v = todo[i].second;
-            switch (todo[i].first) {
-                case CAM_3DNR:      sky_cfg.dnr_3d       = (uint8_t)v;  break;
-                case CAM_EV:        sky_cfg.ev_x10       = (int8_t)v;   break;
-                case CAM_SAT:       sky_cfg.saturation   = (uint8_t)v;  break;
-                case CAM_CONTRAST:  sky_cfg.contrast     = (uint8_t)v;  break;
-                case CAM_SHARPNESS: sky_cfg.sharpness    = (uint8_t)v;  break;
-                case CAM_SCENE:     sky_cfg.scenes       = (uint8_t)v;  break;
-                case CAM_AWB:       sky_cfg.awb_cct      = (uint16_t)v; break;
-                case CAM_ANGLE:     sky_cfg.angle        = (uint8_t)v;  break;
-                case CAM_FOCUS:     sky_cfg.focus_en     = (uint8_t)v;  break;
-                // CAM_STANDBY deliberately absent: its offset inside the
-                // SET_CONFIG body is not known, so writing it there would
-                // corrupt a field we do not understand.
-                default: break;
-            }
-            save_sky_config();
+        printf("ar8030: set %s = %d (cmd 0x%02X) -> %d\n", name, item.second, cmd, w);
+        if (w > 0) {
+            sky_ack_.field = item.first;
+            sky_ack_.value = item.second;
+            sky_ack_.cmd = cmd;
+            sky_ack_.until_ms = now_ms() + kSkyAckMs;
+            return;                      // the next once this one's ack is in
         }
     }
 }
@@ -2725,6 +2774,9 @@ void Ar8030Source::stats_run() {
             publish_link_stats();
         }
         publish_chan_scan();             // its own pace: 2 s, 70 ms while the scan screen is up
+        // Once a second. It was on the video thread, which then waited for the
+        // radio's answer - a lost one held the next picture for a second.
+        poll_ap_time();
         lk.lock();
         stats_cv.wait_for(lk, std::chrono::milliseconds(35), [this] { return stats_stop; });
     }
@@ -2764,6 +2816,8 @@ void Ar8030Source::disconnect_bb() {
     if (sockfd >= 0) { bb_socket_close(sockfd); sockfd = -1; }
     SHUT_STEP("closing control socket");
     if (ctrl_sockfd >= 0) { bb_socket_close(ctrl_sockfd); ctrl_sockfd = -1; }
+    sky_ack_ = SkyAckWait();             // its ack will not come on this socket
+    settings_q_.clear();
     // Hand the device back before letting go of the handle.
     //
     // This is the other half of bb_init/bb_start, and its absence is what
@@ -2796,7 +2850,6 @@ void Ar8030Source::update_stats(size_t frame_size) {
     if (period_start == 0) { period_start = t; return; }
     if (t - period_start >= 1000) {
         period_start = t;
-        poll_ap_time();
         double video_bw = (double)bytes_received;   // bytes in the last second
         if (osd) {
             osd->update_video_bandwidth(video_bw / 125000.0);  // -> Mbit/s
@@ -2989,6 +3042,7 @@ void Ar8030Source::note_air_latency(const uint8_t *hdr) {
 // sample is the middle of the request minus the middle of that ms; a slow
 // answer (over 2 ms) says little and is skipped. Averaged (1/8 per sample),
 // and started again on a jump of over 20 ms: a new link starts a new clock.
+// On the stats thread; the video thread reads the offset.
 void Ar8030Source::poll_ap_time() {
     bb_dev_handle_t *dev = (bb_dev_handle_t *)bb_dev;
     const uint64_t t = now_ms();
@@ -2998,16 +3052,21 @@ void Ar8030Source::poll_ap_time() {
     const uint64_t t0 = now_us();
     if (ar_ioctl(dev, BB_GET_AP_TIME, nullptr, &ap_ms) != 0) return;
     const uint64_t t1 = now_us();
-    if (t1 - t0 > 2000) return;
+    if (t1 - t0 > 2000) {
+        ap_poll_ms_ = t - 800;           // again in 200 ms: this thread is not real-time
+        return;
+    }
     const int64_t off = (int64_t)((t0 + t1) / 2) - ((int64_t)ap_ms * 1000 + 500);
-    if (!ap_off_valid_ || off - ap_off_us_ > 20000 || off - ap_off_us_ < -20000) {
-        if (ap_off_valid_)
+    const int64_t cur = ap_off_us_.load(std::memory_order_relaxed);
+    const bool valid = ap_off_valid_.load(std::memory_order_relaxed);
+    if (!valid || off - cur > 20000 || off - cur < -20000) {
+        if (valid)
             printf("ar8030: the radio's AP clock moved by %.1f ms against ours\n",
-                   (off - ap_off_us_) / 1000.0);
-        ap_off_us_ = off;
-        ap_off_valid_ = true;
+                   (off - cur) / 1000.0);
+        ap_off_us_.store(off, std::memory_order_relaxed);
+        ap_off_valid_.store(true, std::memory_order_release);
     } else {
-        ap_off_us_ += (off - ap_off_us_) / 8;
+        ap_off_us_.store(cur + (off - cur) / 8, std::memory_order_relaxed);
     }
 }
 
@@ -3094,14 +3153,14 @@ void Ar8030Source::note_ap_delay(const uint8_t *hdr, size_t len, bool new_pic) {
         hdr_height_ = h;
         hdr_fps_ = fps;
     }
-    if (!ap_off_valid_ || len < 31) return;
+    if (!ap_off_valid_.load(std::memory_order_acquire) || len < 31) return;
     auto u16 = [&](int o) { return (int64_t)(hdr[o] | (hdr[o + 1] << 8)) * 10; };
     const bool ka = air_kestrel_ && (air_feat_ & kAirFeatLatInfo) && len >= 42;
     const bool fine = ka && (air_feat_ & kAirFeatApClock);
     const uint32_t rt = (uint32_t)hdr[26] | ((uint32_t)hdr[27] << 8) |
                         ((uint32_t)hdr[28] << 16) | ((uint32_t)hdr[29] << 24);
     const uint64_t here = now_us();
-    const uint64_t ap_us = here - (uint64_t)ap_off_us_;
+    const uint64_t ap_us = here - (uint64_t)ap_off_us_.load(std::memory_order_relaxed);
     const int64_t frac_us = fine ? ((int64_t)hdr[2] * 1000 + 128) / 256 : 500;
     const int64_t d = (int64_t)(int32_t)((uint32_t)(ap_us / 1000) - rt) * 1000 +
                       (int64_t)(ap_us % 1000) - frac_us;
@@ -3737,6 +3796,10 @@ void Ar8030Source::drop_au() {
     if (au_streamed && !au_stream_done && vdec) vdec->stream_end(au_pts);
     au_streamed = au_stream_done = false;
     au_slices.clear();
+    // The next picture gets a pts of its own, as after a flush: with this
+    // one's, MPP refuses its streamed parts as late and the renderer takes
+    // it for the picture dropped here.
+    if (au_open) frame_pts++;
     au_open = false;
 }
 

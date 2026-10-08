@@ -53,6 +53,70 @@ static std::atomic<uint32_t> s_buf_epoch{1};
 // 	printf("init_buffer done\n");
 // }
 
+// The picture buffers init_buffer made, given back: on a resolution change,
+// and when the decoder goes. Order: framebuffers, then MPP's group (it
+// closes the prime_fds it holds), then the dumb buffers. A picture still held
+// elsewhere (an imported texture, a DecodedUnit) keeps its memory alive.
+void VdecRK::free_frame_buffers() {
+	if (!mpi.frm_grp) return;
+	const int fd = dev ? dev->drm_fd : -1;
+	// 1. Remove DRM framebuffers (kernel ref-counts, safe even if still displayed)
+	for (int i = 0; i < MAX_FRAMES; i++) {
+		if (mpi.frame_to_drm[i].fb_id) {
+			if (fd >= 0) drmModeRmFB(fd, mpi.frame_to_drm[i].fb_id);
+			mpi.frame_to_drm[i].fb_id = 0;
+		}
+	}
+	// 2. Release MPP buffer group (closes prime_fds owned by MPP). Cleared
+	// first, as MPP's own decoder test does on an info change: a buffer
+	// something still references is marked discard, so it is freed when
+	// that lets go. Put back with one still in use, MPP 1.0.3 would
+	// otherwise keep it - and the orphaned group - for good.
+	mpp_buffer_group_clear(mpi.frm_grp);
+	mpp_buffer_group_put(mpi.frm_grp);
+	mpi.frm_grp = NULL;
+	// 3. Destroy underlying GEM dumb buffers
+	for (int i = 0; i < MAX_FRAMES; i++) {
+		if (mpi.frame_to_drm[i].handle) {
+			if (fd >= 0) {
+				struct drm_mode_destroy_dumb dmd = {};
+				dmd.handle = mpi.frame_to_drm[i].handle;
+				ioctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dmd);
+			}
+			mpi.frame_to_drm[i].handle = 0;
+		}
+		mpi.frame_to_drm[i].prime_fd = -1;
+	}
+}
+
+// Everything the constructor and init_buffer took. Before this, a decoder
+// that went (each recording played in the gallery has its own) kept its MPP
+// context and its 16 picture buffers - about 65 MB at 1080p - for good.
+VdecRK::~VdecRK() {
+	{
+		std::lock_guard<std::mutex> lock(early_mutex_);
+		early_stop_ = true;
+	}
+	early_cv_.notify_all();
+	if (early_thread_.joinable()) early_thread_.join();
+	if (mpi.ctx) {
+		mpi.mpi->reset(mpi.ctx);
+		mpp_destroy(mpi.ctx);   // its threads stop: nothing writes the buffers after this
+		mpi.ctx = NULL;
+	}
+	free_frame_buffers();
+	if (packet) {
+		void *data = mpp_packet_get_data(packet);
+		mpp_packet_deinit(&packet);
+		free(data);
+	}
+	for (int i = 0; i < NUM_SLICES_BUFFERS; i++) {
+		if (slices_buffers[i]) {
+			free(slices_buffers[i]);
+		}
+	}
+}
+
 void VdecRK::init_buffer(MppFrame frame) {
 	uint64_t video_frm_width = mpp_frame_get_width(frame);
 	uint64_t video_frm_height = mpp_frame_get_height(frame);
@@ -73,33 +137,9 @@ void VdecRK::init_buffer(MppFrame frame) {
 		// The screen recorder's pictures too: a buffer still referenced when
 		// the group is put back below is never freed by MPP 1.0.3.
 		if (dev) dev->drop_screen_pictures();
-		// 1. Remove DRM framebuffers (kernel ref-counts, safe even if still displayed)
-		for (int i = 0; i < MAX_FRAMES; i++) {
-			if (mpi.frame_to_drm[i].fb_id) {
-				drmModeRmFB(dev->drm_fd, mpi.frame_to_drm[i].fb_id);
-				mpi.frame_to_drm[i].fb_id = 0;
-			}
-		}
-		// 2. Release MPP buffer group (closes prime_fds owned by MPP). Their
-		// numbers may come back for the new buffers: a new epoch. Cleared
-		// first, as MPP's own decoder test does on an info change: a buffer
-		// something still references is marked discard, so it is freed when
-		// that lets go. Put back with one still in use, MPP 1.0.3 would
-		// otherwise keep it - and the orphaned group - for good.
+		// The prime_fds' numbers may come back for the new buffers: a new epoch.
 		s_buf_epoch++;
-		mpp_buffer_group_clear(mpi.frm_grp);
-		mpp_buffer_group_put(mpi.frm_grp);
-		mpi.frm_grp = NULL;
-		// 3. Destroy underlying GEM dumb buffers
-		for (int i = 0; i < MAX_FRAMES; i++) {
-			if (mpi.frame_to_drm[i].handle) {
-				struct drm_mode_destroy_dumb dmd = {};
-				dmd.handle = mpi.frame_to_drm[i].handle;
-				ioctl(dev->drm_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dmd);
-				mpi.frame_to_drm[i].handle = 0;
-			}
-			mpi.frame_to_drm[i].prime_fd = -1;
-		}
+		free_frame_buffers();
 	}
 
 	// output_list->video_fb_x = 0;
@@ -760,8 +800,9 @@ bool VdecRK::stream_append(const void* data, int len, int64_t pts, bool last) {
     a.flags = last ? MPP_STREAM_APPEND_LAST : 0;
     a.pts = pts;
     const bool ok = mpi.mpi->control(mpi.ctx, MPP_DEC_SET_STREAM_APPEND, &a) == MPP_OK;
-    if (last && early_ok_) {
-        // the whole picture is in: its bottom half is due a tail from now
+    if (last && ok && early_ok_) {
+        // the whole picture is in: its bottom half is due a tail from now.
+        // Refused, it is not: the estimate stays unknown and the top waits.
         std::lock_guard<std::mutex> lock(early_mutex_);
         auto it = strm_pics_.find(pts);
         if (it != strm_pics_.end()) {
@@ -859,6 +900,7 @@ void VdecRK::set_mpp_decoding_parameters() {
         printf("%p failed to set cfg %p ret %d\n", mpi.ctx, cfg, ret);
         assert(false);
     }
+    mpp_dec_cfg_deinit(cfg);   // MPP_DEC_SET_CFG copied it
 	int mpp_split_mode = 0;
     set_control_verbose(MPP_DEC_SET_PARSER_SPLIT_MODE, mpp_split_mode);
     set_control_verbose(MPP_DEC_SET_DISABLE_ERROR, 1);

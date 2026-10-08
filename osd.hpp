@@ -678,6 +678,12 @@ class OSD {
         char menu_opt_[kMenuOptMax][kMenuOptLen] = {};
         // Which column has focus: 0 section, 1 setting, 2 value.
         int  menu_focus = 1;
+        // The row being changed (focus 2): its tab and label. OK and the
+        // arrows act on it only while it is still the row under the cursor
+        // (menu_edit_row_intact).
+        int  menu_edit_tab_ = -1;
+        std::string menu_edit_label_;
+        bool menu_edit_row_intact() const;
         // True while a walk is enumerating a row's values by stepping its own
         // handler. The step has to move the menu's mirror of the setting -
         // that is what the walk reads back - but it must not apply it to the

@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <deque>
 #include <mutex>
 #include <thread>
 #include <utility>
@@ -465,8 +466,9 @@ class Ar8030Source {
         static constexpr uint8_t kAirFeatApClock = 0x08;   // byte 2: the stamp's sub-ms part
         static constexpr uint8_t kAirFeatMaxBw = 0x10;     // takes the goggle's bandwidth cap (sky 0x41)
         static constexpr uint8_t kAirFeatFcImu = 0x20;     // the flight controller's IMU (the Lite+: none on the camera)
-        int64_t  ap_off_us_ = 0;
-        bool     ap_off_valid_ = false;
+        // Written by the stats thread (poll_ap_time), read by the video thread.
+        std::atomic<int64_t> ap_off_us_{0};
+        std::atomic<bool>    ap_off_valid_{false};
         uint64_t ap_poll_ms_ = 0;
         uint64_t pic_cap_us_ = 0;        // the picture being received: its capture, our clock (0 = unknown)
         uint32_t pic_enc_us_ = 0;        // and capture -> its first slice out of the encoder
@@ -550,6 +552,7 @@ class Ar8030Source {
         int  wait_sky_status(uint8_t want_cmd, int timeout_ms);
         bool read_sky_ack(uint8_t want_cmd, int timeout_ms);
         void drain_control_socket();  // keep the port-2 RX ring from overflowing
+        void on_ctrl_bytes(const uint8_t *buf, int n);  // the air's reports, MSP, an awaited ack
         void drain_msp_socket();      // FC MSP passthrough -> OSD DisplayPort
         void apply_bandwidth();       // must run after the link is up (see .cpp)
         void send_prj_rf_config();    // BB_SET_PRJ_DISPATCH cmd 138 (see .cpp)
@@ -575,6 +578,20 @@ class Ar8030Source {
         std::vector<uint8_t> build_config_frame(const uint8_t *tmpl, size_t len);
         void apply_pending_settings();
         void apply_pending_rf();
+        // A camera setting sent and not acknowledged yet. Its ack is picked
+        // out of whatever the control socket brings in (on_ctrl_bytes), read
+        // by the main loop between pictures: the video goes on meanwhile. The
+        // next setting goes once it is in, or after kSkyAckMs.
+        struct SkyAckWait {
+            int field = -1;              // -1: none awaited
+            int value = 0;
+            uint8_t cmd = 0;
+            uint64_t until_ms = 0;
+        };
+        static constexpr int kSkyAckMs = 1000;
+        SkyAckWait sky_ack_;
+        std::deque<std::pair<int,int>> settings_q_;   // parked settings not sent yet, in order
+        void sky_ack_done(int status);
         unsigned rf_caps = 0;
         bool ranging_ok = false;
         int  ranging_tries = 0;

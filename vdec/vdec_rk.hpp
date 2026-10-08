@@ -49,6 +49,7 @@ class VdecRK : public Vdec {
         int current_slice_buffer_idx = 0;
 
         void init_buffer(MppFrame frame);
+        void free_frame_buffers();
         void set_mpp_decoding_parameters();
         void set_control_verbose(MpiCmd control,RK_U32 enable);
         void probe_stream();
@@ -117,19 +118,8 @@ class VdecRK : public Vdec {
         void cleanup();
         void run_frame();
 
-        virtual ~VdecRK() {
-            {
-                std::lock_guard<std::mutex> lock(early_mutex_);
-                early_stop_ = true;
-            }
-            early_cv_.notify_all();
-            if (early_thread_.joinable()) early_thread_.join();
-            for (int i = 0; i < NUM_SLICES_BUFFERS; i++) {
-                if (slices_buffers[i]) {
-                    free(slices_buffers[i]);
-                }
-            }
-        }
+        // The owner stops run_frame (and joins its thread) first.
+        virtual ~VdecRK();
 
         VdecRK(VideoCodec codec, std::shared_ptr<Renderer> rdr, std::shared_ptr<DrmDevice> dev_, volatile bool* signal_stop) :
             should_stop(signal_stop), renderer(rdr), dev(dev_),

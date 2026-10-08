@@ -1171,6 +1171,7 @@ void DrmDevice::cleanup() {
 	modeset_cleanup(drm_fd, output_list);
 
 	close(drm_fd);
+	drm_fd = -1;   // a decoder going after this (at exit) skips its DRM calls
 	
 	int ret = pthread_cond_destroy(&video_cond);
 	assert(!ret);

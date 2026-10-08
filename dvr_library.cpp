@@ -56,6 +56,36 @@ template <typename F> void each_box(const uint8_t* b, size_t n, F f) {
     }
 }
 
+// The child boxes of the file's range [off, end), read by their headers only:
+// calls f(type, body offset, body size) for each. A finished recording's moov
+// holds every sample's size and offset - megabytes for a long one - and only
+// a few small boxes in it are wanted.
+template <typename F> void each_box_at(int fd, uint64_t off, uint64_t end, F f) {
+    for (int guard = 0; guard < 1024 && off + 8 <= end; guard++) {
+        uint8_t h[16];
+        const ssize_t got = pread(fd, h, 16, (off_t)off);
+        if (got < 8) return;
+        uint64_t size = be32(h), hdr = 8;
+        if (size == 1) {
+            if (got < 16) return;
+            size = be64(h + 8);
+            hdr = 16;
+        } else if (size == 0) {
+            size = end - off;
+        }
+        if (size < hdr || size > end - off) return;
+        f(h + 4, off + hdr, size - hdr);
+        off += size;
+    }
+}
+
+// The first bytes of a box's body: at most cap of them, none if the read fails.
+std::vector<uint8_t> read_body(int fd, uint64_t off, uint64_t n, size_t cap) {
+    std::vector<uint8_t> b((size_t)std::min<uint64_t>(n, cap));
+    if (pread(fd, b.data(), b.size(), (off_t)off) != (ssize_t)b.size()) b.clear();
+    return b;
+}
+
 // A fragmented MP4's length, from the last of its fragments: that fragment's
 // decode time plus its samples' durations, in the track's timescale. -1 if the
 // tail of the file holds no fragment that parses.
@@ -136,29 +166,33 @@ double mp4_duration(const std::string& path) {
             }
             if (size < hdr) break;
             if (memcmp(h + 4, "moov", 4) == 0) {
-                if (size - hdr > (1u << 20)) break;      // no moov this DVR writes
-                std::vector<uint8_t> m(size - hdr);
-                if (pread(fd, m.data(), m.size(), (off_t)(off + hdr)) != (ssize_t)m.size()) break;
+                // Walked by box headers: a long recording's moov is megabytes
+                // (it was read whole, up to 1 MB, and a finished recording
+                // over about 11 minutes was left out of the gallery).
                 uint32_t track_scale = 0, trex_duration = 0;
                 bool fragmented = false;
-                each_box(m.data(), m.size(), [&](const uint8_t* type, const uint8_t* b, size_t n) {
-                    if (memcmp(type, "mvhd", 4) == 0 && n >= 32) {
-                        const uint32_t scale = b[0] == 1 ? be32(b + 20) : be32(b + 12);
-                        const uint64_t dur = b[0] == 1 ? be64(b + 24) : be32(b + 16);
+                each_box_at(fd, off + hdr, off + size, [&](const uint8_t* type, uint64_t bo, uint64_t bn) {
+                    if (memcmp(type, "mvhd", 4) == 0) {
+                        const std::vector<uint8_t> b = read_body(fd, bo, bn, 32);
+                        if (b.size() < 32) return;
+                        const uint32_t scale = b[0] == 1 ? be32(&b[20]) : be32(&b[12]);
+                        const uint64_t dur = b[0] == 1 ? be64(&b[24]) : be32(&b[16]);
                         if (scale && dur) secs = (double)dur / scale;
                     } else if (memcmp(type, "trak", 4) == 0 && !track_scale) {
-                        each_box(b, n, [&](const uint8_t* type, const uint8_t* b, size_t n) {
+                        each_box_at(fd, bo, bo + bn, [&](const uint8_t* type, uint64_t bo, uint64_t bn) {
                             if (memcmp(type, "mdia", 4) != 0) return;
-                            each_box(b, n, [&](const uint8_t* type, const uint8_t* b, size_t n) {
-                                if (memcmp(type, "mdhd", 4) == 0 && n >= 24)
-                                    track_scale = b[0] == 1 ? be32(b + 20) : be32(b + 12);
+                            each_box_at(fd, bo, bo + bn, [&](const uint8_t* type, uint64_t bo, uint64_t bn) {
+                                if (memcmp(type, "mdhd", 4) != 0) return;
+                                const std::vector<uint8_t> b = read_body(fd, bo, bn, 24);
+                                if (b.size() >= 24) track_scale = b[0] == 1 ? be32(&b[20]) : be32(&b[12]);
                             });
                         });
                     } else if (memcmp(type, "mvex", 4) == 0) {
                         fragmented = true;
-                        each_box(b, n, [&](const uint8_t* type, const uint8_t* b, size_t n) {
-                            if (memcmp(type, "trex", 4) == 0 && n >= 16 && !trex_duration)
-                                trex_duration = be32(b + 12);
+                        each_box_at(fd, bo, bo + bn, [&](const uint8_t* type, uint64_t bo, uint64_t bn) {
+                            if (memcmp(type, "trex", 4) != 0 || trex_duration) return;
+                            const std::vector<uint8_t> b = read_body(fd, bo, bn, 16);
+                            if (b.size() >= 16) trex_duration = be32(&b[12]);
                         });
                     }
                 });
@@ -230,8 +264,12 @@ class Thumbnailer {
                 const std::string in = dir() + "/" + name, out = thumb_path(name);
                 // Deleted while it waited (the goggle's gallery can do that): nothing
                 // to make, and a thumbnail made now would be left with no recording.
-                struct stat gone;
-                if (stat(in.c_str(), &gone) != 0) {
+                // Made already, from the recording as it is now: nothing to do
+                // either - the goggle's gallery asks for every recording each time
+                // it opens, and each one is a second of software decode.
+                struct stat rec, thumb;
+                if (stat(in.c_str(), &rec) != 0 ||
+                    (stat(out.c_str(), &thumb) == 0 && thumb.st_size > 0 && thumb.st_mtime >= rec.st_mtime)) {
                     std::lock_guard<std::mutex> lk(m_);
                     queued_.erase(name);
                     continue;
