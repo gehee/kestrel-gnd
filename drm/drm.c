@@ -432,6 +432,7 @@ int modeset_setup_objects(int fd, struct modeset_output *out)
     for (uint32_t i = 0; i < connector->props->count_props; i++) {
         if (!strcmp(connector->props_info[i]->name, "vrr_capable")) {
             printf("DRM: Monitor reports vrr_capable = %lu\n", (unsigned long)connector->props->prop_values[i]);
+            out->vrr_capable = connector->props->prop_values[i] != 0;
         }
         if (!strcmp(connector->props_info[i]->name, "vrr_range")) {
             printf("DRM: Monitor reports vrr_range property exists\n");
@@ -968,8 +969,8 @@ int modeset_atomic_prepare_commit(int fd, struct modeset_output *out, drmModeAto
 			return -1;
 		if (set_drm_object_property(req, &out->crtc, "ACTIVE", 1) < 0)
 			return -1;
-		// Enable VRR if supported and allowed
-		set_drm_object_property(req, &out->crtc, "VRR_ENABLED", out->allow_vrr ? 1 : 0);
+		// VRR only on a sink that says it can (vrr_capable), and when allowed
+		set_drm_object_property(req, &out->crtc, "VRR_ENABLED", out->allow_vrr && out->vrr_capable ? 1 : 0);
 	}
 
 	if (set_drm_object_property(req, plane, "FB_ID", fb_id) < 0)

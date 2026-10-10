@@ -3527,10 +3527,14 @@ void Ar8030Source::emit_nal(const uint8_t* nal, size_t len) {
                 // Its slices, each timed on its own - only with the capture
                 // measured by the radio's clock and the slices' rows known.
                 au_times_.reset();
-                if (au_measured_ && pic_cap_us_ && ctb_size_ && ctbs_per_row_ && hdr_height_) {
+                // A --debug-replay capture from before the radio clock: its
+                // arrival stands in for the capture, so the slices still have
+                // rows (what a picture in halves is cut at) on the bench.
+                const bool bench = !au_measured_ && !replay_path.empty();
+                if (((au_measured_ && pic_cap_us_) || bench) && ctb_size_ && ctbs_per_row_ && hdr_height_) {
                     au_times_ = std::make_shared<SliceTimes>();
                     au_times_->height = hdr_height_;
-                    au_times_->frame_cap_us = pic_cap_us_;
+                    au_times_->frame_cap_us = bench ? recv_us : pic_cap_us_;
                     au_times_->key = nal_type >= 16 && nal_type <= 21;
                     au_times_->pts = (int64_t)frame_pts;
                 }

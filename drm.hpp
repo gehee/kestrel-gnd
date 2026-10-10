@@ -320,6 +320,9 @@ public:
     struct gbm_device* get_gbm_device() { return gbm_dev; }
     int get_osd_zpos() { return osd_zpos; }
     bool is_flip_pending() { return flip_pending; }
+    // VRR on: allowed by the settings and the sink is vrr_capable (FreeSync).
+    // Each frame then goes out when committed, not at a fixed vblank.
+    bool vrr_active() const { return enable_vrr && output_list && output_list->vrr_capable; }
     // Kernel timestamp (CLOCK_MONOTONIC us) of the last vblank on our CRTC.
     bool last_vblank(uint64_t *ts_us, uint32_t *seq = nullptr);
     // How long after a vblank the scan-out reaches a screen row, in

@@ -215,6 +215,10 @@ class Renderer {
         int halves_policy_ = 0;
         unsigned halves_holds_ = 0, halves_lower_first_ = 0, halves_lower_superseded_ = 0;
         bool deadline_commit_ = true;
+        // VRR: halves go up as soon as they are ready, a commit starting the
+        // frame (vrr_halves: 0 or KESTREL_VRR_HALVES=0 for whole pictures).
+        bool vrr_halves_ = false;
+        uint64_t vrr_hold_n_ = 0;          // stands in for the vblank in the hold trace
         double commit_margin_us_ = 1200, commit_min_slack_us_ = 600;
         unsigned halves_whole_ = 0, halves_split_ = 0, halves_lower_ = 0, halves_waited_ = 0,
                  halves_dropped_ = 0, halves_lower_skipped_ = 0;

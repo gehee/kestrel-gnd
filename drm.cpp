@@ -705,8 +705,8 @@ bool DrmDevice::page_flip(int fb_id, uint64_t recv_ts, uint64_t dec_start_ts, ui
 
     drmModeAtomicSetCursor(output_list->video_request, 0);
     
-    // Enable VRR if supported and not disabled
-    set_drm_object_property(output_list->video_request, &output_list->crtc, "VRR_ENABLED", enable_vrr ? 1 : 0);
+    // VRR when allowed and the sink is capable
+    set_drm_object_property(output_list->video_request, &output_list->crtc, "VRR_ENABLED", vrr_active() ? 1 : 0);
 
     // Bundle OSD update. First, so that the video plane's rectangle below is
     // the one that goes with the OSD buffer this flip carries (the gallery's

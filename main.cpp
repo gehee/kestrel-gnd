@@ -616,13 +616,15 @@ int main(int argc, char **argv)
 	Ar8030Source::max_bw_mhz    = Settings::getInstance().getInt("ar8030_max_bw_mhz", 40) == 20 ? 20 : 40;
 	Ar8030Source::replay_stock_rf = Settings::getInstance().getInt("replay_stock_rf", 1);
 	std::string decoder_name = Settings::getInstance().getString("decoder_name", "rkmpp");
-	bool enable_vrr = Settings::getInstance().getBool("enable_vrr", true);
-	
-	// Force VRR off on Rockchip (ARM) platforms - not properly supported
+	// VRR (FreeSync over HDMI): opt-in on Rockchip, where it needs fpvOS's
+	// kernel support and a sink that declares FreeSync (or is forced to with
+	// rockchipdrm.freesync_force). Used only when the connector is vrr_capable.
 	#if defined(__aarch64__) || defined(__arm__)
-	enable_vrr = false;
-	printf("VRR disabled on ARM/Rockchip platform\n");
+	bool enable_vrr = Settings::getInstance().getBool("enable_vrr", false);
+	#else
+	bool enable_vrr = Settings::getInstance().getBool("enable_vrr", true);
 	#endif
+	printf("VRR %s by the settings\n", enable_vrr ? "allowed" : "off");
 	
 	float ui_scale = Settings::getInstance().getFloat("ui_scale", 1.0f);
 

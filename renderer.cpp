@@ -449,14 +449,32 @@ void Renderer::run(){
     // VOP2 a commit takes 0.2 to over 0.8 ms to be latched: at 0.8 ms before
     // the vblank 23% missed it and went out a refresh later, at 1.2 ms 1%. A
     // picture less than commit_min_slack_ms from a vblank waits for the next.
-    const bool deadline_commit = deadline_commit_ = Settings::getInstance().getInt("deadline_commit", 1) != 0;
+    // Under VRR there is no deadline: the commit itself ends the frame.
+    const bool vrr = dev->vrr_active();
+    const bool deadline_commit = deadline_commit_ =
+        Settings::getInstance().getInt("deadline_commit", 1) != 0 && !vrr;
     const double commit_margin_us = commit_margin_us_ = Settings::getInstance().getFloat("commit_margin_ms", 1.2f) * 1000.0;
     const double commit_min_slack_us = commit_min_slack_us_ = Settings::getInstance().getFloat("commit_min_slack_ms", 0.6f) * 1000.0;
     if (deadline_commit && render_mode == Atomic)
         printf("renderer: committing %.1f ms before each vblank\n", commit_margin_us / 1000);
+    // VRR: there is no fixed vblank to aim for - a commit ends the frame being
+    // stretched, so each picture goes out the moment it is decoded.
+    if (vrr && render_mode == Atomic)
+        printf("renderer: VRR - committing each picture as soon as it is decoded\n");
     if (const char *e = getenv("KESTREL_SPLIT")) split_enabled_ = atoi(e) != 0;
+    // Under VRR a commit starts a frame: a picture in halves takes two, its
+    // top's as soon as the top is decoded, its rest's when that is. On the
+    // RK3588 at 4K120 that once underflowed the display controller
+    // (POST_BUF_EMPTY, a black screen) - hence the switch.
+    if (vrr) {
+        vrr_halves_ = Settings::getInstance().getInt("vrr_halves", 1) != 0;
+        if (const char *e = getenv("KESTREL_VRR_HALVES")) vrr_halves_ = atoi(e) != 0;
+    }
+    const bool split_off_for_vrr = vrr && split_enabled_ && !vrr_halves_;
+    if (split_off_for_vrr) split_enabled_ = false;
     if (render_mode == Atomic && dev->has_split_plane())
         printf("renderer: a picture can go up in halves, its top before its rest%s\n",
+               split_off_for_vrr ? " - off under VRR" :
                split_enabled_ ? "" : " - off (KESTREL_SPLIT=0)");
 
     while(!*should_stop) {
@@ -748,7 +766,7 @@ void Renderer::heartbeat(uint64_t now) {
 // that is not (100 fps on 60 Hz, or on 100 Hz with drift) the halves queue up
 // behind each other and it is slower than whole pictures (+8 to +16 ms).
 bool Renderer::halves_wanted() {
-    if (!(split_active() && deadline_commit_ && dev->split_possible())) {
+    if (!(split_active() && (deadline_commit_ || vrr_halves_) && dev->split_possible())) {
         halves_why_ = split_active() ? "deadline commit off" :
                       dev->tap.recording() ? "the screen is being recorded" :
                       dev->has_split_plane() ? "switched off" : "no second video plane";
@@ -899,22 +917,31 @@ void Renderer::halves_step() {
         return;
     }
     uint64_t vb = 0;
-    const double period = dev->frame_period_us();
-    if (period <= 0 || !dev->last_vblank(&vb)) {
-        usleep(1000);
-        return;
+    const uint64_t t0 = get_time_us();
+    double to_next;
+    if (vrr_halves_) {
+        // No deadline: whatever is ready goes up now, and the frame starts
+        // about a millisecond after the commit (the VOP2's latch).
+        to_next = 1000;
+        vb = ++vrr_hold_n_;
+    } else {
+        const double period = dev->frame_period_us();
+        if (period <= 0 || !dev->last_vblank(&vb)) {
+            usleep(1000);
+            return;
+        }
+        const double since = t0 > vb ? (double)(t0 - vb) : 0.0;
+        to_next = period - fmod(since, period);
+        double sleep_us = 0;
+        if (to_next > commit_margin_us_) sleep_us = to_next - commit_margin_us_;
+        else if (to_next < commit_min_slack_us_) sleep_us = to_next + period - commit_margin_us_;
+        if (sleep_us > 50) {
+            struct timespec ts = { 0, (long)(sleep_us * 1000) };
+            nanosleep(&ts, nullptr);
+            return;
+        }
     }
-    const uint64_t t = get_time_us();
-    const double since = t > vb ? (double)(t - vb) : 0.0;
-    const double to_next = period - fmod(since, period);
-    double sleep_us = 0;
-    if (to_next > commit_margin_us_) sleep_us = to_next - commit_margin_us_;
-    else if (to_next < commit_min_slack_us_) sleep_us = to_next + period - commit_margin_us_;
-    if (sleep_us > 50) {
-        struct timespec ts = { 0, (long)(sleep_us * 1000) };
-        nanosleep(&ts, nullptr);
-        return;
-    }
+    const uint64_t t = t0;
 
     // Tops, oldest first; a backlog past two is let go down to two.
     int waiting = 0;

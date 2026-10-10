@@ -86,6 +86,7 @@ struct modeset_output {
 	bool cleanup;
 	bool initialized;
 	bool allow_vrr;
+	bool vrr_capable;	/* the connector's vrr_capable: a FreeSync/VRR sink */
 };
 
 
