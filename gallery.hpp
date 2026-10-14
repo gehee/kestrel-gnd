@@ -53,7 +53,7 @@ class Gallery {
             bool  delete_chosen = false;   // ... and DELETE (not KEEP) is the one lit
             float gap = 0;          // tiles from gap_from on are this many places to the right,
             int   gap_from = 0;     //   closing up after a deletion
-            int   stats_window = 0; // 0: the last 10 s, 1: 1 min, 2: 3 min
+            int   stats_window = 2; // 0: the last 2 s, 1: 5 s, 2: 10 s, 3: 1 min, 4: 3 min
         };
 
         Gallery();
@@ -124,7 +124,7 @@ class Gallery {
         bool  confirming_ = false, confirm_delete_ = false;
         float dialog_t_ = 0, gap_ = 0;
         int   gap_from_ = 0;
-        int   stats_window_ = 0;
+        int   stats_window_ = 2;   // 10 s
 
         std::thread scan_thread_;
         std::atomic<bool> scan_cancel_{false};

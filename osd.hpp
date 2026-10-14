@@ -63,6 +63,13 @@ typedef struct {
     float processing_ms;
     float net_ms;
     float dec_ms;
+    // Each stage's share spent waiting (within it, not added): the slice
+    // waiting for the rest of its picture, the decoded rows waiting for their
+    // refresh. Drawn in a lighter shade.
+    float processing_wait_ms = 0.0f;
+    float net_wait_ms = 0.0f;
+    float dec_wait_ms = 0.0f;
+    float disp_wait_ms = 0.0f;
     float disp_ms;
     float pace_ms;    // Time since last frame (frame interval)
     float video_mbps; // Video bitrate at this frame
@@ -72,12 +79,17 @@ typedef struct {
     uint32_t lost = 0;   // link packets lost so far
     int8_t   snr = 0;    // link SNR, dB
     uint8_t  mcs = 0;    // receive MCS
+    int8_t   bw_idx = -1;   // the video link's bandwidth gear (ar_bw_label), -1: no link
     uint8_t  key = 0;    // this picture was a keyframe
     uint16_t skipped = 0;   // pictures before this one that were never shown
+    // When its top first went up (the vblank) and when it was captured, both
+    // CLOCK_MONOTONIC (0: not known): the stats screen's frame spacing.
+    uint64_t shown_us = 0, cap_us = 0;
     // Each slice, top to bottom, from its own first row's capture to that row
     // lit (ms); nslices 0: not timed slice by slice (see kLatSlices).
     uint8_t nslices = 0;
     float slice_ms[kLatSlices] = {0, 0, 0, 0};
+    SliceStages sl[kLatSlices];   // each slice's stages and when it was captured
 } LatencyFrame;
 
 #include "utils/latency_ring.hpp"
@@ -879,6 +891,7 @@ class OSD {
             int   dist_m    = -1;        // -1 = no ranging
             char  vtx_pwr[24] = {0};
             int   link_freq_mhz = 0;     // 0 = unknown, do not show
+            int   link_bw_idx = -1;      // the video link's bandwidth gear (ar_bw_label), -1 = unknown
             // What the video link is actually delivering: the mode it is
             // sending, the bitrate it is spending on it, and how long a frame
             // takes to arrive. The three belong on one line because no one of
@@ -886,6 +899,7 @@ class OSD {
             // at 1080p120.
             int   v_w = 0, v_h = 0, fps = 0;
             float mbps = 0.0f;
+            float link_mbps = 0.0f;      // what the link carries at its MCS now (the radio's figure), 0 = unknown
             bool  have_lat = false;
             float lat_med_ms = 0.0f;
             // SPLIT: each slice of the picture on its own, top to bottom (0: none).

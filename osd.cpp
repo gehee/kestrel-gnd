@@ -3516,6 +3516,8 @@ void OSD::render_gl() {
         // on this radio rather than the actual channel (see the RF tab's own
         // frequency row for the same substitution).
         canopy.link_freq_mhz = artosyn_copy.tx_freq;
+        canopy.link_bw_idx = artosyn_copy.rf_bw_idx;
+        canopy.link_mbps = artosyn_copy.state == 2 ? artosyn_copy.rx_data_rate_kbps / 1000.0f : 0.0f;
     }
 
     if (canopy_on) {
@@ -3545,8 +3547,9 @@ void OSD::render_gl() {
         // link normally feels like.
         if (video_active && have_latency_median) {
             canopy.lat_med_ms = latency_median_ms;
-            canopy.lat_nslices = g_frame_mode.load(std::memory_order_relaxed) == kFrameSplit
-                ? osd_vars.latency_ring.slice_medians(canopy.lat_slice_ms) : 0;
+            // One per slice in every frame mode: a picture put up whole still
+            // has its lower slice lit later, mid-screen.
+            canopy.lat_nslices = osd_vars.latency_ring.slice_medians(canopy.lat_slice_ms);
             canopy.have_lat = true;
         }
         prof::mark(prof::kDrawPre);
@@ -4240,6 +4243,8 @@ void OSD::add_latency_frame(LatencyFrame frame) {
     frame.lost = osd_vars.link_stats.count_p_lost;
     frame.snr = (int8_t)std::max(-127.0f, std::min(127.0f, osd_vars.artosyn.snr));
     frame.mcs = (uint8_t)std::max(0, std::min(255, osd_vars.artosyn.rx_mcs_val));
+    frame.bw_idx = osd_vars.artosyn.state == 2 && osd_vars.artosyn.rf_bw_idx >= 0 && osd_vars.artosyn.rf_bw_idx < 6
+                   ? (int8_t)osd_vars.artosyn.rf_bw_idx : (int8_t)-1;
 
     osd_vars.latency_ring.push(frame);
     osd_vars.latency_history_last_us = now_us;

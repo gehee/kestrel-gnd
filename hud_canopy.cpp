@@ -11,6 +11,7 @@
 // (both panels use the same offsets, mirrored), Y upward from the bottom.
 
 #include "osd.hpp"
+#include "common.hpp"
 #include "settings.hpp"
 #include "vec_icons.hpp"
 #include "hud_theme.hpp"
@@ -1212,7 +1213,12 @@ void OSD::draw_canopy_hud(const CanopyIn& in) {
         icon(VecIcon::Drone, x, base, lir, lig, lib);
         x -= igap;
         char freq[16] = {0}, pw[16] = {0}, tp[16] = {0};
-        if (in.link_freq_mhz > 0) snprintf(freq, sizeof(freq), "%dMHz", in.link_freq_mhz);
+        // The channel and how wide the video link is on it ("5839@20MHz"):
+        // the width moves at run time (the radio's own steps, 40 MHz).
+        if (in.link_freq_mhz > 0 && in.link_bw_idx >= 0 && in.link_bw_idx < 6)
+            snprintf(freq, sizeof(freq), "%d@%sMHz", in.link_freq_mhz, ar_bw_label(in.link_bw_idx));
+        else if (in.link_freq_mhz > 0)
+            snprintf(freq, sizeof(freq), "%dMHz", in.link_freq_mhz);
         if (in.vtx_pwr[0])        snprintf(pw,   sizeof(pw),   "%s", in.vtx_pwr);
         if (in.vtx_temp_valid)    snprintf(tp,   sizeof(tp),   "%.0fC", in.vtx_temp_c);
 
@@ -1261,9 +1267,14 @@ void OSD::draw_canopy_hud(const CanopyIn& in) {
         char mode[24] = "--", rate[24] = "--", lat[24] = "--";
         if (in.v_h > 0 && fps > 0)    snprintf(mode, sizeof(mode), "%dp%d", in.v_h, fps);
         else if (in.v_h > 0)          snprintf(mode, sizeof(mode), "%dp", in.v_h);
-        if (in.mbps > 0.05f)          snprintf(rate, sizeof(rate), "%.1fMbps", in.mbps);
+        // What the video spends against what the link carries now
+        // ("11.2/44.9Mbps"): the headroom, which moves with the MCS and the
+        // step to 40 MHz.
+        if (in.mbps > 0.05f && in.link_mbps > 0.05f)
+            snprintf(rate, sizeof(rate), "%.1f/%.1fMbps", in.mbps, in.link_mbps);
+        else if (in.mbps > 0.05f)     snprintf(rate, sizeof(rate), "%.1fMbps", in.mbps);
         if (in.have_lat)              snprintf(lat, sizeof(lat), "%.0fms", in.lat_med_ms);
-        // SPLIT: the top half goes up before the bottom - both, top first.
+        // Each slice's own latency, top first, in every frame mode.
         if (in.lat_nslices >= 2) {
             // Each slice, top to bottom: 23|27ms, 22|24|26ms.
             int o = 0;

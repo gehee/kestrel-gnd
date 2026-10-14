@@ -2860,12 +2860,23 @@ void Ar8030Source::disconnect_bb() {
 }
 
 void Ar8030Source::update_stats(size_t frame_size) {
-    bytes_received += (long long)frame_size;
     uint64_t t = now_ms();
+    // After a gap (the link went, the video stopped) a new period from this
+    // frame. The bytes from before it used to be counted as the first second
+    // after it: the first line after a link-up said 8-9 Mbit/s "on" the 5 MHz
+    // link just come up, which carries 1.56 - the rate from before the drop
+    // (2026-10-16 flight log, read as the air unit flooding the new link).
+    if (period_start && t - stats_frame_ms_ > 500) {
+        period_start = t;
+        bytes_received = 0;
+    }
+    stats_frame_ms_ = t;
+    bytes_received += (long long)frame_size;
     if (period_start == 0) { period_start = t; return; }
     if (t - period_start >= 1000) {
+        // Over the time the period really took: a second, or a little more.
+        double video_bw = (double)bytes_received * 1000.0 / (double)(t - period_start);   // bytes a second
         period_start = t;
-        double video_bw = (double)bytes_received;   // bytes in the last second
         if (osd) {
             osd->update_video_bandwidth(video_bw / 125000.0);  // -> Mbit/s
             osd->log_csv_row();
@@ -2979,6 +2990,15 @@ void Ar8030Source::note_air_info(const uint8_t *pl, size_t n) {
         std::string v = line.substr(eq + 1);
         for (char &c : v) if ((unsigned char)c < 0x20 || (unsigned char)c > 0x7e) c = '?';
         kv.emplace_back(line.substr(0, eq), v);
+    }
+    // The sensor's readout and exposure: ours, they change as it runs, so not
+    // part of what is logged or shown.
+    for (auto it = kv.begin(); it != kv.end();) {
+        const long r = strtol(it->second.c_str(), nullptr, 10);
+        if (it->first == "readout") air_readout_us_ = r >= 1000 && r <= 40000 ? (uint32_t)r : 0;
+        else if (it->first == "exposure") air_exposure_us_ = r > 0 && r <= 200000 ? (uint32_t)r : 0;
+        else { ++it; continue; }
+        it = kv.erase(it);
     }
     std::lock_guard<std::mutex> g(air_info_mtx_);
     if (kv == air_info_.kv) return;
@@ -3100,6 +3120,21 @@ void Ar8030Source::bw_poll() {
     const uint64_t t = now_ms();
     if (!dev || t - last < 500) return;
     last = t;
+    // Tests: /tmp/kestrel-frame-mode holding 0, 1 or 2 asks the radio for
+    // that TDD frame (SET order 16, as the stock RF setup does at start with
+    // 2): both ends change together; it holds until the link re-forms. At
+    // 20 MHz 0 = 5633.92 us, 1 = 7964.80, 2 = 4650.88; at 40 MHz 4233.60,
+    // 5398.40, 6501.12 (measured 2026-10-14).
+    if (FILE *f = fopen("/tmp/kestrel-frame-mode", "r")) {
+        int m = -1;
+        if (fscanf(f, "%d", &m) != 1) m = -1;
+        fclose(f);
+        unlink("/tmp/kestrel-frame-mode");
+        if (m >= 0 && m <= 2) {
+            uint8_t buf[16] = { (uint8_t)m };
+            printf("ar8030: /tmp/kestrel-frame-mode: %d -> %d\n", m, ar_ioctl(dev, (2 << 24) | 16, buf, NULL));
+        }
+    }
     auto set_ours = [&](int g) {
         bb_set_bandwidth_t p;
         memset(&p, 0, sizeof(p));
@@ -3164,6 +3199,7 @@ void Ar8030Source::note_ap_delay(const uint8_t *hdr, size_t len, bool new_pic) {
             last_addr_cand = -1; last_addr_streak = 0; last_count_cand = 0; last_slice_count = 0;
             cut_last_hseq_ = -1; cut_period_ = 0; cut_confirms_ = 0; pics_since_cut_ = 0;
             readout_win_.clear(); readout_us_ = 0;
+            air_readout_us_ = 0;   // the air unit says the new mode's within 2 s
         }
         hdr_height_ = h;
         hdr_fps_ = fps;
@@ -3183,7 +3219,12 @@ void Ar8030Source::note_ap_delay(const uint8_t *hdr, size_t len, bool new_pic) {
     const int64_t enc = ka ? u16(35) : (int64_t)hdr[30] * 1000;
     const int64_t queue = ka ? u16(37) : 0;
     if (ka && (hdr[32] & 0x40)) ap_enc_last_.push_back((uint32_t)enc);
-    if (d - queue >= 0) {
+    // Not while a link-up's resync drops the pictures: those slices sat in
+    // the air radio while the link formed and are never shown, and the
+    // per-picture figures leave them out too. Counted, they made the first
+    // window after a link-up read p99 765-795 ms with its shown pictures at
+    // p99 25-30 (2026-10-20, Open8030 frame stamps: exact from link-up).
+    if (!resync_ && d - queue >= 0) {
         ap_link_.push_back((uint32_t)(d - queue));
         if (len >= 33) {   // byte 32: slice index | 0x20 more follow | 0x40 last
             const int pos = (hdr[32] & 0x40) ? 2 : (hdr[32] & 0x1f) == 0 ? 0 : 1;
@@ -3218,11 +3259,11 @@ void Ar8030Source::note_ap_picture(uint64_t last_recv_us) {
            pct_ms(ap_all_, 50), pct_ms(ap_all_, 99), pct_ms(ap_link_, 50), pct_ms(ap_link_, 99));
     printf("ar8030: per slice, air unit's radio->here by place: first %zu p50 %.2f p99 %.2f | "
            "middle %zu p50 %.2f p99 %.2f | last %zu p50 %.2f p99 %.2f ms | capture->last slice "
-           "out of the encoder p50 %.2f p99 %.2f ms | sensor readout, learned, %.2f ms\n",
+           "out of the encoder p50 %.2f p99 %.2f ms | sensor readout, learned, %.2f ms, the air unit's %.2f ms\n",
            ap_link_pos_[0].size(), pct_ms(ap_link_pos_[0], 50), pct_ms(ap_link_pos_[0], 99),
            ap_link_pos_[1].size(), pct_ms(ap_link_pos_[1], 50), pct_ms(ap_link_pos_[1], 99),
            ap_link_pos_[2].size(), pct_ms(ap_link_pos_[2], 50), pct_ms(ap_link_pos_[2], 99),
-           pct_ms(ap_enc_last_, 50), pct_ms(ap_enc_last_, 99), readout_us_ / 1000.0);
+           pct_ms(ap_enc_last_, 50), pct_ms(ap_enc_last_, 99), readout_us_ / 1000.0, air_readout_us_ / 1000.0);
     ap_enc_.clear(); ap_first_.clear(); ap_all_.clear(); ap_link_.clear(); ap_enc_last_.clear();
     for (auto &v : ap_link_pos_) v.clear();
     ap_log_ms_ = t;
@@ -3535,6 +3576,8 @@ void Ar8030Source::emit_nal(const uint8_t* nal, size_t len) {
                     au_times_ = std::make_shared<SliceTimes>();
                     au_times_->height = hdr_height_;
                     au_times_->frame_cap_us = bench ? recv_us : pic_cap_us_;
+                    au_times_->readout_us = air_readout_us_.load();
+                    au_times_->exposure_us = air_exposure_us_.load();
                     au_times_->key = nal_type >= 16 && nal_type <= 21;
                     au_times_->pts = (int64_t)frame_pts;
                 }
@@ -3867,7 +3910,8 @@ void Ar8030Source::note_slice(int addr, bool first_slice, uint64_t recv_us) {
     }
     SliceTimes::Slice &s = st->s[i];
     s.row = row;
-    s.cap_us = st->frame_cap_us + (uint64_t)readout_us_ * row / st->height;
+    const uint32_t ro = st->readout_us ? st->readout_us : readout_us_;   // the air unit's, else learned
+    s.cap_us = st->frame_cap_us + (uint64_t)ro * row / st->height;
     s.out_us = out;
     s.here_us = recv_us;
     st->n.store(i + 1);

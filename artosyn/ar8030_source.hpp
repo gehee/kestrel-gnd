@@ -281,6 +281,7 @@ class Ar8030Source {
         uint64_t frames_seen = 0;
         long long bytes_received = 0;
         uint64_t period_start = 0;
+        uint64_t stats_frame_ms_ = 0;    // update_stats: the last frame's arrival (a gap starts a new period)
         uint64_t last_tick_ms = 0;
         uint64_t last_data_ms = 0;   // last read that returned video bytes
         // Last byte off the telemetry socket, and when we last re-sent the
@@ -485,6 +486,12 @@ class Ar8030Source {
         // apart the first and last slices leave the encoder (see note_slice).
         std::vector<uint32_t> readout_win_;
         uint32_t readout_us_ = 0;
+        // The sensor's readout as the air unit says it (its info, "readout",
+        // us; kestrel-air from 2026-10-12): used instead of the learned one,
+        // and what splits a slice's Enc into the sensor's part and the rest.
+        // 0: not said (or a new mode not said yet).
+        std::atomic<uint32_t> air_readout_us_{0};
+        std::atomic<uint32_t> air_exposure_us_{0};   // its exposure now ("exposure", us; 0: not said)
         void note_slice(int addr, bool first_slice, uint64_t recv_us);
         void drop_au();   // the open access unit goes, a streamed one ended in the decoder
         bool ps_since_pic_ = false;          // parameter sets came since the last picture (a GOP start)

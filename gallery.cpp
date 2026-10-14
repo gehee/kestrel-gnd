@@ -142,7 +142,7 @@ bool Gallery::key(Key k) {
     if (mode_ == Mode::Stats) {
         switch (k) {
             case kUp:   stats_window_ = std::max(0, stats_window_ - 1); break;   // closer in
-            case kDown: stats_window_ = std::min(2, stats_window_ + 1); break;   // further back
+            case kDown: stats_window_ = std::min(4, stats_window_ + 1); break;   // further back
             case kBack:
                 play_target_ = 0;
                 mode_ = Mode::Strip;

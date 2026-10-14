@@ -237,10 +237,13 @@ void OSD::stats_history_update(uint64_t now) {
         sf.t_us = f.t_us;
         sf.stage[0] = f.processing_ms; sf.stage[1] = f.net_ms;
         sf.stage[2] = f.dec_ms; sf.stage[3] = f.disp_ms;
+        sf.wait[0] = f.processing_wait_ms; sf.wait[1] = f.net_wait_ms;
+        sf.wait[2] = f.dec_wait_ms; sf.wait[3] = f.disp_wait_ms;
         sf.video_mbps = f.video_mbps; sf.link_mbps = f.rf_mbps;
-        sf.lost = f.lost; sf.snr = f.snr; sf.mcs = f.mcs; sf.key = f.key; sf.skipped = f.skipped;
+        sf.lost = f.lost; sf.snr = f.snr; sf.mcs = f.mcs; sf.bw = f.bw_idx; sf.key = f.key; sf.skipped = f.skipped;
+        sf.shown_us = f.shown_us; sf.cap_us = f.cap_us;
         sf.nslices = f.nslices;
-        for (int s = 0; s < kLatSlices; s++) sf.slice_ms[s] = f.slice_ms[s];
+        for (int s = 0; s < kLatSlices; s++) { sf.slice_ms[s] = f.slice_ms[s]; sf.sl[s] = f.sl[s]; }
         fresh.push_back(sf);
     }
     pthread_mutex_unlock(&osd_mutex);
@@ -272,8 +275,8 @@ void OSD::stats_history_update(uint64_t now) {
 // rebuilds a second is smooth (the chart scrolls by the fraction in between) and each is a
 // pass over the whole window. And once a window changes, at once.
 void OSD::stats_refresh(int window_idx, uint64_t now) {
-    static const int kWin[3] = { 10, 60, 180 };
-    const int ws = kWin[std::max(0, std::min(2, window_idx))];
+    static const int kWin[5] = { 2, 5, 10, 60, 180 };
+    const int ws = kWin[std::max(0, std::min(4, window_idx))];
     const uint64_t every = ws <= 10 ? 0 : ws <= 60 ? 50000 : 250000;
     if (stats_view_window_ == ws && now - stats_view_us_ < every) return;
     const uint64_t pt_start = prof::enabled() ? get_time_us() : 0;
@@ -403,14 +406,13 @@ void OSD::gallery_prewarm() {
         "PAUSED", "ENDED - ENTER TO REPLAY", "1 / 1", "0:00",
         "LEFT / RIGHT  BROWSE      ENTER  PLAY      DOWN  DELETE      BACK  LIVE",
         "CANCEL", "DELETE",
-        "STATS", "Latency, frame pacing and link, live", "LATENCY", "SMOOTH", "FPS", "LOST",
-        "MCS / SNR", "VIDEO", "LINK USE", "STALLS", "WORST", "latency distribution",
-        "Enc", "RF", "Dec", "Disp", "ms", "I", "F", "Mb", "link", "p50", "p99", "now",
+        "STATS", "Latency, frame pacing and link, live", "LATENCY", "SMOOTH", "SHOWN/DECODED", "fps", "LOST",
+        "MCS / SNR", "VIDEO", "LINK USE", "VTX TEMP", "VRX TEMP", "worst", "latency distribution",
+        "Exp", "Read", "Enc", "RF", "Dec", "Disp", "ms", "I", "Mb", "link", "p50", "p99", "now",
         "0", "20", "40", "60", "80", "100", "-10 s", "-1 min", "-3 min", "WAITING FOR VIDEO",
-        "pacing: n/a (needs vsync)", "--",
-        "UP / DOWN  WINDOW 10 S      BACK  GALLERY",
-        "UP / DOWN  WINDOW 1 MIN      BACK  GALLERY",
-        "UP / DOWN  WINDOW 3 MIN      BACK  GALLERY",
+        "frame spacing", "n/a (needs vsync)", "skipped", "--", "slices timelines", "slice timeline",
+        "| vblank  : mid-screen",
+        "1080p", "720p",
     };
     for (const char* w : words) ensure_text_texture(w);
 }
@@ -649,19 +651,13 @@ bool OSD::render_gallery(int W, int H) {
     static const float kStageCol[StatsFrame::kStages][3] = {
         {1.00f, 0.42f, 0.42f}, {0.10f, 0.83f, 0.64f},
         {0.95f, 0.79f, 0.30f}, {1.00f, 0.54f, 0.30f} };
-    static const char* const kStageName[StatsFrame::kStages] = { "Enc", "RF", "Dec", "Disp" };
-    static const char* const kWinTime[3]   = { "-10 s", "-1 min", "-3 min" };
-    static const char* const kWinHint[3]   = {
-        "UP / DOWN  WINDOW 10 S      BACK  GALLERY",
-        "UP / DOWN  WINDOW 1 MIN      BACK  GALLERY",
-        "UP / DOWN  WINDOW 3 MIN      BACK  GALLERY" };
+    static const char* const kWinTime[5]   = { "-2 s", "-5 s", "-10 s", "-1 min", "-3 min" };
     float stats_fr = 0.0f;       // how far the chart has scrolled past its last rebuild, in columns
     const float lime[3]  = { 0.70f, 1.00f, 0.00f };
     const float amber[3] = { 0.95f, 0.79f, 0.30f };
     const float red[3]   = { 1.00f, 0.30f, 0.30f };
     const float white[3] = { 1.0f, 1.0f, 1.0f };
     const float panel[3] = { ground[0] * 0.45f, ground[1] * 0.45f, ground[2] * 0.45f };
-    const float* const kPaceCol[4] = { lime, amber, red, quiet };
 
     // Shapes are built as positions in vb, then given a colour and appended to the batch
     // (see gflush) by flush(): rectangles (six vertices each) and strips alike.
@@ -715,53 +711,71 @@ bool OSD::render_gallery(int W, int H) {
     // ---- the layer that changes twice a second ----
     auto stats_layer_static = [&](float ox, float oy, float m, float A) {
         const StatsView& sh = stats_shown_;
-        const int wi = sh.window_s >= 180 ? 2 : sh.window_s >= 60 ? 1 : 0;
+        const int wi = sh.window_s >= 180 ? 4 : sh.window_s >= 60 ? 3 : sh.window_s >= 10 ? 2 : sh.window_s >= 5 ? 1 : 0;
         auto X = [&](float a) { return ox + a * m; };
         auto Yd = [&](float a) { return oy + a * m; };
         const float fs = m * 0.8f;                  // font px per font unit of the 680 x 383 box
         char b[96];
         fill(ox, oy, 680.0f * m, 383.0f * m, panel, A);
 
-        // header: the median, and the figures that say how the picture is doing
-        text("LATENCY", X(10), Yd(16), 11 * fs, 0, quiet, A);
-        snprintf(b, sizeof(b), "%.1f", sh.p50);
-        text(b, X(10), Yd(46), 30 * fs, 0, ink, A);
-        text("ms", X(10) + text_width(b, 30 * fs) + 6 * m, Yd(46), 13 * fs, 0, quiet, A);
-        // SPLIT: the top of the picture goes up before the bottom - each one's
-        // median, from its own rows' capture to those rows lit.
-        if (g_frame_mode.load(std::memory_order_relaxed) == kFrameSplit && sh.nslices >= 2) {
-            // Each slice's median, top to bottom.
-            int o = snprintf(b, sizeof(b), "slices");
-            for (int s = 0; s < sh.nslices; s++)
-                o += snprintf(b + o, sizeof(b) - o, s ? " | %.1f" : " %.1f", sh.slice_p50[s]);
-            snprintf(b + o, sizeof(b) - o, "   p99 %.1f", sh.p99);
-        }
-        else
-            snprintf(b, sizeof(b), "p50 %.1f   p99 %.1f", sh.p50, sh.p99);
-        text(b, X(10), Yd(62), 11 * fs, 0, quiet, A);
+        // header: the figures that say how the picture is doing (the latency
+        // is in the right column, over its distribution). The left column is
+        // one edge top to bottom, the charts' (kx0): the header, its second
+        // row, the charts, their titles and keys; axis figures and units sit
+        // in the margin left of it, right-aligned.
         auto chip = [&](float x, const char* label, const char* val) {
             text(label, X(x), Yd(16), 11 * fs, 0, quiet, A);
             text(val, X(x), Yd(40), 16 * fs, 0, ink, A);
         };
-        snprintf(b, sizeof(b), "%.1f", sh.fps_now);        // now, not the window's average
-        chip(150, "FPS", b);
+        // Pictures a second, now (not the window's average): shown, of those
+        // decoded - the ones overtaken before their refresh are never shown.
+        snprintf(b, sizeof(b), "%.0f/%.0f", sh.fps_now, sh.fps_dec_now);
+        chip(kx0, "SHOWN/DECODED", b);
+        text("fps", X(kx0) + text_width(b, 16 * fs) + 3 * m, Yd(40), 10 * fs, 0, quiet, A);
         snprintf(b, sizeof(b), "%.1f", sh.video_now);      // the video's, Mbps
-        chip(196, "BITRATE", b);
-        text("SMOOTH", X(250), Yd(16), 11 * fs, 0, quiet, A);
-        fill(X(250), Yd(28), 9 * m, 9 * m, !sh.pacing ? quiet : sh.good_pct >= 99.0f ? lime : sh.good_pct >= 95.0f ? amber : red, A);
-        if (sh.pacing) snprintf(b, sizeof(b), "%.1f%%", sh.good_pct); else snprintf(b, sizeof(b), "--");
-        text(b, X(264), Yd(40), 16 * fs, 0, ink, A);
-        // (LOST is in the right column.)
+        chip(130, "BITRATE", b);
+        text("Mbps", X(130) + text_width(b, 16 * fs) + 3 * m, Yd(40), 10 * fs, 0, quiet, A);
+        text("SMOOTH", X(190), Yd(16), 11 * fs, 0, quiet, A);
+        // The pictures shown on target (the frame spacing below).
+        fill(X(190), Yd(28), 9 * m, 9 * m, !sh.pacing ? quiet : sh.on_target_pct >= 99.0f ? lime : sh.on_target_pct >= 95.0f ? amber : red, A);
+        if (sh.pacing) snprintf(b, sizeof(b), "%.1f%%", sh.on_target_pct); else snprintf(b, sizeof(b), "--");
+        text(b, X(204), Yd(40), 16 * fs, 0, ink, A);
         if (sh.freq_mhz > 0) snprintf(b, sizeof(b), "%d / %d", ar_mcs_label(sh.mcs_now), (int)sh.snr_now);
         else snprintf(b, sizeof(b), "--");
-        chip(316, "MCS / SNR", b);
+        chip(262, "MCS / SNR", b);
         // The channel, and how wide the video link is on it now.
         if (sh.freq_mhz > 0) snprintf(b, sizeof(b), "%d", sh.freq_mhz); else snprintf(b, sizeof(b), "--");
-        chip(378, "CHANNEL", b);
+        chip(338, "CHANNEL", b);
         if (sh.freq_mhz > 0 && sh.bw_idx >= 0) {
             char w[24];
             snprintf(w, sizeof(w), "%s MHz", ar_bw_label(sh.bw_idx));
-            text(w, X(378) + text_width(b, 16 * fs) + 4 * m, Yd(40), 11 * fs, 0, quiet, A);
+            text(w, X(338) + text_width(b, 16 * fs) + 4 * m, Yd(40), 11 * fs, 0, quiet, A);
+        }
+        // A second row under them, a label and its value each: the link's use
+        // and losses from the left edge, the two units' temperatures to the
+        // charts' right edge (kx1).
+        {
+            const float rf2 = 10 * fs;
+            auto fig = [&](float x, const char* label, const char* val, const float* col = nullptr) {
+                text(label, X(x), Yd(62), rf2, 0, quiet, A);
+                text(val, X(x + text_width(label, rf2) / m + 3), Yd(62), rf2, 0, col ? col : ink, A);
+            };
+            // A temperature, coloured as it nears what the unit can take (90 C,
+            // the HUD's placeholder limit); -- when there is none. Ending at
+            // right; where it starts is returned.
+            auto temp = [&](float right, const char* label, float c) {
+                char v[16];
+                if (c < 0) snprintf(v, sizeof(v), "--"); else snprintf(v, sizeof(v), "%.0f C", c);
+                const float x = right - (text_width(label, rf2) + text_width(v, rf2)) / m - 3;
+                fig(x, label, v, c < 0 ? nullptr : c >= 90 ? red : c >= 80 ? amber : ink);
+                return x;
+            };
+            snprintf(b, sizeof(b), "%.0f%%", sh.link_use);
+            fig(kx0, "LINK USE", b);
+            snprintf(b, sizeof(b), "%u", (unsigned)sh.lost_total);
+            fig(104, "LOST", b);
+            const float vrx = temp(kx1, "VRX TEMP", sh.vrx_temp_c);
+            temp(vrx - 16, "VTX TEMP", sh.vtx_temp_c);
         }
 
         // the latency chart's axes
@@ -779,19 +793,49 @@ bool OSD::render_gallery(int W, int H) {
             snprintf(b, sizeof(b), "%d", ms);
             text(b, X(kx0 - 5), Yl((float)ms) + 3.2f * m, 8.5f * fs, 2, quiet, A);
         }
+        text("ms", X(kx0 - 5), Yd(80), 11 * fs, 2, quiet, A);    // the axis's unit, over it
         text("I", X(kx0 - 5), Yd(227), 11 * fs, 2, quiet, A);
-        text("F", X(kx0 - 5), Yd(248), 11 * fs, 2, quiet, A);
-        if (sh.pacing)
-            snprintf(b, sizeof(b), "pacing: on time %.1f%%   p99 lateness %.1f ms   stutters %d", sh.good_pct, sh.p99_gap_ms, sh.stutters);
-        else
-            snprintf(b, sizeof(b), "pacing: n/a (needs vsync)");
-        text(b, X(kx0), Yd(270), 11 * fs, 0, quiet, A);
-        // What the stems over the chart are.
+        // Frame spacing: each picture shown by how long after the one before it
+        // went up, in ranges around the source's spacing S (gallery_stats.hpp),
+        // a bar each - its height the root of its share, so a few in a thousand
+        // still show beside nine in ten on target - and the share over it.
+        text("frame spacing", X(kx0), Yd(240), 11 * fs, 0, quiet, A);
+        if (sh.pacing && sh.sp_n && sh.sp_src_ms > 0) {
+            const float S = sh.sp_src_ms;
+            snprintf(b, sizeof(b), "source %.1f fps   target %.2f +/- 0.3 ms", 1000.0f / S, S);
+            text(b, X(kx0) + text_width("frame spacing", 11 * fs) + 8 * m, Yd(240), 9 * fs, 0, quiet, A);
+            snprintf(b, sizeof(b), "on target %.1f%%", sh.on_target_pct);
+            text(b, X(kx1), Yd(240), 11 * fs, 2, ink, A);
+            const int nb = StatsView::kSpBins;
+            const float bw = (kx1 - kx0) / (float)nb, by = 266, bh = 13;
+            const float e[7] = { S - 1.5f, S - 0.3f, S + 0.3f, S + 1.5f, 1.5f * S, 2.5f * S, 3.5f * S };
+            const float* const col[StatsView::kSpBins] = { red, amber, lime, amber, amber, red, red, red };
+            fill(X(kx0), Yd(by), (kx1 - kx0) * m, 0.6f * m, quiet, 0.5f * A);
+            for (int k = 0; k < nb; k++) {
+                const float xc = kx0 + (k + 0.5f) * bw;
+                const float share = (float)sh.sp[k] / (float)sh.sp_n;
+                const float h = sh.sp[k] ? std::max(0.8f, bh * std::sqrt(share)) : 0.0f;
+                if (h > 0) fill(X(xc - 0.42f * bw), Yd(by - h), 0.84f * bw * m, h * m, col[k], A);
+                const float* tc = k == StatsView::kSpTarget ? ink : quiet;
+                snprintf(b, sizeof(b), "%.1f%%", 100.0f * share);
+                text(b, X(xc), Yd(251), 8.5f * fs, 1, tc, A);
+                if (k == 0) snprintf(b, sizeof(b), "< %.1f", e[0]);
+                else if (k == nb - 1) snprintf(b, sizeof(b), "> %.1f", e[6]);
+                else snprintf(b, sizeof(b), "%.1f-%.1f", e[k - 1], e[k]);
+                text(b, X(xc), Yd(275), 8 * fs, 1, tc, A);
+            }
+        } else {
+            text("n/a (needs vsync)", X(kx0) + text_width("frame spacing", 11 * fs) + 8 * m, Yd(240), 9 * fs, 0, quiet, A);
+        }
+        // What the stems over the chart are, and the ticks along its top.
         {
             const float kw = text_width("keyframe", 11 * fs) / m;
             text("keyframe", X(kx1), Yd(100), 11 * fs, 2, quiet, A);
             fill(X(kx1 - kw - 8.5f), Yd(100 - 7), 1.0f * m, 7 * m, amber, 0.7f * A);
             fill(X(kx1 - kw - 11), Yd(100 - 10.5f), 6 * m, 4 * m, amber, A);
+            const float sx = kx1 - kw - 20, sw = text_width("skipped", 11 * fs) / m;
+            text("skipped", X(sx), Yd(100), 11 * fs, 2, quiet, A);
+            fill(X(sx - sw - 6), Yd(100 - 8), 1.6f * m, 8 * m, red, A);
         }
 
         // the link lane: what it means, said in words - the scale in Mbps (a line at the
@@ -808,7 +852,7 @@ bool OSD::render_gallery(int W, int H) {
             for (int mb = step; mb <= (int)(lmx + 0.5f); mb += step)
                 if (mb % 20 == 0) dashed_h(X(kx0), X(kx1), Yk((float)mb), 1.0f * m, 3 * m, 5 * m);
             flush(GL_TRIANGLES, quiet, 0.4f * A);
-            text("Mbps", X(10), Yd(287), 11 * fs, 0, quiet, A);
+            text("Mbps", X(kx0 - 5), Yd(287), 11 * fs, 2, quiet, A);   // the axis's unit, over it
             for (int mb = 0; mb <= (int)(lmx + 0.5f); mb += step) {
                 snprintf(b, sizeof(b), "%d", mb);
                 text(b, X(kx0 - 5), Yk((float)mb) + 3.2f * m, 9 * fs, 2, quiet, A);
@@ -816,33 +860,50 @@ bool OSD::render_gallery(int W, int H) {
         }
         {
             float kx = kx0;
-            auto key = [&](const char* label, const char* val, const float* col, int shape) {
+            // Names only: the figures are where the lines end.
+            auto key = [&](const char* label, const float* col, int shape) {
                 // shape 0: a filled swatch (an area), 1: a line, 2: a tick
                 if (shape == 0)      fill(X(kx), Yd(279), 10 * m, 8 * m, col, 0.55f * A);
                 else if (shape == 1) fill(X(kx), Yd(282.5f), 10 * m, 1.6f * m, col, A);
                 else                 fill(X(kx + 4), Yd(278), 2.4f * m, 9 * m, col, A);
                 text(label, X(kx + 14), Yd(287), 11 * fs, 0, ink, A);
-                const float w = text_width(label, 11 * fs) / m;
-                if (val[0]) text(val, X(kx + 14 + w + 4), Yd(287), 11 * fs, 0, quiet, A);
-                kx += 14 + w + 4 + (val[0] ? text_width(val, 11 * fs) / m : 0.0f) + 14;
+                kx += 14 + text_width(label, 11 * fs) / m + 4 + 14;
             };
-            snprintf(b, sizeof(b), "%.1f", sh.video_now);
-            key("video rate", b, data, 0);
-            snprintf(b, sizeof(b), "%.1f", sh.link_now);
-            key("link capacity", b, white, 1);
-            key("lost packets", "", red, 2);
+            key("video rate", data, 0);
+            key("link capacity", white, 1);
+            key("lost packets", red, 2);
+            if (sh.bw_mhz_max > 0 && kx + 14 + text_width("bandwidth", 11 * fs) / m <= kx1) key("bandwidth", lime, 1);
         }
         {
-            // The two lines are named where they end, the lower one pushed down if they meet.
+            // Each line carries its figure where it ends, with its unit as the
+            // bandwidth's does, pushed down if it meets the one above. "Mb", not
+            // "Mbps": "44.9 Mb" ends before the right column, "31.4 Mbps" did not.
             const float yl = Yk(std::max(sh.link_now, 0.0f)) + 4 * m;
             const float yv = std::max(Yk(std::max(sh.video_now, 0.0f)) + 4 * m, yl + 12 * m);
-            text("link", X(kx1 + 4), yl, 11 * fs, 0, white, A);
-            text("video", X(kx1 + 4), std::min(yv, Yd(klb) + 4 * m), 11 * fs, 0, data, A);
+            auto figure = [&](float mbps, char* out, size_t n) {
+                snprintf(out, n, "%.1f Mb", std::max(mbps, 0.0f));
+            };
+            char fl[24], fv[24];
+            figure(sh.link_now, fl, sizeof(fl));
+            figure(sh.video_now, fv, sizeof(fv));
+            text(fl, X(kx1 + 4), yl, 11 * fs, 0, white, A);
+            text(fv, X(kx1 + 4), std::min(yv, Yd(klb) + 4 * m), 11 * fs, 0, data, A);
+            // The bandwidth's figure where its line ends, clear of the two names.
+            if (sh.bw_idx >= 0) {
+                snprintf(b, sizeof(b), "%s MHz", ar_bw_label(sh.bw_idx));
+                static const float kMhz[6] = { 1.25f, 2.5f, 5, 10, 20, 40 };
+                float yw = Yk(kMhz[std::min(5, sh.bw_idx)]) + 4 * m;
+                const float lv = std::min(yv, Yd(klb) + 4 * m);
+                for (int k = 0; k < 2; k++)
+                    if (std::fabs(yw - yl) < 12 * m || std::fabs(yw - lv) < 12 * m) yw = std::min(yl, lv) - 12 * m;
+                text(b, X(kx1 + 4), yw, 11 * fs, 0, lime, A);
+            }
         }
         text(kWinTime[wi], X(kx0), Yd(370), 11 * fs, 0, quiet, A);
         text("now", X(kx1), Yd(370), 11 * fs, 2, quiet, A);
 
-        // right column: the distribution, a few figures, the key
+        // right column, under the live picture: the latency's distribution
+        // (its p50 and p99 are under the slices' table, per slice)
         text("latency distribution", X(khx), Yd(khy - 4), 11 * fs, 0, quiet, A);
         {
             uint32_t hm = 1;
@@ -867,41 +928,197 @@ bool OSD::render_gallery(int W, int H) {
                 text(b, X(khx + (float)ms / 60.0f * khw), Yd(khy + khh + 13), 9.5f * fs, ms == 60 ? 2 : ms == 0 ? 0 : 1, quiet, A);
             }
         }
-        auto readout = [&](float x, float y, const char* label, const char* val, const float* col = nullptr) {
-            text(label, X(x), Yd(y), 11 * fs, 0, quiet, A);
-            text(val, X(x), Yd(y + 22), 19 * fs, 0, col ? col : ink, A);
-        };
-        // A temperature, coloured as it nears what the unit can take (90 C, the
-        // HUD's placeholder limit); -- when there is none.
-        auto temp = [&](float x, float y, const char* label, float c) {
-            if (c < 0) { readout(x, y, label, "--"); return; }
-            snprintf(b, sizeof(b), "%.0f C", c);
-            readout(x, y, label, b, c >= 90 ? red : c >= 80 ? amber : ink);
-        };
-        // Three columns: the link, the picture, the two units' temperatures.
-        snprintf(b, sizeof(b), "%.0f%%", sh.link_use);
-        readout(464, 246, "LINK USE", b);
-        snprintf(b, sizeof(b), "%u", (unsigned)sh.lost_total);
-        readout(534, 246, "LOST", b);
-        temp(604, 246, "VTX TEMP", sh.vtx_temp_c);
-        snprintf(b, sizeof(b), "%d", sh.stutters);
-        readout(464, 284, "STALLS", b);
-        snprintf(b, sizeof(b), "%.0f ms", sh.worst_ms);
-        readout(534, 284, "WORST", b);
-        temp(604, 284, "VRX TEMP", sh.vrx_temp_c);
-        // The stages, each with its median over the window in ms.
-        text("stage medians, ms", X(464), Yd(324), 11 * fs, 0, quiet, A);
-        // Only the stages this link reports: one that reads zero all the time is left out.
-        int shown = 0;
-        for (int i = 0; i < StatsFrame::kStages; i++) {
-            if (sh.stage_p50[i] < 0.05f) continue;
-            const float lx = 464 + (float)(shown % 2) * 104, ly = 338 + (float)(shown / 2) * 14;
-            fill(X(lx), Yd(ly - 9), 9 * m, 9 * m, kStageCol[i], A);
-            snprintf(b, sizeof(b), "%s (%.1f)", kStageName[i], sh.stage_p50[i]);
-            text(b, X(lx + 13), Yd(ly), 11 * fs, 0, ink, A);
-            shown++;
+        // The slices' timelines, under the distribution: each slice on its own
+        // row, on one timeline from the capture of the picture's first row - a
+        // slice starts where its own first row was captured - through its
+        // stages to its rows lit, each stage as long as its median; each piece
+        // carries its ms where it fits. Before a slice's start, in blue-grey,
+        // the exposure that ends at its first row's capture: the timeline's 0
+        // is where the first slice's exposure starts (the light in it is half
+        // of that older on average). Enc is
+        // split: the sensor reading the
+        // slice's rows first, in its colour halfway to white, then the rest
+        // (ISP, scaling, the encoder) - when the air unit says its readout.
+        // Dec is split: its wait first, in its
+        // colour halfway to white - the slice idle, arrived but not yet in the
+        // decoder (queued, or the rest of the picture to come when whole
+        // pictures are decoded) - then the decoder's work on it. Disp is one
+        // piece, decoded to its rows lit: the frame to start, then the scan-out
+        // sending the rows above it (none for the top slice, ~2 ms for one
+        // starting mid-screen at 240 Hz) - waiting either way, nothing done to
+        // the slice itself. It always shows, at least a sliver. Under the bars
+        // a table: the exposure (Exp), Enc's two parts as rows (Read, Enc), the
+        // rest of the stages, then the latency's p50 and p99, per slice
+        // (the first and the last). Without per-slice
+        // timing, one bar of the slowest slice's stages. Over the bars, faint
+        // lines at the screen's vblanks - the one that showed the first slice
+        // (its frame's start, median) and every refresh before and after it -
+        // and dotted ones where each refresh's scan-out reaches mid-screen (as
+        // the last slice's rows were lit, else half a refresh on).
+        {
+            const float bx0 = 474, bx1 = 674;               // the bars
+            const float vf = 8 * fs, tf = 7.5f * fs;        // the figures' sizes: on the bars, in the table
+            // the table's columns, one a slice (two at most): their right edges
+            const float cx[2] = { 572, 652 };
+            auto pale_of = [&](int i, float* c) {
+                for (int q = 0; q < 3; q++) c[q] = 0.5f + 0.5f * kStageCol[i][q];
+            };
+            auto fits = [&](const char* t, float w) { return text_width(t, vf) / m + 1.0f <= w; };
+            static const float kExpCol[3] = { 0.60f, 0.68f, 0.82f };   // exposure: blue-grey
+            float tz = 0;          // where the timeline starts, ms from row 0's capture (<= 0): its 0
+            // one piece of a bar, its ms on it if they fit
+            auto piece = [&](float x, float w, float y, float bh, const float* col, float ms) {
+                fill(X(x), Yd(y), w * m, bh * m, col, A);
+                snprintf(b, sizeof(b), "%.1f", ms);
+                if (ms >= 0.05f && fits(b, w))
+                    text(b, X(x + 0.5f * w), Yd(y + 0.5f * bh + 3.0f), vf, 1, panel, A);
+            };
+            // one bar: start (ms on the timeline), stages, waits, the exposure
+            // before it; k px per ms
+            auto bar = [&](float y, float bh, float t0, const float* st, const float* wt, float ex, float k) {
+                float x = bx0 + (t0 - tz) * k;
+                if (ex * k > 0.2f) {
+                    piece(x - ex * k, ex * k, y, bh, kExpCol, ex);
+                    fill(X(x) - 0.3f * m, Yd(y), 0.6f * m, bh * m, panel, A);
+                }
+                for (int i = 0; i < StatsFrame::kStages; i++) {
+                    const bool disp = i == StatsFrame::kStages - 1;
+                    if (st[i] < 0.05f && !disp) continue;
+                    // Disp in one piece, at least a sliver
+                    const float w = disp ? 0.0f : std::min(wt[i], st[i]);
+                    float pale[3];
+                    pale_of(i, pale);
+                    const float ww = w * k;
+                    const float aw = std::max((st[i] - w) * k, disp ? 1.6f : 0.0f);
+                    if (ww > 0.2f) piece(x, ww, y, bh, pale, w);
+                    if (aw > 0.2f) piece(x + ww, aw, y, bh, kStageCol[i], st[i] - w);
+                    x += ww + aw;
+                    // a dark line between stages, so a short one still reads as its own
+                    if (!disp) fill(X(x) - 0.3f * m, Yd(y), 0.6f * m, bh * m, panel, A);
+                }
+            };
+            // the screen's vblanks over the bars: every refresh from v0 (ms on the
+            // timeline), from y down h, faint; dotted where the scan-out is mid
+            // screen (mid ms after each); what they are at the title's right
+            auto vblanks = [&](float v0, float mid, float end, float k, float y, float h) {
+                const float P = sh.refresh_ms;
+                if (P < 0.5f) return;
+                if (mid <= 0 || mid >= P) mid = 0.5f * P;
+                const float a0 = v0 - std::floor((v0 - tz) / P) * P;     // the first at or after the start
+                for (float t = a0; t <= end + 0.01f; t += P)
+                    fill(X(bx0 + (t - tz) * k) - 0.2f * m, Yd(y), 0.4f * m, h * m, ink, 0.3f * A);
+                for (float t = a0 + mid - (a0 + mid - tz > P ? P : 0); t <= end + 0.01f; t += P)
+                    for (float d = 0; d < h; d += 2.5f)
+                        fill(X(bx0 + (t - tz) * k) - 0.2f * m, Yd(y + d), 0.4f * m, std::min(1.2f, h - d) * m, ink,
+                             0.3f * A);
+                text("| vblank  : mid-screen", X(bx1), Yd(240), 8 * fs, 2, quiet, A);
+            };
+            // ticks every 5 ms under the bars, a figure every 10
+            auto axis = [&](float y, float end, float k) {
+                fill(X(bx0), Yd(y), (bx1 - bx0) * m, 0.5f * m, quiet, 0.6f * A);
+                // from the timeline's start (the first exposure's)
+                for (int t = 0; (float)t <= end - tz; t += 5) {
+                    fill(X(bx0 + t * k) - 0.3f * m, Yd(y), 0.6f * m, (t % 10 ? 2.0f : 3.0f) * m, quiet, 0.8f * A);
+                    if (t % 10) continue;
+                    snprintf(b, sizeof(b), "%d", t);
+                    text(b, X(bx0 + t * k), Yd(y + 8), tf, t ? 1 : 0, quiet, A);
+                }
+                text("ms", X(bx1), Yd(y + 8), tf, 2, quiet, A);
+            };
+            // the table: a column per slice given (two at most), each stage's
+            // time, then the latency's p50 and p99 (p50, p99: one per column)
+            auto table = [&](const SliceStages* q, int nq, const char* h1, const char* h2,
+                             const float* p50, const float* p99) {
+                const char* hs[2] = { h1, h2 };
+                for (int c = 0; c < nq; c++) text(hs[c], X(cx[c]), Yd(306), tf, 2, ink, A);
+                // The exposure before it (blue-grey, as on the bars), then Enc in
+                // two rows: the sensor reading the slice's rows (pale, as on the
+                // bars) and the rest of it. -- for what the air unit does not say.
+                static const char* const kRow[6] = { "Exp", "Read", "Enc", "RF", "Dec", "Disp" };
+                for (int r = 0; r < 6; r++) {
+                    const int i = r >= 2 ? r - 2 : 0;        // the stage the row is of
+                    const float y = 314 + r * 7.0f;
+                    float col[3] = { kStageCol[i][0], kStageCol[i][1], kStageCol[i][2] };
+                    if (r == 0) for (int j = 0; j < 3; j++) col[j] = kExpCol[j];
+                    if (r == 1) pale_of(0, col);
+                    fill(X(464), Yd(y - 5), 5 * m, 5 * m, col, A);
+                    text(kRow[r], X(472), Yd(y), tf, 0, ink, A);
+                    for (int c = 0; c < nq; c++) {
+                        const float rd = std::min(q[c].enc_read, q[c].enc);
+                        const float v[6] = { q[c].exp, rd, q[c].enc - rd, q[c].rf, q[c].dec, q[c].disp };
+                        if (r <= 1 && v[r] <= 0.0f) snprintf(b, sizeof(b), "--");
+                        else snprintf(b, sizeof(b), "%.1f", v[r]);
+                        text(b, X(cx[c]), Yd(y), tf, 2, ink, A);
+                    }
+                }
+                // Under them, each column's latency from its first row's capture
+                // to those rows lit (the Exp row is before it, not in it): the
+                // window's median and p99.
+                fill(X(464), Yd(353), (bx1 - 464) * m, 0.5f * m, quiet, 0.6f * A);
+                static const char* const kTot[2] = { "p50", "p99" };
+                for (int r = 0; r < 2; r++) {
+                    const float y = 360 + r * 7.0f;
+                    text(kTot[r], X(472), Yd(y), tf, 0, ink, A);
+                    for (int c = 0; c < nq; c++) {
+                        snprintf(b, sizeof(b), "%.1f", r ? p99[c] : p50[c]);
+                        text(b, X(cx[c]), Yd(y), tf, 2, ink, A);
+                    }
+                }
+            };
+            const int ns = sh.nslices >= 2 ? std::min(sh.nslices, kLatSlices) : 0;
+            if (ns) {
+                float end = 0;
+                for (int r = 0; r < ns; r++) {
+                    const SliceStages& q = sh.sl_p50[r];
+                    end = std::max(end, q.off + q.enc + q.rf + q.dec + q.disp);
+                }
+                text("slices timelines", X(464), Yd(240), 11 * fs, 0, quiet, A);
+                // the exposures before the slices' starts: the timeline from the earliest
+                for (int r = 0; r < ns; r++) tz = std::min(tz, sh.sl_p50[r].off - sh.sl_p50[r].exp);
+                if (end > 0.05f) {
+                    const float k = (bx1 - bx0) / (end - tz);
+                    const float step = 36.0f / (float)ns, bh = step - 4.0f;
+                    for (int r = 0; r < ns; r++) {
+                        const SliceStages& q = sh.sl_p50[r];
+                        const float st[StatsFrame::kStages] = { q.enc, q.rf, q.dec, q.disp };
+                        // Enc's pale part is the sensor reading the rows, not a wait
+                        const float wt[StatsFrame::kStages] = { q.enc_read, 0, q.dec_wait, q.disp_wait };
+                        const float y = 244 + r * step;
+                        snprintf(b, sizeof(b), "%d", r + 1);
+                        text(b, X(464), Yd(y + 0.5f * bh + 3.0f), vf, 0, quiet, A);
+                        bar(y, bh, q.off, st, wt, q.exp, k);
+                    }
+                    const SliceStages& q0 = sh.sl_p50[0], &qn = sh.sl_p50[ns - 1];
+                    vblanks(q0.off + q0.enc + q0.rf + q0.dec + q0.disp_wait, qn.disp - qn.disp_wait, end, k, 242,
+                            step * ns + 1);
+                    axis(282, end, k);
+                    const SliceStages cols[2] = { sh.sl_p50[0], sh.sl_p50[ns - 1] };
+                    char h2[16];
+                    snprintf(h2, sizeof(h2), "slice %d", ns);
+                    const float p50s[2] = { sh.slice_p50[0], sh.slice_p50[ns - 1] };
+                    const float p99s[2] = { sh.slice_p99[0], sh.slice_p99[ns - 1] };
+                    table(cols, 2, "slice 1", h2, p50s, p99s);
+                }
+            } else {
+                float tot = 0, st[StatsFrame::kStages], wt[StatsFrame::kStages];
+                for (int i = 0; i < StatsFrame::kStages; i++) {
+                    st[i] = sh.stage_p50[i];
+                    wt[i] = sh.wait_p50[i];
+                    tot += st[i];
+                }
+                text("slice timeline", X(464), Yd(240), 11 * fs, 0, quiet, A);
+                if (tot > 0.05f) {
+                    const float k = (bx1 - bx0) / tot;
+                    bar(250, 16, 0, st, wt, 0, k);
+                    vblanks(st[0] + st[1] + st[2] + wt[3], 0, tot, k, 248, 20);
+                    axis(282, tot, k);
+                    SliceStages one{};
+                    one.enc = st[0]; one.rf = st[1]; one.dec = st[2]; one.disp = st[3];
+                    one.dec_wait = wt[2]; one.disp_wait = wt[3];
+                    table(&one, 1, "slowest slice", "", &sh.p50, &sh.p99);
+                }
+            }
         }
-        text(kWinHint[wi], X(676), Yd(380), 11 * fs, 2, quiet, A);
         gflush();
     };
 
@@ -953,16 +1170,28 @@ bool OSD::render_gallery(int W, int H) {
         {
             float acc[StatsView::kCols];
             for (int i = 0; i < C; i++) acc[i] = 0;
+            // Each stage in two shades: its waiting share first, lighter (the
+            // stage's colour halfway to white), then the rest in its own colour.
             for (int k2 = 0; k2 < StatsFrame::kStages; k2++) {
-                for (int i = 0; i < Cd; i++) {
-                    const float lo = acc[i], hi = lo + (v.have[i] ? v.stage[k2][i] : 0.0f);
-                    // Held out to the chart's edges: its ends do not move with the columns.
-                    if (i == 0)      { vtx(X(kx0), Yl(lo)); vtx(X(kx0), Yl(hi)); }
-                    vtx(colx(i), Yl(lo)); vtx(colx(i), Yl(hi));
-                    if (i == Cd - 1) { vtx(X(kx1), Yl(lo)); vtx(X(kx1), Yl(hi)); }
-                    acc[i] = hi;
+                for (int part = 0; part < 2; part++) {
+                    for (int i = 0; i < Cd; i++) {
+                        const float st = v.have[i] ? v.stage[k2][i] : 0.0f;
+                        const float wt = v.have[i] ? std::min(st, v.wait[k2][i]) : 0.0f;
+                        const float lo = acc[i], hi = lo + (part == 0 ? wt : st - wt);
+                        // Held out to the chart's edges: its ends do not move with the columns.
+                        if (i == 0)      { vtx(X(kx0), Yl(lo)); vtx(X(kx0), Yl(hi)); }
+                        vtx(colx(i), Yl(lo)); vtx(colx(i), Yl(hi));
+                        if (i == Cd - 1) { vtx(X(kx1), Yl(lo)); vtx(X(kx1), Yl(hi)); }
+                        acc[i] = hi;
+                    }
+                    if (part == 0) {
+                        const float pale[3] = { 0.5f + 0.5f * kStageCol[k2][0], 0.5f + 0.5f * kStageCol[k2][1],
+                                                0.5f + 0.5f * kStageCol[k2][2] };
+                        flush(GL_TRIANGLE_STRIP, pale, 0.8f * A);
+                    } else {
+                        flush(GL_TRIANGLE_STRIP, kStageCol[k2], 0.8f * A);
+                    }
                 }
-                flush(GL_TRIANGLE_STRIP, kStageCol[k2], 0.8f * A);
             }
         }
         for (int i = 0; i < Cd; i++) {
@@ -1002,7 +1231,7 @@ bool OSD::render_gallery(int W, int H) {
             dashed_v(worst_x, Yd(82), Yd(kbase), 1.2f * m, 4 * m, 3 * m);
             flush(GL_TRIANGLES, red, A);
         }
-        // keyframes, and how evenly the pictures reached the screen
+        // keyframes
         // (Columns wider than the gap between keyframes all hold one: a solid bar says nothing.)
         {
             int keys = 0, have_cols = 0;
@@ -1011,12 +1240,9 @@ bool OSD::render_gallery(int W, int H) {
                 for (int i = 0; i < C; i++) if (v.key[i]) rect_c(colx(i) - 1.0f * m, colx(i) + 1.0f * m, Yd(220), 7 * m);
         }
         flush(GL_TRIANGLES, quiet, A);
-        const float cw = colw * m;
-        for (int cls = 0; cls < 4; cls++) {
-            for (int i = 0; i < (cls == StatsView::kNoData ? Cd : C); i++)     // the filling column shows what has happened in it, never a blank
-                if (v.pace[i] == cls) rect_c(colx(i) - cw * 0.5f, colx(i) + cw * 0.5f + 0.4f, Yd(234), 18 * m);
-            flush(GL_TRIANGLES, kPaceCol[cls], (cls == 0 ? 0.75f : cls == 3 ? 0.18f : 1.0f) * A);
-        }
+        // pictures never shown: a tick along the chart's top in their column
+        for (int i = 0; i < C; i++) if (v.skip[i]) rect_c(colx(i) - 0.8f * m, colx(i) + 0.8f * m, Yd(kchY), 6 * m);
+        flush(GL_TRIANGLES, red, A);
         // the link: the video's rate against what the link carries, and the packets it lost
         for (int i = 0; i < Cd; i++) {
             const float y = v.have[i] ? Yk(v.video[i]) : Yd(klb);
@@ -1032,6 +1258,27 @@ bool OSD::render_gallery(int W, int H) {
             if (i == Cd - 1) { vtx(X(kx1), y - 0.5f * m); vtx(X(kx1), y + 0.5f * m); }
         }
         flush(GL_TRIANGLE_STRIP, white, 0.7f * A);
+        // the link's bandwidth (MHz, on the lane's scale: 40 MHz at its 40), a
+        // step per change, cut where it is not known
+        {
+            int i = 0;
+            while (i < Cd) {
+                if (!v.have[i] || v.bw_mhz[i] <= 0) { i++; continue; }
+                int j = i;
+                while (j + 1 < Cd && v.have[j + 1] && v.bw_mhz[j + 1] == v.bw_mhz[i]) j++;
+                const float xa = i == 0 ? kx0 : std::max(kx0, cxu(i) - 0.5f * colw);
+                const float xb = j == Cd - 1 ? kx1 : std::min(kx1, cxu(j) + 0.5f * colw);
+                const float y = Yk(v.bw_mhz[i]);
+                if (xb > xa) rect_v(X(xa), y - 0.6f * m, (xb - xa) * m, 1.2f * m);
+                // the step to the next run
+                if (j + 1 < Cd && v.have[j + 1] && v.bw_mhz[j + 1] > 0) {
+                    const float y2 = Yk(v.bw_mhz[j + 1]);
+                    rect_c(X(xb) - 0.6f * m, X(xb) + 0.6f * m, std::min(y, y2) - 0.6f * m, std::fabs(y2 - y) + 1.2f * m);
+                }
+                i = j + 1;
+            }
+            flush(GL_TRIANGLES, lime, 0.9f * A);
+        }
         for (int i = 0; i < C; i++) if (v.lost[i]) rect_c(colx(i) - 1.5f * m, colx(i) + 1.5f * m, Yd(klb - 8), 8 * m);
         flush(GL_TRIANGLES, red, A);
         // the p50 / p99 marks on the histogram
@@ -1050,10 +1297,9 @@ bool OSD::render_gallery(int W, int H) {
         }
         text("p50", X(kx1 + 4), Yl(stats_p50_) + 4 * m, 11 * fs, 0, data, A);
         text("p99", X(kx1 + 4), Yl(stats_p99_) + 4 * m, 11 * fs, 0, amber, A);
-        if (worst) {
-            snprintf(b, sizeof(b), "worst %.0f ms", v.tmax[v.worst_col]);
+        if (worst) {   // where it was
             const bool left = worst_x > X(kx1 - 70);
-            text(b, left ? worst_x - 4 * m : worst_x + 4 * m, Yd(kchY + 11), 11 * fs, left ? 2 : 0, red, A);
+            text("worst", left ? worst_x - 4 * m : worst_x + 4 * m, Yd(kchY + 11), 11 * fs, left ? 2 : 0, red, A);
         }
     };
 
@@ -1147,6 +1393,14 @@ bool OSD::render_gallery(int W, int H) {
             ring(pip, 3 * m, accent, A);
             if (live_pic) pill(live_fresh ? "LIVE" : "LAST FRAME", pip.x - pip.w * 0.5f + 4 * m, pip.y - pip.h * 0.5f + 4 * m,
                                8 * m, live_fresh ? accent : quiet, 0.95f, ground, A);
+            // The video mode, by the decoded picture's height, in the other corner.
+            const uint32_t vh = osd_vars.video_height;
+            if (live_pic && vh) {
+                char mode[16];
+                snprintf(mode, sizeof(mode), "%up", vh == 1088 ? 1080u : vh);
+                const float fp = 8 * m, w = text_width(mode, fp) + fp;
+                pill(mode, pip.x + pip.w * 0.5f - 4 * m - w, pip.y - pip.h * 0.5f + 4 * m, fp, quiet, 0.95f, ground, A);
+            }
         }
     };
 
@@ -1163,7 +1417,7 @@ bool OSD::render_gallery(int W, int H) {
             const float ytgt = std::max(40.0f, std::min(100.0f, std::ceil(stats_shown_.p99 * 1.3f / 10.0f) * 10.0f));
             float ltgt = 40.0f;
             for (int i = 0; i < StatsView::kCols - 1; i++)
-                if (v.have[i]) ltgt = std::max(ltgt, std::max(v.video[i], v.link[i]));
+                if (v.have[i]) ltgt = std::max(ltgt, std::max(std::max(v.video[i], v.link[i]), v.bw_mhz[i]));
             ltgt = std::ceil(ltgt / 20.0f) * 20.0f;
             const float ease = 1.0f - std::exp(-sdt / 0.25f);
             stats_p50_ = stats_p50_ <= 0 ? stats_shown_.p50 : stats_p50_ + (stats_shown_.p50 - stats_p50_) * ease;

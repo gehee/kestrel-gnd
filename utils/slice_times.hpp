@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <memory>
@@ -15,6 +16,8 @@ struct SliceTimes {
     static constexpr int kMax = 8;
     uint32_t height = 0;                       // picture rows
     uint64_t frame_cap_us = 0;                 // the capture stamp: row 0
+    uint32_t readout_us = 0;                   // the sensor's readout of all its rows (air unit's; 0: not known)
+    uint32_t exposure_us = 0;                  // each row's exposure, ending at its capture (air unit's; 0: not known)
     bool key = false;                          // a keyframe
     int64_t pts = -1;                          // the decoder's picture number
     std::atomic<bool> counted{false};          // its latency sample is taken (once per picture)
@@ -30,6 +33,7 @@ struct SliceTimes {
         uint64_t cap_us = 0;                   // its first row captured
         uint64_t out_us = 0;                   // handed out by the air unit's encoder
         uint64_t here_us = 0;                  // received here
+        std::atomic<uint64_t> in_us{0};        // handed to the decoder (0: not yet)
         std::atomic<uint64_t> done_us{0};      // its rows decoded
     } s[kMax];
     // The flips that put rows of this picture up: rows [from, to) from vblank
@@ -64,12 +68,36 @@ struct SliceTimes {
 };
 using SliceTimesPtr = std::shared_ptr<SliceTimes>;
 
+// The slices noted so far that have not reached the decoder: they do now.
+inline void slices_to_decoder(SliceTimes* st, uint64_t now_us) {
+    if (!st) return;
+    const int n = st->n.load() < SliceTimes::kMax ? st->n.load() : SliceTimes::kMax;
+    for (int i = 0; i < n; i++) {
+        uint64_t z = 0;
+        st->s[i].in_us.compare_exchange_strong(z, now_us);
+    }
+}
+
 // One slice's way to the screen, in us: the stages the HUD shows.
 struct SliceLatency {
     uint32_t enc = 0;      // first row captured -> out of the encoder
     uint32_t rf = 0;       // out of the encoder -> here
     uint32_t dec = 0;      // here -> its rows decoded
     uint32_t disp = 0;     // decoded -> the scan-out lights its first row
+    // Each stage's share spent waiting rather than working (part of it, not
+    // added to it): the slice waiting for the rest of its picture before the
+    // decoder takes it, the decoded rows waiting for the refresh that shows
+    // them. Enc has none: the sensor reading out the slice's rows is the work
+    // that makes them. The radio's is not known per slice (0).
+    uint32_t enc_wait = 0, rf_wait = 0, dec_wait = 0, disp_wait = 0;
+    // Enc's sensor part (within it): the sensor reading the slice's rows, its
+    // first to its last; the rest is the ISP, scaling and the encoder. 0: the
+    // readout is not known.
+    uint32_t enc_read = 0;
+    // Before it all, not part of the total: the exposure that ends at the
+    // capture of each row (its light is half of it older on average). 0: not
+    // known.
+    uint32_t exposure = 0;
     uint32_t total() const { return enc + rf + dec + disp; }
 };
 
@@ -95,6 +123,24 @@ bool slice_latency(const SliceTimes& st, int i, double period_us,
     out.rf = (uint32_t)(s.here_us - s.out_us);
     out.dec = (uint32_t)(done - s.here_us);
     out.disp = (uint32_t)(lit - (double)done);
+    out.exposure = st.exposure_us;
+    // Enc's read: the sensor's readout over the slice's rows (they end where
+    // the next slice starts, or where the first is known to end, or at the
+    // bottom).
+    if (st.readout_us) {
+        const int n = st.n.load() < SliceTimes::kMax ? st.n.load() : SliceTimes::kMax;
+        uint32_t end = i + 1 < n ? st.s[i + 1].row : st.height;
+        if (i == 0 && n < 2 && st.split_row.load()) end = st.split_row.load();
+        if (end > s.row && end <= st.height)
+            out.enc_read = std::min<uint32_t>(out.enc, (uint32_t)((uint64_t)st.readout_us * (end - s.row) / st.height));
+    }
+    // Dec's wait: here until the decoder had it (unknown: at once).
+    uint64_t in = s.in_us.load();
+    if (in >= s.here_us && in <= done) out.dec_wait = (uint32_t)(in - s.here_us);
+    // Disp's wait: decoded until its frame started; the rest is the scan-out
+    // reaching its row.
+    const double frame_start = lit - row_us(srow);
+    if (frame_start > (double)done) out.disp_wait = (uint32_t)(frame_start - (double)done);
     return true;
 }
 

@@ -1486,6 +1486,7 @@ void Renderer::update_stats(DecodedUnit *du, uint64_t display_start_ts) {
         // the first and the last also for the log): kLatSlices of them at most,
         // spread from the first to the last when there are more.
         float slice_ms[kLatSlices] = {0, 0, 0, 0};
+        SliceStages sl[kLatSlices];
         int nslices = 0;
         if (n >= 2) {
             const int m = std::min(n, kLatSlices);
@@ -1495,6 +1496,15 @@ void Renderer::update_stats(DecodedUnit *du, uint64_t display_start_ts) {
                 SliceLatency e;
                 if (!slice_latency(st, i, period, rows, row_us, e)) { all = false; continue; }
                 slice_ms[k] = e.total() / 1000.0f;
+                sl[k].off = st.s[i].cap_us > st.frame_cap_us ? (st.s[i].cap_us - st.frame_cap_us) / 1000.0f : 0.0f;
+                sl[k].enc = e.enc / 1000.0f;
+                sl[k].rf = e.rf / 1000.0f;
+                sl[k].dec = e.dec / 1000.0f;
+                sl[k].dec_wait = e.dec_wait / 1000.0f;
+                sl[k].disp = e.disp / 1000.0f;
+                sl[k].disp_wait = e.disp_wait / 1000.0f;
+                sl[k].enc_read = e.enc_read / 1000.0f;
+                sl[k].exp = e.exposure / 1000.0f;
                 if (i == 0) slice_log_.v[0].push_back(e);
                 if (i == n - 1) slice_log_.v[1].push_back(e);
             }
@@ -1502,7 +1512,7 @@ void Renderer::update_stats(DecodedUnit *du, uint64_t display_start_ts) {
         }
         if (slowest_slice(st, period, rows, row_us, l, &which)) {
             add_latency_sample(l.enc, l.rf, l.dec, l.disp, l.total(), st.key, skipped_pending_ + f.skipped,
-                               slice_ms, nslices);
+                               slice_ms, nslices, &l, sl, st.lit_vblank(0), st.frame_cap_us);
             skipped_pending_ = 0;
             samples_sliced_++;
             slice_log_.slowest[which == 0 ? 0 : which == n - 1 ? 2 : 1]++;
@@ -1546,10 +1556,13 @@ void Renderer::update_stats(DecodedUnit *du, uint64_t display_start_ts) {
             auto& v = slice_log_.v[k];
             if (!v.empty())
                 printf("renderer: %s slice, capture of its first row -> lit, %zu pictures: "
-                       "enc %.2f rf %.2f dec %.2f disp %.2f = %.2f ms (medians)\n",
+                       "enc %.2f (sensor read %.2f) rf %.2f dec %.2f (wait %.2f) disp %.2f (wait %.2f) = %.2f ms (medians), "
+                       "exposure before it %.2f\n",
                        k ? "last" : "first", v.size(), med(v, &SliceLatency::enc),
-                       med(v, &SliceLatency::rf), med(v, &SliceLatency::dec),
-                       med(v, &SliceLatency::disp), med_total(v));
+                       med(v, &SliceLatency::enc_read), med(v, &SliceLatency::rf),
+                       med(v, &SliceLatency::dec), med(v, &SliceLatency::dec_wait),
+                       med(v, &SliceLatency::disp), med(v, &SliceLatency::disp_wait), med_total(v),
+                       med(v, &SliceLatency::exposure));
             v.clear();
         }
         if (slice_log_.slowest[0] + slice_log_.slowest[1] + slice_log_.slowest[2])
@@ -1583,13 +1596,15 @@ bool Renderer::whole_picture_sample(const SliceTimes &st, double period, int row
     for (int k = 0; k < 4 && period > 0 && (double)done > lit; k++) lit += period;
     if ((double)done > lit) return false;
     const uint64_t rf = s.here_us - st.frame_cap_us, dec = done - s.here_us, disp = (uint64_t)(lit - (double)done);
-    add_latency_sample(0, rf, dec, disp, rf + dec + disp, st.key, skipped);
+    add_latency_sample(0, rf, dec, disp, rf + dec + disp, st.key, skipped, nullptr, 0, nullptr, nullptr,
+                       st.lit_vblank(0), st.frame_cap_us);
     return true;
 }
 
 void Renderer::add_latency_sample(uint64_t tx_enc, uint64_t tx_proc, uint64_t dec_lat,
                                   uint64_t disp_lat, uint64_t total_lat, bool key, unsigned skipped,
-                                  const float* slice_ms, int nslices) {
+                                  const float* slice_ms, int nslices, const SliceLatency* waits,
+                                  const SliceStages* sl, uint64_t shown_us, uint64_t cap_us) {
     if (stats_.frame_counter >= Stats::kMaxFrames) return;
     const uint64_t now = get_time_us();
     uint64_t pace_lat = (stats_.last_frame_ts > 0 && now > stats_.last_frame_ts) ? now - stats_.last_frame_ts : 0;
@@ -1621,9 +1636,19 @@ void Renderer::add_latency_sample(uint64_t tx_enc, uint64_t tx_proc, uint64_t de
             .key = (uint8_t)(key ? 1 : 0),
             .skipped = (uint16_t)std::min(skipped, 65535u),
         };
+        lf.shown_us = shown_us;
+        lf.cap_us = cap_us;
+        if (waits) {
+            lf.processing_wait_ms = waits->enc_wait / 1000.0f;
+            lf.net_wait_ms = waits->rf_wait / 1000.0f;
+            lf.dec_wait_ms = waits->dec_wait / 1000.0f;
+            lf.disp_wait_ms = waits->disp_wait / 1000.0f;
+        }
         if (slice_ms && nslices >= 2 && nslices <= kLatSlices) {
             lf.nslices = (uint8_t)nslices;
             for (int k = 0; k < nslices; k++) lf.slice_ms[k] = slice_ms[k];
+            if (sl)
+                for (int k = 0; k < nslices; k++) lf.sl[k] = sl[k];
         }
         osd->add_latency_frame(lf);
     }

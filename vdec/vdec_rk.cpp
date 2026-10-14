@@ -560,6 +560,13 @@ void VdecRK::feed_packet_to_decoder(void* data_p, int data_len, int64_t pts, uin
     }
     
     const uint64_t put_start_us = get_time_us();
+    {
+        // What has arrived of the picture goes to the decoder now: the
+        // whole picture, or a streamed picture's first slice.
+        std::lock_guard<std::mutex> lock(decoding_stats_mutex);
+        auto it = decoding_stats.find(pts);
+        if (it != decoding_stats.end()) slices_to_decoder(it->second.slices.get(), put_start_us);
+    }
     int attempt = 0;
     while (MPP_OK != (ret = mpi.mpi->decode_put_packet(mpi.ctx, pkt))) {
         attempt++;
@@ -799,7 +806,14 @@ bool VdecRK::stream_append(const void* data, int len, int64_t pts, bool last) {
     a.size = (RK_U32)len;
     a.flags = last ? MPP_STREAM_APPEND_LAST : 0;
     a.pts = pts;
+    const uint64_t in_us = get_time_us();
     const bool ok = mpi.mpi->control(mpi.ctx, MPP_DEC_SET_STREAM_APPEND, &a) == MPP_OK;
+    if (ok) {
+        // a streamed picture's later slices reach the decoder as appended
+        std::lock_guard<std::mutex> lock(decoding_stats_mutex);
+        auto it = decoding_stats.find(pts);
+        if (it != decoding_stats.end()) slices_to_decoder(it->second.slices.get(), in_us);
+    }
     if (last && ok && early_ok_) {
         // the whole picture is in: its bottom half is due a tail from now.
         // Refused, it is not: the estimate stays unknown and the top waits.
