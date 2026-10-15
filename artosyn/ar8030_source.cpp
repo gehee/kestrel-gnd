@@ -356,6 +356,7 @@ int Ar8030Source::ap_index = 0;
 bool Ar8030Source::chan_auto = true;
 bool Ar8030Source::chan_manual_cli = false;
 int Ar8030Source::tx_power_mw  = kArPwrDefaultMw;
+int Ar8030Source::tx_power_want_mw = kArPwrDefaultMw;
 std::atomic<int> Ar8030Source::air_prj{0};
 std::mutex Ar8030Source::air_info_mtx_;
 Ar8030Source::AirInfo Ar8030Source::air_info_;
@@ -365,13 +366,14 @@ Ar8030Source::AirInfo Ar8030Source::air_info() {
     return air_info_;
 }
 
-const Ar8030Source::AirCap Ar8030Source::kAirCaps[6] = {
+const Ar8030Source::AirCap Ar8030Source::kAirCaps[7] = {
     { kAirFeatLatInfo,      "air-timing",    "Air Timing" },
     { kAirFeatApClock,      "radio-clock",   "Radio Clock" },
     { kAirFeatIntraRefresh, "intra-refresh", "Intra Refresh" },
     { kAirFeatCamImu,       "cam-imu",       "Camera IMU" },
     { kAirFeatFcImu,        "fc-imu",        "FC IMU" },
     { kAirFeatMaxBw,        "bandwidth-cap", "Bandwidth Cap" },
+    { kAirFeat864p120,      "864p120",       "864p120" },
 };
 
 std::vector<std::string> Ar8030Source::air_cap_names(const AirInfo &a) {
@@ -383,6 +385,25 @@ std::vector<std::string> Ar8030Source::air_cap_names(const AirInfo &a) {
 void Ar8030Source::clear_air_info() {
     std::lock_guard<std::mutex> g(air_info_mtx_);
     air_info_ = AirInfo();
+    air_info_feat_ = 0;
+    air_info_seen_ = false;
+}
+
+void Ar8030Source::check_air_modes() {
+    // Not before it has said what it is (its info can come first).
+    if (!air_ver_seen_) return;
+    const uint16_t have = air_kestrel_ ? (uint16_t)(air_feat_ | air_info_feat_) : 0;
+    const uint16_t known = air_info_seen_ ? 0xffff : 0x00ff;
+    for (int i = 0; i < sky::kFpvModeCount; i++) {
+        const sky::VideoMode &m = sky::kFpvModes[i];
+        if (m.w == sky_cfg.ch0_w && m.h == sky_cfg.ch0_h && m.fps == sky_cfg.ch0_fps && (m.need & known & ~have)) {
+            const int d = sky::default_fpv_mode_index();
+            printf("ar8030: the air unit has no %s: asking for %s\n", m.name, sky::kFpvModes[d].name);
+            if (osd) osd->set_video_mode_current(d);
+            request_mode_index(d);
+            break;
+        }
+    }
 }
 int Ar8030Source::tx_power_dbm = kArPwrLevels[ar_pwr_index(kArPwrDefaultMw)].dbm;
 bool Ar8030Source::tx_power_auto = false;
@@ -1146,15 +1167,19 @@ void Ar8030Source::save_sky_config() {
 // channel is not kept - the air unit decides it, and the goggle searches.
 void Ar8030Source::load_sky_link() {
     if (sky_cfg_key.empty()) return;
-    tx_power_mw  = Settings::getInstance().getInt(sky_cfg_key + "_tx_power_mw", tx_power_mw);
+    tx_power_want_mw = Settings::getInstance().getInt(sky_cfg_key + "_tx_power_mw", tx_power_want_mw);
+    tx_power_mw  = ar_pwr_fit(air_prj.load(), tx_power_want_mw);
     tx_power_dbm = kArPwrLevels[ar_pwr_index(tx_power_mw)].dbm;
-    printf("ar8030: [%s] restored radio cfg: power=%s\n", sky_cfg_key.c_str(),
-           kArPwrLevels[ar_pwr_index(tx_power_mw)].label);
+    printf("ar8030: [%s] restored radio cfg: power=%s (chosen %s)\n", sky_cfg_key.c_str(),
+           kArPwrLevels[ar_pwr_index(tx_power_mw)].label, kArPwrLevels[ar_pwr_index(tx_power_want_mw)].label);
 }
 
+// The power chosen, not the one a smaller air unit is held to: a Lite's fit
+// saved here would cap the next Lite+ (the units can share one key - one
+// pairing - and did, 2026-10-12).
 void Ar8030Source::save_sky_link() {
     if (sky_cfg_key.empty()) return;
-    Settings::getInstance().set(sky_cfg_key + "_tx_power_mw", tx_power_mw);
+    Settings::getInstance().set(sky_cfg_key + "_tx_power_mw", tx_power_want_mw);
 }
 
 // Rebuild one captured SET_CONFIG frame around our live settings. The stock
@@ -1499,27 +1524,15 @@ void Ar8030Source::scan_air_status(const uint8_t *buf, int n) {
         }
 
         // What the air unit is decides which power levels it is offered, as on
-        // stock. A power it is not offered (a Lite still set to 500mW) is
-        // brought down to the nearest one it is, and sent to it.
+        // stock. The power chosen is fitted to them - brought down to the
+        // nearest one a Lite is offered, or back up to the chosen one for a
+        // Lite+ after a Lite - and sent to it; the choice itself is kept.
         int rf_hw = sky::Proto::find_tlv(pl, pl_len, sky::Proto::TLV_SKY_RF_HWVER);
         if (rf_hw >= 0) {
             std::lock_guard<std::mutex> g(air_info_mtx_);
             air_info_.rf_hw = rf_hw;
         }
-        int prj = sky::Proto::find_tlv(pl, pl_len, sky::Proto::TLV_SKY_PRJ_NAME);
-        if (prj > 0 && prj != air_prj.load()) {
-            air_prj.store(prj);
-            ar_pwr_offer o = ar_pwr_offered(prj);
-            printf("ar8030: air unit is an %s (prj %d): power up to %s\n", ar_air_name(prj), prj,
-                   kArPwrLevels[ar_pwr_index(o.mw[o.n - 1])].label);
-            int fit = ar_pwr_fit(prj, tx_power_mw);
-            if (fit != tx_power_mw) {
-                printf("ar8030: power %s is not offered to it: %s\n",
-                       kArPwrLevels[ar_pwr_index(tx_power_mw)].label, kArPwrLevels[ar_pwr_index(fit)].label);
-                request_rf(RF_TX_POWER, fit);
-            }
-            if (osd) osd->set_air_power_levels();
-        }
+        note_air_prj(sky::Proto::find_tlv(pl, pl_len, sky::Proto::TLV_SKY_PRJ_NAME), "settings");
 
         int sb = sky::Proto::find_tlv(pl, pl_len, sky::Proto::TLV_STANDBY_MODE);
         if (sb >= 0) {
@@ -1892,10 +1905,17 @@ void Ar8030Source::apply_pending_rf() {
             case RF_TX_POWER: {
                 // val is mW in stock's encoding (N, or N+1 for auto capped
                 // at N); apply_tx_power() owns the mapping and both ioctls.
-                apply_tx_power(val);
+                // The menu's choice: kept, and run fitted to this air unit.
+                tx_power_want_mw = val;
+                apply_tx_power(ar_pwr_fit(air_prj.load(), val));
                 save_sky_link();
                 break;
             }
+            case RF_TX_POWER_FIT:
+                // The choice fitted to the air unit that just said what it is;
+                // the choice stays as it was.
+                apply_tx_power(ar_pwr_fit(air_prj.load(), tx_power_want_mw));
+                break;
             case RF_MCS: {
                 // val < 0 means AUTO: flip the mode rather than pin an index.
                 bb_set_mcs_mode_t m; memset(&m, 0, sizeof(m));
@@ -2991,6 +3011,26 @@ void Ar8030Source::note_air_info(const uint8_t *pl, size_t n) {
         for (char &c : v) if ((unsigned char)c < 0x20 || (unsigned char)c > 0x7e) c = '?';
         kv.emplace_back(line.substr(0, eq), v);
     }
+    // Its board type (stock's: 482 Lite, 472 Lite+) says what it is too.
+    for (const auto &e : kv)
+        if (e.first == "board") {
+            const long b = strtol(e.second.c_str(), nullptr, 10);
+            note_air_prj(b == 472 ? AR_AIR_LITE_PLUS : b == 482 ? AR_AIR_LITE : 0, "info");
+        }
+    // The modes it says it has beyond its header's bits (864p144): the Video
+    // Mode row offers them, and a stored one it lacks goes back to the default.
+    {
+        uint16_t xf = 0;
+        for (const auto &e : kv)
+            if (e.first == "864p144" && e.second == "1") xf |= kAirFeat864p144;
+        const bool first = !air_info_seen_;
+        air_info_seen_ = true;
+        if (first || xf != air_info_feat_) {
+            air_info_feat_ = xf;
+            if (osd) osd->set_air_features(air_kestrel_ ? (uint16_t)(air_feat_ | xf) : 0);
+            check_air_modes();
+        }
+    }
     // The sensor's readout and exposure: ours, they change as it runs, so not
     // part of what is logged or shown.
     for (auto it = kv.begin(); it != kv.end();) {
@@ -3008,6 +3048,28 @@ void Ar8030Source::note_air_info(const uint8_t *pl, size_t n) {
     printf("\n");
 }
 
+// What the air unit is (its project number: 4 Lite, 7 Lite+), from its camera
+// settings (TLV 0x11, stock's way) or kestrel-air's info (its board type):
+// the power levels it is offered, and the chosen power fitted to them.
+// kestrel-air sends its settings only after the link-up handshake reaches it,
+// which a kestrel-air started after that never had - the goggle then took a
+// Lite+ for a Lite and capped it at 100mW AUTO (2026-10-12): the info, every
+// 2 s, says it anyway.
+void Ar8030Source::note_air_prj(int prj, const char *from) {
+    if (prj <= 0 || prj == air_prj.load()) return;
+    air_prj.store(prj);
+    ar_pwr_offer o = ar_pwr_offered(prj);
+    printf("ar8030: air unit is an %s (prj %d, from its %s): power up to %s\n", ar_air_name(prj), prj, from,
+           kArPwrLevels[ar_pwr_index(o.mw[o.n - 1])].label);
+    int fit = ar_pwr_fit(prj, tx_power_want_mw);
+    if (fit != tx_power_mw) {
+        printf("ar8030: power for it: %s (chosen %s, was %s)\n", kArPwrLevels[ar_pwr_index(fit)].label,
+               kArPwrLevels[ar_pwr_index(tx_power_want_mw)].label, kArPwrLevels[ar_pwr_index(tx_power_mw)].label);
+        request_rf(RF_TX_POWER_FIT, fit);
+    }
+    if (osd) osd->set_air_power_levels();
+}
+
 void Ar8030Source::note_air_announce(bool ka, uint8_t proto, uint8_t feat) {
     {
         std::lock_guard<std::mutex> g(air_info_mtx_);
@@ -3021,16 +3083,21 @@ void Ar8030Source::note_air_announce(bool ka, uint8_t proto, uint8_t feat) {
     air_proto_ = proto;
     air_feat_ = feat;
     if (osd) osd->set_air_max_bw(ka && (feat & kAirFeatMaxBw));
+    if (osd) osd->set_air_features(ka ? (uint16_t)(feat | air_info_feat_) : 0);
+    // The mode pushed at link-up, if this air unit does not have it (864p120
+    // kept from before a downgrade, or a stock air app): back to the default.
+    check_air_modes();
     lat_enc_.clear(); lat_queue_.clear(); lat_write_.clear();
     lat_depth_max_ = 0;
     if (ka) {
-        printf("ar8030: the air unit is kestrel-air, protocol %u, features:%s%s%s%s%s%s\n", proto,
+        printf("ar8030: the air unit is kestrel-air, protocol %u, features:%s%s%s%s%s%s%s\n", proto,
                (feat & kAirFeatLatInfo) ? " air-side-times" : "",
                (feat & kAirFeatIntraRefresh) ? " intra-refresh" : "",
                (feat & kAirFeatCamImu) ? " cam-imu" : "",
                (feat & kAirFeatFcImu) ? " fc-imu" : "",
                (feat & kAirFeatApClock) ? " us-radio-clock" : "",
-               (feat & kAirFeatMaxBw) ? " max-bandwidth" : "");
+               (feat & kAirFeatMaxBw) ? " max-bandwidth" : "",
+               (feat & kAirFeat864p120) ? " 864p120" : "");
         // Its own settings, which it keeps in RAM only: sent once it has said
         // it is kestrel-air, at every link-up (the announcement comes again),
         // whichever of the two units was powered first. The bandwidth cap

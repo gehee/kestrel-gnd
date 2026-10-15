@@ -7,9 +7,13 @@ namespace sky {
 
 // The 120 fps entries are labelled 100: 120 is the value stock sends on the
 // wire and what the menu matches against, but the air unit does not support 120.
+// 864p120 is kestrel-air's (its 864p120 feature): the camera's 1536x864 window
+// at a real 120 fps.
 const VideoMode kFpvModes[] = {
     { "720p60",   1280,  720,  60 },
     { "720p100",  1280,  720, 120 },
+    { "864p120",  1536,  864, 120, 0x40 },
+    { "864p144",  1536,  864, 144, 0x100 },   // the Lite+'s OS02K10 window, for 144 Hz screens
     { "1080p60",  1920, 1080,  60 },
     { "1080p100", 1920, 1080, 120 },
 };

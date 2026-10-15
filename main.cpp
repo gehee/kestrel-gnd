@@ -583,6 +583,7 @@ int main(int argc, char **argv)
 	// mW, in stock's encoding (N = hold, N+1 = auto capped at N). See
 	// kArPwrLevels in common.hpp for the levels this board accepts.
 	Ar8030Source::tx_power_mw = Settings::getInstance().getInt("tx_power_mw", kArPwrDefaultMw);
+	Ar8030Source::tx_power_want_mw = Ar8030Source::tx_power_mw;   // the choice, until an air unit's own
 	{
 		int fm = Settings::getInstance().getInt("frame_mode", kFrameWhole);
 		g_frame_mode = (fm >= 0 && fm < kFrameModeCount) ? fm : kFrameWhole;
@@ -1054,15 +1055,17 @@ int main(int argc, char **argv)
         // ArtLynk air unit's, and start on whatever --ar8030-mode asked for
         // (falling back to the mode stock boots into).
         std::vector<std::string> names;
+        std::vector<uint16_t> needs;
         int cur = sky::default_fpv_mode_index();
         for (int i = 0; i < sky::kFpvModeCount; i++) {
             names.push_back(sky::kFpvModes[i].name);
+            needs.push_back(sky::kFpvModes[i].need);
             if (Ar8030Source::mode_w == sky::kFpvModes[i].w &&
                 Ar8030Source::mode_h == sky::kFpvModes[i].h &&
                 Ar8030Source::mode_fps == sky::kFpvModes[i].fps)
                 cur = i;
         }
-        osd->set_video_mode_names(names, cur);
+        osd->set_video_mode_names(names, cur, needs);
     }
 
     if (osd) {

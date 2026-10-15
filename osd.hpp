@@ -372,6 +372,8 @@ class OSD {
         // has a different one from the ArtLynk air unit), the VIDEO tab shows
         // these labels and cycles over them instead of the built-in four.
         std::vector<std::string> video_mode_names;
+        std::vector<uint16_t> video_mode_needs;  // per mode: the air features it takes
+        std::atomic<uint16_t> air_feat_{0};
         // AR8030 camera menu: the VIDEO tab shows the camera's own settings
         // instead of the kestrel-air encoder knobs, which do not apply here.
         // Bitmask of RF controls the baseband accepted (Ar8030Source::RfCap).
@@ -1061,9 +1063,17 @@ class OSD {
                                 char* status, size_t scap);
         std::vector<MenuItem> menu_items(int tab) const;
         static const char* menu_intern(const std::string& s);
-        void set_video_mode_names(const std::vector<std::string>& n, int current) {
+        void set_video_mode_names(const std::vector<std::string>& n, int current,
+                                  const std::vector<uint16_t>& needs = {}) {
             video_mode_names = n;
+            video_mode_needs = needs;
             if (current >= 0 && current < (int)n.size()) menu_video_mode = current;
+        }
+        // The air unit's kestrel-air feature bits (0: stock or none yet): the
+        // Video Mode row skips the modes that need one it does not have.
+        void set_air_features(uint16_t f) { air_feat_ = f; }
+        bool video_mode_ok(int i) const {
+            return i < 0 || i >= (int)video_mode_needs.size() || (video_mode_needs[i] & ~air_feat_.load()) == 0;
         }
         // The list is published before the link is up, when the per-air-unit
         // config has not been read yet, so the row would otherwise sit on the

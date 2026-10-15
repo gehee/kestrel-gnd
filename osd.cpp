@@ -41,8 +41,11 @@ extern "C" uint64_t gbm_bo_get_modifier(struct gbm_bo *bo);
 #include "kestrel_gnd_config.h"
 
 
+// The TX Power row holds the power chosen; it shows (and Enter sends) it
+// fitted to the air unit connected, and -- until that unit has said what it is
+// (its levels are not known before: a Lite+ would be offered a Lite's).
 void OSD::set_air_power_levels() {
-    if (!menu_open) menu_ar_power = ar_pwr_fit(Ar8030Source::air_prj.load(), Ar8030Source::tx_power_mw);
+    if (!menu_open) menu_ar_power = Ar8030Source::tx_power_want_mw;
 }
 
 // AR8030 RF menu. The rows are Channel (the channel page, where AUTO is the
@@ -4564,7 +4567,8 @@ static const char kAirCapsHelp[] =
     "What this air unit's kestrel-air has on. Air Timing: its own times in each slice. "
     "Radio Clock: pictures stamped on the radio's clock. Intra Refresh: no keyframe spikes. "
     "Camera IMU: the camera's gyro samples with the video. FC IMU: the flight controller's gyro, "
-    "polled, for an air unit with no IMU on its camera. Bandwidth Cap: takes RADIO > Max Bandwidth.";
+    "polled, for an air unit with no IMU on its camera. Bandwidth Cap: takes RADIO > Max Bandwidth. "
+    "864p120: VIDEO > Video Mode offers 864p120, a 1536x864 window of the camera at 120 fps.";
 
 // A row label made at run time (the capabilities list), kept for good: a
 // MenuItem holds only the pointer, and a set's strings never move.
@@ -5035,7 +5039,15 @@ void OSD::menu_apply_change(int tab, int index, int dir) {
        switch (video_row(menu_index)) {
            case 0: {
                int n = video_mode_names.empty() ? 1 : (int)video_mode_names.size();
-               menu_video_mode = menu_step(menu_video_mode, dir, n);
+               // Past the modes this air unit does not have (864p120 needs kestrel-air's).
+               int v = menu_video_mode;
+               for (int k = 0; k < n; k++) {
+                   const int s = menu_step(v, dir, n);
+                   if (s == v) break;
+                   v = s;
+                   if (video_mode_ok(v)) break;
+               }
+               if (video_mode_ok(v)) menu_video_mode = v;
                break;
            }
            case 1: menu_cam_flip = menu_step(menu_cam_flip ? 1 : 0, dir, 2) != 0; break;
@@ -5057,8 +5069,10 @@ void OSD::menu_apply_change(int tab, int index, int dir) {
                case 5: break;   // Channel is read-only (see above)
                case 1:
                    {
-                       // The levels this air unit is offered (common.hpp).
+                       // The levels this air unit is offered (common.hpp);
+                       // none before it has said what it is.
                        const int prj = Ar8030Source::air_prj.load();
+                       if (prj <= 0) break;
                        ar_pwr_offer o = ar_pwr_offered(prj);
                        int i = ar_pwr_offer_index(prj, ar_pwr_fit(prj, menu_ar_power));
                        i = menu_step(i < 0 ? 0 : i, dir, o.n);
@@ -5281,10 +5295,12 @@ void OSD::menu_value_text(int tab, int i, char* val_buf, size_t cap) {
                     else   sprintf(val_buf, "--");
                     break;
                 }
-                case 1:     // TX power
-                    sprintf(val_buf, "< %s >",
-                            kArPwrLevels[ar_pwr_index(menu_ar_power)].label);
+                case 1: {   // TX power: -- until the air unit has said what it is
+                    const int prj = Ar8030Source::air_prj.load();
+                    if (prj <= 0) sprintf(val_buf, "--");
+                    else sprintf(val_buf, "< %s >", kArPwrLevels[ar_pwr_index(ar_pwr_fit(prj, menu_ar_power))].label);
                     break;
+                }
                 case 8:     // Standby. Shows the air's current state (menu value is
                     // seeded from it); the arrows + Enter force it on/off as a
                     // momentary override. The air still dictates it on its own
@@ -5699,7 +5715,7 @@ void OSD::handle_key(int key) {
              // Seed the RF rows from what the radio and the air unit report.
              // This air unit's own (Ar8030Source::load_sky_link), which the
              // radio is running with.
-             menu_ar_power = Ar8030Source::tx_power_mw;
+             menu_ar_power = Ar8030Source::tx_power_want_mw;   // shown fitted to the air unit (or --)
              menu_ar_standby = air_standby;   // start the row at the air's real state
              menu_ar_hop = Ar8030Source::chan_auto;
              menu_ar_maxbr = ar_maxbr_index(Ar8030Source::max_kbps);
@@ -5922,9 +5938,11 @@ void OSD::handle_key(int key) {
                         case 5:
                             chan_open();
                             break;
-                        case 1:
-                            cmd_cb(0x311, menu_ar_power);   // saved per air unit there
+                        case 1: {   // saved per air unit there; nothing before it is known
+                            const int prj = Ar8030Source::air_prj.load();
+                            if (prj > 0) cmd_cb(0x311, ar_pwr_fit(prj, menu_ar_power));
                             break;
+                        }
                         case 8:
                             // Force standby on/off (sky cmd 0x23 via the queue that
                             // owns the port-2 socket). Momentary: NOT persisted, and

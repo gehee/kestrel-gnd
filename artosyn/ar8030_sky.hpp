@@ -84,6 +84,8 @@ struct VideoMode {
     uint16_t    w;
     uint16_t    h;
     uint8_t     fps;
+    uint16_t    need = 0;   // kestrel-air feature bits the mode takes (0: any air unit); 0x100 and
+                            // up are said in its info, not its header (Ar8030Source::kAirFeat864p144)
 };
 extern const VideoMode kFpvModes[];
 extern const int       kFpvModeCount;

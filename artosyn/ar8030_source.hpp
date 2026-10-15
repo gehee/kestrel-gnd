@@ -76,6 +76,10 @@ class Ar8030Source {
         static bool chan_manual_cli;   // --ar8030-chan-manual: pinned to freq_khz from the start
         static int tx_power_dbm;
         static int tx_power_mw;   // stock's encoding: N = hold N mW, N+1 = auto capped at N
+        // The power chosen in the menu (saved per air unit); tx_power_mw is it
+        // fitted to what the air unit connected now is offered (ar_pwr_fit),
+        // so a Lite's 100mW AUTO never replaces a 500mW AUTO chosen for a Lite+.
+        static int tx_power_want_mw;
         // The air unit's project number (TLV 0x11: 4 Lite, 6 RC, 7 Lite+), 0 until
         // it reports; picks the power levels it is offered (ar_pwr_offered).
         static std::atomic<int> air_prj;
@@ -103,7 +107,7 @@ class Ar8030Source {
         // kestrel-air's capabilities, named for the INFO tab, by the feature bit
         // that says the air unit has it on.
         struct AirCap { uint8_t bit; const char *key; const char *name; };
-        static const AirCap kAirCaps[6];
+        static const AirCap kAirCaps[7];
         // What the air unit has on, by name: its feature bits.
         static std::vector<std::string> air_cap_names(const AirInfo &a);
         static int air_floor_us;       // fastest capture -> first slice (air_floor_ms), see air_delay_for
@@ -206,7 +210,8 @@ class Ar8030Source {
         // it. Bits are published to the OSD via OSD::set_rf_caps().
         enum RfCap { RF_CAP_POWER = 1, RF_CAP_MCS = 2, RF_CAP_LNA = 4,
                      RF_CAP_BW = 8, RF_CAP_CHAN = 16 };
-        enum RfField { RF_TX_POWER = 1, RF_MCS, RF_LNA, RF_BW, RF_CHAN, RF_HOP };
+        enum RfField { RF_TX_POWER = 1, RF_MCS, RF_LNA, RF_BW, RF_CHAN, RF_HOP,
+                       RF_TX_POWER_FIT = 100 };   // ours: the chosen power fitted to the air unit now
         static void request_rf(int field, int value);
 
         // ---- binding (pairing) -------------------------------------------
@@ -453,6 +458,7 @@ class Ar8030Source {
         void note_air_info(const uint8_t *pl, size_t n);
         static std::mutex air_info_mtx_;
         static AirInfo air_info_;
+        void note_air_prj(int prj, const char *from);   // what the air unit is: its power levels
         void note_air_announce(bool ka, uint8_t proto, uint8_t feat);
         // Air-side times of each slice, us, over 5 s windows, from the header.
         std::vector<uint32_t> lat_enc_, lat_queue_, lat_write_;
@@ -467,6 +473,15 @@ class Ar8030Source {
         static constexpr uint8_t kAirFeatApClock = 0x08;   // byte 2: the stamp's sub-ms part
         static constexpr uint8_t kAirFeatMaxBw = 0x10;     // takes the goggle's bandwidth cap (sky 0x41)
         static constexpr uint8_t kAirFeatFcImu = 0x20;     // the flight controller's IMU (the Lite+: none on the camera)
+        static constexpr uint8_t kAirFeat864p120 = 0x40;   // 864p120: its camera's 1536x864 window at 120 fps
+        // Said in its info (KA_MSG_INFO), the header's byte being full: 864p144
+        // (864p144=1), its OS02K10's 1536x864 window at 144 fps.
+        static constexpr uint16_t kAirFeat864p144 = 0x100;
+        static inline uint16_t air_info_feat_ = 0;   // those bits, from its info (reset with the info)
+        static inline bool air_info_seen_ = false;   // its info has come since the link came up
+        // The mode stored for this air unit, if it lacks it: the default asked
+        // for. Bits said in the info only once it has come.
+        void check_air_modes();
         // Written by the stats thread (poll_ap_time), read by the video thread.
         std::atomic<int64_t> ap_off_us_{0};
         std::atomic<bool>    ap_off_valid_{false};
