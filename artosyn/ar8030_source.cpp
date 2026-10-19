@@ -14,6 +14,7 @@
 #include <ctime>
 #include <cerrno>
 #include <chrono>
+#include <poll.h>
 #include <pthread.h>
 #include <unistd.h>
 #include <sys/stat.h>
@@ -29,7 +30,22 @@ extern "C" {
 // NULL, and everything below behaves as it always has.
 extern "C" const char* arlink_version(void) __attribute__((weak));
 extern "C" uint64_t arlink_socket_rx_ns(int sockfd) __attribute__((weak));
+extern "C" int arlink_socket_read_now(int sockfd, void *buf, uint32_t len) __attribute__((weak));
+extern "C" int arlink_socket_poll_fd(int sockfd) __attribute__((weak));
 static bool on_ar_libre() { return arlink_version != nullptr; }
+
+// A socket's own file to poll(), where ar_libre has one (-1: none, or
+// Artosyn's library).
+static int poll_fd(int sfd) {
+    return sfd >= 0 && arlink_socket_read_now && arlink_socket_poll_fd ? arlink_socket_poll_fd(sfd) : -1;
+}
+
+// What a socket has queued, without waiting where ar_libre allows it; else
+// bb_socket_read's shortest wait, 1 ms. <= 0: nothing.
+static int read_queued(int sfd, void *buf, uint32_t len) {
+    if (poll_fd(sfd) >= 0) return arlink_socket_read_now(sfd, buf, len);
+    return bb_socket_read(sfd, buf, len, 1);
+}
 
 }
 
@@ -1299,7 +1315,7 @@ void Ar8030Source::drain_control_socket() {
     if (ctrl_sockfd < 0) return;
     uint8_t buf[1024];
     for (int i = 0; i < 64; i++) {          // bounded: never starve the video read
-        int n = bb_socket_read(ctrl_sockfd, buf, sizeof(buf), 1);
+        int n = read_queued(ctrl_sockfd, buf, sizeof(buf));
         if (n <= 0) break;                  // -1 here is just "ring empty"
         on_ctrl_bytes(buf, n);
 
@@ -1752,7 +1768,7 @@ void Ar8030Source::drain_msp_socket() {
 
     uint8_t buf[1024];
     for (int i = 0; i < 64; i++) {       // bounded, like the telemetry drain
-        int n = bb_socket_read(msp_sockfd, buf, sizeof(buf), 1);
+        int n = read_queued(msp_sockfd, buf, sizeof(buf));
         if (n <= 0) break;               // -1 is just "ring empty"
 
         // First bytes go to the log verbatim. If this port carries MSP at all
@@ -3513,9 +3529,11 @@ void Ar8030Source::emit_nal(const uint8_t* nal, size_t len) {
             } else {
                 // Intra refresh has no keyframes to join on, and the ones the
                 // air sent at link-up came before the video did: once the
-                // stream is live, ask for one, again every half second.
+                // stream is live, ask for one, again every 1.5 s - a keyframe
+                // on a new link (5 MHz, low MCS) takes longer than half a
+                // second to arrive, and each ask meant another one.
                 if (is_vcl && !key && resync_live_ >= kResyncLive && air_kestrel_ &&
-                    (air_feat_ & kAirFeatIntraRefresh) && now_ms() - idr_asked_ms_ >= 500) {
+                    (air_feat_ & kAirFeatIntraRefresh) && now_ms() - idr_asked_ms_ >= 1500) {
                     idr_asked_ms_ = now_ms();
                     request_air_idr();
                 }
@@ -4209,15 +4227,30 @@ void Ar8030Source::consume_bytes(const uint8_t* data, size_t len) {
             }
             nal_start = i + sc_len;
             i += sc_len;
-            // A packet header, whole: where its packet ends.
-            if (nal_start + 42 <= n && accum[nal_start] == 0x80) {
-                const uint8_t *h = accum.data() + nal_start;
-                const uint32_t plen = (uint32_t)h[4] | ((uint32_t)h[5] << 8) |
-                                      ((uint32_t)h[6] << 16) | ((uint32_t)h[7] << 24);
-                const uint32_t ext = h[31];
-                pkt_end_pos_ = (plen > 0 && plen < AR_MAX_ACCUM && ext <= 64)
-                    ? accum_base_ + nal_start + 42 + ext + plen + 4 : 0;
+            if (accum[nal_start] != 0x80) continue;
+            // A packet header is not Annex-B: its bytes can hold a start code.
+            // The capture time's high bytes (18..25) are 01 00 00 00 or zeros,
+            // so a radio clock (26..29) ending in 01 makes 00 00 00 01 - about
+            // one header in 256. Cut there, the header's tail read as a header
+            // of its own now and then (a mode of its own, a capture stamp from
+            // nowhere: 16 pictures dropped as stale). So a header is skipped
+            // whole, with its extras, once its checksum (byte 1, the sum of
+            // bytes 2..41) says it is one; until it is all here, nothing past
+            // its start is scanned.
+            if (nal_start + 42 > n) break;
+            const uint8_t *h = accum.data() + nal_start;
+            uint8_t sum = 0;
+            for (int k = 2; k < 42; k++) sum += h[k];
+            const uint32_t ext = h[31];
+            if (sum == h[1] && ext <= 64) {
+                if (nal_start + 42 + ext > n) break;
+                i = nal_start + 42 + ext;
             }
+            // A packet header, whole: where its packet ends.
+            const uint32_t plen = (uint32_t)h[4] | ((uint32_t)h[5] << 8) |
+                                  ((uint32_t)h[6] << 16) | ((uint32_t)h[7] << 24);
+            pkt_end_pos_ = (plen > 0 && plen < AR_MAX_ACCUM && ext <= 64)
+                ? accum_base_ + nal_start + 42 + ext + plen + 4 : 0;
             continue;
         }
         i++;
@@ -4423,7 +4456,63 @@ void Ar8030Source::run() {
         }
 
         // timeout in ms; short enough that *should_stop is honoured promptly.
-        int rd = bb_socket_read(sockfd, buf.data(), (uint32_t)buf.size(), 500);
+        // On ar_libre: what is queued, else one wait on the video, control
+        // and MSP sockets together, so a slice is read the moment it lands.
+        // Read in turn, each with its own timeout, the control and MSP drains
+        // above held it up to 1 ms whenever they found nothing (their last
+        // read always does): the stats' Dec wait, 0.8 ms (2026-10-12).
+        // The video silent while the air unit still talks (see where it is
+        // called): the handshake again. Also checked on a pass that only
+        // found the control or MSP socket's data - an air unit sending its
+        // telemetry every ~0.5 s kept the video read from ever timing out,
+        // and this from ever running (2026-10-14, video gone after a step
+        // to 40 MHz until kestrel-gnd restarted).
+        auto video_silent_check = [&]() {
+                uint64_t t_now = now_ms();
+                // Tight enough that an air unit coming back on its own power is
+                // streaming again inside ten seconds: about three to notice, then
+                // the handshake itself.
+                // Talking: anything from it in the last 8 s - with the video gone
+                // a kestrel-air sends little else than its status, every ~5 s
+                // (3 s missed it: video stayed off after a step to 40 MHz).
+                bool air_talking = last_ctrl_ms && (t_now - last_ctrl_ms) < 8000;
+                // No video yet since this start: counted from the link-up's
+                // handshake. A handshake sent just before the link re-formed
+                // (the radio's own step to 40 MHz right after link-up, as after
+                // RADIO > Max Bandwidth restarts the radio) can be lost, and
+                // the air unit then talks but never streams.
+                bool video_gone  = last_data_ms ? (t_now - last_data_ms) > 2500
+                                                : last_rehandshake_ms && (t_now - last_rehandshake_ms) > 5000;
+                bool cooled      = (t_now - last_rehandshake_ms) > 6000;
+                if (air_talking && video_gone && cooled && rehandshakes < 4) {
+                    last_rehandshake_ms = t_now;
+                    rehandshakes++;
+                    printf("ar8030: video silent %llums but telemetry still arriving - "
+                           "re-sending the air handshake (%d/4)\n",
+                           (unsigned long long)(t_now - last_data_ms), rehandshakes);
+                    send_air_handshake();
+                }
+        };
+        int rd;
+        if (poll_fd(sockfd) >= 0) {
+            rd = arlink_socket_read_now(sockfd, buf.data(), (uint32_t)buf.size());
+            if (rd == 0) {
+                struct pollfd p[3];
+                int np = 0;
+                bool other = false;
+                for (int s : { sockfd, ctrl_sockfd, msp_sockfd }) {
+                    const int f = poll_fd(s);
+                    if (f >= 0) p[np++] = { f, POLLIN, 0 };
+                }
+                if (poll(p, (nfds_t)np, 500) > 0)
+                    for (int i = 1; i < np; i++) other |= (p[i].revents & POLLIN) != 0;
+                rd = arlink_socket_read_now(sockfd, buf.data(), (uint32_t)buf.size());
+                if (rd == 0 && other) { video_silent_check(); continue; }   // the control or MSP socket's: drained above, next pass
+                if (rd == 0) rd = -1;             // nothing: as a read timeout
+            }
+        } else {
+            rd = bb_socket_read(sockfd, buf.data(), (uint32_t)buf.size(), 500);
+        }
         if (rd > 0) {
             read_rx_us = arlink_socket_rx_ns ? arlink_socket_rx_ns(sockfd) / 1000 : 0;
             read_timeouts = 0;
@@ -4509,21 +4598,7 @@ void Ar8030Source::run() {
             // Waiting for the socket to look dead instead (read_timeouts >=
             // 200) does eventually recover this, but only after ~100s of a
             // blank screen, and by tearing down a link that was never broken.
-            uint64_t t_now = now_ms();
-            // Tight enough that an air unit coming back on its own power is
-            // streaming again inside ten seconds: about three to notice, then
-            // the handshake itself.
-            bool air_talking = last_ctrl_ms && (t_now - last_ctrl_ms) < 3000;
-            bool video_gone  = last_data_ms && (t_now - last_data_ms) > 2500;
-            bool cooled      = (t_now - last_rehandshake_ms) > 6000;
-            if (air_talking && video_gone && cooled && rehandshakes < 4) {
-                last_rehandshake_ms = t_now;
-                rehandshakes++;
-                printf("ar8030: video silent %llums but telemetry still arriving - "
-                       "re-sending the air handshake (%d/4)\n",
-                       (unsigned long long)(t_now - last_data_ms), rehandshakes);
-                send_air_handshake();
-            }
+            video_silent_check();
             // NOT while binding. A bind window has no video by definition -
             // no air unit is associated yet, that is the entire point - so
             // this recovery reads the silence as a dead socket and tears down
