@@ -443,6 +443,8 @@ class OSD {
         // Same reason as vrx_temp_cached_: sampled on the status row's timer
         // so the canopy panel does not re-read the ADC every frame.
         float vrx_volts_cached_ = 0.0f;
+        bool     hud_wifi_on_ = false;      // wifi_ap_on(), read once a second for the HUD
+        uint64_t hud_wifi_us_ = 0;
         // Arm-transition wipe: the frame line is redrawn in the new state's
         // colour from one end, and back the other way on disarm. -2 means
         // "nothing seen yet", which starts settled rather than animating.
@@ -921,6 +923,8 @@ class OSD {
             // (see Ar8030Source::vrx_volts). 0 = not read yet / unavailable,
             // and the HUD draws nothing rather than inventing a reading.
             float vrx_volts  = 0.0f;
+            // The goggle's WiFi access point is on (SYSTEM > WiFi AP).
+            bool  wifi_on    = false;
         };
         void draw_canopy_hud(const CanopyIn& in);
         // The canopy awake (osd.cpp), and the blades' names while a side is

@@ -22,12 +22,13 @@ class MppH264Encoder {
         ~MppH264Encoder();
 
         // NV12 in, H.264 out. Returns false if the hardware refuses the config.
-        // NV12 in, H.264 out. The input buffer is exported as a DMA-BUF so the
-        // DRM writeback connector can composite directly into it.
+        // The input buffers are DMA-BUFs RGA composites the screen into.
         // bt601: tag the stream BT.601 limited range in its VUI, for input
         // converted from RGB with that matrix (the RGA screen recorder), so
         // players do not guess BT.709 for HD and shift the colours.
-        bool init(int width, int height, int fps, int bitrate_bps, bool bt601 = false);
+        // max_bps > 0: variable rate, bitrate_bps on average and never above
+        // max_bps (the web view's cap); otherwise constant rate.
+        bool init(int width, int height, int fps, int bitrate_bps, bool bt601 = false, int max_bps = 0);
         bool ready() const { return ctx_ != nullptr; }
 
         // SPS/PPS as Annex-B, fetched at init. minimp4 needs these before any
@@ -37,12 +38,15 @@ class MppH264Encoder {
         int width()  const { return w_; }
         int height() const { return h_; }
 
-        // The input buffers as DMA-BUFs. The DRM writeback connector
-        // composites straight into them, so a captured frame is never copied:
-        // the display controller writes one, the encoder reads it. There are
-        // several so the display can write the next frame while the encoder
-        // is still reading the last one.
-        static constexpr int kInputBuffers = 4;
+        // The input buffers as DMA-BUFs: RGA composites the screen straight
+        // into them, so a frame is never copied - RGA writes one, the encoder
+        // reads it. There are several so RGA can write the next frame while
+        // the encoder is still reading the last one (and a follower, another
+        // encoder, reads one too).
+        static constexpr int kInputBuffers = 6;
+        // Before init(): how many to allocate (0 for an encoder that only
+        // reads another's, encode_external()).
+        void set_input_count(int n) { n_inputs_ = n; }
         int  input_count() const { return (int)bufs_.size(); }
         int  input_dmabuf_fd(int i = 0) const;
         // Encode whatever is already in input buffer i (no memcpy in).
@@ -50,6 +54,12 @@ class MppH264Encoder {
         bool encode_in_place(const std::function<void(const uint8_t*, size_t, bool)>& sink) {
             return encode_buffer(0, sink);
         }
+        // The next frame encoded is an IDR (a viewer waiting to start on one).
+        void force_idr();
+        // Input buffer i itself (an MppBuffer), for a second encoder of the
+        // same size to read with encode_external(): one composite, two streams.
+        void* input_buffer(int i) const { return i >= 0 && i < (int)bufs_.size() ? bufs_[i] : nullptr; }
+        bool encode_external(void* mpp_buffer, const std::function<void(const uint8_t*, size_t, bool)>& sink);
 
         void deinit();
 
@@ -62,6 +72,7 @@ class MppH264Encoder {
         size_t frame_size_ = 0;
         std::vector<uint8_t> header_;
         int64_t pts_ = 0;
+        int    n_inputs_ = kInputBuffers;
 };
 
 #endif

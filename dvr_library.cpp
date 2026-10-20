@@ -290,7 +290,10 @@ class Thumbnailer {
         std::thread worker_;
 };
 
-Thumbnailer& thumbnailer() { static Thumbnailer t; return t; }
+// Never destroyed: its worker runs for the life of the program, and a static
+// one's destructor at exit met that thread still joinable - std::terminate,
+// an abort at every kestrel-gnd stop.
+Thumbnailer& thumbnailer() { static Thumbnailer* t = new Thumbnailer; return *t; }
 
 } // namespace
 

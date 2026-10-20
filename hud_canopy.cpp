@@ -965,19 +965,29 @@ void OSD::draw_canopy_hud(const CanopyIn& in) {
         float vr, vg, vb;
         temp_rgb(in.vrx_temp_c, tr, tg, tb, vr, vg, vb);
         draw_text(buf, x, BL(base, T_ROW), T_ROW, false, vr, vg, vb);
+        x += text_width(buf, T_ROW);              // the end of what is drawn so far
 
         // The goggle's own supply, beside its temperature - the two readings
         // that are about this unit rather than the aircraft. Drawn only when
         // the ADC has actually produced a value; an unwired or failed read
         // leaves the slot empty instead of showing a plausible-looking zero.
         if (in.vrx_volts > 0.5f) {
-            x += text_width(buf, T_ROW) + igap * 1.6f;
+            x += igap * 1.6f;
             const int   n  = cells_for(in.vrx_volts);
             const float pc = n ? in.vrx_volts / (float)n : 0.0f;
             float br, bg, bb;
             volt_rgb(pc, tr, tg, tb, br, bg, bb);
             snprintf(buf, sizeof(buf), "%.1fV", in.vrx_volts);
             draw_text(buf, x, BL(base, T_ROW), T_ROW, false, br, bg, bb);
+            x += text_width(buf, T_ROW);
+        }
+
+        // The goggle's WiFi access point on: a 2.4 GHz transmitter beside the
+        // RC link, and the web page open to anyone in range - worth seeing.
+        // In the theme's accent, the colour of live state.
+        if (in.wifi_on) {
+            x += igap * 1.6f;
+            draw_text("WIFI", x, BL(base, T_ROW), T_ROW, false, kLimeR * dim, kLimeG * dim, kLimeB * dim);
         }
     }
 

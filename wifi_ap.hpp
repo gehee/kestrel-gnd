@@ -19,5 +19,9 @@ bool wifi_ap_available();         // the fpvOS script is on this system
 bool wifi_ap_on();                // up, or asked to start - what the menu shows
 void wifi_ap_set(bool on);        // start or stop, in the background
 std::string wifi_ap_describe();   // one line for the menu help
+// For the menu's QR codes: the network as a phone camera joins it
+// ("WIFI:T:WPA;S:...;P:...;;"), and the spectator page's address.
+std::string wifi_ap_join_text();
+std::string wifi_ap_page_url();
 
 #endif

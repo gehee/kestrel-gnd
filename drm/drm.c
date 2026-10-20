@@ -63,14 +63,6 @@ int modeset_open(int *out, const char *node)
 		return ret;
 	}
 
-	/* Writeback connectors are hidden from clients that do not ask for them.
-	   Needed to capture the composited output (video plane + OSD plane) for
-	   screen recording. Not fatal if the kernel does not support it. */
-#ifdef DRM_CLIENT_CAP_WRITEBACK_CONNECTORS
-	if (drmSetClientCap(fd, DRM_CLIENT_CAP_WRITEBACK_CONNECTORS, 1))
-		fprintf(stderr, "note: writeback connectors unavailable\n");
-#endif
-
 	if (drmGetCap(fd, DRM_CAP_DUMB_BUFFER, &cap) < 0 || !cap) {
 		fprintf(stderr, "drm device '%s' does not support dumb buffers\n",
 			node);
@@ -661,11 +653,10 @@ struct modeset_output *modeset_output_create(int fd, drmModeRes *res, drmModeCon
 		goto out_error;
 	}
 
-	// Writeback is not a display. It reports itself connected and advertises
-	// modes like any other connector - this board offers 1920x1080@67 on it -
-	// and modeset_prepare takes the last connector that creates successfully,
-	// so whether the picture goes to the panel or into a capture buffer came
-	// down to enumeration order.
+	// Writeback is not a display. Hidden from us (we do not ask for
+	// DRM_CLIENT_CAP_WRITEBACK_CONNECTORS any more), but were one listed: it
+	// reports itself connected with modes like any other connector, and
+	// modeset_prepare takes the last connector that creates successfully.
 	if (conn->connector_type == DRM_MODE_CONNECTOR_WRITEBACK) {
 		fprintf(stderr, "ignoring writeback connector %u (not a display)\n",
 			conn->connector_id);

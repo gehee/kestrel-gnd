@@ -39,7 +39,29 @@ class WebStream {
         void set_frame_size(int w, int h);
 
         // One whole access unit (all slices of a picture), Annex-B.
-        void feed(const std::shared_ptr<std::vector<uint8_t>>& au, bool key);
+        // seq: the air unit's picture counter (16 bits), -1 when not known; a
+        // jump in it is a picture that never reached us.
+        void feed(const std::shared_ptr<std::vector<uint8_t>>& au, bool key, int seq = -1);
+        // Pictures were lost before they reached us (the radio): every viewer
+        // waits for a keyframe, as the ones after them refer to them.
+        void gap();
+
+        // A viewer is waiting for a keyframe to start on (just connected, or
+        // fell behind). With intra refresh the air unit sends none by itself,
+        // so the video source asks it for one while this holds.
+        bool wants_keyframe() const;
+
+        // The screen as the goggle shows it, re-encoded (web_source "screen",
+        // the default): H.264 from a DVR screen encoder at a bitrate a phone's
+        // WiFi carries, with a keyframe every 2 s, sent to the viewers instead
+        // of the air unit's stream. The encoder runs while someone watches
+        // (DvrRecorder::set_web_watching). header: its SPS/PPS, Annex-B;
+        // dur90k: one picture, 90 kHz ticks. A different source (a screen
+        // recording's encoder taking over) restarts the viewers on it.
+        void set_screen_source(const std::vector<uint8_t>& header, int w, int h, int dur90k);
+        // One encoded picture of it, Annex-B. True while a viewer waits for a
+        // keyframe (the encoder then makes the next picture one).
+        bool feed_screen(const uint8_t* p, size_t n, int dur);
 
         // A DVR recording (file name in the DVR folder) has just been closed:
         // make its gallery thumbnail now, before anyone opens the gallery.

@@ -63,12 +63,6 @@ struct RenderCadence {
 };
 
 class DrmDevice {
-public:
-    // One captured frame: the buffer it went into, the fence that signals when
-    // the CRTC has finished writing it, and when it was committed.
-    struct WbShot { int idx; int fence; uint64_t us; };
-private:
-
 private:
     struct modeset_output *output_list_original = nullptr;
 
@@ -81,22 +75,6 @@ private:
     // true = stock's blocking atomic commit (no completion event); false = the
     // original non-blocking commit + PAGE_FLIP_EVENT. See page_flip().
     bool blocking_flip = false;
-    uint32_t wb_connector_id = 0;   // 0 = none found
-    std::vector<uint32_t> wb_fbs_;      // one framebuffer per encoder buffer
-    std::vector<uint32_t> wb_handles_;  // their imported GEM handles, closed at deinit
-    // The writeback connector's property ids, looked up once in writeback_init.
-    uint32_t wb_prop_crtc_ = 0, wb_prop_fb_ = 0, wb_prop_fence_ = 0;
-    std::mutex wb_mu_;
-    std::condition_variable wb_cv_;
-    std::deque<int>    wb_free_;         // buffers the display may write
-    std::deque<WbShot> wb_ready_;        // written (or being written), to encode
-    std::atomic<bool>     wb_on_{false};
-    // Add a capture to a commit being built, if a buffer is free: returns its
-    // index, or -1 when capturing is off or the encoder has every buffer.
-    int  wb_attach(drmModeAtomicReq* req, int32_t* fence);
-    // After the commit: queue the capture for the encoder, or take the buffer
-    // back if the commit failed.
-    void wb_committed(int idx, int32_t fence, bool ok);
     uint32_t pending_osd_fb_id = 0;   // rendered, waiting for a commit to carry it
     uint32_t current_osd_fb_id = 0;   // in the last commit made
     // The OSD fb the last in-flight video flip carried, and the one the display
@@ -269,40 +247,11 @@ public:
     bool osd_fb_in_use(uint32_t fb_id);
     void set_blocking_flip(bool on) { blocking_flip = on; }
 
-    // --- DRM writeback capture ------------------------------------------
-    // The CRTC composites every plane (video + OSD) and writes the result into
-    // a buffer we supply. That is the only way to capture what is actually on
-    // screen: glReadPixels sees the GL/OSD layer only, because the video lives
-    // on a separate DRM plane the display controller blends at scanout.
-    //
-    // This connector advertises NV12 among WRITEBACK_PIXEL_FORMATS, so the
-    // hardware also does the colour conversion the encoder would otherwise
-    // need - and if the supplied buffer is the encoder's own DMA-BUF, the frame
-    // is never copied at all.
     // Hardware picture controls on the HDMI connector (brightness, contrast,
     // saturation, hue - all 0..100, default 50). These act on the whole display
     // pipeline, so they lift the video and the OSD together.
     bool set_display_property(const char* name, uint64_t value);
 
-    bool writeback_available() const { return wb_connector_id != 0; }
-    // dmabuf_fds: NV12 targets, the encoder's input buffers, used in turn so
-    // the display can write one while the encoder reads another.
-    bool writeback_init(int w, int h, const std::vector<int>& dmabuf_fds);
-    void writeback_deinit();
-    // For the encoder thread: the next captured frame, waiting up to
-    // timeout_ms. Hand the buffer back with writeback_release() once encoded.
-    bool writeback_next(WbShot& shot, int timeout_ms);
-    void writeback_release(int idx);
-    // Composite the current screen into a free buffer: a commit of its own,
-    // queued without waiting for the vblank. Skipped when the encoder holds
-    // every buffer.
-    //
-    // Deliberately separate from the video's page flips. Carrying the capture
-    // on every flip (so the recording got every frame shown) made the flips
-    // themselves fail with EBUSY - the pilot's live picture dropping frames -
-    // and stalled the VEPU until reboot.
-    void writeback_capture();
-    static void writeback_wait(int fence);
     // FrontBuffer mode never waits for a vblank - the frame is memcpy'd straight
     // into the scanout buffer and is live as soon as the copy lands. Record the
     // real dec->visible latency here instead of timing a page flip the frame

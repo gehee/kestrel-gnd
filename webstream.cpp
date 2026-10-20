@@ -44,6 +44,9 @@
 //   LIVE     /stream.mp4 through Media Source Extensions, a small jitter
 //            buffer behind live (?buffer=ms), held by nudging the playback
 //            rate. Appends in 'sequence' mode; only runs while its tab is open.
+//            Over the picture: a LIVE badge (amber catching up, grey
+//            reconnecting) whose tap shows the numbers. A phone turned
+//            sideways gets the picture alone.
 //   GALLERY  the DVR folder (/api/recordings), newest first; PLAY opens a
 //            recording in the page, SAVE downloads it (/dvr/<name>, ranges).
 static const char kPage[] = R"HTML(<!doctype html>
@@ -72,7 +75,31 @@ section{display:none}section.on{display:block}
 .frame video{width:100%;height:100%;object-fit:contain;display:block}
 #b{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);display:none;padding:12px 22px;
   font:600 15px Chakra,system-ui;letter-spacing:.1em;border:0;border-radius:10px;background:var(--accent);color:var(--ground)}
-.status{margin-top:10px;color:var(--quiet);font-size:13px;line-height:1.4}
+#fs{position:absolute;right:10px;bottom:10px;width:40px;height:40px;padding:0;border:0;border-radius:8px;
+  background:rgba(0,0,0,.55);color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center}
+#fs svg{width:22px;height:22px;fill:none;stroke:currentColor;stroke-width:2.2;stroke-linecap:round}
+.frame:fullscreen{border-radius:0;aspect-ratio:auto;width:100vw;height:100vh}
+.frame:-webkit-full-screen{border-radius:0;aspect-ratio:auto;width:100vw;height:100vh}
+[hidden]{display:none!important}
+.ov{position:absolute;top:10px;left:max(10px,env(safe-area-inset-left));display:flex;gap:8px;align-items:center}
+.pill{display:inline-flex;align-items:center;gap:7px;padding:6px 11px;border:0;border-radius:999px;
+  background:rgba(0,0,0,.55);color:#fff;font:600 12px Chakra,system-ui;letter-spacing:.14em;cursor:pointer}
+.pill i{width:8px;height:8px;border-radius:50%;background:var(--quiet)}
+.pill.live i{background:var(--accent)}
+.pill.behind i{background:#f2c94c}
+.pill.wait i{animation:blink 1s infinite}
+.pill.off i{background:#ff4d4d}
+@keyframes blink{50%{opacity:.2}}
+.det{position:absolute;bottom:10px;left:max(10px,env(safe-area-inset-left));right:62px;padding:6px 10px;
+  border-radius:8px;background:rgba(0,0,0,.55);color:#fff;font-size:12px;line-height:1.4}
+.msg{position:absolute;left:16px;right:16px;top:50%;transform:translateY(-50%);text-align:center;
+  color:#fff;font-size:14px;line-height:1.4}
+/* A phone on its side: the picture, edge to edge, nothing else. */
+@media (orientation:landscape) and (max-height:540px){
+  body.watching header,body.watching .tz{display:none}
+  body.watching main{padding:0}
+  body.watching .frame{border-radius:0;aspect-ratio:auto;width:100vw;height:100vh;height:100dvh}
+}
 .tz{margin-top:14px;display:flex;flex-wrap:wrap;align-items:center;gap:10px;color:var(--quiet);font-size:13px}
 #list{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px}
 .rec{border-radius:12px;overflow:hidden;background:color-mix(in srgb,var(--quiet) 12%,transparent)}
@@ -105,8 +132,11 @@ section{display:none}section.on{display:block}
 <main>
 <section id="live" class="on">
   <div class="frame"><video id="v" muted playsinline autoplay disableremoteplayback></video>
-  <button id="b">TAP TO PLAY</button></div>
-  <div class="status" id="s">connecting...</div>
+  <div class="msg" id="m"></div>
+  <div class="ov"><button class="pill wait" id="lb" title="Show the numbers"><i></i><span id="lt">CONNECTING</span></button></div>
+  <div class="det" id="s" hidden></div>
+  <button id="b">TAP TO PLAY</button>
+  <button id="fs" aria-label="Full screen" title="Full screen"><svg viewBox="0 0 24 24"><path id="fsi" d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></svg></button></div>
   <div class="tz" id="tz"></div>
 </section>
 <section id="gallery"><div id="list"></div></section>
@@ -136,11 +166,41 @@ const live = (() => {
   const v = $('v'), s = $('s'), b = $('b');
   const TYPE = 'video/mp4; codecs="__CODEC__"';
   const MS = window.ManagedMediaSource || window.MediaSource;
-  const RECOVER = params.get('recover') === '1';
+  const RECOVER = params.get('recover') !== '0';
   const TARGET = Math.min(2000, Math.max(40, parseInt(params.get('buffer') || '250', 10) || 250)) / 1000;
-  const say = t => { s.textContent = t; };
+  const say = t => { s.textContent = t; };          // the numbers, under a tap on the badge
+  const msg = t => { $('m').textContent = t; };      // something to read over the picture
+  const lb = $('lb'), lt = $('lt');
+  const badge = (kind, text) => { lb.className = 'pill ' + kind; lt.textContent = text; };
+  const store = (k, v) => { try { v === undefined ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch (e) {} };
+  try { s.hidden = localStorage.getItem('fpvos-numbers') !== '1'; } catch (e) {}
+  lb.onclick = () => { s.hidden = !s.hidden; store('fpvos-numbers', s.hidden ? undefined : '1'); };
+  // ?debug=1: the player's state and events, into the goggle's log.
+  const DEBUG = params.get('debug') === '1', T0 = performance.now();
+  const plog = m => { if (DEBUG) fetch('/api/plog?m=' + encodeURIComponent(((performance.now() - T0) / 1000).toFixed(2) + ' ' + m), { cache: 'no-store' }).catch(() => {}); };
+  if (DEBUG) for (const e of ['waiting', 'stalled', 'seeking', 'seeked', 'playing', 'pause', 'error', 'emptied', 'suspend'])
+    v.addEventListener(e, () => plog('ev ' + e + ' ct ' + v.currentTime.toFixed(2) + ' rs ' + v.readyState));
   let session = 0, running = false, recoveries = 0, lastErr = '', teardown = () => {};
   b.onclick = () => { b.style.display = 'none'; v.play(); };
+  // Full screen: the picture's frame (button included) where the browser can;
+  // iPhone Safari only lets a video go full screen, through its own player.
+  const frame = v.parentElement, fsi = $('fsi');
+  const fsEl = () => document.fullscreenElement || document.webkitFullscreenElement;
+  $('fs').onclick = () => {
+    if (fsEl()) { (document.exitFullscreen || document.webkitExitFullscreen).call(document); return; }
+    const go = frame.requestFullscreen || frame.webkitRequestFullscreen;
+    if (go) {
+      const r = go.call(frame);
+      if (r && r.catch) r.catch(() => { if (v.webkitEnterFullscreen) v.webkitEnterFullscreen(); });
+      try { screen.orientation.lock('landscape').catch(() => {}); } catch (e) {}
+    } else if (v.webkitEnterFullscreen) {
+      v.webkitEnterFullscreen();
+    }
+  };
+  const fsIcon = () => fsi.setAttribute('d', fsEl() ? 'M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5'
+                                                    : 'M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5');
+  document.addEventListener('fullscreenchange', fsIcon);
+  document.addEventListener('webkitfullscreenchange', fsIcon);
 
   const quality = () => {
     const q = v.getVideoPlaybackQuality ? v.getVideoPlaybackQuality() : null;
@@ -158,13 +218,24 @@ const live = (() => {
     const fail = why => {
       if (!alive()) return;
       session++; teardown();
-      if (!RECOVER) { say('Stopped: ' + why + (quality() ? ' (' + quality() + ')' : '')); return; }
+      // Reconnect, which starts again at a keyframe: after a dropped connection
+      // (WiFi) and after a decode error (a picture that never arrived) alike.
+      // ?recover=0 stops at a decode error instead, to see it.
+      if (!RECOVER && why !== 'stream ended') {
+        badge('off', 'STOPPED');
+        msg('Stopped: ' + why + (quality() ? ' (' + quality() + ')' : ''));
+        return;
+      }
+      badge('wait', 'RECONNECTING');
+      plog('reconnect after ' + why);
       recoveries++; lastErr = why;
       setTimeout(() => { if (running) open(); }, 300);
     };
     v.onerror = () => { const e = v.error; fail(e ? 'error ' + e.code + (e.message ? ': ' + e.message : '') : 'error'); };
     v.disableRemotePlayback = true;
     v.src = URL.createObjectURL(ms);
+    if (DEBUG) for (const e of ['startstreaming', 'endstreaming', 'sourceclose', 'sourceended'])
+      ms.addEventListener(e, () => plog('ms ' + e));
     ms.addEventListener('sourceopen', async () => {
       if (!alive()) return;
       const sb = ms.addSourceBuffer(TYPE);
@@ -173,7 +244,10 @@ const live = (() => {
       const pump = () => {
         if (!alive() || sb.updating || !q.length || ms.readyState !== 'open') return;
         try {
-          if (v.buffered.length && v.currentTime - v.buffered.start(0) > 8) { sb.remove(0, v.currentTime - 3); return; }
+          // Played video is trimmed, but never the last 15 s: removing a
+          // keyframe drops every picture up to the next one, and the goggle
+          // sends one every 10 s (intra refresh has none of its own).
+          if (v.buffered.length && v.currentTime - v.buffered.start(0) > 20) { sb.remove(0, v.currentTime - 15); return; }
           let n = 0; for (const c of q) n += c.length;
           const all = new Uint8Array(n); let o = 0;
           for (const c of q) { all.set(c, o); o += c.length; }
@@ -187,15 +261,30 @@ const live = (() => {
         const dt = (performance.now() - t0) / 1000; t0 = performance.now();
         const mbps = (bytes * 8 / dt / 1e6).toFixed(1); bytes = 0;
         const rec = recoveries ? ' · recovered ' + recoveries + 'x (' + lastErr + ')' : '';
-        if (!v.buffered.length) { say('Waiting for a keyframe... ' + mbps + ' Mbps' + rec); return; }
+        if (!v.buffered.length) {
+          if (!recoveries) badge('wait', 'CONNECTING');
+          say('Waiting for a keyframe... ' + mbps + ' Mbps' + rec);
+          return;
+        }
         const end = v.buffered.end(v.buffered.length - 1), lag = end - v.currentTime;
-        if (lag > TARGET + 1.0) { v.currentTime = end - TARGET; v.playbackRate = 1; }
+        if (DEBUG) {
+          let rg = ''; for (let i = 0; i < v.buffered.length; i++) rg += ' [' + v.buffered.start(i).toFixed(1) + '-' + v.buffered.end(i).toFixed(1) + ']';
+          plog('st ct ' + v.currentTime.toFixed(2) + ' lag ' + lag.toFixed(2) + ' rate ' + v.playbackRate + ' rs ' + v.readyState +
+               ' paused ' + v.paused + ' ' + mbps + 'Mbps ' + quality() + ' buf' + rg + (ms.streaming === undefined ? '' : ' streaming ' + ms.streaming));
+        }
+        // Far behind: jump (it lands between keyframes, which the browser
+        // has to decode its way to - a visible stall); behind: catch up by
+        // playing faster, which nobody notices for a moment.
+        if (lag > TARGET + 4.0) { plog('jump to ' + (end - TARGET).toFixed(2)); v.currentTime = end - TARGET; v.playbackRate = 1; }
+        else if (lag > TARGET + 0.6) v.playbackRate = 1.25;
         else if (lag > TARGET * 1.5) v.playbackRate = 1.05;
         else if (lag > TARGET * 1.15) v.playbackRate = 1.02;
         else if (lag < TARGET * 0.5) v.playbackRate = 0.95;
         else if (lag < TARGET * 0.85) v.playbackRate = 0.98;
         else v.playbackRate = 1;
-        if (v.paused) v.play().catch(() => { b.style.display = 'block'; });
+        if (v.paused) { v.play().catch(() => { b.style.display = 'block'; }); badge('wait', 'PAUSED'); }
+        // Playing within the catch-up band: live. Beyond it, playing faster to get back.
+        else if (lag > TARGET + 0.6) badge('behind', 'CATCHING UP'); else badge('live', 'LIVE');
         say(mbps + ' Mbps · ' + Math.round(lag * 1000) + ' ms behind live' +
             (v.videoWidth ? ' · ' + v.videoWidth + 'x' + v.videoHeight : '') + rec);
       }, 500);
@@ -215,9 +304,9 @@ const live = (() => {
   return {
     start() {
       if (running) return;
-      if (!MS) { say('This browser has no Media Source support (iPhone needs iOS 17.1 or later).'); return; }
-      if (!MS.isTypeSupported(TYPE)) { say('This browser cannot play ' + TYPE); return; }
-      running = true; say('Connecting...'); open();
+      if (!MS) { badge('off', 'NO VIDEO'); msg('This browser has no Media Source support (iPhone needs iOS 17.1 or later).'); return; }
+      if (!MS.isTypeSupported(TYPE)) { badge('off', 'NO VIDEO'); msg('This browser cannot play ' + TYPE); return; }
+      running = true; msg(''); badge('wait', 'CONNECTING'); say('Connecting...'); open();
     },
     stop() { running = false; session++; teardown(); b.style.display = 'none'; },
   };
@@ -353,6 +442,7 @@ function show(tab) {
     $(sec).classList.toggle('on', sec === tab);
   }
   theme();
+  document.body.classList.toggle('watching', tab === 'live');
   if (tab === 'live') { live.start(); tz(); } else { live.stop(); gallery(); }
   history.replaceState(null, '', location.pathname + location.search + (tab === 'gallery' ? '#gallery' : ''));
 }
@@ -367,7 +457,9 @@ show(location.hash === '#gallery' ? 'gallery' : 'live');
 namespace {
 
 constexpr size_t kQueueMax    = 16;                // pictures waiting for the thread
-constexpr size_t kSkipBytes   = 4u << 20;          // backlog: skip to next keyframe
+constexpr size_t kSkipBytes   = 1u << 20;          // backlog: skip to next keyframe
+constexpr uint64_t kKeyEveryUs = 10000000;         // a keyframe this often while watched
+constexpr int    kSndBuf      = 256 << 10;         // the viewer socket's kernel buffer
 constexpr size_t kDropBytes   = 16u << 20;         // backlog: give up on the viewer
 constexpr int    kMaxClients  = 16;               // Safari opens several per video
 constexpr size_t kFileChunk   = 256u << 10;        // file bytes read ahead per client
@@ -376,6 +468,10 @@ struct Item {
     std::shared_ptr<std::vector<uint8_t>> au;
     bool key;
 };
+
+// After the last viewer leaves, the screen encoder keeps running this long: a
+// page reconnecting (WiFi, a decode error) is back within a second.
+constexpr uint64_t kScreenIdleUs = 10000000;
 
 struct Client {
     int fd = -1;
@@ -387,6 +483,7 @@ struct Client {
     bool need_key = true;           // skipping until a keyframe
     MP4E_mux_t* mux = nullptr;
     mp4_h26x_writer_t wr{};
+    unsigned gen = 0;               // the screen source its muxer was made for
     int dur = 750;                  // sample duration, 90 kHz ticks
     int64_t written = 0;            // bytes the muxer has emitted
     int file_fd = -1;               // a recording being served, read in chunks
@@ -426,13 +523,19 @@ std::string hex_colour(const float c[3]) {
 }
 
 // Annex-B (start codes) to an MP4 sample (4-byte big-endian length per NAL).
-void annexb_to_sample(const std::vector<uint8_t>& in, std::vector<uint8_t>& out) {
+// strip_ps: an H.264 stream's SPS/PPS/AUD are left out - they are in the
+// avcC already, and Safari refuses a sample that repeats them.
+void annexb_to_sample(const std::vector<uint8_t>& in, std::vector<uint8_t>& out, bool strip_ps = false) {
     out.clear();
     const size_t n = in.size();
     size_t i = 0, start = SIZE_MAX;
     auto emit = [&](size_t a, size_t b) {
         while (b > a && in[b - 1] == 0) b--;           // trailing zero bytes of the next start code
         if (b <= a) return;
+        if (strip_ps) {
+            const int t = in[a] & 0x1F;
+            if (t == 7 || t == 8 || t == 9) return;
+        }
         const uint32_t len = (uint32_t)(b - a);
         const uint8_t be[4] = {(uint8_t)(len >> 24), (uint8_t)(len >> 16), (uint8_t)(len >> 8), (uint8_t)len};
         out.insert(out.end(), be, be + 4);
@@ -450,6 +553,30 @@ void annexb_to_sample(const std::vector<uint8_t>& in, std::vector<uint8_t>& out)
     if (start != SIZE_MAX) emit(start, n);
 }
 
+// Each NAL of an Annex-B buffer with a 4-byte start code of its own.
+std::vector<std::vector<uint8_t>> split_nals(const uint8_t* p, size_t n) {
+    std::vector<std::vector<uint8_t>> v;
+    size_t i = 0, start = SIZE_MAX;
+    auto emit = [&](size_t a, size_t b) {
+        while (b > a && p[b - 1] == 0) b--;
+        if (b <= a) return;
+        std::vector<uint8_t> nal = {0, 0, 0, 1};
+        nal.insert(nal.end(), p + a, p + b);
+        v.push_back(std::move(nal));
+    };
+    while (i + 3 <= n) {
+        if (p[i] == 0 && p[i + 1] == 0 && p[i + 2] == 1) {
+            if (start != SIZE_MAX) emit(start, i);
+            start = i + 3;
+            i += 3;
+        } else {
+            i++;
+        }
+    }
+    if (start != SIZE_MAX) emit(start, n);
+    return v;
+}
+
 } // namespace
 
 struct WebStream::Impl {
@@ -458,15 +585,42 @@ struct WebStream::Impl {
     pthread_t tid = 0;
     std::atomic<bool> run{false};
     std::atomic<int> viewers{0};   // streaming clients, read lock-free by feed()
+    std::atomic<bool> want_key{false};   // one of them waits for a keyframe
+    // The last keyframe a viewer took, us: with intra refresh the air unit
+    // sends none by itself, and the page can only drop old video up to one.
+    std::atomic<uint64_t> last_key_us{0};
 
     VideoCodec codec = VideoCodec::H265;
+    // Viewers get the screen, re-encoded (web_source "screen"), not the air
+    // unit's stream: fixed at start.
+    bool screen_mode = false;
+    // Unsent bytes past which a viewer skips to the next keyframe: about a
+    // second at the web view's cap when re-encoding, kSkipBytes otherwise.
+    size_t skip_bytes = kSkipBytes;
+    std::atomic<bool> want_screen_key{false};
+    bool screen_on = false;        // server thread: the encoder asked for
+    uint64_t idle_since = 0;       // server thread: no viewer since then, us
+    uint64_t screen_since = 0;     // server thread: asked for since then, us
+    uint64_t retry_us = 0;         // server thread: asked again then, us
+    std::atomic<uint64_t> last_screen_us{0};   // the encoder's last picture, us
+    unsigned cur_gen = 0;          // server thread: the source being muxed
 
     std::mutex m;                  // guards everything below
     std::deque<Item> q;
     std::vector<std::vector<uint8_t>> ps;
     int w = 1920, h = 1080;
+    // The screen source (screen_mode): SPS/PPS, size, picture duration, and a
+    // generation that changes with any of them.
+    std::vector<std::vector<uint8_t>> screen_ps;
+    int sw = 0, sh = 0, sdur = 0;
+    unsigned screen_gen = 0;
     uint64_t last_us = 0;
-    double frame_us = 1e6 / 60;    // measured picture interval, EWMA
+    double frame_us = 1e6 / 60;    // measured picture interval
+    uint64_t win_us = 0;           // ... over pictures counted since then
+    unsigned q_dropped = 0;        // pictures dropped off q (the thread behind)
+    unsigned seq_gaps = 0;         // jumps in the air unit's picture counter
+    int last_seq = -1;
+    unsigned win_n = 0;
 
     std::vector<Client*> clients;  // server thread only
 
@@ -494,6 +648,8 @@ bool WebStream::start(int port, VideoCodec codec) {
     if (impl_) return true;
     Impl* d = new Impl();
     d->codec = codec;
+    d->screen_mode = Settings::getInstance().getString("web_source", "screen") != "air";
+    if (d->screen_mode) d->skip_bytes = (size_t)DvrRecorder::web_cap_kbps() * 1000 / 8;
 
     d->listen_fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
     int one = 1;
@@ -554,25 +710,92 @@ void WebStream::recording_finished(const std::string& name) {
     if (safe_name(name) && ends_with(name, ".mp4")) dvr_lib::request_thumbnail(name);
 }
 
-void WebStream::feed(const std::shared_ptr<std::vector<uint8_t>>& au, bool key) {
+void WebStream::feed(const std::shared_ptr<std::vector<uint8_t>>& au, bool key, int seq) {
     Impl* d = impl_;
-    if (!d) return;
+    if (!d || d->screen_mode) return;
     const uint64_t now = get_time_us();
     {
         std::lock_guard<std::mutex> lk(d->m);
         // The picture rate, measured rather than configured: sample durations
         // have to match the real rate or the player drifts off the live edge.
-        if (d->last_us) {
-            const double dt = (double)(now - d->last_us);
-            if (dt > 2000 && dt < 100000) d->frame_us = 0.95 * d->frame_us + 0.05 * dt;
+        // Pictures counted over a second or more: they arrive bunched (two in
+        // one radio frame, <2 ms apart), and an average of the gaps that left
+        // out the short ones read 7-10% long - the page fell behind by that
+        // much and jumped ahead every ~15 s.
+        if (!d->win_us || now - d->win_us > 3000000) { d->win_us = now; d->win_n = 0; }
+        else if (++d->win_n >= 60 && now - d->win_us >= 1000000) {
+            const double fu = (double)(now - d->win_us) / d->win_n;
+            if (fu > 2000 && fu < 100000)
+                d->frame_us = d->frame_us == 1e6 / 60 ? fu : 0.7 * d->frame_us + 0.3 * fu;
+            d->win_us = now; d->win_n = 0;
         }
         d->last_us = now;
+        // A picture missing before it got here (lost on the radio, or not
+        // assembled): its successors refer to it, so viewers restart at a key.
+        if (seq >= 0 && d->last_seq >= 0 && (uint16_t)(seq - d->last_seq) != 1) d->seq_gaps++;
+        d->last_seq = seq;
         if (d->viewers.load(std::memory_order_relaxed) == 0) return;   // nobody watching
-        if (d->q.size() >= kQueueMax) d->q.pop_front();   // the thread is behind
+        // The thread is behind: drop the oldest - and every viewer then waits
+        // for a keyframe, since the pictures after it refer to it (silently
+        // dropped, Safari stopped with "media failed to decode").
+        if (d->q.size() >= kQueueMax) { d->q.pop_front(); d->q_dropped++; }
         d->q.push_back({au, key});
     }
     uint64_t one = 1;
     if (write(d->wake_fd, &one, sizeof(one)) < 0) {}
+}
+
+void WebStream::gap() {
+    Impl* d = impl_;
+    if (!d || d->screen_mode || d->viewers.load(std::memory_order_relaxed) == 0) return;
+    std::lock_guard<std::mutex> lk(d->m);
+    d->q_dropped++;
+}
+
+bool WebStream::wants_keyframe() const {
+    return impl_ && !impl_->screen_mode && impl_->want_key.load(std::memory_order_relaxed);
+}
+
+void WebStream::set_screen_source(const std::vector<uint8_t>& header, int w, int h, int dur90k) {
+    Impl* d = impl_;
+    if (!d || !d->screen_mode) return;
+    auto ps = split_nals(header.data(), header.size());
+    {
+        std::lock_guard<std::mutex> lk(d->m);
+        // A viewer's muxer holds the SPS/PPS and size: only a change in them
+        // restarts it. Its picture duration is its own (fixed per viewer), so
+        // another encoder's period a tick off (the recording's slots x 2 vs
+        // every 4th refresh) is no reason to reconnect.
+        d->sdur = dur90k > 0 ? dur90k : 3000;
+        if (ps == d->screen_ps && w == d->sw && h == d->sh) return;
+        d->screen_ps = std::move(ps);
+        d->sw = w; d->sh = h;
+        d->screen_gen++;
+        d->q.clear();
+    }
+    printf("webstream: screen source %dx%d, %.2f fps\n", w, h, 90000.0 / (dur90k > 0 ? dur90k : 3000));
+    uint64_t one = 1;
+    if (write(d->wake_fd, &one, sizeof(one)) < 0) {}
+}
+
+bool WebStream::feed_screen(const uint8_t* p, size_t n, int dur) {
+    Impl* d = impl_;
+    if (!d || !d->screen_mode || !n) return false;
+    d->last_screen_us.store(get_time_us(), std::memory_order_relaxed);
+    if (d->viewers.load(std::memory_order_relaxed) == 0) return false;
+    bool key = false;   // an IDR slice in it
+    for (size_t i = 0; i + 3 < n && !key; i++)
+        key = p[i] == 0 && p[i + 1] == 0 && p[i + 2] == 1 && (p[i + 3] & 0x1F) == 5;
+    auto au = std::make_shared<std::vector<uint8_t>>(p, p + n);
+    (void)dur;   // every picture is the source's duration (constant rate, see DVR)
+    {
+        std::lock_guard<std::mutex> lk(d->m);
+        if (d->q.size() >= kQueueMax) { d->q.pop_front(); d->q_dropped++; }
+        d->q.push_back({au, key});
+    }
+    uint64_t one = 1;
+    if (write(d->wake_fd, &one, sizeof(one)) < 0) {}
+    return d->want_screen_key.load(std::memory_order_relaxed);
 }
 
 // ---- server thread ------------------------------------------------------------
@@ -612,16 +835,40 @@ void WebStream::Impl::loop() {
         std::deque<Item> items;
         std::vector<std::vector<uint8_t>> ps_now;
         int w_now, h_now, dur_now;
+        unsigned dropped = 0, gaps = 0;
         {
             std::lock_guard<std::mutex> lk(m);
             items.swap(q);
-            ps_now = ps;
-            w_now = w; h_now = h;
-            dur_now = (int)(frame_us * 90000.0 / 1e6 + 0.5);
+            dropped = q_dropped; q_dropped = 0;
+            gaps = seq_gaps; seq_gaps = 0;
+            if (screen_mode) {
+                ps_now = screen_ps;
+                w_now = sw; h_now = sh;
+                dur_now = sdur;
+                cur_gen = screen_gen;
+            } else {
+                ps_now = ps;
+                w_now = w; h_now = h;
+                dur_now = (int)(frame_us * 90000.0 / 1e6 + 0.5);
+            }
+        }
+        // A new screen source (another encoder, another size): a viewer's
+        // muxer was made for the old one, so the page connects again.
+        if (screen_mode)
+            for (Client* c : clients)
+                if (c->streaming && c->mux && c->gen != cur_gen && c->fd >= 0) {
+                    printf("webstream: viewer %d - the screen source changed, reconnecting it\n", c->fd);
+                    close(c->fd); c->fd = -1;
+                }
+        if (dropped || gaps) {
+            printf("webstream: pictures missing (%u dropped behind, %u jumps in the air unit's counter) - "
+                   "viewers restart at the next keyframe\n", dropped, gaps);
+            for (Client* c : clients)
+                if (c->streaming) c->need_key = true;
         }
         for (const Item& it : items)
             for (Client* c : clients)
-                if (c->streaming) mux_item(c, it, ps_now, w_now, h_now, dur_now);
+                if (c->streaming && c->fd >= 0) mux_item(c, it, ps_now, w_now, h_now, dur_now);
 
         // Socket events. Indices 2.. match `clients` as it was when polled.
         // A client is finished once its fd is closed (-1); every path that
@@ -647,6 +894,50 @@ void WebStream::Impl::loop() {
         for (size_t i = 0; i < clients.size();) {
             if (clients[i]->fd < 0) { drop(clients[i]); clients.erase(clients.begin() + i); }
             else i++;
+        }
+        bool waiting = false;
+        // Only once it can take one: a keyframe that comes while it is still
+        // behind is skipped like the rest, and costs the radio link for nothing.
+        for (Client* c : clients) waiting |= c->streaming && c->need_key && c->pending() <= skip_bytes;
+        // A keyframe every kKeyEveryUs while someone watches: the page trims
+        // the video it has played (memory), and a browser's media buffer drops
+        // every picture after a removed keyframe up to the next one - with
+        // intra refresh there was no next one, and the picture froze at ~8 s.
+        // ~60 KB per keyframe at 1080p, every 10 s, on the radio link.
+        if (screen_mode) {
+            // The screen encoder makes a keyframe every 2 s by itself; one is
+            // forced only for a viewer waiting to start. It runs while anyone
+            // watches, and a little longer (kScreenIdleUs).
+            want_screen_key.store(waiting, std::memory_order_relaxed);
+            const uint64_t now = get_time_us();
+            if (viewers.load() > 0) {
+                idle_since = 0;
+                if (!screen_on) {
+                    screen_on = true;
+                    screen_since = now;
+                    DvrRecorder::instance().set_web_watching(true);
+                } else {
+                    // Nothing from the encoder for 3 s: it could not start (the
+                    // screen not known yet, no encoder) - ask again, every 3 s.
+                    const uint64_t last = std::max(last_screen_us.load(std::memory_order_relaxed), screen_since);
+                    if (now - last > 3000000 && now - retry_us > 3000000) {
+                        retry_us = now;
+                        DvrRecorder::instance().web_retry();
+                    }
+                }
+            } else if (screen_on) {
+                if (!idle_since) idle_since = now;
+                else if (now - idle_since > kScreenIdleUs) {
+                    screen_on = false;
+                    DvrRecorder::instance().set_web_watching(false);
+                }
+            }
+        } else {
+            bool watching = false;
+            for (Client* c : clients) watching |= c->streaming && !c->need_key;
+            if (watching && get_time_us() - last_key_us.load(std::memory_order_relaxed) > kKeyEveryUs)
+                waiting = true;
+            want_key.store(waiting, std::memory_order_relaxed);
         }
 
         if (pf[0].revents & POLLIN) accept_one();
@@ -701,7 +992,10 @@ void WebStream::Impl::on_request(Client* c, const std::string& method, const std
         // Codec strings MSE accepts for this stream: HEVC Main and H.264 High,
         // at a level high enough for 1080p at 120 fps.
         std::string page = kPage;
-        const char* cs = codec == VideoCodec::H264 ? "avc1.640033" : "hvc1.1.6.L153.B0";
+        // The screen: H.264 Main as the VEPU encodes it, level 4.2 (1080p60)
+        // covering both the web view's encoder and a screen recording's.
+        const char* cs = screen_mode ? "avc1.4d402a"
+                       : codec == VideoCodec::H264 ? "avc1.640033" : "hvc1.1.6.L153.B0";
         const size_t p = page.find("__CODEC__");
         if (p != std::string::npos) page.replace(p, 9, cs);
         reply("200 OK", "text/html; charset=utf-8", page);
@@ -710,10 +1004,34 @@ void WebStream::Impl::on_request(Client* c, const std::string& method, const std
             "HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nCache-Control: no-store\r\n"
             "Connection: close\r\n\r\n";
         c->out.insert(c->out.end(), hdr, hdr + sizeof(hdr) - 1);
+        // Small, so a backlog shows up here within a fraction of a second.
+        // Left to autotune it grew to 8 MB - five seconds of a 13 Mbit/s
+        // stream queued unseen while the page froze, waiting for it to drain
+        // over a WiFi that had dipped below the video's rate.
+        setsockopt(c->fd, SOL_SOCKET, SO_SNDBUF, &kSndBuf, sizeof(kSndBuf));
+        // Re-encoding: sent at the web view's cap, never faster - a keyframe,
+        // or what piled up while the WiFi stalled, goes out paced instead of
+        // as a burst the goggle's WiFi (and a dozing iPhone) chokes on.
+        if (screen_mode) {
+            const uint32_t rate = (uint32_t)DvrRecorder::web_cap_kbps() * 1000 / 8;   // bytes/s
+            setsockopt(c->fd, SOL_SOCKET, SO_MAX_PACING_RATE, &rate, sizeof(rate));
+        }
         c->streaming = true;
         c->need_key = true;
         viewers++;
         printf("webstream: viewer %d connected (%d watching)\n", c->fd, viewers.load());
+    } else if (path == "/api/plog") {
+        // ?debug=1 on the page: its player's state, a line at a time, into
+        // this log (what a phone's browser does is otherwise out of sight).
+        std::string m;
+        for (size_t i = query.compare(0, 2, "m=") == 0 ? 2 : query.size(); i < query.size() && m.size() < 400; i++) {
+            char ch = query[i];
+            if (ch == '%' && i + 2 < query.size()) { ch = (char)strtol(query.substr(i + 1, 2).c_str(), nullptr, 16); i += 2; }
+            else if (ch == '+') ch = ' ';
+            m += (ch >= 32 && ch < 127) ? ch : '?';
+        }
+        printf("webpage %d: %s\n", c->fd, m.c_str());
+        reply("204 No Content", "text/plain", "");
     } else if (path == "/api/theme") {
         // The HUD's current theme, for the page to dress itself in.
         const HudTheme& t = hud_theme_current();
@@ -943,7 +1261,7 @@ void WebStream::Impl::mux_item(Client* c, const Item& it,
     if (c->fd < 0) return;
     // Behind: stop adding until the backlog drains, then pick up at a keyframe
     // so the phone never decodes a picture whose references it skipped.
-    if (c->pending() > kSkipBytes) {
+    if (c->pending() > skip_bytes) {
         if (!c->need_key)
             printf("webstream: viewer %d behind (%zu KB unsent), skipping to the next keyframe\n",
                    c->fd, c->pending() / 1024);
@@ -955,9 +1273,10 @@ void WebStream::Impl::mux_item(Client* c, const Item& it,
         if (!c->mux) {
             if (ps_now.empty()) return;          // nothing to build hvcC/avcC from yet
             c->dur = dur_now > 0 ? dur_now : 750;
+            c->gen = cur_gen;
             c->mux = MP4E_open(0, 1 /*fragmented*/, c, mux_write);
             if (!c->mux || MP4E_STATUS_OK != mp4_h26x_write_init(&c->wr, c->mux, w_now, h_now,
-                                                                 codec == VideoCodec::H265)) {
+                                                                 !screen_mode && codec == VideoCodec::H265)) {
                 printf("webstream: muxer init failed\n");
                 close(c->fd); c->fd = -1;
                 return;
@@ -977,10 +1296,11 @@ void WebStream::Impl::mux_item(Client* c, const Item& it,
     // mid-picture - FFmpeg shrugged ("First slice in a frame missing"), the
     // iPhone's hardware decoder refused the lot ("media failed to decode").
     static thread_local std::vector<uint8_t> smp;
-    annexb_to_sample(*it.au, smp);
+    annexb_to_sample(*it.au, smp, screen_mode);
     if (!smp.empty())
         MP4E_put_sample(c->mux, c->wr.mux_track_id, smp.data(), (int)smp.size(), c->dur,
                         it.key ? MP4E_SAMPLE_RANDOM_ACCESS : MP4E_SAMPLE_DEFAULT);
+    if (it.key) last_key_us.store(get_time_us(), std::memory_order_relaxed);
 }
 
 void WebStream::Impl::flush(Client* c) {

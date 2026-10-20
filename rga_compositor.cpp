@@ -174,7 +174,7 @@ bool RgaCompositor::compose(const ScreenPair& pair, int osd_fd, uint32_t osd_str
     return true;
 }
 
-#else   // !USE_RGA - no librga on this build: screen recording uses writeback
+#else   // !USE_RGA - no librga on this build: no screen recording
 
 bool RgaCompositor::available() { return false; }
 bool RgaCompositor::init(int, int, const std::vector<int>&) { return false; }

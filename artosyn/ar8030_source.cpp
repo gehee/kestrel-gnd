@@ -3433,7 +3433,10 @@ void Ar8030Source::emit_nal(const uint8_t* nal, size_t len) {
                 if (new_pic) {
                     if (hseq_valid) {
                         uint16_t gap = (uint16_t)(hseq - last_hseq);
-                        if (gap > 1 && gap < 1000) frames_lost += (gap - 1);
+                        if (gap > 1 && gap < 1000) {
+                            frames_lost += (gap - 1);
+                            WebStream::instance().gap();   // its viewers restart at a keyframe
+                        }
                     }
                     last_hseq = hseq;
                     hseq_valid = true;
@@ -4120,7 +4123,7 @@ void Ar8030Source::flush_access_unit(uint64_t recv_us) {
         const bool key = (codec == VideoCodec::H265)
                              ? (au_nal_type >= 19 && au_nal_type <= 21)
                              : (au_nal_type == 5);
-        WebStream::instance().feed(au, key);
+        WebStream::instance().feed(au, key, au_hseq_);
     }
     au_slices.clear();
     au_open = false;
@@ -4354,6 +4357,14 @@ void Ar8030Source::run() {
         }
         apply_pending_settings();
         apply_pending_rf();
+        // A web viewer waits for a keyframe to start on. With intra refresh
+        // the air unit sends none by itself (the page sat on "Waiting for a
+        // keyframe" for good), so ask for one, as the resync does.
+        if (air_kestrel_ && (air_feat_ & kAirFeatIntraRefresh) &&
+            WebStream::instance().wants_keyframe() && now_ms() - idr_asked_ms_ >= 1000) {
+            idr_asked_ms_ = now_ms();
+            request_air_idr();
+        }
         // Binding, if the menu or the front-panel button asked for it. One
         // non-blocking step per pass; it owns the baseband only in short
         // bursts, so video and telemetry keep flowing while it runs.

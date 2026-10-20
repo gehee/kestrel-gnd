@@ -13,6 +13,9 @@
 
 #include "osd.hpp"
 #include "hud_theme.hpp"
+#include "wifi_ap.hpp"
+#include "utils/qrcodegen.h"
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -50,6 +53,31 @@ void tidy_value(char* t, bool keep_mark) {
         n -= 4;
     }
     if (marked && keep_mark) { t[n] = ' '; t[n+1] = '*'; t[n+2] = '\0'; }
+}
+
+// A QR code's modules, row-major, 1 dark - made again only when its text
+// changes (the menu is drawn every frame).
+struct Qr {
+    std::string text;
+    bool made = false;   // tried for this text (n stays 0 if it did not fit)
+    int n = 0;
+    std::vector<uint8_t> m;
+};
+
+const Qr& qr_for(Qr& q, const std::string& text) {
+    if (q.made && q.text == text) return q;
+    q.text = text; q.made = true; q.n = 0; q.m.clear();
+    uint8_t tmp[qrcodegen_BUFFER_LEN_FOR_VERSION(10)], code[qrcodegen_BUFFER_LEN_FOR_VERSION(10)];
+    // Medium error correction, raised where the version has room for more:
+    // read off a screen, at an angle, through a phone's camera.
+    if (text.empty() || !qrcodegen_encodeText(text.c_str(), tmp, code, qrcodegen_Ecc_MEDIUM, 1, 10,
+                                              qrcodegen_Mask_AUTO, true))
+        return q;
+    q.n = qrcodegen_getSize(code);
+    q.m.resize((size_t)q.n * q.n);
+    for (int y = 0; y < q.n; y++)
+        for (int x = 0; x < q.n; x++) q.m[(size_t)y * q.n + x] = qrcodegen_getModule(code, x, y) ? 1 : 0;
+    return q;
 }
 
 }  // namespace
@@ -150,8 +178,61 @@ void OSD::draw_side_panel(int side, float x, float y, float w, float h, float u)
             px_text(line[k], x + pad, help_top + lh * (float)k + f_help * 0.9f, f_help, 0, line_col[k], 1.0f);
     }
 
+    // ---- SYSTEM > WiFi AP while the access point is up: a phone's camera
+    // joins the network from the first code and opens the page from the
+    // second. Above the help; the rows stop above them.
+    float list_bottom = help_top - 20 * u;
+    if (n && menu_tab == kTabSystem && sel == 4 && !editing && !menu_dirty[kTabSystem][4] && wifi_ap_on()) {
+        static Qr qr_join, qr_page;
+        // The network's name and password from their file, once a second.
+        static std::string join_text, page_url;
+        static std::chrono::steady_clock::time_point read_at;
+        const auto now = std::chrono::steady_clock::now();
+        if (join_text.empty() || now - read_at > std::chrono::seconds(1)) {
+            read_at = now;
+            join_text = wifi_ap_join_text();
+            page_url = wifi_ap_page_url();
+        }
+        const Qr& a = qr_for(qr_join, join_text);
+        const Qr& b = qr_for(qr_page, page_url);
+        const float gap = 24 * u, f_lab = 17 * u, lab_h = f_lab * 1.8f;
+        // As big as the blade's width allows, leaving three rows above them.
+        float side_px = (w - 2 * pad - gap) * 0.5f;
+        const float room = list_bottom - lab_h - (list_top + 3 * row_h + 20 * u);
+        if (side_px > room) side_px = room;
+        // At least 2 pixels a module, or no code: a camera cannot read 1.
+        const bool fit = a.n && b.n && std::floor(side_px / (float)(a.n + 6)) >= 2 &&
+                         std::floor(side_px / (float)(b.n + 6)) >= 2;
+        if (fit) {
+            const float top = list_bottom - lab_h - side_px;
+            const float white[3] = { 1, 1, 1 }, black[3] = { 0, 0, 0 };
+            auto draw_qr = [&](const Qr& q, float cx, const char* label) {
+                // Dark on light with a quiet zone of 3 modules, whole pixels
+                // per module so no edge is smeared.
+                const int quiet = 3, total = q.n + 2 * quiet;
+                const float m = std::floor(side_px / (float)total);
+                const float s = m * (float)total;
+                const float qx = std::round(cx - s * 0.5f), qy = std::round(top + (side_px - s));
+                px_fill(qx, qy, s, s, white, 1.0f);
+                for (int r = 0; r < q.n; r++) {
+                    for (int c = 0; c < q.n;) {
+                        if (!q.m[(size_t)r * q.n + c]) { c++; continue; }
+                        int e = c;
+                        while (e < q.n && q.m[(size_t)r * q.n + e]) e++;
+                        px_fill(qx + (float)(quiet + c) * m, qy + (float)(quiet + r) * m, (float)(e - c) * m, m, black, 1.0f);
+                        c = e;
+                    }
+                }
+                px_text(label, cx, top + side_px + lab_h * 0.75f, f_lab, 1, T.text, 1.0f);
+            };
+            const float c0 = x + pad + side_px * 0.5f, c1 = x + w - pad - side_px * 0.5f;
+            draw_qr(a, c0, "1  JOIN THE WIFI");
+            draw_qr(b, c1, "2  WATCH");
+            list_bottom = top - 20 * u;
+        }
+    }
+
     // ---- the rows ----
-    const float list_bottom = help_top - 20 * u;
     const float open_extra = editing ? row_h * 1.6f : 0.0f;    // the row being changed opens up
     int visible = (int)((list_bottom - list_top - open_extra) / row_h);
     if (visible < 3) visible = 3;

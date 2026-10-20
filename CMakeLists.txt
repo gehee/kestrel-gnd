@@ -16,6 +16,7 @@ set(SOURCE_FILES
         drm/drm.c
         utils/copy_utils.c
         utils/screen_id.c
+        utils/qrcodegen.c
         utils/scheduling_helper.cpp
         utils/mpp_encoder.cpp
         utils/h264_cfr.cpp

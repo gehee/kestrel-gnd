@@ -19,7 +19,7 @@
 
 MppH264Encoder::~MppH264Encoder() { deinit(); }
 
-bool MppH264Encoder::init(int width, int height, int fps, int bitrate_bps, bool bt601) {
+bool MppH264Encoder::init(int width, int height, int fps, int bitrate_bps, bool bt601, int max_bps) {
     deinit();
     w_ = width; h_ = height; fps_ = (fps > 0) ? fps : 30;
 
@@ -56,10 +56,11 @@ bool MppH264Encoder::init(int width, int height, int fps, int bitrate_bps, bool 
         mpp_enc_cfg_set_s32(cfg, "prep:colorrange", MPP_FRAME_RANGE_MPEG);
     }
 
-    mpp_enc_cfg_set_s32(cfg, "rc:mode",           MPP_ENC_RC_MODE_CBR);
+    const bool vbr = max_bps > bitrate_bps;
+    mpp_enc_cfg_set_s32(cfg, "rc:mode",           vbr ? MPP_ENC_RC_MODE_VBR : MPP_ENC_RC_MODE_CBR);
     mpp_enc_cfg_set_s32(cfg, "rc:bps_target",     bitrate_bps);
-    mpp_enc_cfg_set_s32(cfg, "rc:bps_max",        bitrate_bps * 17 / 16);
-    mpp_enc_cfg_set_s32(cfg, "rc:bps_min",        bitrate_bps * 15 / 16);
+    mpp_enc_cfg_set_s32(cfg, "rc:bps_max",        vbr ? max_bps : bitrate_bps * 17 / 16);
+    mpp_enc_cfg_set_s32(cfg, "rc:bps_min",        vbr ? bitrate_bps / 4 : bitrate_bps * 15 / 16);
     mpp_enc_cfg_set_s32(cfg, "rc:fps_in_flex",    0);
     mpp_enc_cfg_set_s32(cfg, "rc:fps_in_num",     fps_);
     mpp_enc_cfg_set_s32(cfg, "rc:fps_in_denorm",  1);
@@ -109,7 +110,7 @@ bool MppH264Encoder::init(int width, int height, int fps, int bitrate_bps, bool 
         mpp_destroy(ctx);
         return false;
     }
-    for (int i = 0; i < kInputBuffers; i++) {
+    for (int i = 0; i < n_inputs_; i++) {
         MppBuffer fbuf = nullptr;
         if (mpp_buffer_get(grp, &fbuf, frame_size_)) {
             printf("MppEnc: frame buffer alloc failed\n");
@@ -123,8 +124,8 @@ bool MppH264Encoder::init(int width, int height, int fps, int bitrate_bps, bool 
     }
 
     ctx_ = ctx; mpi_ = mpi; frm_grp_ = grp; pts_ = 0;
-    printf("MppEnc: %dx%d @%dfps %d kbps NV12 dmabuf-in, %zu byte header\n",
-           w_, h_, fps_, bitrate_bps / 1000, header_.size());
+    printf("MppEnc: %dx%d @%dfps %d kbps%s NV12 dmabuf-in, %zu byte header\n",
+           w_, h_, fps_, bitrate_bps / 1000, vbr ? " (variable, capped)" : "", header_.size());
     return true;
 }
 
@@ -135,9 +136,16 @@ int MppH264Encoder::input_dmabuf_fd(int i) const {
 
 bool MppH264Encoder::encode_buffer(int i, const std::function<void(const uint8_t*, size_t, bool)>& sink) {
     if (!ctx_ || i < 0 || i >= (int)bufs_.size()) return false;
+    return encode_external(bufs_[i], sink);
+}
+
+// MPP buffers belong to no encoder: any context reads any of them (by its
+// DMA-BUF), so another encoder's input of the same size is encoded as is.
+bool MppH264Encoder::encode_external(void* mpp_buffer, const std::function<void(const uint8_t*, size_t, bool)>& sink) {
+    if (!ctx_ || !mpp_buffer) return false;
     MppApi* mpi = (MppApi*)mpi_;
     MppCtx  ctx = (MppCtx)ctx_;
-    MppBuffer fbuf = (MppBuffer)bufs_[i];
+    MppBuffer fbuf = (MppBuffer)mpp_buffer;
 
     MppFrame frame = nullptr;
     if (mpp_frame_init(&frame)) return false;
@@ -183,6 +191,10 @@ bool MppH264Encoder::encode_buffer(int i, const std::function<void(const uint8_t
     return true;
 }
 
+void MppH264Encoder::force_idr() {
+    if (ctx_) ((MppApi*)mpi_)->control((MppCtx)ctx_, MPP_ENC_SET_IDR_FRAME, nullptr);
+}
+
 void MppH264Encoder::deinit() {
     for (void* b : bufs_) mpp_buffer_put((MppBuffer)b);
     bufs_.clear();
@@ -195,9 +207,11 @@ void MppH264Encoder::deinit() {
 #else   // !USE_RKMPP - no hardware encoder on this build
 
 MppH264Encoder::~MppH264Encoder() {}
-bool MppH264Encoder::init(int, int, int, int, bool) { return false; }
+bool MppH264Encoder::init(int, int, int, int, bool, int) { return false; }
 int  MppH264Encoder::input_dmabuf_fd(int) const { return -1; }
 void MppH264Encoder::deinit() {}
+void MppH264Encoder::force_idr() {}
+bool MppH264Encoder::encode_external(void*, const std::function<void(const uint8_t*, size_t, bool)>&) { return false; }
 bool MppH264Encoder::encode_buffer(
         int, const std::function<void(const uint8_t*, size_t, bool)>&) { return false; }
 

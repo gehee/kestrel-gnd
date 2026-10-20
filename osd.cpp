@@ -2457,8 +2457,8 @@ void OSD::render_gl() {
         signal_render(prof::kWakeAnim); // keep redrawing to animate the warp
     }
     // VideoState::LIVE draws nothing here. The FPV frame is on its own DRM
-    // plane, which the display controller composites with this one at scanout -
-    // and, for screen recording, writes out via the writeback connector.
+    // plane, which the display controller composites with this one at scanout;
+    // a screen recording rebuilds the same from both with RGA (screen_tap.hpp).
     //
     // This used to call draw_live_video() when dvr_screen was set, because
     // glReadPixels could not see the video plane and the capture needed a copy
@@ -3537,6 +3537,11 @@ void OSD::render_gl() {
         canopy.vtx_low_power  = vtx_low_power;
         canopy.vrx_temp_c     = vrx_temp_cached_;
         canopy.vrx_volts      = vrx_volts_cached_;
+        {
+            const uint64_t t = get_time_us();
+            if (t - hud_wifi_us_ > 1000000) { hud_wifi_us_ = t; hud_wifi_on_ = wifi_ap_on(); }
+            canopy.wifi_on = hud_wifi_on_;
+        }
         canopy.bf             = msp_osd.get_telem();
         int d = link_distance_raw;
         if (d >= 0) { d -= dist_offset; if (d < 0) d = 0; }
@@ -3676,15 +3681,9 @@ void OSD::present_gl_frame() {
     const int screen_w = dev->output_list->mode.hdisplay;
     const int screen_h = dev->output_list->mode.vdisplay;
 
-    // Screen capture feeds the one recorder, and only while a screen recording
-    // is actually running - glReadPixels of a 1080p frame is not free, so it
-    // must not happen just because the mode is enabled.
-    if (DvrRecorder::instance().screen_mode()) {
-        // Publish the display size whether or not we are recording, so the
-        // writeback buffer and encoder are created with the right dimensions
-        // when REC is pressed.
-        DvrRecorder::instance().set_screen_size(screen_w, screen_h);
-    }
+    // The display size, whatever REC records: a screen recording and the web
+    // view's encoder (a phone watching) are both made at this size.
+    DvrRecorder::instance().set_screen_size(screen_w, screen_h);
 
     prof::mark(prof::kDraw);
     // Profiling only: a native fence for this frame's GPU work, so its real

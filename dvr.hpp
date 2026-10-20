@@ -29,19 +29,11 @@ extern "C" {
 #include <iomanip>
 #include <sstream>
 #include <thread>
-
-// How often a writeback screen recording (dvr_capture: writeback, or no RGA)
-// captures the screen, from dvr_screen_fps (default 60, at most 60). Each
-// capture is an extra commit on the CRTC that presents the video, whose flips
-// are refused while it is in flight, so fewer cost the live picture less. The
-// RGA recorder costs it nothing and always records 60 frames a second (every
-// other refresh at 120 Hz); the menu offers screen recording at 60 only.
-int dvr_screen_capture_fps();
+#include <functional>
 
 // What REC records when the settings do not say (dvr_screen): the screen -
 // video and HUD as the pilot sees them - 60 times a second.
 constexpr bool kDvrScreenDefault    = true;
-constexpr int  kDvrScreenFpsDefault = 60;
 
 enum DvrFormat {
     RAW,
@@ -115,11 +107,9 @@ class DVR {
         H264Cfr screen_cfr;
         std::vector<uint8_t> pkt_copy_;   // encoder output, copied to cached memory
         int     screen_fps = 60;
-        bool use_writeback = false;   // frames arrive already composited
-        class DrmDevice* wb_dev = nullptr;
-        // The RGA recorder (the default, dvr_capture: rga): the screen rebuilt
-        // from what the display scanned out, every rga_div-th refresh.
-        bool use_rga = false;
+        class DrmDevice* disp_dev = nullptr;
+        // The screen rebuilt by RGA from what the display scanned out, every
+        // rga_div-th refresh.
         int  rga_div = 2;
         // One slot of the recording in 90 kHz ticks: rga_div refreshes of the
         // screen's real rate, not of the rounded fps (144 Hz at 30 fps is a
@@ -127,6 +117,53 @@ class DVR {
         int  rga_slot_ticks = 1500;
         RgaCompositor rga;
         void run_screen_rga();
+        // A screen encoder that writes no file: the web view's (to_file false).
+        bool to_file = true;
+        int  enc_bitrate = 0;    // bps, 0: the recording's 16 Mbit/s
+        int  enc_max_bps = 0;    // > 0: variable rate, never above this
+        int  enc_fps_cap = 60;   // the screen sampled at most this often
+        // The RGA recorder's slots: composited pictures (idx into the
+        // encoder's inputs, -1 for the screen of the slot before), queued
+        // from the sampler to the encoding thread.
+        struct Shot { int idx; int64_t slot; };
+        std::mutex qm;
+        std::condition_variable qcv;
+        std::deque<Shot> shots;
+        std::deque<int> free_bufs;
+        // Holders of each encoder input (under qm): the composite on its way
+        // to the encoder, the latest one kept for a follower, the follower.
+        int  buf_refs[MppH264Encoder::kInputBuffers] = {0};
+        void release_buf(int idx);
+        // Following another RGA recorder (the web view's encoder while a
+        // screen recording runs - the screen has one sampler, and RGA no time
+        // for a second composite): no sampler and no composite of its own.
+        // Every follow_k-th slot the leader hands it its latest composite,
+        // which this encoder reads as it is (one picture, two streams).
+        DVR* leader = nullptr;
+        int  follow_k = 1;
+        std::mutex follow_m;     // the leader's: guards follower, follower_draining
+        DVR* follower = nullptr;
+        bool follower_draining = false;   // unhooked, still reading our inputs
+        std::condition_variable follow_cv;
+        int  f_held = 0;         // the leader's, under qm: its inputs the follower holds
+        void push_shot(int idx, int64_t slot);   // follower, from the leader's encoding thread
+        void follower_done(int idx);             // leader: the follower has read input idx
+        // The sink waits for a keyframe: the next slot is composited and
+        // encoded even if the screen is unchanged (a still screen otherwise
+        // makes only skip frames, and no keyframe for a new viewer).
+        std::atomic<bool> want_fresh{false};
+        // Every encoded picture also goes here (the web view), as written.
+        // It answers true while it waits for a keyframe: the next picture is
+        // then encoded as one (at most once a second).
+        std::mutex sink_m;
+        std::function<bool(const uint8_t*, size_t, int)> sink;
+        bool     sink_wants_key = false;
+        uint64_t last_forced_idr_us = 0;
+        void to_sink(const uint8_t* d, size_t len, int dur) {
+            std::lock_guard<std::mutex> lk(sink_m);
+            if (sink) { sink_wants_key = sink(d, len, dur); want_fresh = sink_wants_key; }
+        }
+        void idr_if_wanted();
 
         static std::string format_timestamped_filename(const std::string& base_filename) {
             if (base_filename.empty()) return "";
@@ -147,9 +184,10 @@ class DVR {
         }
 
     public:
-        DVR(std::string filename_, VideoCodec codec_, int framerate_, DvrFormat fmt_ ,volatile bool* stop_signal, bool record_screen_ = false) 
-            : filename(format_timestamped_filename(filename_)), codec(codec_), video_framerate(framerate_), format(fmt_), should_stop(stop_signal), record_screen(record_screen_) {
+        DVR(std::string filename_, VideoCodec codec_, int framerate_, DvrFormat fmt_ ,volatile bool* stop_signal, bool record_screen_ = false, bool to_file_ = true) 
+            : filename(to_file_ ? format_timestamped_filename(filename_) : std::string()), codec(codec_), video_framerate(framerate_), format(fmt_), should_stop(stop_signal), record_screen(record_screen_), to_file(to_file_) {
             dvr_file = nullptr;
+            mux = nullptr;
             frame_pts = 0;
             should_exit = false;
             // Both modes write through minimp4 now, so both need the FILE*.
@@ -157,24 +195,40 @@ class DVR {
             // recording went through ffmpeg's avio_open instead; with the MPP
             // encoder the muxer writes to this file (through a DvrWriter) and a
             // null one segfaults inside DVR::init().
-            if ((dvr_file = fopen(filename.c_str(), "w")) == NULL) {
+            if (to_file && (dvr_file = fopen(filename.c_str(), "w")) == NULL) {
                 printf("ERROR: unable to open %s\n", filename.c_str());
             }
         }
 
         // DvrRecorder reports the open file's path in the OSD.
         const std::string& path() const { return filename; }
+        // Before init(): the screen encoder's bitrate and highest frame rate.
+        // max_bps > 0: variable rate under that ceiling.
+        void set_encoding(int bitrate_bps, int fps_cap, int max_bps = 0) {
+            enc_bitrate = bitrate_bps; enc_max_bps = max_bps; enc_fps_cap = fps_cap > 0 ? fps_cap : 60;
+        }
+        // Before init(): take the screen from l's sampler (an RGA recorder
+        // already running) instead of sampling it.
+        void set_leader(DVR* l) { leader = l; }
+        // Every encoded picture of a screen encoder also to fn (nullptr: none).
+        void set_sink(std::function<bool(const uint8_t*, size_t, int)> fn) {
+            std::lock_guard<std::mutex> lk(sink_m);
+            sink = std::move(fn);
+            sink_wants_key = sink != nullptr;   // a new viewer starts on a keyframe
+            want_fresh = sink_wants_key;
+        }
+        // After init(): the encoder's SPS/PPS (Annex-B), size and frame period.
+        const std::vector<uint8_t>& screen_header() const { return screen_enc.header(); }
+        int screen_width() const { return screen_enc.width(); }
+        int screen_height() const { return screen_enc.height(); }
+        int screen_period_ticks() const { return rga_slot_ticks; }
 
         int init(int frm_width, int frm_height);
         void run_dvr();
         void stop();
         void enqueueDvrPacket(std::shared_ptr<std::vector<uint8_t>> frame);
-        // Composited capture: the display controller writes NV12 straight into
-        // the encoder's buffer, so nothing is copied and the video plane is
-        // included (glReadPixels only ever saw the OSD layer).
-        bool using_writeback() const { return use_writeback; }
-        void set_writeback_dev(class DrmDevice* d) { wb_dev = d; }
-        void run_screen();
+        // The display a screen recording samples (vblanks, the screen tap).
+        void set_display_dev(class DrmDevice* d) { disp_dev = d; }
         // Queue depth, so producers can drop instead of growing it without
         // bound. A screen frame is ~8MB; letting these pile up OOM-killed the
         // process at 637MB RSS.
@@ -225,9 +279,9 @@ class DvrRecorder {
         // dimensions; using those to size the encoder while the capture buffer
         // is screen-sized read past the end of it and segfaulted in memcpy.
         void set_screen_size(int w, int h);
-        // Capture composited frames via the DRM writeback connector instead of
-        // glReadPixels. Set by main() once the DRM device is up.
-        void set_writeback(class DrmDevice* dev);
+        // The display screen recordings and the web view sample (its vblanks
+        // and screen tap). Set by main() once the DRM device is up.
+        void set_display(class DrmDevice* dev);
         bool screen_mode() const;
 
         // VPS/SPS/PPS for the stream. A recording started mid-stream begins at
@@ -236,11 +290,32 @@ class DvrRecorder {
         // queue first when recording starts.
         void set_parameter_sets(const std::vector<std::vector<uint8_t>>& ps);
         void shutdown();                     // stop and join if recording
+        // The web view wants the screen encoded (a phone is watching): a
+        // screen encoder of its own runs, writing no file - or, while a
+        // screen recording runs, the recording's feeds it. Any thread.
+        void set_web_watching(bool on);
+        // Set up the web view's encoder again if it is wanted but missing
+        // (it could not start: the screen not known yet, no encoder).
+        void web_retry();
+        // The web view's ceiling, kbit/s (web_kbps, default 5000): its encoder
+        // stays under it, and each viewer's socket is paced at it.
+        static int web_cap_kbps();
 
     private:
         DvrRecorder() {}
         bool start_recording();
         void stop_recording();
+        // Under ctl_: the web view's encoder to match web_want_ and the recording.
+        void web_reconcile();
+        void start_web(const std::shared_ptr<DVR>& leader);
+        void stop_web();
+        static void attach_web(DVR* d);
+        bool                 web_want_ = false;
+        bool                 shut_ = false;         // shutdown(): no encoder starts after it
+        bool                 rec_screen_ = false;   // the running recording is a screen one
+        std::shared_ptr<DVR> web_dvr_;
+        std::shared_ptr<DVR> web_leader_;           // the recording web_dvr_ follows, if any
+        pthread_t            web_tid_ = 0;
 
         std::mutex           ctl_;    // one start or stop at a time (see start_recording)
         mutable std::mutex   m_;      // the fields below, briefly
@@ -258,7 +333,7 @@ class DvrRecorder {
         int           fw_ = 1920, fh_ = 1080;  // frame size handed to the muxer
         std::atomic<bool> screen_{false};      // record the screen, not the FPV stream
         int sw_ = 0, sh_ = 0;                  // display size for screen recordings
-        class DrmDevice* wb_dev_ = nullptr;    // non-null once writeback is usable
+        class DrmDevice* disp_dev_ = nullptr;   // the display, once it is up
         std::vector<std::vector<uint8_t>> ps_;  // VPS/SPS/PPS, replayed on start
         // Whether this recording has been given ps_ yet. A recording started
         // before the stream's parameter sets were first seen gets them ahead

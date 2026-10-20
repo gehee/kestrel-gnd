@@ -1038,7 +1038,7 @@ int main(int argc, char **argv)
     // Recording is button-driven now, so give the recorder everything it needs
     // to build a DVR on demand. dvr_dir defaults to the recordings partition
     // created on first boot (S35dvrpart).
-    DvrRecorder::instance().set_writeback(dev.get());
+    DvrRecorder::instance().set_display(dev.get());
     DvrRecorder::instance().set_screen_mode(
         Settings::getInstance().getBool("dvr_screen", kDvrScreenDefault));
     DvrRecorder::instance().configure(

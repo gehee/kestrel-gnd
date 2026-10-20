@@ -114,226 +114,99 @@ int DVR::init(int frm_width, int frm_height) {
 		return 0;
 	}
 
-	// Screen recording: the DRM writeback connector composites every plane
-	// (video + OSD) and writes NV12 straight into the encoder's own DMA-BUF, so
-	// a captured frame is never copied - the display controller writes it and
-	// the VEPU reads it.
+	// Screen recording: each slot (every rga_div-th refresh) the screen is
+	// rebuilt from what the display scanned out - the decoded picture and the
+	// OSD - by RGA into the encoder's own input buffer (screen_tap.hpp), and
+	// encoded on the VEPU. Nothing touches the display, so the live picture
+	// pays nothing. No RGA, no screen recording: the only other way to see the
+	// video plane, a DRM writeback capture, cost the live picture, and
+	// glReadPixels sees the OSD alone.
 	//
-	// There is deliberately no software fallback. The previous glReadPixels
-	// route could only see the GL/OSD layer, because the FPV video lives on a
-	// separate DRM plane blended at scanout, so its recordings came out with a
-	// black video area. A capture that silently omits the video is worse than
-	// refusing to record.
-	//
-	// ffmpeg is not an option for the encode either: this board's libavcodec has
+	// ffmpeg is not an option for the encode: this board's libavcodec has
 	// only h264_v4l2m2m and no /dev/video* node for it to bind to.
-	// The file runs at the display's refresh rate (H264Cfr fills the scan-outs
-	// between captures), so the encoder is set up for that rate. The rate
-	// control's fps only shapes the bitrate budget and the H.264 level;
-	// actual sample durations come from the capture times.
 	//
-	// Capped at 60 fps: a 120 Hz display records at 60. Captures run at
-	// dvr_screen_capture_fps() whatever the file's rate (each one costs the
-	// live picture a little), so 120 would mostly add skip frames, and 60 is
-	// what players and editors handle everywhere.
-	int fps = 60;
-	if (wb_dev && wb_dev->output_list && wb_dev->output_list->mode.vrefresh > 0)
-		fps = (int)wb_dev->output_list->mode.vrefresh;
-	if (fps > 60) fps = 60;
-	const int bitrate = 16000000;
-
-	if (!wb_dev) {
+	// The file is on the slot grid (H264Cfr makes an unchanged slot a skip
+	// frame): at most enc_fps_cap a second, 60 for a recording - a 120 Hz
+	// screen records every other refresh, and 60 is what players and editors
+	// handle everywhere.
+	const int bitrate = enc_bitrate > 0 ? enc_bitrate : 16000000;
+	if (!disp_dev) {
 		printf("DVR: no DRM device - screen recording unavailable\n");
 		return -1;
 	}
-	// RGA unless asked otherwise: the screen rebuilt from what the display
-	// scanned out, every rga_div-th refresh (screen_tap.hpp). The file runs
-	// at that rate: 60 fps, every other refresh at 120 Hz. Not dvr_screen_fps,
-	// which only spares the live picture writeback captures: an earlier menu
-	// wrote 30 there for "SCREEN (30fps)", and the menu now says SCREEN at 60.
-	const bool want_rga = Settings::getInstance().getString("dvr_capture", "rga") != "writeback";
-	if (want_rga && RgaCompositor::available()) {
-		const int hz = wb_dev->refresh_hz();
-		const int want = 60;
+	if (!RgaCompositor::available()) {
+		printf("DVR: no RGA (/dev/rga) - screen recording unavailable\n");
+		return -1;
+	}
+	int fps;
+	if (leader) {
+		// Every follow_k-th of the leader's slots, as near enc_fps_cap as that gets.
+		follow_k = (leader->screen_fps + enc_fps_cap - 1) / enc_fps_cap;
+		if (follow_k < 1) follow_k = 1;
+		rga_div = leader->rga_div * follow_k;
+		fps = (leader->screen_fps + follow_k / 2) / follow_k;
+		if (fps < 1) fps = 1;
+		rga_slot_ticks = leader->rga_slot_ticks * follow_k;
+	} else {
+		const int hz = disp_dev->refresh_hz();
+		const int want = enc_fps_cap;
 		rga_div = (hz + want - 1) / want;
 		if (rga_div < 1) rga_div = 1;
 		fps = (hz + rga_div / 2) / rga_div;
-		if (fps > 60) fps = 60;
-		const double period_us = wb_dev->frame_period_us();
+		if (fps > enc_fps_cap) fps = enc_fps_cap;
+		if (fps < 1) fps = 1;
+		const double period_us = disp_dev->frame_period_us();
 		rga_slot_ticks = period_us > 0 ? (int)(period_us * rga_div * 0.09 + 0.5) : 90000 / fps;
-	} else if (want_rga) {
-		printf("DVR: no RGA (/dev/rga) - recording the screen with writeback, which costs the live picture\n");
 	}
 	screen_fps = fps;
-	if (!screen_enc.init(frm_width, frm_height, fps, bitrate, want_rga)) {
+	if (leader) screen_enc.set_input_count(0);   // it reads the leader's
+	if (!screen_enc.init(frm_width, frm_height, fps, bitrate, true /*BT.601, RGA's*/, enc_max_bps)) {
 		printf("DVR: hardware H.264 encoder unavailable - screen recording disabled\n");
 		return -1;
 	}
-	std::vector<int> fds;
-	for (int i = 0; i < screen_enc.input_count(); i++) fds.push_back(screen_enc.input_dmabuf_fd(i));
-	if (want_rga && rga.init(frm_width, frm_height, fds)) {
-		use_rga = true;
-	} else {
-		if (want_rga) {
-			// The file was set up for RGA's colours; writeback's are its own.
-			printf("DVR: RGA unusable - recording the screen with writeback, which costs the live picture\n");
-			screen_fps = fps = 60;
-			if (wb_dev->output_list && wb_dev->output_list->mode.vrefresh > 0 &&
-			    (int)wb_dev->output_list->mode.vrefresh < 60)
-				screen_fps = fps = (int)wb_dev->output_list->mode.vrefresh;
-			if (!screen_enc.init(frm_width, frm_height, fps, bitrate)) {
-				printf("DVR: hardware H.264 encoder unavailable - screen recording disabled\n");
-				return -1;
-			}
-			fds.clear();
-			for (int i = 0; i < screen_enc.input_count(); i++) fds.push_back(screen_enc.input_dmabuf_fd(i));
-		}
-		if (!wb_dev->writeback_init(frm_width, frm_height, fds)) {
-			printf("DVR: no writeback connector - screen recording unavailable\n");
+	if (!screen_cfr.init(screen_enc.header())) {
+		printf("DVR: the encoder's stream is one H264Cfr cannot hold on the slot grid - screen recording disabled\n");
+		screen_enc.deinit();
+		return -1;
+	}
+	if (!leader) {
+		std::vector<int> fds;
+		for (int i = 0; i < screen_enc.input_count(); i++) fds.push_back(screen_enc.input_dmabuf_fd(i));
+		if (!rga.init(frm_width, frm_height, fds)) {
+			printf("DVR: RGA unusable - screen recording unavailable\n");
 			screen_enc.deinit();
 			return -1;
 		}
-		use_writeback = true;
 	}
 
-	if (!dvr_file) {
-		printf("DVR: output file not open - screen recording disabled\n");
-		return -1;
+	if (to_file) {
+		if (!dvr_file) {
+			printf("DVR: output file not open - screen recording disabled\n");
+			return -1;
+		}
+		writer.reset(new DvrWriter(fileno(dvr_file)));
+		mux = MP4E_open(0 /*sequential_mode*/, format == DvrFormat::FMP4, writer.get(), write_callback);
+		if (format == DvrFormat::FMP4)
+			MP4E_set_finalize(mux);     // as in the camera recording
+		if (MP4E_STATUS_OK != mp4_h26x_write_init(&mp4wr, mux, frm_width, frm_height, 0 /*H.264*/)) {
+			printf("DVR: mp4_h26x_write_init failed (screen)\n");
+			mux = NULL;
+			return -1;
+		}
 	}
-	writer.reset(new DvrWriter(fileno(dvr_file)));
-	mux = MP4E_open(0 /*sequential_mode*/, format == DvrFormat::FMP4, writer.get(), write_callback);
-	if (format == DvrFormat::FMP4)
-		MP4E_set_finalize(mux);     // as in the camera recording
-	if (MP4E_STATUS_OK != mp4_h26x_write_init(&mp4wr, mux, frm_width, frm_height, 0 /*H.264*/)) {
-		printf("DVR: mp4_h26x_write_init failed (screen)\n");
-		mux = NULL;
-		return -1;
-	}
-	if (!Settings::getInstance().getBool("dvr_screen_cfr", true))
-		printf("DVR: constant rate off (dvr_screen_cfr) - variable-rate recording\n");
-	else if (!screen_cfr.init(screen_enc.header()))
-		printf("DVR: screen recording stays variable-rate\n");
 	// SPS/PPS first, exactly as the FPV path primes its parameter sets.
-	if (!screen_enc.header().empty())
+	if (mux && !screen_enc.header().empty())
 		mp4_h26x_write_nal(&mp4wr, screen_enc.header().data(),
 		                   (int)screen_enc.header().size(), 90000 / fps);
-
-	if (use_rga)
+	if (!to_file)
+		printf("DVR: screen encoder for the web view, %dx%d at %d fps, %d kbit/s\n",
+		       frm_width, frm_height, screen_fps, bitrate / 1000);
+	else if (leader)
+		; // said by DvrRecorder ("follows the screen recording")
+	else
 		printf("DVR: screen recording %dx%d at %d fps, RGA composite of every %d%s refresh\n",
 		       frm_width, frm_height, screen_fps, rga_div, rga_div == 2 ? "nd" : rga_div == 3 ? "rd" : "th");
-	else
-		printf("DVR: screen recording %dx%d, DRM writeback composited capture\n",
-		       frm_width, frm_height);
 	return 0;
-}
-
-// The screen recording's encoder loop, on the DVR thread - off the OSD thread,
-// so encoding never delays the HUD: take each captured frame as the display
-// finishes writing it, encode it, hand the buffer back.
-void DVR::run_screen() {
-	// Every sample lasts one scan-out. A captured frame lands on the scan-out
-	// grid by its capture time; the scan-outs between it and the previous
-	// capture become skip frames repeating it, so the file runs at exactly
-	// the display's rate and plays back in real time. The grid
-	// position is counted from the first frame rather than from the last
-	// one, so rounding never accumulates into drift, and a frame always
-	// advances at least one scan-out, so none is ever discarded.
-	const int period = 90000 / (screen_fps > 0 ? screen_fps : 60);   // 90 kHz ticks
-	const double period_us = 1e6 / (screen_fps > 0 ? screen_fps : 60);
-	uint64_t t0 = 0, last_us = 0;
-	int64_t  last_idx = -1;
-	uint64_t frames = 0, skips = 0;
-	auto write = [&](const uint8_t* p, size_t len, int dur) {
-		auto r = mp4_h26x_write_nal(&mp4wr, p, (int)len, dur);
-		if (!(MP4E_STATUS_OK == r || MP4E_STATUS_BAD_ARGUMENTS == r))
-			printf("DVR: writeback mp4_h26x_write_nal err %d\n", r);
-	};
-	auto encode = [&](const DrmDevice::WbShot& shot) {
-		DrmDevice::writeback_wait(shot.fence);
-		int dur = period;
-		if (screen_cfr.ready()) {
-			if (last_idx < 0) t0 = shot.us;
-			int64_t idx = (int64_t)((double)(shot.us - t0) / period_us + 0.5);
-			if (idx <= last_idx) idx = last_idx + 1;
-			// A second at most: the idle capture keeps gaps far shorter.
-			int64_t held = last_idx < 0 ? 0 : idx - last_idx - 1;
-			if (held > screen_fps) held = screen_fps;
-			for (int64_t i = 0; i < held; i++) {
-				std::vector<uint8_t> sk = screen_cfr.skip_frame();
-				if (sk.empty()) break;
-				write(sk.data(), sk.size(), period);
-				skips++;
-			}
-			last_idx = idx;
-		} else if (last_us && shot.us > last_us) {
-			// Variable rate: the time since the previous capture.
-			uint64_t d = shot.us - last_us;
-			if (d > 1000000) d = 1000000;
-			if (d < 1000)    d = 1000;
-			dur = (int)(d * 90000 / 1000000);
-		}
-		last_us = shot.us;
-		screen_enc.encode_buffer(shot.idx, [&](const uint8_t* p_hw, size_t len, bool) {
-			// One bulk copy out of the encoder's output buffer first. It is
-			// uncached for the CPU, and parsing it in place - a byte at a
-			// time - took 15-17 ms per frame, more than the encode itself,
-			// and capped screen recording near 38 fps.
-			pkt_copy_.assign(p_hw, p_hw + len);
-			const uint8_t* p = pkt_copy_.data();
-			if (screen_cfr.ready()) {
-				std::vector<uint8_t> au = screen_cfr.rewrite(p, len);
-				write(au.data(), au.size(), dur);
-			} else {
-				write(p, len, dur);
-			}
-		});
-		wb_dev->writeback_release(shot.idx);
-		frames++;
-
-	};
-
-	// The captures run on a thread of their own, on a fixed schedule: a
-	// capture is a display commit that grabs whatever is on screen at that
-	// instant, so it needs nothing from the HUD. It used to be driven from the
-	// HUD's draw loop, which forced a HUD redraw per capture (capping the rate
-	// near 36/s at ~9 ms a frame, and costing battery for nothing).
-	std::atomic<bool> capturing{true};
-	std::thread capturer([&] {
-		const int fps = dvr_screen_capture_fps();
-		const long period_ns = 1000000000L / fps;
-		struct timespec next;
-		clock_gettime(CLOCK_MONOTONIC, &next);
-		while (capturing) {
-			if (use_writeback && wb_dev) wb_dev->writeback_capture();
-			next.tv_nsec += period_ns;
-			while (next.tv_nsec >= 1000000000L) { next.tv_nsec -= 1000000000L; next.tv_sec++; }
-			// Absolute deadlines: a slow commit does not push every later
-			// capture back. If one ran past its slot, skip ahead rather than
-			// firing a burst to catch up.
-			struct timespec now;
-			clock_gettime(CLOCK_MONOTONIC, &now);
-			if (now.tv_sec > next.tv_sec || (now.tv_sec == next.tv_sec && now.tv_nsec > next.tv_nsec)) {
-				next = now;
-				continue;
-			}
-			clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, nullptr);
-		}
-	});
-
-	DrmDevice::WbShot shot;
-	while (!*should_stop) {
-		{
-			std::lock_guard<std::mutex> lock(mtx);
-			if (should_exit) break;
-		}
-		if (use_writeback && wb_dev && wb_dev->writeback_next(shot, 50)) encode(shot);
-	}
-	capturing = false;
-	capturer.join();
-	// Frames already captured are still part of the recording.
-	while (use_writeback && wb_dev && wb_dev->writeback_next(shot, 0)) encode(shot);
-	printf("DVR: %llu screen frames encoded, %llu held scan-outs as skip frames (%d fps)\n",
-	       (unsigned long long)frames, (unsigned long long)skips, screen_fps);
 }
 
 // The RGA screen recording. Every rga_div-th vblank is one frame of the file
@@ -345,24 +218,35 @@ void DVR::run_screen() {
 // composited, nothing encoded - and so is one the sampler could not fill
 // (encoder behind, woke too late), so the file stays on the slot grid.
 void DVR::run_screen_rga() {
-	struct Shot { int idx; int64_t slot; };   // idx -1: the screen of the slot before
-	std::mutex qm;
-	std::condition_variable qcv;
-	std::deque<Shot> q;
-	std::deque<int> free_bufs;
-	for (int i = 0; i < screen_enc.input_count(); i++) free_bufs.push_back(i);
+	{
+		std::lock_guard<std::mutex> lk(qm);
+		shots.clear();
+		free_bufs.clear();
+		for (int i = 0; i < screen_enc.input_count(); i++) { free_bufs.push_back(i); buf_refs[i] = 0; }
+	}
 	std::atomic<bool> sampling{true};
-	ScreenTap& tap = wb_dev->tap;
+	ScreenTap& tap = disp_dev->tap;
+	auto fresh_wanted = [&] {
+		if (want_fresh.load(std::memory_order_relaxed)) return true;
+		std::lock_guard<std::mutex> lk(follow_m);
+		return follower && follower->want_fresh.load(std::memory_order_relaxed);
+	};
 	// Seeded with what the screen shows now, so a recording started with no
 	// video flowing records the frozen picture, not black.
-	wb_dev->start_screen_tap();
+	if (!leader) disp_dev->start_screen_tap();
 
 	// Sampler counters, read after it is joined.
 	uint64_t n_slots = 0, n_same = 0, n_late = 0, n_busy = 0, n_fail = 0, n_nothing = 0;
 	uint32_t blend_hist[64] = {0};   // RGA time, 0.25 ms buckets
 	uint32_t blend_max = 0;
 
-	std::thread sampler([&] {
+	// A follower takes its slots from the leader's encoding thread (hand_on).
+	if (leader) {
+		std::lock_guard<std::mutex> lk(leader->follow_m);
+		leader->follower = this;
+	}
+	std::thread sampler;
+	if (!leader) sampler = std::thread([&] {
 		pthread_setname_np(pthread_self(), "dvr-sampler");
 		const int div = rga_div;
 		int parity = 0;
@@ -376,7 +260,7 @@ void DVR::run_screen_rga() {
 		while (sampling) {
 			uint32_t seq;
 			uint64_t vb;
-			if (!wb_dev->wait_vblank(&seq, &vb)) { usleep(10000); continue; }
+			if (!disp_dev->wait_vblank(&seq, &vb)) { usleep(10000); continue; }
 			tap.drain_graveyard();
 			if (div > 1) {
 				// Sample the refresh after the one pictures land on: 60 fps
@@ -402,15 +286,18 @@ void DVR::run_screen_rga() {
 			}
 			n_slots++;
 			const DecodedUnit* du = p.video.get();
-			const bool same = have_last && (du != nullptr) == last_video &&
+			bool same = have_last && (du != nullptr) == last_video &&
 			                  (!du || (du->pts == last_pts && du->dec_end_ts == last_dec &&
 			                           du->buf_epoch == last_epoch)) &&
 			                  p.osd_gen == last_gen && p.vx == lvx && p.vy == lvy && p.vw == lvw && p.vh == lvh;
+			// A viewer waiting for a keyframe (ours, or our follower's) gets
+			// one only from a picture that is encoded: this slot is, anyway.
+			if (same && fresh_wanted()) same = false;
 			if (same) {
 				p.video.reset();
 				tap.sample_done();
 				n_same++;
-				{ std::lock_guard<std::mutex> lk(qm); q.push_back({-1, slot}); }
+				{ std::lock_guard<std::mutex> lk(qm); shots.push_back({-1, slot}); }
 				qcv.notify_one();
 				last_slot = slot;
 				continue;
@@ -418,11 +305,11 @@ void DVR::run_screen_rga() {
 			int idx = -1;
 			{
 				std::lock_guard<std::mutex> lk(qm);
-				if (!free_bufs.empty()) { idx = free_bufs.front(); free_bufs.pop_front(); }
+				if (!free_bufs.empty()) { idx = free_bufs.front(); free_bufs.pop_front(); buf_refs[idx] = 1; }
 			}
 			if (idx < 0) { p.video.reset(); tap.sample_done(); n_busy++; continue; }   // encoder behind
 			uint32_t stride = 0;
-			const int osd_fd = p.osd_fb ? wb_dev->osd_fb_dmabuf(p.osd_fb, &stride) : -1;
+			const int osd_fd = p.osd_fb ? disp_dev->osd_fb_dmabuf(p.osd_fb, &stride) : -1;
 			uint32_t us = 0;
 			const bool ok = rga.compose(p, osd_fd, stride, idx, &us);
 			// The picture goes back to the decoder from here: let go before
@@ -430,8 +317,7 @@ void DVR::run_screen_rga() {
 			p.video.reset();
 			tap.sample_done();
 			if (!ok) {
-				std::lock_guard<std::mutex> lk(qm);
-				free_bufs.push_back(idx);
+				release_buf(idx);
 				n_fail++;
 				continue;
 			}
@@ -444,7 +330,7 @@ void DVR::run_screen_rga() {
 			last_epoch = du ? du->buf_epoch : 0;
 			last_gen = p.osd_gen;
 			lvx = p.vx; lvy = p.vy; lvw = p.vw; lvh = p.vh;
-			{ std::lock_guard<std::mutex> lk(qm); q.push_back({idx, slot}); }
+			{ std::lock_guard<std::mutex> lk(qm); shots.push_back({idx, slot}); }
 			qcv.notify_one();
 			last_slot = slot;
 		}
@@ -457,6 +343,8 @@ void DVR::run_screen_rga() {
 	int64_t last_written = -1;
 	uint64_t frames = 0, skips = 0;
 	auto write = [&](const uint8_t* d, size_t len, int dur) {
+		to_sink(d, len, dur);
+		if (!mux) return;
 		auto r = mp4_h26x_write_nal(&mp4wr, d, (int)len, dur);
 		if (!(MP4E_STATUS_OK == r || MP4E_STATUS_BAD_ARGUMENTS == r))
 			printf("DVR: rga mp4_h26x_write_nal err %d\n", r);
@@ -468,55 +356,84 @@ void DVR::run_screen_rga() {
 		skips++;
 		return true;
 	};
-	// Without constant rate (dvr_screen_cfr: false) a frame's duration is only
-	// known when the next one arrives, so the last encoded frame waits here.
-	std::vector<uint8_t> held;
-	int64_t held_slot = -1;
-	auto flush_held = [&](int64_t until) {
-		if (held_slot < 0) return;
-		// Unchanged slots are not encoded, so a held frame stands for every
-		// slot until the next one - a still screen can be minutes of them.
-		int64_t n = until - held_slot;
-		if (n < 1) n = 1;
-		if (n > kMaxGap) n = kMaxGap;
-		write(held.data(), held.size(), (int)(period * n));
-		held_slot = -1;
+	// Leader: the latest composite, kept back from the sampler while a
+	// follower may still want it, and what the follower was last handed.
+	int latest = -1;
+	uint64_t latest_seq = 0, taken_seq = 0;
+	int64_t f_slot = -1;
+	auto keep_latest = [&](int idx) {
+		bool following;
+		{ std::lock_guard<std::mutex> lk(follow_m); following = follower != nullptr; }
+		if (!following) { release_buf(idx); return; }
+		if (latest >= 0) release_buf(latest);
+		latest = idx;
+		latest_seq++;
+	};
+	auto hand_on = [&](int64_t slot) {
+		std::lock_guard<std::mutex> lk(follow_m);
+		if (!follower) {
+			if (latest >= 0) { release_buf(latest); latest = -1; }
+			f_slot = -1;
+			return;
+		}
+		const int64_t fs = slot / follower->follow_k;
+		if (fs <= f_slot) return;
+		f_slot = fs;
+		if (latest >= 0 && latest_seq != taken_seq) {
+			// At most two of our inputs in its hands: one stalled must not
+			// leave our sampler without a buffer (our pictures lost). Its slot
+			// then becomes a skip frame, and the next picture goes to it.
+			bool room;
+			{
+				std::lock_guard<std::mutex> q(qm);
+				room = f_held < 2;
+				if (room) { buf_refs[latest]++; f_held++; }
+			}
+			if (room) {
+				taken_seq = latest_seq;
+				follower->push_shot(latest, fs);
+			}
+		} else {
+			follower->push_shot(-1, fs);    // unchanged since its last
+		}
 	};
 	auto handle = [&](const Shot& s) {
-		if (s.idx < 0 && last_written < 0) return;   // nothing to repeat yet
-		if (screen_cfr.ready()) {
-			if (last_written >= 0) {
-				int64_t gap = s.slot - last_written - 1;
-				if (gap > kMaxGap) gap = kMaxGap;
-				for (int64_t i = 0; i < gap; i++) if (!skip()) break;
-			}
-			if (s.idx < 0) skip();
+		if (s.idx < 0 && last_written < 0) { if (!leader) hand_on(s.slot); return; }   // nothing to repeat yet
+		// Slots nobody filled (the sampler late, the encoder behind) and
+		// unchanged ones are skip frames: the file stays on the slot grid.
+		if (last_written >= 0) {
+			int64_t gap = s.slot - last_written - 1;
+			if (gap > kMaxGap) gap = kMaxGap;
+			for (int64_t i = 0; i < gap; i++) if (!skip()) break;
 		}
+		if (s.idx < 0) skip();
 		if (s.idx >= 0) {
-			if (!screen_cfr.ready()) flush_held(s.slot);
-			screen_enc.encode_buffer(s.idx, [&](const uint8_t* p_hw, size_t len, bool) {
+			idr_if_wanted();
+			auto out = [&](const uint8_t* p_hw, size_t len, bool) {
 				// One bulk copy out of the encoder's uncached output first (see run_screen).
 				pkt_copy_.assign(p_hw, p_hw + len);
-				if (screen_cfr.ready()) {
-					std::vector<uint8_t> au = screen_cfr.rewrite(pkt_copy_.data(), len);
-					write(au.data(), au.size(), period);
-				} else {
-					held = pkt_copy_;
-					held_slot = s.slot;
-				}
-			});
+				std::vector<uint8_t> au = screen_cfr.rewrite(pkt_copy_.data(), len);
+				write(au.data(), au.size(), period);
+			};
+			if (leader) {
+				// The leader's composite, read in place, then let go.
+				screen_enc.encode_external(leader->screen_enc.input_buffer(s.idx), out);
+				leader->follower_done(s.idx);
+			} else {
+				screen_enc.encode_buffer(s.idx, out);
+				keep_latest(s.idx);
+			}
 			frames++;
-			std::lock_guard<std::mutex> lk(qm);
-			free_bufs.push_back(s.idx);
 		}
 		last_written = s.slot;
+		if (!leader) hand_on(s.slot);   // after the encode: its picture is the latest
 	};
 	auto pop = [&](Shot& s, int wait_ms) {
 		std::unique_lock<std::mutex> lk(qm);
-		if (wait_ms > 0) qcv.wait_for(lk, std::chrono::milliseconds(wait_ms), [&] { return !q.empty(); });
-		if (q.empty()) return false;
-		s = q.front();
-		q.pop_front();
+		if (wait_ms > 0) qcv.wait_for(lk, std::chrono::milliseconds(wait_ms), [&] { return !shots.empty(); });
+		if (shots.empty()) return false;
+		s = shots.front();
+		shots.pop_front();
 		return true;
 	};
 
@@ -530,12 +447,26 @@ void DVR::run_screen_rga() {
 		if (pop(s, 50)) handle(s);
 	}
 	sampling = false;
-	sampler.join();
+	if (sampler.joinable()) sampler.join();
+	if (leader) {
+		std::lock_guard<std::mutex> lk(leader->follow_m);
+		leader->follower = nullptr;
+		leader->follower_draining = true;   // the drain below still reads its inputs
+	}
 	// Frames already composited are still part of the recording.
 	Shot s;
 	while (pop(s, 0)) handle(s);
-	if (!screen_cfr.ready()) flush_held(last_written + 1);
-	tap.set_recording(false);
+	if (leader) {
+		{ std::lock_guard<std::mutex> lk(leader->follow_m); leader->follower_draining = false; }
+		leader->follow_cv.notify_all();
+	} else {
+		tap.set_recording(false);
+		// Both stopping at once (exit): a follower still reading our inputs
+		// is waited for before they go (run_dvr deinits the encoder next).
+		std::unique_lock<std::mutex> lk(follow_m);
+		follow_cv.wait_for(lk, std::chrono::seconds(3), [&] { return !follower && !follower_draining; });
+	}
+	if (latest >= 0) { release_buf(latest); latest = -1; }
 
 	uint64_t total = 0, med_i = 0, p99_i = 0, acc = 0;
 	for (uint32_t c : blend_hist) total += c;
@@ -543,6 +474,12 @@ void DVR::run_screen_rga() {
 		acc += blend_hist[i];
 		if (!med_i && acc * 2 >= total) med_i = i + 1;
 		if (!p99_i && acc * 100 >= total * 99) p99_i = i + 1;
+	}
+	if (leader) {
+		printf("DVR: web view encoder (following the recording): %llu frames encoded, %llu skip frames (%d fps)\n",
+		       (unsigned long long)frames, (unsigned long long)skips, screen_fps);
+		fflush(stdout);
+		return;
 	}
 	printf("DVR: %llu frames encoded, %llu skip frames (%d fps). Sampled %llu slots: %llu unchanged, "
 	       "%llu missed (sampler late, or the picture changing size), %llu with the encoder behind, "
@@ -553,6 +490,34 @@ void DVR::run_screen_rga() {
 	       (unsigned long long)n_busy, (unsigned long long)n_fail, (unsigned long long)n_nothing,
 	       med_i * 0.25, p99_i * 0.25, blend_max / 1000.0);
 	fflush(stdout);
+}
+
+void DVR::release_buf(int idx) {
+	std::lock_guard<std::mutex> lk(qm);
+	if (idx < 0 || idx >= MppH264Encoder::kInputBuffers) return;
+	if (--buf_refs[idx] <= 0) { buf_refs[idx] = 0; free_bufs.push_back(idx); }
+}
+
+void DVR::follower_done(int idx) {
+	{ std::lock_guard<std::mutex> lk(qm); if (f_held > 0) f_held--; }
+	release_buf(idx);
+}
+
+void DVR::push_shot(int idx, int64_t slot) {
+	{ std::lock_guard<std::mutex> lk(qm); shots.push_back({idx, slot}); }
+	qcv.notify_one();
+}
+
+void DVR::idr_if_wanted() {
+	{
+		std::lock_guard<std::mutex> lk(sink_m);
+		if (!sink_wants_key) return;
+		sink_wants_key = false;
+	}
+	const uint64_t now = get_time_us();
+	if (now - last_forced_idr_us < 1000000) return;
+	last_forced_idr_us = now;
+	screen_enc.force_idr();
 }
 
 void DVR::stop() {
@@ -566,15 +531,12 @@ void DVR::stop() {
 void DVR::run_dvr() {
 	printf("DVR::run_dvr start.\n");
 	if (record_screen) {
-		if (use_rga) run_screen_rga(); else run_screen();
+		run_screen_rga();
 		if (mux) {
 			MP4E_close(mux);
 			mp4_h26x_write_close(&mp4wr);
 			mux = NULL;
 		}
-		// Stop capturing before the encoder's buffers go away: writeback_deinit
-		// also waits out any capture still being written.
-		if (wb_dev && use_writeback) wb_dev->writeback_deinit();
 		rga.deinit();
 		screen_enc.deinit();
 		writer.reset();             // everything written and synced
@@ -673,10 +635,6 @@ void DVR::enqueueDvrPacket(std::shared_ptr<std::vector<uint8_t>> frame) {
 		dvrQueue.push({frame, get_time_us()});
 	}
 	cv.notify_one();
-}
-int dvr_screen_capture_fps() {
-	int fps = Settings::getInstance().getInt("dvr_screen_fps", kDvrScreenFpsDefault);
-	return fps < 1 ? 1 : fps > 60 ? 60 : fps;
 }
 
 // ---------------------------------------------------------------- DvrRecorder
@@ -812,9 +770,9 @@ void DvrRecorder::set_screen_size(int w, int h) {
     sw_ = w; sh_ = h;
 }
 
-void DvrRecorder::set_writeback(DrmDevice* dev) {
+void DvrRecorder::set_display(DrmDevice* dev) {
     std::lock_guard<std::mutex> lk(m_);
-    wb_dev_ = dev;
+    disp_dev_ = dev;
 }
 
 
@@ -850,13 +808,13 @@ bool DvrRecorder::start_recording() {
     std::string dir;
     bool configured;
     const bool screen = screen_;
-    DrmDevice* wb_dev;
+    DrmDevice* disp_dev;
     std::vector<std::vector<uint8_t>> ps;
     {
         std::lock_guard<std::mutex> lk(m_);
         codec = codec_; fps = fps_; fmt = fmt_; stop_signal = stop_; dir = dir_;
         configured = configured_; fw = fw_; fh = fh_; sw = sw_; sh = sh_;
-        wb_dev = wb_dev_;
+        disp_dev = disp_dev_;
         if (!screen) ps = ps_;
     }
     if (!configured) {
@@ -887,6 +845,10 @@ bool DvrRecorder::start_recording() {
     const char* ext = (fmt == DvrFormat::RAW) ? ".h265" : ".mp4";
     std::string base = dir + "/fpvOS" + ext;
 
+    // One screen sampler at a time: the web view's encoder makes way for a
+    // screen recording, and then follows its sampler (web_reconcile).
+    if (screen) stop_web();
+
     // Everything made from here on - the DVR's thread, the writer's, the
     // encoder's - is scheduled as an ordinary thread (OrdinaryScheduling).
     OrdinaryScheduling ordinary;
@@ -904,7 +866,7 @@ bool DvrRecorder::start_recording() {
         std::lock_guard<std::mutex> lk(m_);
         file_ = file;
     }
-    if (screen && wb_dev) dvr->set_writeback_dev(wb_dev);
+    if (screen && disp_dev) dvr->set_display_dev(disp_dev);
     // Without this the muxer is never created and every frame the writer thread
     // dequeues is silently dropped - the file is opened, the timer runs, and
     // nothing is ever written. Renderer only calls init() on the legacy --dvr
@@ -938,7 +900,9 @@ bool DvrRecorder::start_recording() {
         tid_ = tid;
         ps_sent_ = !ps.empty();
         running_ = true;
+        rec_screen_ = screen;
     }
+    web_reconcile();
     return true;
 }
 
@@ -956,6 +920,8 @@ void DvrRecorder::stop_recording() {
         file = file_;   // still the current file until it is complete
     }
     printf("DVR: stopping -> %s\n", file.c_str());
+    // The web view's encoder following this recording's sampler goes first.
+    if (web_leader_ == dvr) stop_web();
     dvr->stop();
     pthread_join(tid, nullptr);
     dvr.reset();
@@ -966,6 +932,122 @@ void DvrRecorder::stop_recording() {
     // The file is complete now (moov written): its gallery thumbnail can be
     // made in the background, ready before the gallery is opened.
     WebStream::instance().recording_finished(file);
+    // A phone still watching gets its own screen encoder back.
+    {
+        std::lock_guard<std::mutex> lk(m_);
+        rec_screen_ = false;
+    }
+    web_reconcile();
+}
+
+// ---- the web view's screen encoder ----
+
+void DvrRecorder::attach_web(DVR* d) {
+    WebStream::instance().set_screen_source(d->screen_header(), d->screen_width(), d->screen_height(),
+                                            d->screen_period_ticks());
+    d->set_sink([](const uint8_t* p, size_t n, int dur) { return WebStream::instance().feed_screen(p, n, dur); });
+}
+
+void DvrRecorder::start_web(const std::shared_ptr<DVR>& leader) {
+    if (web_dvr_) return;
+    int fps, sw, sh;
+    volatile bool* stop_signal;
+    DrmDevice* disp_dev;
+    {
+        std::lock_guard<std::mutex> lk(m_);
+        if (!configured_ || !disp_dev_ || sw_ <= 0 || sh_ <= 0) {
+            printf("DVR: web view - the screen is not known yet, no encoder\n");
+            return;
+        }
+        fps = fps_; sw = sw_; sh = sh_; stop_signal = stop_; disp_dev = disp_dev_;
+    }
+    // A follower reads its leader's inputs: exactly their size.
+    if (leader) { sw = leader->screen_width(); sh = leader->screen_height(); }
+    OrdinaryScheduling ordinary;
+    auto dvr = std::make_shared<DVR>("", VideoCodec::H264, fps, DvrFormat::FMP4, stop_signal, true, false);
+    dvr->set_display_dev(disp_dev);
+    if (leader) dvr->set_leader(leader.get());
+    // A phone over the goggle's WiFi: an iPhone takes ~5 Mbit/s here, and 30
+    // pictures a second of the screen are plenty for a spectator. Variable
+    // rate under the cap (web_kbps, which also paces each viewer's socket -
+    // webstream.cpp), averaging 70% of it: room to catch up after a stall.
+    const int cap = web_cap_kbps() * 1000;
+    dvr->set_encoding(cap / 10 * 7, Settings::getInstance().getInt("web_fps", 30), cap / 10 * 9);
+    if (dvr->init(sw, sh) != 0) {
+        printf("DVR: web view - no screen encoder\n");
+        return;
+    }
+    attach_web(dvr.get());
+    pthread_t tid;
+    if (pthread_create(&tid, nullptr, DVR::run_dvr_thread, dvr.get()) != 0) {
+        printf("DVR: web view - no encoder thread\n");
+        dvr->set_sink(nullptr);
+        return;
+    }
+    web_dvr_ = dvr;
+    web_tid_ = tid;
+    web_leader_ = leader;
+    if (leader) printf("DVR: web view's encoder follows the screen recording\n");
+}
+
+void DvrRecorder::stop_web() {
+    if (!web_dvr_) return;
+    web_dvr_->set_sink(nullptr);
+    web_dvr_->stop();
+    pthread_join(web_tid_, nullptr);
+    web_dvr_.reset();
+    web_tid_ = 0;
+    web_leader_.reset();
+    printf("DVR: web view's screen encoder stopped\n");
+}
+
+void DvrRecorder::web_reconcile() {
+    bool want, rec_screen;
+    std::shared_ptr<DVR> rec;
+    {
+        std::lock_guard<std::mutex> lk(m_);
+        want = web_want_ && !shut_;
+        rec_screen = running_ && rec_screen_;
+        rec = dvr_;
+    }
+    if (!want) {
+        stop_web();
+        return;
+    }
+    // A screen recording owns the screen's one sampler: the web view's
+    // encoder follows it.
+    std::shared_ptr<DVR> lead = rec_screen && rec ? rec : nullptr;
+    if (web_dvr_ && web_leader_ != lead) stop_web();
+    start_web(lead);
+}
+
+int DvrRecorder::web_cap_kbps() {
+    const int k = Settings::getInstance().getInt("web_kbps", 5000);
+    return k < 500 ? 500 : k > 50000 ? 50000 : k;
+}
+
+void DvrRecorder::set_web_watching(bool on) {
+    {
+        std::lock_guard<std::mutex> lk(m_);
+        if (shut_ || web_want_ == on) return;
+        web_want_ = on;
+    }
+    // Encoder set-up and tear-down take a moment: not on the caller's thread.
+    std::thread([this] {
+        std::lock_guard<std::mutex> ctl(ctl_);
+        web_reconcile();
+    }).detach();
+}
+
+void DvrRecorder::web_retry() {
+    {
+        std::lock_guard<std::mutex> lk(m_);
+        if (shut_ || !web_want_) return;
+    }
+    std::thread([this] {
+        std::lock_guard<std::mutex> ctl(ctl_);
+        web_reconcile();
+    }).detach();
 }
 
 bool DvrRecorder::toggle() {
@@ -997,5 +1079,11 @@ void DvrRecorder::feed(std::shared_ptr<std::vector<uint8_t>> frame) {
 
 void DvrRecorder::shutdown() {
     std::lock_guard<std::mutex> ctl(ctl_);
+    {
+        std::lock_guard<std::mutex> lk(m_);
+        web_want_ = false;
+        shut_ = true;     // a viewer arriving now starts nothing (WebStream stops after us)
+    }
     stop_recording();
+    stop_web();
 }

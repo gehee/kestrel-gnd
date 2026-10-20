@@ -1,4 +1,5 @@
 #include "wifi_ap.hpp"
+#include "settings.hpp"
 
 #include <unistd.h>
 
@@ -53,6 +54,30 @@ static std::string read_key(const char* path, const char* key) {
     while (std::getline(f, line))
         if (line.compare(0, k.size(), k) == 0) return line.substr(k.size());
     return "";
+}
+
+// The Wi-Fi QR format's special characters, backslash-escaped.
+static std::string wifi_escape(const std::string& s) {
+    std::string o;
+    for (char c : s) {
+        if (c == '\\' || c == ';' || c == ',' || c == ':' || c == '"') o += '\\';
+        o += c;
+    }
+    return o;
+}
+
+std::string wifi_ap_join_text() {
+    const std::string ssid = read_key(kIdent, "SSID"), pass = read_key(kIdent, "PASSPHRASE");
+    if (ssid.empty()) return "";
+    // fpvos-wifi runs WPA2-PSK; with no passphrase it would be an open network.
+    if (pass.empty()) return "WIFI:T:nopass;S:" + wifi_escape(ssid) + ";;";
+    return "WIFI:T:WPA;S:" + wifi_escape(ssid) + ";P:" + wifi_escape(pass) + ";;";
+}
+
+// fpvos-wifi's fixed address, and the page's port (web_port).
+std::string wifi_ap_page_url() {
+    const int port = Settings::getInstance().getInt("web_port", 80);
+    return port == 80 ? "http://192.168.4.1" : "http://192.168.4.1:" + std::to_string(port);
 }
 
 std::string wifi_ap_describe() {
