@@ -663,7 +663,21 @@ void Ar8030Source::configure_link() {
                sout.role, sout.role == BB_ROLE_AP ? "AP" : "DEV", sout.mode,
                sout.cfg_sbmp, sout.rt_sbmp);
         if (sout.role == BB_ROLE_DEV && n > 0) {
+            // Which of the paired units to name before the link: the one last
+            // linked (identify_peer() saves it), not simply the oldest entry
+            // of stock's pairing ring - that named an air unit that was not
+            // there and kept every per-air setting under its key. The link
+            // itself goes by the whole candidate list; identify_peer() fixes
+            // the choice once the radio says who answered.
             int idx = (ap_index >= 0 && ap_index < n) ? ap_index : 0;
+            if (ap_index == 0) {
+                const unsigned last = (unsigned)Settings::getInstance().getInt("ar8030_last_peer", 0);
+                for (int i = 0; i < n; i++) {
+                    const unsigned m = ((unsigned)macs[i].addr[0] << 24) | ((unsigned)macs[i].addr[1] << 16) |
+                                       ((unsigned)macs[i].addr[2] << 8) | macs[i].addr[3];
+                    if (last && m == last) { idx = i; break; }
+                }
+            }
             set_sky_key_from_mac(macs[idx].addr);   // per-VTX settings namespace
             load_sky_link();                        // its TX power
             bb_set_ap_mac_t ap;
@@ -1126,6 +1140,50 @@ void Ar8030Source::set_sky_key_from_mac(const uint8_t mac[4]) {
     sky_cfg_key = buf;
 }
 
+// The per-air settings key and the AP MAC follow the unit that answered, read
+// from the link status at the handshake (before the camera config goes out).
+// The key chosen at start is a guess from the pairing list.
+void Ar8030Source::identify_peer() {
+    bb_dev_handle_t *dev = (bb_dev_handle_t *)bb_dev;
+    if (!dev) return;
+    bb_get_status_in_t in;
+    memset(&in, 0, sizeof(in));
+    in.user_bmp = 0x03FF;
+    bb_get_status_out_t st;
+    memset(&st, 0, sizeof(st));
+    if (ar_ioctl(dev, BB_GET_STATUS, &in, &st) != 0 || st.role != BB_ROLE_DEV) return;
+    const uint8_t *p = st.link_status[0].peer_mac.addr;
+    const bool blank = (!p[0] && !p[1] && !p[2] && !p[3]) ||
+                       (p[0] == 0xFF && p[1] == 0xFF && p[2] == 0xFF && p[3] == 0xFF);
+    printf("ar8030: linked peer %02X:%02X:%02X:%02X (state %u)%s\n", p[0], p[1], p[2], p[3],
+           st.link_status[0].state, blank ? " - not reported, settings key kept" : "");
+    if (blank || st.link_status[0].state != 2) return;
+    // Only a unit this goggle is paired with: Open8030 reports a placeholder
+    // (66:00:00:00) there, and adopting it moved every setting to a new key.
+    bb_mac_t macs[BB_CONFIG_MAX_SLOT_CANDIDATE];
+    const int n = ar_load_candidate_macs(macs, BB_CONFIG_MAX_SLOT_CANDIDATE);
+    bool paired = false;
+    for (int i = 0; i < n && !paired; i++) paired = memcmp(macs[i].addr, p, BB_MAC_LEN) == 0;
+    if (!paired) {
+        printf("ar8030: linked peer is not a paired unit - settings key kept\n");
+        return;
+    }
+    char key[32];
+    snprintf(key, sizeof(key), "sky_%02X%02X%02X%02X", p[0], p[1], p[2], p[3]);
+    Settings::getInstance().set("ar8030_last_peer",
+        (int)(((unsigned)p[0] << 24) | ((unsigned)p[1] << 16) | ((unsigned)p[2] << 8) | p[3]));
+    if (sky_cfg_key == key) return;
+    printf("ar8030: settings key %s -> %s\n", sky_cfg_key.c_str(), key);
+    sky_cfg_key = key;
+    load_sky_link();
+    apply_tx_power(tx_power_mw);
+    bb_set_ap_mac_t ap;
+    memset(&ap, 0, sizeof(ap));
+    memcpy(ap.mac.addr, p, BB_MAC_LEN);
+    printf("ar8030: BB_SET_AP_MAC(%02X:%02X:%02X:%02X) -> %d\n", p[0], p[1], p[2], p[3],
+           ar_ioctl(dev, BB_SET_AP_MAC, &ap, NULL));
+}
+
 void Ar8030Source::load_sky_config() {
     // Seed from the stock capture so every field we do not persist keeps the
     // value stock boots with, then let stored settings override.
@@ -1155,6 +1213,15 @@ void Ar8030Source::load_sky_config() {
            sky_cfg.ev_x10, sky_cfg.saturation, sky_cfg.sharpness, sky_cfg.contrast,
            sky_cfg.scenes, sky_cfg.awb_cct, sky_cfg.anti_flicker, sky_cfg.angle,
            sky_cfg.focus_en);
+    // The video mode is this air unit's too: the one the handshake asks for,
+    // so nothing asks for another after it (a mode picked for the last unit
+    // switched this one's encoder twice at every link-up).
+    if (mode_chn == 0 && sky_cfg.ch0_w && sky_cfg.ch0_h && sky_cfg.ch0_fps) {
+        mode_w = sky_cfg.ch0_w; mode_h = sky_cfg.ch0_h; mode_fps = sky_cfg.ch0_fps;
+        for (int i = 0; osd && i < sky::kFpvModeCount; i++)
+            if (sky::kFpvModes[i].w == mode_w && sky::kFpvModes[i].h == mode_h && sky::kFpvModes[i].fps == mode_fps)
+                osd->set_video_mode_current(i);
+    }
 
     if (osd) {
         osd->set_camera_config(sky_cfg.ev_x10, sky_cfg.saturation, sky_cfg.contrast,
@@ -1256,6 +1323,7 @@ void Ar8030Source::send_air_handshake() {
         if (ctrl_sockfd < 0) return;
     }
 
+    identify_peer();
     load_sky_config();
     for (size_t i = 0; i < ar_handshake_n; i++) {
         const uint8_t *data = ar_handshake[i].data;
@@ -1292,7 +1360,8 @@ void Ar8030Source::send_air_handshake() {
     sky_proto.set_seq(ar_handshake[ar_handshake_n - 1].data[3] + 1);
     if (probe_rf) probe_rf_ioctls();
     if (probe_modes) probe_video_modes();
-    apply_video_mode();
+    // The resolution is the handshake's (this air unit's stored mode): no
+    // mode switch after it - that is for a different mode picked in the menu.
 }
 
 // Read frames off the port-2 socket until one acknowledges want_cmd. The air
@@ -2566,7 +2635,7 @@ void Ar8030Source::publish_link_stats() {
     // The video link's own width, where the events have said (ar_libre).
     if (video_bw_idx_.load() >= 0) st.rf_bw_idx = video_bw_idx_.load();
     st.radio_frame_us = (float)frame_clock_.local_period();
-    st.radio_frame_mode_want = frame_mode;
+    st.radio_frame_mode_want = air_ver_seen_ && !air_kestrel_ ? 0 : frame_mode;   // stock air: standard
 
     last_link_kbps = st.rx_data_rate_kbps;   // for the periodic stat line
     last_bw_idx    = st.rf_bw_idx;           // live RF bandwidth gear
@@ -3217,6 +3286,7 @@ void Ar8030Source::note_air_announce(bool ka, uint8_t proto, uint8_t feat) {
     air_feat_ = feat;
     if (osd) osd->set_air_max_bw(ka && (feat & kAirFeatMaxBw));
     if (osd) osd->set_air_features(ka ? (uint16_t)(feat | air_info_feat_) : 0);
+    if (osd) osd->set_air_stock(!ka);
     // The mode pushed at link-up, if this air unit does not have it (864p120
     // kept from before a downgrade, or a stock air app): back to the default.
     check_air_modes();
@@ -3240,8 +3310,8 @@ void Ar8030Source::note_air_announce(bool ka, uint8_t proto, uint8_t feat) {
         if (feat & kAirFeatMaxBw) request_setting(CAM_MAX_BW, max_bw_mhz == 0 ? 40 : max_bw_mhz);
     } else {
         printf("ar8030: the air unit is the stock air app (no kestrel-air announcement in its "
-               "version message): latency timed from its packet stamps (whole ms), no "
-               "Max Bandwidth / Max Bitrate (kestrel-air only)\n");
+               "version message): latency timed from its packet stamps (whole ms), the "
+               "standard radio frame, no Max Bandwidth / Max Bitrate (kestrel-air only)\n");
     }
 }
 
@@ -3399,6 +3469,7 @@ void Ar8030Source::bw_poll() {
                 rc_st = arlink_request(0x0c5a0037, &st, 1, nullptr, 0, &got, 500);
             }
             auto rc = [](int r) { return r == 1 ? std::string("not sent") : std::to_string(r); };
+            if (rc_bw != 1 || rc_mcs != 1 || rc_st != 1)
             printf("ar8030: caps: %s (SET 22 -> %s), MCS %s (-> %s), steady latency %s (-> %s)\n",
                    mhz ? ("up to " + std::to_string(mhz) + " MHz").c_str() : "AUTO", rc(rc_bw).c_str(),
                    max_mcs < 0 ? "AUTO" : std::to_string(max_mcs).c_str(), rc(rc_mcs).c_str(),
@@ -3777,6 +3848,13 @@ void Ar8030Source::emit_nal(const uint8_t* nal, size_t len) {
                     air_hdr_tag_ = false;
                     air_untagged_ = 0;
                     air_ver_seen_ = false;
+                } else if (!air_hdr_tag_ && !air_ver_seen_ && ++air_stock_hdrs_ >= 200) {
+                    // Video and never the tag: the stock air app, which sends its
+                    // version message only in some states (none at all after a
+                    // link-up on 2026-10-20). A kestrel-air without the tag says
+                    // otherwise in its version message, which then decides.
+                    air_stock_hdrs_ = 0;
+                    note_air_announce(false, 0, 0);
                 }
                 if (air_kestrel_ && (air_feat_ & kAirFeatLatInfo) && len >= 42)
                     note_air_latency(nal);
@@ -4721,9 +4799,14 @@ void Ar8030Source::run() {
         int want = pending_mode_index.exchange(-1);
         if (want >= 0 && want < sky::kFpvModeCount) {
             const sky::VideoMode& m = sky::kFpvModes[want];
-            mode_w = m.w; mode_h = m.h; mode_fps = m.fps; mode_chn = 0;
-            printf("ar8030: menu requested mode %s\n", m.name);
-            apply_video_mode();
+            if (m.w == sky_cfg.ch0_w && m.h == sky_cfg.ch0_h && m.fps == sky_cfg.ch0_fps) {
+                // The mode the air unit runs: no switch (it restarts the encoder).
+                printf("ar8030: menu mode %s - already this air unit's, nothing sent\n", m.name);
+            } else {
+                mode_w = m.w; mode_h = m.h; mode_fps = m.fps; mode_chn = 0;
+                printf("ar8030: menu requested mode %s\n", m.name);
+                apply_video_mode();
+            }
         }
         apply_pending_settings();
         apply_pending_rf();
@@ -4809,6 +4892,9 @@ void Ar8030Source::run() {
                         air_hdr_tag_     = false;
                         air_kestrel_     = false;
                         air_feat_        = 0;
+                        air_stock_hdrs_  = 0;
+                        if (osd) osd->set_air_stock(false);
+                        frame_clock_.forget_air();
                         printf("ar8030: link up - dropping video until it arrives "
                                "at the rate it was captured\n");
                         printf("ar8030: link up - sending the air handshake now that "
@@ -4822,9 +4908,13 @@ void Ar8030Source::run() {
                 }
                 if (frame_mode_changed.exchange(false)) frame_mode_due_ms_.store(tl);   // the menu
                 const uint64_t fm_due = frame_mode_due_ms_.load();
-                if (fm_due && ls == 2 && tl >= fm_due && tl - bw_change_ms_.load() >= 1000) {
+                // Once the air unit has said what it runs (kestrel-air's first
+                // tagged header, or the stock app's 200 untagged): a stock air
+                // unit keeps the standard frame every link starts on.
+                if (fm_due && ls == 2 && tl >= fm_due && tl - bw_change_ms_.load() >= 1000 && air_ver_seen_) {
                     frame_mode_due_ms_.store(0);
-                    set_frame_mode();
+                    if (air_kestrel_) set_frame_mode();
+                    else printf("ar8030: stock air app: the radio frame stays standard\n");
                 }
             }
         }

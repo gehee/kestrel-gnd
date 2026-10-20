@@ -470,6 +470,7 @@ class Ar8030Source {
         uint8_t  air_proto_ = 0;
         uint8_t  air_feat_ = 0;
         unsigned air_untagged_ = 0;      // sane headers in a row without the tag
+        unsigned air_stock_hdrs_ = 0;    // headers since link-up, none tagged, nothing decided
         bool     air_hdr_tag_ = false;   // seen in a slice header, which is more reliable than the message
         void note_air_version(const uint8_t *pl, size_t n);
         void note_air_info(const uint8_t *pl, size_t n);
@@ -630,6 +631,7 @@ class Ar8030Source {
         sky::SkyConfig sky_cfg;
         std::string    sky_cfg_key;      // "sky_E5DA0008" - empty until known
         void  set_sky_key_from_mac(const uint8_t mac[4]);
+        void  identify_peer();          // the air unit actually linked, from BB_GET_STATUS
         void  load_sky_config();
         void  save_sky_config();
         // The TX power this air unit last ran with, kept beside its camera

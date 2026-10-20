@@ -100,7 +100,7 @@ static const int kArFrameVals[]     = { 2, 0 };
 static const char* kArFrameLabels[] = { "SHORT", "STANDARD" };
 static const int kArFrameCount = 2;
 static int ar_frame_index(int mode) { return mode == 0 ? 1 : 0; }
-// Radio Firmware: the baseband firmware the goggle's radio runs (bb_only.sh
+// VRX Radio Firmware: the baseband firmware the goggle's radio runs (bb_only.sh
 // uploads it from ar8030_firmware): Open8030 when it is installed (the
 // default), or stock's.
 static const char* kArFwLabels[] = { "STOCK", "OPEN8030" };
@@ -121,7 +121,7 @@ std::vector<std::pair<const char*, int>> OSD::ar_rf_items() const {
     if (osd_vars.artosyn.state != 2) {
         v.push_back({"Bind", 9});
         // Also unlinked: a firmware that does not link is the time to switch.
-        v.push_back({"Radio Firmware", 13});
+        v.push_back({"VRX Radio Firmware", 13});
         return v;
     }
     // Channel opens the channel page. Channel Hop (id 7) was the other half of
@@ -137,7 +137,7 @@ std::vector<std::pair<const char*, int>> OSD::ar_rf_items() const {
     // Open8030 with steady mode (request 0x0c5a0037), which its main lacks.
     // Open8030 on the goggle: the MCS its receive policy may go up to.
     if (Ar8030Source::radio_fw == 1) v.push_back({"Max MCS", 14});
-    v.push_back({"Radio Firmware", 13});
+    v.push_back({"VRX Radio Firmware", 13});
     // MCS, Bandwidth and LNA Mode were removed rather than left visible.
     // BB_SET_MCS has no direction field, so it can only set our own transmit -
     // the video MCS is the air unit's choice, driven by the policy table in
@@ -4052,8 +4052,28 @@ void OSD::update_artosyn_stats(artosyn_stats v) {
         const bool had_previous = osd_peer_mac_[0] != 0;
         snprintf(osd_peer_mac_, sizeof(osd_peer_mac_), "%s", v.peer_mac);
         if (had_previous) msp_osd.reset_screen();
+        // Calib Distance is per air unit (its radio's MAC): one never
+        // calibrated starts from the last calibration made.
+        dist_offset = Settings::getInstance().getInt(dist_offset_key(),
+                                                     Settings::getInstance().getInt("dist_offset", 115));
+        printf("[OSD] air unit %s: distance offset %d\n", osd_peer_mac_, dist_offset);
     }
     pthread_mutex_unlock(&osd_mutex);
+}
+
+// Calib Distance's setting for the linked air unit: dist_offset_<its radio's
+// MAC>, or the plain dist_offset before any link.
+std::string OSD::dist_offset_key() const {
+    std::string k = "dist_offset";
+    if (!osd_peer_mac_[0]) return k;
+    k += '_';
+    for (const char *c = osd_peer_mac_; *c; c++) if (*c != ':') k += *c;
+    return k;
+}
+// Saved for this air unit, and as the starting value for one never calibrated.
+void OSD::save_dist_offset() {
+    Settings::getInstance().set(dist_offset_key(), dist_offset);
+    Settings::getInstance().set("dist_offset", dist_offset);
 }
 
 // Refresh only the link state, leaving every other figure at its last value.
@@ -4753,9 +4773,12 @@ std::vector<OSD::MenuItem> OSD::menu_items(int tab) const {
                 // Video Mode, the other setting that decides the stream; listed
                 // here, handled as row 10 (video_row).
                 {"Video Mode", 1},
-                {"Max Bitrate", 1, "Cap on the video bitrate. AUTO follows the link. A cap "
-                                   "below it gives a steadier picture and less time on the "
-                                   "air per frame. Kestrel air units only."},
+                air_stock_
+                    ? MenuItem{"Max Bitrate", 0, "Needs an fpvOS air unit: this one runs the stock "
+                                                 "air app, which ignores the cap.", nullptr, true}
+                    : MenuItem{"Max Bitrate", 1, "Cap on the video bitrate. AUTO follows the link. A cap "
+                                                 "below it gives a steadier picture and less time on the "
+                                                 "air per frame. fpvOS air units only."},
                 {"Rotate", 1},
                 {"Scene", 1}, {"EV", 1}, {"White Balance", 1},
                 {"Saturation", 1}, {"Contrast", 1}, {"Sharpness", 1}, {"3D DNR", 1},
@@ -4791,12 +4814,13 @@ std::vector<OSD::MenuItem> OSD::menu_items(int tab) const {
                     "Enter applies it: the radio restarts, the picture is back in ~10 s."}); break;
                 case 12: items.push_back({it.first, 1,
                     "How long the radio's frame is. SHORT gets each slice out sooner; "
-                    "STANDARD is stock's, with a longer, sturdier uplink. "
+                    "STANDARD is stock's, with a longer, sturdier uplink, and what a stock "
+                    "air unit always gets. "
                     "HUD > Debug Info shows the frame in use."}); break;
                 case 13: items.push_back({it.first, 1,
-                    "The goggle radio's firmware: STOCK, or OPEN8030 (open source) when "
-                    "it is installed. Enter applies it: the radio restarts, the picture "
-                    "is back in ~10 s."}); break;
+                    "This VRX's own radio firmware: STOCK, or OPEN8030 (open source) when "
+                    "it is installed. The air unit's is not changed. Enter applies it: the "
+                    "radio restarts, the picture is back in ~10 s."}); break;
                 case 15: items.push_back({it.first, 1,
                     "Each block the air radio has to send again takes the link one MCS "
                     "lower at once, and it climbs back only after 5 s without one: steadier "
@@ -5288,7 +5312,7 @@ void OSD::menu_apply_change(int tab, int index, int dir) {
             // left/right nudges the calibration by 1
             if (!menu_stepping_) {
                 dist_offset = std::max(0, dist_offset + dir);
-                Settings::getInstance().set("dist_offset", dist_offset);
+                save_dist_offset();
             }
         } else if (hud_row(menu_index) == kHudRowClock) {
             const int c = menu_step(clock_choice(menu_clock_show, menu_clock_mode), dir, kClockChoices);
@@ -5495,7 +5519,10 @@ void OSD::menu_value_text(int tab, int i, char* val_buf, size_t cap) {
             case 7: sprintf(val_buf, "< %s >", cam_auto_label(menu_cam_sharp)); break;
             case 8: sprintf(val_buf, "< %s >", kDnrLabels[menu_cam_3dnr]); break;
             case 9: sprintf(val_buf, "< %s >", menu_cam_focus ? "On" : "Off"); break;
-            case 10: sprintf(val_buf, "< %s >", kArMaxBrLabels[menu_ar_maxbr]); break;
+            case 10:
+                if (air_stock_) snprintf(val_buf, cap, "FPVOS AIR ONLY");
+                else sprintf(val_buf, "< %s >", kArMaxBrLabels[menu_ar_maxbr]);
+                break;
             default: break;
         }
     } else if (menu_tab == 1) { // AR8030 RF items
@@ -5548,7 +5575,7 @@ void OSD::menu_value_text(int tab, int i, char* val_buf, size_t cap) {
                 case 15:    // Steady Latency
                     sprintf(val_buf, "< %s >", menu_ar_steady ? "ON" : "OFF");
                     break;
-                case 13:    // Radio Firmware
+                case 13:    // VRX Radio Firmware
                     sprintf(val_buf, "< %s >", kArFwLabels[menu_ar_fw]);
                     break;
                 default: break;
@@ -6267,8 +6294,9 @@ void OSD::handle_key(int key) {
                     // arrows nudge the same offset by hand.
                     if (link_distance_raw >= 0) {
                         dist_offset = link_distance_raw;
-                        Settings::getInstance().set("dist_offset", dist_offset);
-                        printf("[OSD] distance calibrated: offset = %d\n", dist_offset);
+                        save_dist_offset();
+                        printf("[OSD] distance calibrated for air unit %s: offset = %d\n",
+                               osd_peer_mac_[0] ? osd_peer_mac_ : "?", dist_offset);
                     }
                 }
             } else if (menu_tab == 3) { // DISPLAY

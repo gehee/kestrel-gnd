@@ -109,11 +109,21 @@ public:
                    Tt, phi, gen);
         // Another frame, or this one restarted elsewhere (the air's phase
         // moved more than its own count's noise): counted again - on from
-        // ours where it is fresh.
-        if (air_known_ && (std::fabs(Tt - air_Tt_) > 0.01 || std::fabs(fe_wrap(phi - air_phi_, Tt)) > 150))
+        // ours where it is fresh. Against the last one said, before a link-up
+        // too.
+        if (air_said_ && (std::fabs(Tt - air_Tt_) > 0.01 || std::fabs(fe_wrap(phi - air_phi_, Tt)) > 150))
             recount_ = true;
         air_Tt_ = Tt; air_phi_ = phi; air_gen_ = gen;
-        air_known_ = true;
+        air_known_ = air_said_ = true;
+    }
+    // A link-up: the air unit may be another one, or the same with stock's
+    // app, which sends no frame - kept, it held a stock air unit's figures
+    // back for good, waiting on a check only kestrel-air's stamps pass
+    // (2026-10-20: a Lite flashed to stock, RF never shown). kestrel-air says
+    // its frame again within a second, inside the link-up's resync.
+    void forget_air() {
+        std::lock_guard<std::mutex> lk(mu_);
+        air_known_ = false;
     }
     // The frame the radio clock is counted on, us (0: not counted).
     double frame_period() {
@@ -536,7 +546,7 @@ private:
     std::atomic<int64_t> shift_{0};
     std::atomic<unsigned> count_gen_{0}, shifts_taken_{0};
     std::mutex mu_;
-    bool valid_ = false, air_known_ = false, recount_ = false, following_ = false;
+    bool valid_ = false, air_known_ = false, air_said_ = false, recount_ = false, following_ = false;
     double Tm_ = 1, air_Tt_ = 0, air_phi_ = 0;
     // The clock (publish()): good until until_.
     double cE_ = 0, cTm_ = 1, cTt_ = 0, cphi_ = 0, until_ = 0;

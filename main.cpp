@@ -634,7 +634,7 @@ int main(int argc, char **argv)
 		Ar8030Source::max_mcs = mcs >= 0 && mcs <= 13 ? mcs : -1;
 		Ar8030Source::steady = Settings::getInstance().getInt("ar8030_steady", 0) == 1 ? 1 : 0;
 	}
-	// RADIO > Radio Firmware: Open8030 when its image is on the unit, unless
+	// RADIO > VRX Radio Firmware: Open8030 when its image is on the unit, unless
 	// the menu said STOCK (0) - as bb_only.sh decides what it uploads.
 	Ar8030Source::radio_fw      = access("/lib/firmware/open8030-vrxpro-usb.img", R_OK) == 0 &&
 	                              Settings::getInstance().getInt("ar8030_firmware", 1) != 0 ? 1 : 0;
@@ -1147,7 +1147,7 @@ int main(int argc, char **argv)
                     return;
                 }
                 case 0x309: {
-                    // RADIO > Radio Firmware: which baseband firmware bb_only.sh
+                    // RADIO > VRX Radio Firmware: which baseband firmware bb_only.sh
                     // uploads with the radio (0 stock, 1 Open8030, when its image
                     // is on the unit). Loaded with the radio, so a change restarts
                     // the radio and kestrel-gnd, as Max Bandwidth does.

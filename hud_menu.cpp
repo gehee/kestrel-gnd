@@ -286,7 +286,8 @@ void OSD::draw_side_panel(int side, float x, float y, float w, float h, float u)
             px_frame(x + pad * 0.5f, ry + 2 * u, w - pad, rh - 4 * u, ring, T.accent, 1.0f);
         }
         const float base = ry + row_h * 0.5f + f_row * 0.36f;
-        px_text(it.label, x + pad, base, f_row, 0, scaled(T.text, on ? 1.0f : 0.82f), 1.0f);
+        // A row the air unit does not take: dimmed, selected or not.
+        px_text(it.label, x + pad, base, f_row, 0, it.off ? T.quiet : scaled(T.text, on ? 1.0f : 0.82f), 1.0f);
 
         if (open_row) {
             // The values either side of the one in force, as in the old value
@@ -317,7 +318,7 @@ void OSD::draw_side_panel(int side, float x, float y, float w, float h, float u)
                 const float room = w - 2 * pad - px_text_w(it.label, f_row) - 16 * u;
                 const float vw = px_text_w(v, vs);
                 if (vw > room && room > 0) vs = std::fmax(vs * room / vw, f_val * 0.6f);
-                const float* vc = on ? T.accent : (it.type == 0 ? T.quiet : T.text);
+                const float* vc = it.off ? T.quiet : on ? T.accent : (it.type == 0 ? T.quiet : T.text);
                 px_text(v, x + w - pad, base, vs, 2, vc, on ? 1.0f : 0.85f);
             }
         }

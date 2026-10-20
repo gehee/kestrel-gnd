@@ -375,6 +375,7 @@ class OSD {
         std::vector<std::string> video_mode_names;
         std::vector<uint16_t> video_mode_needs;  // per mode: the air features it takes
         std::atomic<uint16_t> air_feat_{0};
+        std::atomic<bool> air_stock_{false};
         // AR8030 camera menu: the VIDEO tab shows the camera's own settings
         // instead of the kestrel-air encoder knobs, which do not apply here.
         // Bitmask of RF controls the baseband accepted (Ar8030Source::RfCap).
@@ -511,6 +512,8 @@ class OSD {
         // resends a DisplayPort row whose content CHANGED - see
         // update_artosyn_stats().
         char     osd_peer_mac_[20]       = {0};
+        std::string dist_offset_key() const;   // Calib Distance per air unit
+        void save_dist_offset();
         // The acquiring screen runs for at least this long from the link edge,
         // the same edge the canopy's rebuild sweep fires on. Without it the
         // screen is hostage to how fast the air unit dumps its startup buffer:
@@ -539,7 +542,7 @@ class OSD {
         int menu_ar_frame = 0;     // index into kArFrameVals (0 = SHORT, mode 2)
         int menu_ar_maxmcs = 0;    // RADIO > Max MCS: 0 AUTO, n = MCS n-1 (Open8030)
         int menu_ar_steady = 0;    // RADIO > Steady Latency: 0 OFF, 1 ON (Open8030)
-        int menu_ar_fw = 0;        // RADIO > Radio Firmware: 0 STOCK, 1 OPEN8030
+        int menu_ar_fw = 0;        // RADIO > VRX Radio Firmware: 0 STOCK, 1 OPEN8030
         int menu_cam_ev       = 3;  // index into kEvSteps below (3 = 0.0 EV)
         int menu_cam_sat      = 0;
         int menu_cam_contrast = 0;  // 0-15: the config packs it into a nibble
@@ -1084,8 +1087,10 @@ class OSD {
         // does (hint) and, for one that runs a while, how it is going.
         // type: 0 a reading, 1 a setting, 2 a group's name, 3 an action, 4 a reading
         // whose label is the text, wrapped at ", " over as many lines as it takes.
+        // off: a setting the linked air unit does not take (the stock air app),
+        // listed as a reading and drawn dimmed; its help says why.
         struct MenuItem { const char* label; int type; const char* help = nullptr;
-                          const char* hint = nullptr; };
+                          const char* hint = nullptr; bool off = false; };
         void menu_action_status(int tab, int i, char* hint, size_t hcap,
                                 char* status, size_t scap);
         std::vector<MenuItem> menu_items(int tab) const;
@@ -1099,6 +1104,9 @@ class OSD {
         // The air unit's kestrel-air feature bits (0: stock or none yet): the
         // Video Mode row skips the modes that need one it does not have.
         void set_air_features(uint16_t f) { air_feat_ = f; }
+        // The linked air unit runs the stock air app (known, not just not
+        // kestrel-air yet): the rows only kestrel-air takes are off.
+        void set_air_stock(bool yes) { air_stock_ = yes; }
         bool video_mode_ok(int i) const {
             return i < 0 || i >= (int)video_mode_needs.size() || (video_mode_needs[i] & ~air_feat_.load()) == 0;
         }
