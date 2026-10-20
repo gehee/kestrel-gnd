@@ -1120,7 +1120,7 @@ void Renderer::halves_step() {
 // Ar8030Source::air_delay_for): capture -> encoder out in tx_encode_delay_us
 // and the rest of the air delay in tx_processing_delay_us.
 uint64_t Renderer::sensor_offset_us(const DecodedUnit* du) {
-    if (du->tx_encode_delay_us || du->tx_processing_delay_us || !osd) return 0;
+    if (du->tx_encode_delay_us || du->tx_processing_delay_us || !osd) return 0;   // kAirUnknown too
     uint32_t fps = osd->get_sky_framerate();
     return fps > 0 ? (uint64_t)osd->get_sky_exposure_us() + 1000000 / fps : 0;
 }
@@ -1189,7 +1189,8 @@ bool Renderer::render_frame(DecodedUnit *du) {
         submitted = true;
     } else if (render_mode == Atomic) {
         uint64_t hw_offset_us = sensor_offset_us(du);
-        uint32_t total_tx_age = du->tx_encode_delay_us + du->tx_processing_delay_us + hw_offset_us;
+        uint32_t total_tx_age = du->tx_processing_delay_us == kAirUnknown ? 0
+                              : du->tx_encode_delay_us + du->tx_processing_delay_us + hw_offset_us;
         if (ltrace::on()) ltrace::rec(ltrace::kRender, get_time_us(), (uint32_t)du->pts, (uint64_t)fb_id);
         int bottom_fb = 0;
         if (split_next_row_ && split_bottom_) {
@@ -1206,7 +1207,8 @@ bool Renderer::render_frame(DecodedUnit *du) {
         dev->direct_shown();
         dev->record_direct_frame(du->recv_ts, du->dec_start_ts, du->dec_end_ts,
                                  render_start_ts,
-                                 du->tx_encode_delay_us + du->tx_processing_delay_us + hw_offset_us);
+                                 du->tx_processing_delay_us == kAirUnknown ? 0
+                                 : du->tx_encode_delay_us + du->tx_processing_delay_us + hw_offset_us);
         submitted = true;
     }
         
@@ -1451,8 +1453,10 @@ void Renderer::update_stats(DecodedUnit *du, uint64_t display_start_ts) {
         uint64_t hw_offset_us = sensor_offset_us(du);
 
         // Without an air-side split, the nominal exposure + readout counts as the encoder's.
-        uint64_t tx_enc = du->tx_encode_delay_us + hw_offset_us;
-        uint64_t tx_proc = du->tx_processing_delay_us;
+        // The air part not known (kAirUnknown): the ground's only, and marked so.
+        const bool air = du->tx_processing_delay_us != kAirUnknown;
+        uint64_t tx_enc = air ? du->tx_encode_delay_us + hw_offset_us : 0;
+        uint64_t tx_proc = air ? du->tx_processing_delay_us : 0;
         
         // DEFAULT: Start with software submission time
         uint64_t disp_lat = (now > du->dec_end_ts) ? now - du->dec_end_ts : 0;
@@ -1468,7 +1472,8 @@ void Renderer::update_stats(DecodedUnit *du, uint64_t display_start_ts) {
         if (last_shown_pts_ >= 0 && (int64_t)du->pts > last_shown_pts_ + 1 && (int64_t)du->pts - last_shown_pts_ < 1000)
             skipped = (unsigned)((int64_t)du->pts - last_shown_pts_ - 1);
         if ((int64_t)du->pts > last_shown_pts_) last_shown_pts_ = (int64_t)du->pts;
-        add_latency_sample(tx_enc, tx_proc, dec_lat, disp_lat, total_lat, du->is_keyframe, skipped);
+        add_latency_sample(tx_enc, tx_proc, dec_lat, disp_lat, total_lat, du->is_keyframe, skipped,
+                           nullptr, 0, nullptr, nullptr, 0, 0, air);
     }
 
     // Each slice on its own: from its first row's capture to the scan-out
@@ -1635,7 +1640,7 @@ bool Renderer::whole_picture_sample(const SliceTimes &st, double period, int row
 void Renderer::add_latency_sample(uint64_t tx_enc, uint64_t tx_proc, uint64_t dec_lat,
                                   uint64_t disp_lat, uint64_t total_lat, bool key, unsigned skipped,
                                   const float* slice_ms, int nslices, const SliceLatency* waits,
-                                  const SliceStages* sl, uint64_t shown_us, uint64_t cap_us) {
+                                  const SliceStages* sl, uint64_t shown_us, uint64_t cap_us, bool air) {
     if (stats_.frame_counter >= Stats::kMaxFrames) return;
     const uint64_t now = get_time_us();
     uint64_t pace_lat = (stats_.last_frame_ts > 0 && now > stats_.last_frame_ts) ? now - stats_.last_frame_ts : 0;
@@ -1669,6 +1674,7 @@ void Renderer::add_latency_sample(uint64_t tx_enc, uint64_t tx_proc, uint64_t de
         };
         lf.shown_us = shown_us;
         lf.cap_us = cap_us;
+        lf.air = air ? 1 : 0;
         if (waits) {
             lf.processing_wait_ms = waits->enc_wait / 1000.0f;
             lf.net_wait_ms = waits->rf_wait / 1000.0f;

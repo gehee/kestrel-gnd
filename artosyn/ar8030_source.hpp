@@ -130,7 +130,12 @@ class Ar8030Source {
         static int  air_bw;
         static int  max_kbps;   // ar8030_max_kbps: the video bitrate cap sent at link-up, 0 = none
         static bool stream_decode;   // KESTREL_STREAM_DECODE / stream_decode: 0 (default on)
-        static int  max_bw_mhz; // ar8030_max_bw_mhz: the video link bandwidth cap sent at link-up, 20 or 40
+        static int  max_bw_mhz; // ar8030_max_bw_mhz: the video link bandwidth cap sent at link-up, 5/10/20/40, 0 AUTO (stock: 20 or 40)
+        static int  max_mcs;    // ar8030_max_mcs: Open8030 here, the highest MCS its receive policy may use (-1: none)
+        static int  steady;     // ar8030_steady: Open8030 here, a block sent again steps its MCS down (0/1)
+        static std::atomic<bool> caps_due;   // Open8030 here: send the caps (at link-up, from the menu)
+        static std::atomic<bool> caps_live;  // ... from the menu: AUTO / off sent too, to lift what was set
+        static int  radio_fw;   // ar8030_firmware: 0 stock, 1 Open8030 (bb_only.sh loads it with the radio)
         // ar8030_frame_mode (RADIO > Radio Frame): the TDD frame mode asked of
         // the radio at start and after every link-up, 2 short or 0 standard
         // (set_frame_mode()); frame_mode_changed: the menu changed it, send now.
@@ -384,6 +389,8 @@ class Ar8030Source {
         // the bandwidth-change events: BB_GET_STATUS reports the uplink's 2.5 MHz.
         std::atomic<int> video_bw_idx_{-1};
         std::atomic<int> stat_mcs_{-1}, stat_dist_{-1};
+        std::atomic<int> stat_snr_x10_{0};   // BB_GET_1V1_INFO self SNR, dB x 10 (stats thread)
+        std::atomic<int> stat_gains_{0};     // BB_GET_1V1_INFO gain_a | gain_b << 8 (per-antenna AGC)
         std::atomic<bool> stats_soon_{false};      // refresh the link figures early
     public:
         // ar_libre's event callbacks (on its reader thread): raw payloads.
@@ -500,10 +507,17 @@ class Ar8030Source {
         FrameClock frame_clock_;                // the radio clock to ~10-20 us, from the frame
         int64_t fc_min_d_ = INT64_MAX;          // fastest slice on it lately, us (frame count check)
         unsigned fc_n_ = 0, fc_count_gen_ = 0;
-        int fc_checks_ = 0;                     // windows left to check our count in
+        bool fc_fresh_ = false;                 // the first window after a count: acted on alone
+        int64_t fc_last_k_ = 0;                 // the window before's verdict (frames off)
+        bool fc_wait_ = false;                  // a shift asked for, not applied yet
+        unsigned fc_shifts_seen_ = 0;
         uint64_t fc_win_ms_ = 0;
         uint64_t ap_poll_ms_ = 0;
         uint64_t pic_cap_us_ = 0;        // the picture being received: its capture, our clock (0 = unknown)
+        bool     pic_air_unknown_ = false;   // ... and the radio clock to time it by not checked yet
+        bool     au_air_unknown_ = false;    // the open access unit: no air figure (kAirUnknown)
+        uint64_t air_known_ms_ = 0;          // the last picture with an air figure
+        bool     fc_verified_ = false;       // the frame clock's count checked by the slices since it was made
         uint32_t pic_enc_us_ = 0;        // and capture -> its first slice out of the encoder
         uint32_t au_enc_us_ = 0;         // the same for the open access unit; 0 with au_air_us estimated
         bool     au_measured_ = false;

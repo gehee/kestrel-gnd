@@ -80,6 +80,7 @@ typedef struct {
     int8_t   snr = 0;    // link SNR, dB
     uint8_t  mcs = 0;    // receive MCS
     int8_t   bw_idx = -1;   // the video link's bandwidth gear (ar_bw_label), -1: no link
+    uint8_t  air = 1;    // the air part is known (0: the radio clock not checked yet - no latency)
     uint8_t  key = 0;    // this picture was a keyframe
     uint16_t skipped = 0;   // pictures before this one that were never shown
     // When its top first went up (the vblank) and when it was captured, both
@@ -534,8 +535,11 @@ class OSD {
         float    serial_bps_ = 0;               // bytes a second
         float    serial_rate_ = 0;             // frames a second
         int menu_ar_maxbr = 0;     // index into kArMaxBrVals (0 = AUTO, no cap)
-        int menu_ar_maxbw = 1;     // index into kArMaxBwVals (1 = 40 MHz)
+        int menu_ar_maxbw = 4;     // index into kArMaxBwVals (0 = AUTO, 4 = 40 MHz)
         int menu_ar_frame = 0;     // index into kArFrameVals (0 = SHORT, mode 2)
+        int menu_ar_maxmcs = 0;    // RADIO > Max MCS: 0 AUTO, n = MCS n-1 (Open8030)
+        int menu_ar_steady = 0;    // RADIO > Steady Latency: 0 OFF, 1 ON (Open8030)
+        int menu_ar_fw = 0;        // RADIO > Radio Firmware: 0 STOCK, 1 OPEN8030
         int menu_cam_ev       = 3;  // index into kEvSteps below (3 = 0.0 EV)
         int menu_cam_sat      = 0;
         int menu_cam_contrast = 0;  // 0-15: the config packs it into a nibble
@@ -1057,6 +1061,7 @@ class OSD {
         // video header's capture timestamp against the BB_GET_AP_TIME clock -
         // the half stock shows that the baseband SDK does not expose.
         void set_air_delay(float ms) { air_delay_ms = ms; air_delay_valid = true; }
+        void clear_air_delay() { air_delay_valid = false; }
         // The air unit takes the Max Bandwidth cap (kestrel-air with the feature).
         void set_air_max_bw(bool yes) { air_max_bw_ = yes; }
         std::atomic<bool> air_max_bw_{false};

@@ -62,23 +62,37 @@ static const int kArChanVals[]   = { -1, 5740000, 5770000, 5805000, 5839000 };
 static const char* kArChanLabels[] = { "AUTO", "5740", "5770", "5805", "5839" };
 static const int kArChanCount = 5;
 // Max Bitrate: kestrel-air's video bitrate cap, kbps (0 = AUTO: it follows the
-// link, up to 20 Mbps). Below the link's own rate it buys a steadier picture
+// link, up to 20 Mbps; a cap above that lets kestrel-air go to it, 25 at most,
+// on a link that carries it - 40 MHz). Below the link's own rate it buys a steadier picture
 // and shorter slices on the air; stock air units ignore it.
-static const int kArMaxBrVals[]     = { 0, 6000, 8000, 10000, 12000, 15000, 18000 };
+static const int kArMaxBrVals[]     = { 0, 6000, 8000, 10000, 12000, 15000, 18000, 20000, 22000, 25000 };
 static const char* kArMaxBrLabels[] = { "AUTO", "6 Mbps", "8 Mbps", "10 Mbps", "12 Mbps",
-                                        "15 Mbps", "18 Mbps" };
-static const int kArMaxBrCount = 7;
+                                        "15 Mbps", "18 Mbps", "20 Mbps", "22 Mbps", "25 Mbps" };
+static const int kArMaxBrCount = 10;
 static int ar_maxbr_index(int kbps) {
     for (int i = 0; i < kArMaxBrCount; i++) if (kArMaxBrVals[i] == kbps) return i;
     return 0;
 }
-// Max Bandwidth: how wide kestrel-air may take the video link. It goes up to
-// 40 MHz by itself on a good link (more throughput, less margin, more of the
-// band taken); 20 keeps it there. Stock air units ignore it.
-static const int kArMaxBwVals[]     = { 20, 40 };
-static const char* kArMaxBwLabels[] = { "20 MHz", "40 MHz" };
-static const int kArMaxBwCount = 2;
-static int ar_maxbw_index(int mhz) { return mhz == 20 ? 0 : 1; }
+// Max Bandwidth: how wide the video link may go. The goggle's radio widens it
+// by itself on a good link (bw_auto), to 40 MHz with fpvOS's radio config -
+// more throughput and a shorter frame, less range - or 20 with its 20 MHz one
+// (bb_only.sh picks it from ar8030_max_bw_mhz). Any air unit follows. With
+// Open8030 on the goggle, AUTO (the radio's own config, nothing sent), 5 and
+// 10 too, taken live (SET 22).
+static const int kArMaxBwVals[]     = { 0, 5, 10, 20, 40 };
+static const char* kArMaxBwLabels[] = { "AUTO", "5 MHz", "10 MHz", "20 MHz", "40 MHz" };
+static const int kArMaxBwCount = 5;
+static int ar_maxbw_index(int mhz) { return mhz == 0 ? 0 : mhz == 5 ? 1 : mhz == 10 ? 2 : mhz == 20 ? 3 : 4; }
+// Max MCS (Open8030 on the goggle): the highest MCS its receive policy may
+// use - AUTO (none), or MCS 0..11. Lower: fewer blocks sent again (the radio
+// part's latency tail), less throughput.
+static const int kArMaxMcsCount = 13;   // AUTO, MCS 0..11
+static const char *ar_maxmcs_label(int i) {
+    static char b[8];
+    if (i <= 0) return "AUTO";
+    snprintf(b, sizeof(b), "MCS %d", i - 1);
+    return b;
+}
 // Radio Frame: the TDD frame mode asked of the radio (Ar8030Source::frame_mode).
 // SHORT, mode 2, is 3.25 ms at 40 MHz and 4.65 at 20; STANDARD, stock's mode
 // 0, is 4.23 and 5.63, with an uplink twice as long. For field tests.
@@ -86,6 +100,11 @@ static const int kArFrameVals[]     = { 2, 0 };
 static const char* kArFrameLabels[] = { "SHORT", "STANDARD" };
 static const int kArFrameCount = 2;
 static int ar_frame_index(int mode) { return mode == 0 ? 1 : 0; }
+// Radio Firmware: the baseband firmware the goggle's radio runs (bb_only.sh
+// uploads it from ar8030_firmware): Open8030 when it is installed (the
+// default), or stock's.
+static const char* kArFwLabels[] = { "STOCK", "OPEN8030" };
+static const int kArFwCount = 2;
 // DISPLAY > Refresh Sync's values (g_display_lock).
 static const char *refresh_sync_label(int v) {
     return v == 2 ? "FREE" : v == 1 ? "ON" : "OFF";
@@ -101,6 +120,8 @@ std::vector<std::pair<const char*, int>> OSD::ar_rf_items() const {
     // tune, so this row never looks at them.
     if (osd_vars.artosyn.state != 2) {
         v.push_back({"Bind", 9});
+        // Also unlinked: a firmware that does not link is the time to switch.
+        v.push_back({"Radio Firmware", 13});
         return v;
     }
     // Channel opens the channel page. Channel Hop (id 7) was the other half of
@@ -109,12 +130,17 @@ std::vector<std::pair<const char*, int>> OSD::ar_rf_items() const {
     // row index, so this order is free to change.
     if (rf_caps & 16) v.push_back({"Channel",   5});  // RF_CHAN, RF_HOP
     if (rf_caps & 1)  v.push_back({"TX Power",  1});  // RF_TX_POWER
-    // A kestrel-air command (sky cmd 0x41), not an rf_caps bit: only for an air
-    // unit that says it takes it.
-    if (air_max_bw_) v.push_back({"Max Bandwidth", 11});
+    // The goggle's radio config, so with any air unit (and still sent to a
+    // kestrel-air that takes it, sky cmd 0x41).
+    v.push_back({"Max Bandwidth", 11});
+    // Open8030 on the goggle: the MCS its receive policy may go up to.
+    if (Ar8030Source::radio_fw == 1) v.push_back({"Max MCS", 14});
+    // ... and steps it down on any block the air radio had to send again.
+    if (Ar8030Source::radio_fw == 1) v.push_back({"Steady Latency", 15});
     // The frame is the two radios' (SET 16 carries it to the air unit's), so
     // with any air unit.
     v.push_back({"Radio Frame", 12});
+    v.push_back({"Radio Firmware", 13});
     // MCS, Bandwidth and LNA Mode were removed rather than left visible.
     // BB_SET_MCS has no direction field, so it can only set our own transmit -
     // the video MCS is the air unit's choice, driven by the policy table in
@@ -4754,13 +4780,17 @@ std::vector<OSD::MenuItem> OSD::menu_items(int tab) const {
                 case 8: items.push_back({it.first, 1,
                     "Force the air unit's low-power standby on or off for now."}); break;
                 case 11: items.push_back({it.first, 1,
-                    "How wide the video link may go. At 40 it widens on a strong link "
-                    "for more bitrate; 20 keeps it narrower and steadier. "
-                    "Kestrel air units only."}); break;
+                    "How wide the video link may go. 40 widens it on a strong link: more "
+                    "bitrate, a shorter radio frame, less range. 20 reaches further. "
+                    "Enter applies it: the radio restarts, the picture is back in ~10 s."}); break;
                 case 12: items.push_back({it.first, 1,
                     "How long the radio's frame is. SHORT gets each slice out sooner; "
                     "STANDARD is stock's, with a longer, sturdier uplink. "
                     "HUD > Debug Info shows the frame in use."}); break;
+                case 13: items.push_back({it.first, 1,
+                    "The goggle radio's firmware: STOCK, or OPEN8030 (open source) when "
+                    "it is installed. Enter applies it: the radio restarts, the picture "
+                    "is back in ~10 s."}); break;
                 default: items.push_back({it.first, 1}); break;
             }
         }
@@ -4825,6 +4855,8 @@ std::vector<OSD::MenuItem> OSD::menu_items(int tab) const {
             items.push_back({"kestrel-air", 0, "fpvOS's air app: it runs the camera and the radio in "
                                                "place of Caddx's."});
             items.push_back({"Radio Driver", 0, "What drives the AR8030 radio on the air unit."});
+            items.push_back({"Radio Firmware", 0, "What runs on the air unit's AR8030 radio chip: the stock "
+                                                  "firmware, or Open8030, the open one (on a Lite+)."});
             items.push_back({"Kernel", 0, "The air unit's Linux kernel (the stock one)."});
             items.push_back({"Camera", 0, "The camera's image sensor."});
             // What it has on, as one comma-separated list: a row of type 4,
@@ -5209,8 +5241,14 @@ void OSD::menu_apply_change(int tab, int index, int dir) {
                    }
                    break;
                case 8: menu_ar_standby = menu_step(menu_ar_standby ? 1 : 0, dir, 2) != 0; break;  // forced on Enter
-               case 11: menu_ar_maxbw = menu_step(menu_ar_maxbw, dir, kArMaxBwCount); break;  // applied on Enter
+               case 11:   // applied on Enter; stock's radio: 20 or 40 only
+                   if (Ar8030Source::radio_fw == 1) menu_ar_maxbw = menu_step(menu_ar_maxbw, dir, kArMaxBwCount);
+                   else menu_ar_maxbw = menu_ar_maxbw == 4 ? 3 : 4;
+                   break;
+               case 14: menu_ar_maxmcs = menu_step(menu_ar_maxmcs, dir, kArMaxMcsCount); break;  // applied on Enter
+               case 15: menu_ar_steady = menu_ar_steady ? 0 : 1; break;  // applied on Enter
                case 12: menu_ar_frame = menu_step(menu_ar_frame, dir, kArFrameCount); break;  // applied on Enter
+               case 13: menu_ar_fw = menu_step(menu_ar_fw, dir, kArFwCount); break;  // applied on Enter
                default: break;
            }
        }
@@ -5491,6 +5529,15 @@ void OSD::menu_value_text(int tab, int i, char* val_buf, size_t cap) {
                 case 12:    // Radio Frame
                     sprintf(val_buf, "< %s >", kArFrameLabels[menu_ar_frame]);
                     break;
+                case 14:    // Max MCS
+                    sprintf(val_buf, "< %s >", ar_maxmcs_label(menu_ar_maxmcs));
+                    break;
+                case 15:    // Steady Latency
+                    sprintf(val_buf, "< %s >", menu_ar_steady ? "ON" : "OFF");
+                    break;
+                case 13:    // Radio Firmware
+                    sprintf(val_buf, "< %s >", kArFwLabels[menu_ar_fw]);
+                    break;
                 default: break;
             }
         }
@@ -5577,6 +5624,12 @@ void OSD::menu_value_text(int tab, int i, char* val_buf, size_t cap) {
                 if (a.hw > 0) snprintf(val_buf, cap, "%d.%d.%d", a.stock[0], a.stock[1], a.stock[2]);
                 else snprintf(val_buf, cap, "-.-.-");
                 return;
+            } else if (!strcmp(L, "Radio Firmware")) {
+                // What kestrel-air loaded (an older one does not say: --).
+                const std::string fw = a.get("radiofw");
+                if (fw == "open8030") v = "Open8030";
+                else if (fw == "stock") v = "Stock";
+                else v = fw;
             } else if (!strcmp(L, "fpvOS")) {
                 v = a.get("os");
             } else if (!strcmp(L, "kestrel-air")) {
@@ -5925,6 +5978,9 @@ void OSD::handle_key(int key) {
              menu_ar_maxbr = ar_maxbr_index(Ar8030Source::max_kbps);
              menu_ar_maxbw = ar_maxbw_index(Ar8030Source::max_bw_mhz);
              menu_ar_frame = ar_frame_index(Ar8030Source::frame_mode);
+             menu_ar_maxmcs = Ar8030Source::max_mcs < 0 ? 0 : Ar8030Source::max_mcs + 1;
+             menu_ar_steady = Ar8030Source::steady;
+             menu_ar_fw = Ar8030Source::radio_fw;
              menu_refresh_options();      // seeded: work out what row 0 shows
         }
         render_requested = true;
@@ -6163,6 +6219,18 @@ void OSD::handle_key(int key) {
                         case 12:
                             // Saved and sent to the radio now; again after every link-up.
                             cmd_cb(0x30A, kArFrameVals[menu_ar_frame]);
+                            break;
+                        case 14:
+                            // Saved and sent to our radio now; again after every link-up.
+                            cmd_cb(0x320, menu_ar_maxmcs - 1);
+                            break;
+                        case 15:
+                            // Saved and sent to our radio now; again after every link-up.
+                            cmd_cb(0x321, menu_ar_steady);
+                            break;
+                        case 13:
+                            // Saved; a change restarts the radio with that firmware.
+                            cmd_cb(0x309, menu_ar_fw);
                             break;
                         case 9:
                             // Bind. Parked for the RX thread - the menu runs on the

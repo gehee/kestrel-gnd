@@ -32,6 +32,8 @@ extern "C" const char* arlink_version(void) __attribute__((weak));
 extern "C" uint64_t arlink_socket_rx_ns(int sockfd) __attribute__((weak));
 extern "C" int arlink_socket_read_now(int sockfd, void *buf, uint32_t len) __attribute__((weak));
 extern "C" int arlink_socket_poll_fd(int sockfd) __attribute__((weak));
+extern "C" int arlink_request(uint32_t request_code, const void *in, uint32_t inlen, void *out,
+                              uint32_t outcap, uint32_t *got, int timeout_ms) __attribute__((weak));
 static bool on_ar_libre() { return arlink_version != nullptr; }
 
 // A socket's own file to poll(), where ar_libre has one (-1: none, or
@@ -435,6 +437,11 @@ int Ar8030Source::standby_mode = -1;
 int Ar8030Source::air_bw        = -1;
 int Ar8030Source::max_kbps      = 0;
 int Ar8030Source::max_bw_mhz    = 40;
+int Ar8030Source::max_mcs       = -1;
+int Ar8030Source::steady        = 0;
+std::atomic<bool> Ar8030Source::caps_due{true};
+std::atomic<bool> Ar8030Source::caps_live{false};
+int Ar8030Source::radio_fw      = 0;
 int Ar8030Source::frame_mode    = 2;
 std::atomic<bool> Ar8030Source::frame_mode_changed{false};
 int Ar8030Source::replay_stock_rf = 1;
@@ -554,6 +561,8 @@ void Ar8030Source::on_link_event(const uint8_t* p) {
         clear_air_info();
     }
     printf("ar8030: event: link state %u -> %u\n", p[2], p[1]);
+    if (p[1] == 2) frame_clock_.reframe();   // a new link, its own frame
+    if (p[1] == 2) caps_due.store(true);     // the menu's caps again on it
     if (osd) {
         osd->update_artosyn_link_state(p[1]);
         osd->signal_render(prof::kWakeLink);
@@ -583,6 +592,9 @@ void Ar8030Source::on_logged_event(int ev, const uint8_t* p) {
     if (ev == 12) {
         bw_change_ms_.store(now_ms());
         if (p[2] <= 5) video_bw_idx_.store(p[2]);
+        // Only a step to or from 40 MHz (gear 5) changes the radio's frame: 5,
+        // 10 and 20 MHz share theirs, and a search across a step only fails.
+        if (p[2] == 5 || p[3] == 5) frame_clock_.reframe();
     }
 }
 
@@ -1691,6 +1703,7 @@ void Ar8030Source::set_frame_mode() {
     uint8_t buf[16] = { (uint8_t)frame_mode };
     printf("ar8030: radio frame mode %d (%s) -> %d\n", frame_mode, frame_mode == 2 ? "short" : "standard",
            ar_ioctl(dev, (2 << 24) | 16, buf, NULL));
+    frame_clock_.reframe();                   // another frame, if it was not on it
 }
 
 void Ar8030Source::send_prj_rf_config() {
@@ -2427,6 +2440,19 @@ void Ar8030Source::publish_chan_scan() {
         }
     }
     sc.last_update_ms = now;
+    // Tests: while /tmp/kestrel-scandump exists, each scan read is printed
+    // (MHz:dBm per channel), to compare radio firmwares.
+    if (access("/tmp/kestrel-scandump", F_OK) == 0) {
+        std::string line = "[scandump]";
+        char b[24];
+        snprintf(b, sizeof b, " auto=%d acs=%d", ci.auto_mode, ci.acs_chan);
+        line += b;
+        for (int i = 0; i < n; i++) {
+            snprintf(b, sizeof b, " %d:%d", sc.freq_mhz[i], sc.power_dbm[i]);
+            line += b;
+        }
+        printf("%s\n", line.c_str());
+    }
     // Only log once the table looks real: right after the socket opens the
     // radio has not populated it yet, which is where "link=0MHz" and absurd
     // dBm values come from (the old RPC client logged the same garbage).
@@ -2468,6 +2494,8 @@ void Ar8030Source::publish_link_stats() {
     bb_get_1v1_info_out_t &info = info_buf.info;
     if (ar_ioctl(dev, BB_GET_1V1_INFO, &info_in, &info_buf) == 0) {
         st.snr        = to_db(info.self.snr);
+        stat_snr_x10_.store((int)(st.snr * 10.0f + 0.5f));
+        stat_gains_.store(info.self.gain_a | info.self.gain_b << 8);
         st.snr_raw    = info.self.snr;
         st.mcs        = info.self.tx_mcs;
         st.power      = info.self.tx_power;
@@ -2802,6 +2830,24 @@ void Ar8030Source::start_stats() {
     }
     link_state_.store(-1);
     stats_thread = std::thread(&Ar8030Source::stats_run, this);
+    // Open8030 on our radio: its frame info (the air radio's clock from the
+    // frame stamps). A radio that does not answer is asked again only every
+    // 30 s, so the frame clock's steps keep their pace.
+    if (radio_fw == 1 && arlink_request)
+        frame_clock_.set_info([](FrameStampInfo *si) {
+            static int fails = 0;
+            static uint64_t quiet_until = 0;
+            const uint64_t t = now_ms();
+            if (t < quiet_until) return -1;
+            uint32_t got = 0;
+            // A firmware without the later fields (retries, steady mode: Open8030
+            // main has the frame stamps without them) answers shorter: they read 0.
+            memset(si, 0, sizeof(*si));
+            const int rc = arlink_request(0x0c5a0035, nullptr, 0, si, sizeof(*si), &got, 300);
+            if (rc == 0 && got >= offsetof(FrameStampInfo, retries) && si->version >= 1) { fails = 0; return 0; }
+            if (++fails >= 3) { fails = 0; quiet_until = t + 30000; }
+            return -1;
+        });
     frame_clock_.start(
         [this](uint8_t *b) {
             bb_dev_handle_t *dev = (bb_dev_handle_t *)bb_dev;
@@ -2977,12 +3023,14 @@ void Ar8030Source::update_stats(size_t frame_size) {
             // Cached by publish_link_stats(), on the stats thread.
             printf("ar8030: rx=%llu bytes nals=%llu frames=%llu lost=%llu telemetry_drained=%llu"
                    " msp=%llu mcs=%d bw=%s MHz link=%.2f Mbps video=%.2f Mbps dist=%d"
-                   " air=%.1fms stale=%llu foreign=%llu\n",
+                   " air=%.1fms stale=%llu foreign=%llu snr=%.1fdB freq=%d gains=%d/%d\n",
                    total_bytes, nal_count, (unsigned long long)frames_seen, frames_lost,
                    ctrl_bytes,
                    msp_bytes, mcs >= 0 ? ar_mcs_label(mcs) : -99, ar_bw_label(last_bw_idx.load()), last_link_kbps.load() / 1000.0,
                    video_bw / 125000.0, dist_m,
-                   air_delay_ms < 0.0f ? 0.0f : air_delay_ms, stale_pics, foreign_slices);
+                   air_delay_ms < 0.0f ? 0.0f : air_delay_ms, stale_pics, foreign_slices,
+                   stat_snr_x10_.load() / 10.0, link_freq_mhz,
+                   stat_gains_.load() & 255, stat_gains_.load() >> 8);
         }
         bytes_received = 0;
     }
@@ -3179,7 +3227,7 @@ void Ar8030Source::note_air_announce(bool ka, uint8_t proto, uint8_t feat) {
         // too when 40: an air unit that kept a 20 must hear it is lifted -
         // but only to one that widens the link at all (the feature).
         if (max_kbps > 0) request_setting(CAM_MAX_KBPS, max_kbps);
-        if (feat & kAirFeatMaxBw) request_setting(CAM_MAX_BW, max_bw_mhz);
+        if (feat & kAirFeatMaxBw) request_setting(CAM_MAX_BW, max_bw_mhz == 0 ? 40 : max_bw_mhz);
     } else {
         printf("ar8030: the air unit is the stock air app (no kestrel-air announcement in its "
                "version message): latency timed from its packet stamps (whole ms), no "
@@ -3247,6 +3295,49 @@ void Ar8030Source::poll_ap_time() {
     }
 }
 
+// Tests, Open8030 on our radio: while /tmp/kestrel-o8030diag exists, once a
+// second its receive MCS policy (request 0x0c5a001e: the row it is on, the
+// MCS it sees, its requests and their answers, the samples it counted bad)
+// and the packets its receiver refused (0x0c5a0017: invalid, the MAC's, and
+// drops - flagged, its 4-deep queue full, other), the counts since the last
+// line. The policy takes refused packets for errors.
+static void open8030_diag_poll() {
+    static uint64_t last = 0;
+    static uint32_t p_req, p_ack, p_to, p_inv, p_mac, p_fl, p_busy, p_oth;
+    if (!arlink_request || access("/tmp/kestrel-o8030diag", F_OK) != 0) return;
+    const uint64_t t = now_ms();
+    if (t - last < 1000) return;
+    last = t;
+    struct {
+        uint32_t samples, requests, acknowledgements, unsolicited, timeouts;
+        uint32_t advertisements, cancellations, state, current, previous, observed;
+        uint32_t average_snr, bad_samples, recent_bad, sample_ms, request_ms, direction_ms;
+        uint32_t rest[64];
+    } m;
+    static uint8_t rx[4096];
+    uint32_t n = 0, nr = 0;
+    memset(&m, 0, sizeof(m));
+    if (arlink_request(0x0c5a001e, nullptr, 0, &m, sizeof(m), &n, 1000) < 0 || n < 68) return;
+    if (arlink_request(0x0c5a0017, nullptr, 0, rx, sizeof(rx), &nr, 1000) < 0 || nr < 4096) nr = 0;
+    auto u32 = [&](size_t o) { uint32_t v; memcpy(&v, rx + o, 4); return v; };
+    const uint32_t inv = nr ? u32(108) : 0, mac = nr ? u32(2104) : 0, fl = nr ? u32(4084) : 0,
+                   busy = nr ? u32(4088) : 0, oth = nr ? u32(4092) : 0;
+    auto mcs = [](uint32_t internal) { return internal < 25 ? (int)internal - 2 : 99; };
+    // The frame stamps (0x0c5a0035): flags, taken / refused, the last's residual.
+    FrameStampInfo fs{};
+    uint32_t nf = 0;
+    const int frc = arlink_request(0x0c5a0035, nullptr, 0, &fs, sizeof(fs), &nf, 500);
+    printf("o8030: mcs %d (sees %d) snr %u pending %u | req +%u ack +%u timeout +%u | bad %u/8 recent %u | "
+           "refused: invalid +%u mac +%u flagged +%u busy +%u other +%u | stamps rc %d flags %u taken %u refused %u "
+           "residual %d us frames %u since %u us | retries %u, steady %u, steps down %u\n",
+           mcs(m.current), mcs(m.observed), m.average_snr, (m.state >> 3) & 1, m.requests - p_req,
+           m.acknowledgements - p_ack, m.timeouts - p_to, m.bad_samples, m.recent_bad, inv - p_inv, mac - p_mac,
+           fl - p_fl, busy - p_busy, oth - p_oth, frc, fs.flags, fs.taken, fs.rejected, fs.residual_us, fs.frames,
+           fs.since_us, fs.retries, fs.steady, fs.retry_steps);
+    p_req = m.requests; p_ack = m.acknowledgements; p_to = m.timeouts;
+    p_inv = inv; p_mac = mac; p_fl = fl; p_busy = busy; p_oth = oth;
+}
+
 // Experiment: `echo G > /tmp/bw.req` puts the video link on bandwidth gear G
 // (bb_bandwidth_e, 0..5 = 1.25, 2.5, 5, 10, 20, 40 MHz; bb_config_*.json starts
 // it, the "br" link, at 5 MHz = 2). The air unit is the AP and transmits the
@@ -3262,6 +3353,53 @@ void Ar8030Source::bw_poll() {
     const uint64_t t = now_ms();
     if (!dev || t - last < 500) return;
     last = t;
+    if (radio_fw == 1) open8030_diag_poll();
+    // Open8030 here: the menu's caps (RADIO > Max Bandwidth, Max MCS) on the
+    // link - the widest it may go (SET 22, what our radio asks the air's for;
+    // live, no restart) and the highest MCS our receive policy may use
+    // (request 0x0c5a0036). Our radio keeps both until changed; sent again at
+    // every link-up all the same. Every 2 s until all are taken (SET 22 waits
+    // for the link); -95 (a radio without the request) counts as taken.
+    // AUTO / off: nothing sent at link-up, the radio runs on its own config;
+    // chosen from the menu, sent once (40 MHz, MCS none, steady off) to lift
+    // what was set before.
+    if (radio_fw == 1 && caps_due.load() && link_state_.load() == 2 && arlink_request) {
+        static uint64_t tried = 0;
+        if (t - tried >= 2000) {
+            tried = t;
+            const bool live = caps_live.load();
+            const int mhz = max_bw_mhz;
+            int rc_bw = 1, rc_mcs = 1, rc_st = 1;   // 1: not sent
+            if (mhz > 0 || live) {
+                const uint8_t gear = mhz == 0 || mhz >= 40 ? 5 : mhz >= 20 ? 4 : mhz >= 10 ? 3 : 2;
+                bb_set_bandwidth_t p;
+                memset(&p, 0, sizeof(p));
+                p.slot = BB_SLOT_AP;
+                p.dir = BB_DIR_RX;
+                p.bandwidth = gear;
+                rc_bw = ar_ioctl(dev, BB_SET_BANDWIDTH, &p, NULL);
+            }
+            uint32_t got = 0;
+            if (max_mcs >= 0 || live) {
+                const uint8_t cap = max_mcs < 0 ? 0xff : (uint8_t)(int8_t)max_mcs;
+                rc_mcs = arlink_request(0x0c5a0036, &cap, 1, nullptr, 0, &got, 500);
+            }
+            if (steady || live) {
+                const uint8_t st = steady ? 1 : 0;
+                rc_st = arlink_request(0x0c5a0037, &st, 1, nullptr, 0, &got, 500);
+            }
+            auto rc = [](int r) { return r == 1 ? std::string("not sent") : std::to_string(r); };
+            printf("ar8030: caps: %s (SET 22 -> %s), MCS %s (-> %s), steady latency %s (-> %s)\n",
+                   mhz ? ("up to " + std::to_string(mhz) + " MHz").c_str() : "AUTO", rc(rc_bw).c_str(),
+                   max_mcs < 0 ? "AUTO" : std::to_string(max_mcs).c_str(), rc(rc_mcs).c_str(),
+                   steady ? "on" : "off", rc(rc_st).c_str());
+            auto taken = [](int r) { return r == 0 || r == 1 || r == -95; };
+            if (taken(rc_bw) && taken(rc_mcs) && taken(rc_st)) { caps_due.store(false); caps_live.store(false); }
+        }
+    }
+    // The widest the link may go with a stock air radio (it drops and re-forms
+    // the link at every step to or from 40 MHz) is our Open8030 radio's own
+    // call: it keeps to 20 MHz until the air radio's frame stamps say Open8030.
     // Tests: /tmp/kestrel-frame-mode holding 0, 1 or 2 asks the radio for
     // that TDD frame (SET order 16, see set_frame_mode()): both ends change
     // together; it holds until the next link-up puts 2 back. At 20 MHz
@@ -3275,6 +3413,71 @@ void Ar8030Source::bw_poll() {
         if (m >= 0 && m <= 2) {
             uint8_t buf[16] = { (uint8_t)m };
             printf("ar8030: /tmp/kestrel-frame-mode: %d -> %d\n", m, ar_ioctl(dev, (2 << 24) | 16, buf, NULL));
+            frame_clock_.reframe();
+        }
+    }
+    // Tests: /tmp/kestrel-regwrite holding "offset mask value" (hex) changes
+    // those bits of one baseband register (0x0a110000 + offset) through
+    // GET/SET 100, for A/B tests of radio settings. Logs before and after.
+    if (FILE *f = fopen("/tmp/kestrel-regwrite", "r")) {
+        unsigned off = 0, mask = 0, val = 0;
+        const int n = fscanf(f, "%x %x %x", &off, &mask, &val);
+        fclose(f);
+        unlink("/tmp/kestrel-regwrite");
+        if (n == 3 && off < 0x1000 && !(off & 3)) {
+            uint8_t in[4] = {(uint8_t)off, (uint8_t)(off >> 8), 4, 0}, out[256] = {0};
+            if (ar_ioctl(dev, 0x01000064, in, out) == 0) {
+                uint32_t before = out[0] | out[1] << 8 | out[2] << 16 | (uint32_t)out[3] << 24;
+                uint32_t after = (before & ~mask) | (val & mask);
+                uint8_t w[260] = {(uint8_t)off, (uint8_t)(off >> 8), 4, 0,
+                                  (uint8_t)after, (uint8_t)(after >> 8), (uint8_t)(after >> 16), (uint8_t)(after >> 24)};
+                const int rc = ar_ioctl(dev, 0x02000064, w, NULL);
+                printf("ar8030: /tmp/kestrel-regwrite 0x%03x: 0x%08x -> 0x%08x (rc %d)\n", off, before, after, rc);
+            }
+        }
+    }
+    // Tests: touching /tmp/kestrel-regdump writes the whole baseband register
+    // block (0x0a110000..0x0a110fff, GET 100 in 256-byte reads) to
+    // /tmp/kestrel-regs.txt, one "offset value" line per word, to diff radio
+    // firmwares on a live link.
+    if (access("/tmp/kestrel-regdump", F_OK) == 0) {
+        unlink("/tmp/kestrel-regdump");
+        if (FILE *o = fopen("/tmp/kestrel-regs.txt", "w")) {
+            for (unsigned off = 0; off < 0x1000; off += 256) {
+                uint8_t in[4] = {(uint8_t)off, (uint8_t)(off >> 8), 0, 1}, out[256] = {0};
+                if (ar_ioctl(dev, 0x01000064, in, out) != 0) { fprintf(o, "0x%03x FAIL\n", off); continue; }
+                for (unsigned w = 0; w < 256; w += 4)
+                    fprintf(o, "0x%03x %08x\n", off + w,
+                            out[w] | out[w + 1] << 8 | out[w + 2] << 16 | (uint32_t)out[w + 3] << 24);
+            }
+            fclose(o);
+            printf("ar8030: /tmp/kestrel-regdump -> /tmp/kestrel-regs.txt\n");
+        }
+    }
+    // Tests: /tmp/kestrel-airpower holding a value sets the air unit's TX
+    // power to it as the menu does (sky cmd 0x22): mW from stock's levels, or
+    // under 20 dBm (9..19 - kestrel-air retries a level its radio refuses).
+    // Not saved here; the air unit keeps it until the next one.
+    if (FILE *f = fopen("/tmp/kestrel-airpower", "r")) {
+        int v = 0;
+        if (fscanf(f, "%d", &v) != 1) v = 0;
+        fclose(f);
+        unlink("/tmp/kestrel-airpower");
+        if ((v >= 9 && v < 20) || v == 25 || v == 100 || v == 200 || v == 500) {
+            printf("ar8030: /tmp/kestrel-airpower: %d %s\n", v, v < 20 ? "dBm" : "mW");
+            request_setting(CAM_PWR, v);
+        }
+    }
+    // Tests: /tmp/kestrel-chan holding a frequency in MHz moves the link there
+    // exactly as OK on the channel page does; -1 hands it back to AUTO.
+    if (FILE *f = fopen("/tmp/kestrel-chan", "r")) {
+        int mhz = 0;
+        if (fscanf(f, "%d", &mhz) != 1) mhz = 0;
+        fclose(f);
+        unlink("/tmp/kestrel-chan");
+        if (mhz == -1 || (mhz >= 2000 && mhz <= 7000)) {
+            printf("ar8030: /tmp/kestrel-chan: %d\n", mhz);
+            request_rf(RF_CHAN, mhz < 0 ? -1 : mhz * 1000);
         }
     }
     auto set_ours = [&](int g) {
@@ -3328,7 +3531,7 @@ void Ar8030Source::bw_poll() {
 // 30 (whole ms). Without byte 2 both ends read the clock in whole ms, so a
 // picture is good to about 1 ms; with it, to the two offsets' noise.
 void Ar8030Source::note_ap_delay(const uint8_t *hdr, size_t len, bool new_pic) {
-    if (new_pic) pic_cap_us_ = 0;
+    if (new_pic) { pic_cap_us_ = 0; pic_air_unknown_ = false; }
     hdr_out_us_ = 0;
     if (len >= 18) {
         const uint32_t h = (uint32_t)(hdr[16] | (hdr[17] << 8)), fps = hdr[9];
@@ -3374,15 +3577,37 @@ void Ar8030Source::note_ap_delay(const uint8_t *hdr, size_t len, bool new_pic) {
     // the 3.25 ms frame (40 MHz, mode 2), 5.1-5.9 at 20 MHz (a block written
     // just in time, its airtime, the radio's lead and hand-over). The window
     // was half a frame to one and a half, which on 3.25 ms ends at 4.9.
-    // Three 2 s windows, then left alone.
+    // With Open8030 at both ends the fastest comes sooner: 1.93 ms seen on the
+    // 3.25 ms frame (2026-10-18), and a floor of 2.4 moved a right count a frame
+    // off. 1.5 ms holds both: one frame from it covers stock's 3.6-4.1 there,
+    // 4.65-4.92 on 4650.88 and 5.1-5.9 on 5633.92.
+    static constexpr double kFastestSliceUs = 1500;
+    // 2 s windows, all the time: the first after a count is acted on alone,
+    // later ones when two in a row say the same (one window's fastest can be
+    // a stray). After a shift, nothing until the frame clock has taken it:
+    // a window across the shift held slices from both sides, and the old
+    // side asked for the same shift again (2026-10-18: +217 frames twice,
+    // then a window on the right side for a moment said all was well - the
+    // clock was left 705 ms off).
     if (frame_clock_.count_gen() != fc_count_gen_) {
         fc_count_gen_ = frame_clock_.count_gen();
-        fc_checks_ = 3;
+        fc_verified_ = false;
+        fc_fresh_ = true;
+        fc_last_k_ = 0;
         fc_min_d_ = INT64_MAX;
         fc_n_ = 0;
         fc_win_ms_ = 0;
     }
-    if (on_frame && fine && fc_checks_ > 0) {
+    if (fc_wait_ && frame_clock_.shifts_taken() != fc_shifts_seen_) {
+        fc_wait_ = false;
+        fc_min_d_ = INT64_MAX;
+        fc_n_ = 0;
+        fc_win_ms_ = 0;
+    }
+    // Only slices that waited under 1 ms in the air unit's queue: on a slow
+    // link they queue there, and the fastest is late for real.
+    const int64_t queued = ka ? u16(37) : 0;
+    if (on_frame && fine && !fc_wait_ && queued < 1000) {
         fc_min_d_ = std::min(fc_min_d_, d);
         fc_n_++;
         const uint64_t tm = here / 1000;
@@ -3390,11 +3615,26 @@ void Ar8030Source::note_ap_delay(const uint8_t *hdr, size_t len, bool new_pic) {
         if (tm - fc_win_ms_ >= 2000) {
             const double T = frame_clock_.frame_period();
             if (fc_n_ >= 100 && T > 0) {
-                const int64_t k = (int64_t)std::floor(((double)fc_min_d_ - 2400) / T);
-                printf("ar8030: frame clock: fastest slice %.2f ms%s\n", fc_min_d_ / 1000.0,
-                       k ? ", so our count of edges is off" : "");
-                if (k) frame_clock_.shift(-k);
-                fc_checks_--;
+                const int64_t k = (int64_t)std::floor(((double)fc_min_d_ - kFastestSliceUs) / T);
+                // On the frame stamps nothing is counted: a slice out of the
+                // window is said, never acted on.
+                const bool act = k && (fc_fresh_ || k == fc_last_k_) && !frame_clock_.exact();
+                if (k || fc_fresh_)
+                    printf("ar8030: frame clock: fastest slice %.2f ms%s\n", fc_min_d_ / 1000.0,
+                           act ? ", so our count of edges is off"
+                           : k && frame_clock_.exact() ? " (on the frame stamps: left alone)"
+                           : k ? " (once: checked again)" : "");
+                if (act) {
+                    fc_shifts_seen_ = frame_clock_.shifts_taken();
+                    fc_wait_ = true;
+                    frame_clock_.shift(-k);
+                    fc_last_k_ = 0;
+                    fc_verified_ = false;
+                } else {
+                    fc_last_k_ = k;
+                    if (!k) fc_verified_ = true;
+                }
+                fc_fresh_ = false;
             }
             fc_min_d_ = INT64_MAX;
             fc_n_ = 0;
@@ -3402,6 +3642,14 @@ void Ar8030Source::note_ap_delay(const uint8_t *hdr, size_t len, bool new_pic) {
         }
     }
     const int64_t enc = ka ? u16(35) : (int64_t)hdr[30] * 1000;
+    // With kestrel-air's frame (the frame clock in play), its figures only
+    // once the count is checked: before that our count can be frames off (a
+    // first count from our radio's copy of the radio clock, 43-750 ms off
+    // under Open8030), and a wrong figure is worse than none.
+    if (frame_clock_.air_known() && !(on_frame && (fc_verified_ || frame_clock_.exact()))) {
+        pic_air_unknown_ = true;
+        return;
+    }
     const int64_t queue = ka ? u16(37) : 0;
     if (ka && (hdr[32] & 0x40)) ap_enc_last_.push_back((uint32_t)enc);
     // Not while a link-up's resync drops the pictures: those slices sat in
@@ -3745,12 +3993,21 @@ void Ar8030Source::emit_nal(const uint8_t* nal, size_t len) {
                 // this picture, the floor estimate otherwise.
                 au_measured_ = pic_cap_us_ && recv_us > pic_cap_us_ &&
                                recv_us - pic_cap_us_ < 1000000;
+                au_air_unknown_ = false;
                 if (au_measured_) {
                     au_air_us = (uint32_t)(recv_us - pic_cap_us_);
                     au_enc_us_ = std::min(std::min(pic_enc_us_, au_air_us), 0xffffu);
                     const float ms = (float)au_air_us / 1000.0f;
                     air_delay_ms = (air_delay_ms < 0.0f) ? ms : 0.95f * air_delay_ms + 0.05f * ms;
                     if (osd) osd->set_air_delay(air_delay_ms);
+                    air_known_ms_ = now_ms();
+                } else if (pic_air_unknown_) {
+                    // The radio clock not checked yet: no air figure at all (the
+                    // HUD shows the ground's part only after a second of these).
+                    au_air_us = 0;
+                    au_enc_us_ = 0;
+                    au_air_unknown_ = true;
+                    if (osd && now_ms() - air_known_ms_ > 1000) osd->clear_air_delay();
                 } else {
                     au_air_us = air_delay_for(recv_us);
                     au_enc_us_ = 0;
@@ -3772,6 +4029,7 @@ void Ar8030Source::emit_nal(const uint8_t* nal, size_t len) {
                     au_times_->pts = (int64_t)frame_pts;
                 }
                 pic_cap_us_ = 0;   // one picture, one capture
+                pic_air_unknown_ = false;
                 au_pts = frame_pts;
                 au_nal_type = nal_type;   // picture key-ness (IDR vs trailing)
                 au_first_recv_us = recv_us;  // zero point for this picture
@@ -4031,7 +4289,7 @@ void Ar8030Source::feed_au(const uint8_t *data, size_t len, int stream_slices) {
     // capture. The screen's own delay is not counted: the figure ends at
     // the vblank the picture goes out on.
     const uint32_t enc_us = au_air_us ? au_enc_us_ : 0;
-    const uint32_t proc_us = au_air_us - au_enc_us_;
+    const uint32_t proc_us = au_air_unknown_ ? kAirUnknown : au_air_us - au_enc_us_;
     vdec->set_next_slice_times(au_times_);
     if (stream_slices > 1)
         vdec->stream_start((void *)data, (int)len, au_pts, au_recv, au_nal_type,

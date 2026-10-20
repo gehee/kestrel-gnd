@@ -240,7 +240,7 @@ void OSD::stats_history_update(uint64_t now) {
         sf.wait[0] = f.processing_wait_ms; sf.wait[1] = f.net_wait_ms;
         sf.wait[2] = f.dec_wait_ms; sf.wait[3] = f.disp_wait_ms;
         sf.video_mbps = f.video_mbps; sf.link_mbps = f.rf_mbps;
-        sf.lost = f.lost; sf.snr = f.snr; sf.mcs = f.mcs; sf.bw = f.bw_idx; sf.key = f.key; sf.skipped = f.skipped;
+        sf.lost = f.lost; sf.snr = f.snr; sf.mcs = f.mcs; sf.bw = f.bw_idx; sf.air = f.air; sf.key = f.key; sf.skipped = f.skipped;
         sf.shown_us = f.shown_us; sf.cap_us = f.cap_us;
         sf.nslices = f.nslices;
         for (int s = 0; s < kLatSlices; s++) { sf.slice_ms[s] = f.slice_ms[s]; sf.sl[s] = f.sl[s]; }

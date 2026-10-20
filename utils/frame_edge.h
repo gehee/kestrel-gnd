@@ -122,6 +122,32 @@ static double fe_refine(const double *x, const uint8_t *v, int nf, double c, dou
     return (T + t_hi) / 2;
 }
 
+// The video part's end nearest the middle of the reads, the period known:
+// from its middle (it is one run) and length - by time, not by reads: they
+// come back faster in some parts than in others.
+static double fe_video_end(const fe_read *r, int n, uint32_t cap, double T) {
+    const uint64_t base = r[0].t0;
+    enum { B = 128 };
+    int h[B][2];
+    memset(h, 0, sizeof(h));
+    double sx = 0, sy = 0;
+    for (int i = 0; i < n; i++) {
+        if (r[i].rtt > cap) continue;
+        const double ph = fmod((double)(r[i].t0 - base), T);
+        h[(int)(ph / T * B) % B][r[i].video ? 1 : 0]++;
+        if (!r[i].video) continue;
+        sx += cos(ph / T * 2 * M_PI); sy += sin(ph / T * 2 * M_PI);
+    }
+    int vb = 0;
+    for (int b = 0; b < B; b++) vb += h[b][1] > h[b][0];
+    double mid = atan2(sy, sx) / (2 * M_PI) * T;
+    if (mid < 0) mid += T;
+    const double vlen = (double)vb / B * T;
+    const double t_mid = ((double)r[0].t0 + (double)r[n - 1].t0) / 2;
+    double E = (double)base + mid + vlen / 2;
+    return E + floor((t_mid - E) / T + 0.5) * T;
+}
+
 // From reads over a second or more: the frame's period on our clock and the
 // time of a video part's end near the newest read. 0: found.
 static int fe_acquire(const fe_read *r, int n, double *T_out, double *E_out, double *purity_out) {
@@ -161,30 +187,10 @@ static int fe_acquire(const fe_read *r, int n, double *T_out, double *E_out, dou
     free(x);
     if (purity_out) *purity_out = best;
     if (best < 0.95) return -2;
-    // The video part's middle (it is one run) and length, so its end - by
-    // time, not by reads: they come back faster in some parts than in others.
-    const uint64_t base = r[0].t0;
-    enum { B = 128 };
-    int h[B][2];
-    memset(h, 0, sizeof(h));
-    double sx = 0, sy = 0;
-    for (int i = 0; i < n; i++) {
-        if (r[i].rtt > cap) continue;
-        const double ph = fmod((double)(r[i].t0 - base), T);
-        h[(int)(ph / T * B) % B][r[i].video ? 1 : 0]++;
-        if (!r[i].video) continue;
-        sx += cos(ph / T * 2 * M_PI); sy += sin(ph / T * 2 * M_PI);
-    }
-    int vb = 0;
-    for (int b = 0; b < B; b++) vb += h[b][1] > h[b][0];
-    double mid = atan2(sy, sx) / (2 * M_PI) * T;
-    if (mid < 0) mid += T;
-    const double vlen = (double)vb / B * T;
     // Then the edge in each quarter of the reads: a line through those gives
     // the period's error (its slope) and the edge (its middle). Twice.
     const double t_mid = ((double)r[0].t0 + (double)r[n - 1].t0) / 2;
-    double E = (double)base + mid + vlen / 2;
-    E += floor((t_mid - E) / T + 0.5) * T;
+    double E = fe_video_end(r, n, cap, T);
     for (int pass = 0; pass < 2; pass++) {
         double sx = 0, sy = 0, sxx = 0, sxy = 0;
         int k = 0;
@@ -203,6 +209,42 @@ static int fe_acquire(const fe_read *r, int n, double *T_out, double *E_out, dou
     }
     E += floor(((double)r[n - 1].t0 - E) / T) * T;
     *T_out = T;
+    *E_out = E;
+    return 0;
+}
+
+// The frames it can be, us: modes 0, 1, 2 (SET 16) at 5-20 MHz, then at 40
+// (the table above).
+static const double fe_frames[6] = { 5633.92, 7964.80, 4650.88, 4233.60, 5398.40, 3250.56 };
+
+// With the period known (T, on our clock - a frame of the table on a clock
+// whose rate against the radio's is known): the edge near the newest read
+// from reads over a few dozen frames, a quarter of a second, and how well T
+// sorts them. 0: found.
+#define FE_PHASE_US 250000
+static int fe_phase(const fe_read *r, int n, double T, double *E_out, double *purity_out) {
+    *purity_out = 0;
+    if (n < 60) return -1;
+    const uint32_t cap = fe_fast_cap(r, n);
+    double *x = (double *)malloc((sizeof(double) + 1) * (size_t)n);
+    if (!x) return -3;
+    uint8_t *v = (uint8_t *)(x + n);
+    int nf = 0;
+    uint64_t t0 = 0;
+    for (int i = 0; i < n; i++) {
+        if (r[i].rtt > cap) continue;
+        if (!nf) t0 = r[i].t0;
+        x[nf] = (double)(r[i].t0 - t0);
+        v[nf++] = r[i].video ? 1 : 0;
+    }
+    const double p = nf >= 30 ? fe_purity(x, v, nf, T, 32) : 0;
+    free(x);
+    *purity_out = p;
+    if (p < 0.95) return -2;
+    double E = fe_video_end(r, n, cap, T), s, w;
+    if (fe_measure(r, n, E, T, &s, &w)) return -4;
+    E += s;
+    E += floor(((double)r[n - 1].t0 - E) / T) * T;
     *E_out = E;
     return 0;
 }

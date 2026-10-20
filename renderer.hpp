@@ -287,7 +287,8 @@ class Renderer {
                                 uint64_t total, bool key, unsigned skipped = 0,
                                 const float* slice_ms = nullptr, int nslices = 0,
                                 const SliceLatency* waits = nullptr,
-                                const SliceStages* sl = nullptr, uint64_t shown_us = 0, uint64_t cap_us = 0);
+                                const SliceStages* sl = nullptr, uint64_t shown_us = 0, uint64_t cap_us = 0,
+                                bool air = true);
         template <typename RowTime>
         bool whole_picture_sample(const SliceTimes &st, double period, int rows, RowTime row_us, unsigned skipped);
         int64_t last_shown_pts_ = -1;      // the last picture that reached the screen (per-slice path)

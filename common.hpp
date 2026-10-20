@@ -55,6 +55,10 @@ typedef struct  {
     std::vector<antenna_stats> antennas;
 } packets_stats;
 
+// tx_processing_delay_us of a picture whose air part is not known (the radio
+// clock not checked yet): no latency figure for it, rather than a wrong one.
+static constexpr uint32_t kAirUnknown = 0xFFFFFFFFu;
+
 typedef struct {
     uint64_t recv_time_us;
     uint32_t tx_encode_delay_us;

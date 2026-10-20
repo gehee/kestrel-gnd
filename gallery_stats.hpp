@@ -33,6 +33,7 @@ struct StatsFrame {
     int8_t   snr = 0;
     uint8_t  mcs = 0;
     int8_t   bw = -1;                         // the link's bandwidth gear (0..5 = 1.25 .. 40 MHz), -1: not known
+    uint8_t  air = 1;                         // its air part known (0: the radio clock not checked - counted with its air part at 0)
     uint8_t  key = 0;                         // the picture was a keyframe
     uint16_t skipped = 0;                     // pictures before it never shown
     uint64_t shown_us = 0, cap_us = 0;        // its top first up (the vblank), its capture (0: not known)
