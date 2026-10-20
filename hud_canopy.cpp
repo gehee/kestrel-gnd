@@ -1305,6 +1305,13 @@ void OSD::draw_canopy_hud(const CanopyIn& in) {
         x -= igap;
         draw_text(buf, x, BL(base, T_ROW), T_ROW, true, ltr, ltg, ltb);
     }
+
+    // HUD > Debug Info: one line under the panel's bottom rail (596), lined
+    // up with the rows' text.
+    if (in.debug[0]) {
+        const float base = MY(612.0f) + 0.25f * T_LABEL;
+        draw_text(in.debug, RXo(kEdge) - iw - igap, BL(base, T_LABEL), T_LABEL, true, ltr, ltg, ltb);
+    }
 }
 
 // While a side is being picked: each blade's name over it, the picked one in

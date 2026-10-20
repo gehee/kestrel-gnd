@@ -93,6 +93,10 @@ typedef struct {
     // truncated 2.5 to "2" and 1.25 to "1", which read as a bug on the OSD and
     // hid what the radio was actually reporting. Use ar_bw_label() to display.
     int rf_bw_idx;
+    // Our radio's TDD frame as read off its state word, us (0: not found), and
+    // the frame mode asked of it (SET 16: 2 short, 0 standard).
+    float radio_frame_us;
+    int radio_frame_mode_want;
     bool pwr_auto;              // TX power adaptation is enabled
     uint32_t data_rate_kbps;    // TX throughput from BB_GET_MCS (kbps)
     int tx_mcs_val;             // TX MCS from BB_GET_MCS

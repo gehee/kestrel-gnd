@@ -79,6 +79,13 @@ static const int kArMaxBwVals[]     = { 20, 40 };
 static const char* kArMaxBwLabels[] = { "20 MHz", "40 MHz" };
 static const int kArMaxBwCount = 2;
 static int ar_maxbw_index(int mhz) { return mhz == 20 ? 0 : 1; }
+// Radio Frame: the TDD frame mode asked of the radio (Ar8030Source::frame_mode).
+// SHORT, mode 2, is 3.25 ms at 40 MHz and 4.65 at 20; STANDARD, stock's mode
+// 0, is 4.23 and 5.63, with an uplink twice as long. For field tests.
+static const int kArFrameVals[]     = { 2, 0 };
+static const char* kArFrameLabels[] = { "SHORT", "STANDARD" };
+static const int kArFrameCount = 2;
+static int ar_frame_index(int mode) { return mode == 0 ? 1 : 0; }
 
 std::vector<std::pair<const char*, int>> OSD::ar_rf_items() const {
     std::vector<std::pair<const char*, int>> v;
@@ -101,6 +108,9 @@ std::vector<std::pair<const char*, int>> OSD::ar_rf_items() const {
     // A kestrel-air command (sky cmd 0x41), not an rf_caps bit: only for an air
     // unit that says it takes it.
     if (air_max_bw_) v.push_back({"Max Bandwidth", 11});
+    // The frame is the two radios' (SET 16 carries it to the air unit's), so
+    // with any air unit.
+    v.push_back({"Radio Frame", 12});
     // MCS, Bandwidth and LNA Mode were removed rather than left visible.
     // BB_SET_MCS has no direction field, so it can only set our own transmit -
     // the video MCS is the air unit's choice, driven by the policy table in
@@ -493,6 +503,7 @@ OSD::OSD(std::shared_ptr<DrmDevice> dev_, int refresh_frequency_ms_, volatile bo
     show_all_adapters = true;
     bg_video_enabled = Settings::getInstance().getBool("bg_video_enabled", true);
     link_edge_on_ = Settings::getInstance().getBool("link_edge_warning", true);
+    hud_debug = Settings::getInstance().getBool("hud_debug", false);
     // 0=OFF 1=SMALL 2=MEDIUM 3=EXTREME. This was a bool before the intensity
     // levels existed, so migrate the stored "true"/"false" rather than letting
     // getInt() fail to parse them - stoi throws on both and would hand back the
@@ -576,6 +587,7 @@ OSD::OSD(std::shared_ptr<DrmDevice> dev_, int refresh_frequency_ms_, volatile bo
     menu_bg_video = bg_video_enabled;
     menu_frame_mode = g_frame_mode.load();
     menu_hud_reactivity = hud_reactivity;
+    menu_hud_debug = hud_debug;
 
     // Restore picture size. 100 is the untouched full-screen path.
     int saved_scale = Settings::getInstance().getInt("picture_scale", 100);
@@ -3521,6 +3533,26 @@ void OSD::render_gl() {
         canopy.link_freq_mhz = artosyn_copy.tx_freq;
         canopy.link_bw_idx = artosyn_copy.rf_bw_idx;
         canopy.link_mbps = artosyn_copy.state == 2 ? artosyn_copy.rx_data_rate_kbps / 1000.0f : 0.0f;
+        // HUD > Debug Info: the frame our radio runs, read off its state word,
+        // and the mode that length is - each of the six is its own length:
+        // short (2), standard (0), long (1), at 40 MHz and at 20 or narrower.
+        canopy.debug[0] = 0;
+        if (hud_debug) {
+            static const struct { float us; int mode; } kFrames[] = {
+                { 3250.56f, 2 }, { 4233.60f, 0 }, { 5398.40f, 1 },
+                { 4650.88f, 2 }, { 5633.92f, 0 }, { 7964.80f, 1 },
+            };
+            const float T = artosyn_copy.radio_frame_us;
+            const int want = artosyn_copy.radio_frame_mode_want;
+            int mode = -1;
+            for (const auto& f : kFrames) if (fabsf(T - f.us) < 2.0f) mode = f.mode;
+            const char* name = mode == 2 ? "SHORT" : mode == 0 ? "STANDARD" : mode == 1 ? "LONG" : "?";
+            if (T > 0.0f)
+                snprintf(canopy.debug, sizeof(canopy.debug), "FRAME %.2fms %s%s", T / 1000.0f, name,
+                         mode < 0 || mode == want ? "" : want == 2 ? " (ASKED SHORT)" : " (ASKED STANDARD)");
+            else
+                snprintf(canopy.debug, sizeof(canopy.debug), "FRAME --");
+        }
     }
 
     if (canopy_on) {
@@ -4639,6 +4671,10 @@ std::vector<OSD::MenuItem> OSD::menu_items(int tab) const {
                     "How wide the video link may go. At 40 it widens on a strong link "
                     "for more bitrate; 20 keeps it narrower and steadier. "
                     "Kestrel air units only."}); break;
+                case 12: items.push_back({it.first, 1,
+                    "How long the radio's frame is. SHORT gets each slice out sooner; "
+                    "STANDARD is stock's, with a longer, sturdier uplink. "
+                    "HUD > Debug Info shows the frame in use."}); break;
                 default: items.push_back({it.first, 1}); break;
             }
         }
@@ -4651,7 +4687,9 @@ std::vector<OSD::MenuItem> OSD::menu_items(int tab) const {
             {"Calib Distance", 3, "Zero the range reading where you are standing. "
                                   "The arrows trim the offset by hand.", "ENTER: ZERO HERE"},
             {"Clock", 1, "When the time is shown at the top of the screen, and how it is written."},
-            {"Dynamic HUD", 1, "Let the panels move with the aircraft."}
+            {"Dynamic HUD", 1, "Let the panels move with the aircraft."},
+            {"Debug Info", 1, "A line of radio details under the right panel, for field "
+                              "tests: the radio's frame, and the mode it means."}
         };
         // Only the canopy has a headline voltage to set; the rows after it close up (hud_row()).
         if (menu_hud_style != kHudCanopy) items.erase(items.begin() + kHudRowVoltage);
@@ -5080,6 +5118,7 @@ void OSD::menu_apply_change(int tab, int index, int dir) {
                    break;
                case 8: menu_ar_standby = menu_step(menu_ar_standby ? 1 : 0, dir, 2) != 0; break;  // forced on Enter
                case 11: menu_ar_maxbw = menu_step(menu_ar_maxbw, dir, kArMaxBwCount); break;  // applied on Enter
+               case 12: menu_ar_frame = menu_step(menu_ar_frame, dir, kArFrameCount); break;  // applied on Enter
                default: break;
            }
        }
@@ -5123,6 +5162,12 @@ void OSD::menu_apply_change(int tab, int index, int dir) {
             if (!menu_stepping_) {
                 hud_reactivity = menu_hud_reactivity;
                 Settings::getInstance().set("hud_reactivity", hud_reactivity);
+            }
+        } else if (hud_row(menu_index) == kHudRowDebug) {
+            menu_hud_debug = menu_step(menu_hud_debug ? 1 : 0, dir, 2) != 0;
+            if (!menu_stepping_) {
+                hud_debug = menu_hud_debug;
+                Settings::getInstance().set("hud_debug", hud_debug);
             }
         }
     } else if (menu_tab == 3) { // DISPLAY
@@ -5310,6 +5355,9 @@ void OSD::menu_value_text(int tab, int i, char* val_buf, size_t cap) {
                 case 11:    // Max Bandwidth
                     sprintf(val_buf, "< %s >", kArMaxBwLabels[menu_ar_maxbw]);
                     break;
+                case 12:    // Radio Frame
+                    sprintf(val_buf, "< %s >", kArFrameLabels[menu_ar_frame]);
+                    break;
                 default: break;
             }
         }
@@ -5333,6 +5381,8 @@ void OSD::menu_value_text(int tab, int i, char* val_buf, size_t cap) {
                 const char* react_labels[4] = { "OFF", "SMALL", "MEDIUM", "EXTREME" };
                 int r = (menu_hud_reactivity >= 0 && menu_hud_reactivity < 4) ? menu_hud_reactivity : 2;
                 sprintf(val_buf, "< %s >", react_labels[r]);
+            } else if (hud_row(i) == kHudRowDebug) {
+                sprintf(val_buf, "< %s >", menu_hud_debug ? "ON" : "OFF");
             }
         } else if (menu_tab == 3) { // DISPLAY Tab
             if (i == kDispBrightness) {
@@ -5710,6 +5760,7 @@ void OSD::handle_key(int key) {
              menu_bg_video = bg_video_enabled;
              menu_frame_mode = g_frame_mode.load();
              menu_hud_reactivity = hud_reactivity;
+             menu_hud_debug = hud_debug;
              menu_dvr_source = dvr_source_now();
              // Seed the RF rows from what the radio and the air unit report.
              // This air unit's own (Ar8030Source::load_sky_link), which the
@@ -5719,6 +5770,7 @@ void OSD::handle_key(int key) {
              menu_ar_hop = Ar8030Source::chan_auto;
              menu_ar_maxbr = ar_maxbr_index(Ar8030Source::max_kbps);
              menu_ar_maxbw = ar_maxbw_index(Ar8030Source::max_bw_mhz);
+             menu_ar_frame = ar_frame_index(Ar8030Source::frame_mode);
              menu_refresh_options();      // seeded: work out what row 0 shows
         }
         render_requested = true;
@@ -5953,6 +6005,10 @@ void OSD::handle_key(int key) {
                         case 11:
                             // Saved and sent to the air unit; again at every link-up.
                             cmd_cb(0x30F, kArMaxBwVals[menu_ar_maxbw]);
+                            break;
+                        case 12:
+                            // Saved and sent to the radio now; again after every link-up.
+                            cmd_cb(0x30A, kArFrameVals[menu_ar_frame]);
                             break;
                         case 9:
                             // Bind. Parked for the RX thread - the menu runs on the

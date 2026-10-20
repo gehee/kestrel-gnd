@@ -18,6 +18,7 @@
 #include "../webstream.hpp"
 #include "../common.hpp"
 #include "../utils/slice_times.hpp"
+#include "../utils/frame_clock.hpp"
 #include "ar8030_sky.hpp"
 
 // Direct AR8030 video source.
@@ -130,6 +131,11 @@ class Ar8030Source {
         static int  max_kbps;   // ar8030_max_kbps: the video bitrate cap sent at link-up, 0 = none
         static bool stream_decode;   // KESTREL_STREAM_DECODE / stream_decode: 0 (default on)
         static int  max_bw_mhz; // ar8030_max_bw_mhz: the video link bandwidth cap sent at link-up, 20 or 40
+        // ar8030_frame_mode (RADIO > Radio Frame): the TDD frame mode asked of
+        // the radio at start and after every link-up, 2 short or 0 standard
+        // (set_frame_mode()); frame_mode_changed: the menu changed it, send now.
+        static int  frame_mode;
+        static std::atomic<bool> frame_mode_changed;
         // Replay stock's startup SET sequence verbatim. See the .cpp.
         static int  replay_stock_rf;
         // BB socket port carrying the flight controller's MSP stream, or 0 to
@@ -373,6 +379,7 @@ class Ar8030Source {
         std::atomic<int> link_state_{-1};          // newest: poll or event
         std::atomic<unsigned> link_events_{0};     // link-state events so far
         std::atomic<uint64_t> bw_change_ms_{0};    // the last bandwidth-change event (12)
+        std::atomic<uint64_t> frame_mode_due_ms_{0}; // a link came up: frame mode 2 owed from then (0: none)
         // The video link's bandwidth gear (bb_bandwidth_e), -1 = no link. From
         // the bandwidth-change events: BB_GET_STATUS reports the uplink's 2.5 MHz.
         std::atomic<int> video_bw_idx_{-1};
@@ -456,6 +463,7 @@ class Ar8030Source {
         bool     air_hdr_tag_ = false;   // seen in a slice header, which is more reliable than the message
         void note_air_version(const uint8_t *pl, size_t n);
         void note_air_info(const uint8_t *pl, size_t n);
+        void note_air_frame(const uint8_t *pl, size_t n);   // KA_MSG_FRAME
         static std::mutex air_info_mtx_;
         static AirInfo air_info_;
         void note_air_prj(int prj, const char *from);   // what the air unit is: its power levels
@@ -485,6 +493,15 @@ class Ar8030Source {
         // Written by the stats thread (poll_ap_time), read by the video thread.
         std::atomic<int64_t> ap_off_us_{0};
         std::atomic<bool>    ap_off_valid_{false};
+        // The radio clock read off the radio's frame (utils/frame_clock.hpp):
+        // our chip's frame edges, labelled by kestrel-air's KA_MSG_FRAME. The
+        // coarse offset above drifts some 20 us a second between its rare
+        // re-syncs, and the latency figures with it (RF 7 -> 10 ms in minutes).
+        FrameClock frame_clock_;                // the radio clock to ~10-20 us, from the frame
+        int64_t fc_min_d_ = INT64_MAX;          // fastest slice on it lately, us (frame count check)
+        unsigned fc_n_ = 0, fc_count_gen_ = 0;
+        int fc_checks_ = 0;                     // windows left to check our count in
+        uint64_t fc_win_ms_ = 0;
         uint64_t ap_poll_ms_ = 0;
         uint64_t pic_cap_us_ = 0;        // the picture being received: its capture, our clock (0 = unknown)
         uint32_t pic_enc_us_ = 0;        // and capture -> its first slice out of the encoder
@@ -579,6 +596,7 @@ class Ar8030Source {
         void apply_bandwidth();       // must run after the link is up (see .cpp)
         void send_prj_rf_config();    // BB_SET_PRJ_DISPATCH cmd 138 (see .cpp)
         void replay_stock_rf_setup(); // stock's startup SETs, byte-for-byte
+        void set_frame_mode();        // SET 16 = 2 again at each link-up (see .cpp)
         sky::Proto sky_proto;       // owns the outgoing seq counter
 
         // Camera settings are re-sent to the air unit in the SET_CONFIG frames

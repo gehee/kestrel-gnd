@@ -435,6 +435,8 @@ int Ar8030Source::standby_mode = -1;
 int Ar8030Source::air_bw        = -1;
 int Ar8030Source::max_kbps      = 0;
 int Ar8030Source::max_bw_mhz    = 40;
+int Ar8030Source::frame_mode    = 2;
+std::atomic<bool> Ar8030Source::frame_mode_changed{false};
 int Ar8030Source::replay_stock_rf = 1;
 int Ar8030Source::prj_rf_bw     = -1;
 int Ar8030Source::prj_rf_pwr_mw = -1;
@@ -541,6 +543,7 @@ void Ar8030Source::on_link_event(const uint8_t* p) {
     if (p[0] != (uint8_t)slot || p[1] > 2) return;
     link_events_.fetch_add(1);
     link_state_.store(p[1]);
+    if (p[1] == 2) frame_mode_due_ms_.store(now_ms() + 1000);   // see set_frame_mode()
     // A link starts on the config's 5 MHz (gear 2) and widens from there, each
     // step an event 12. A drop that a bandwidth change caused re-forms the same
     // link on its new width, so it keeps the gear.
@@ -1433,6 +1436,7 @@ void Ar8030Source::scan_air_status(const uint8_t *buf, int n) {
         // number that matters. Log periodically for post-mortems.
         if (buf[i + 6] == 0x04) note_air_version(buf + i + 6, len - 6 - 5);
         if (buf[i + 6] == 0x50) note_air_info(buf + i + 6, len - 6 - 5);
+        if (buf[i + 6] == 0x51) note_air_frame(buf + i + 6, len - 6 - 5);
 
         if (buf[i + 6] == 0x05 && (len - 6 - 5) >= 34) {
             const uint8_t *pl = buf + i + 6;
@@ -1653,14 +1657,40 @@ void Ar8030Source::replay_stock_rf_setup() {
         uint8_t buf[16];
         memset(buf, 0, sizeof(buf));
         memcpy(buf, s.data, (size_t)s.len);
+        if (s.order == 16) buf[0] = (uint8_t)frame_mode;   // RADIO > Radio Frame (set_frame_mode())
         int req = (2 << 24) | s.order;          // BB_REQUEST(BB_REQ_SET, order)
         int rc = ar_ioctl(dev, req, buf, NULL);
         if (rc == 0) ok++; else fail++;
         printf("ar8030: stock SET %-3d ->%3d  [", s.order, rc);
-        for (int j = 0; j < s.len; j++) printf(" %02X", s.data[j]);
+        for (int j = 0; j < s.len; j++) printf(" %02X", buf[j]);
         printf(" ]\n");
     }
     printf("ar8030: stock RF setup replay: %d accepted, %d refused\n", ok, fail);
+}
+
+// The radio's TDD frame. SET order 16 = 2 (in the stock setup above) is the
+// firmware's "frame-change mode 2": the uplink cut to 6 symbols at MCS 0 and
+// the slot's 400 us guard gone - 4650.88 us at 20 MHz against mode 0's
+// 5633.92, and 3250.56 at 40 MHz against 4233.60. Every link that forms starts on mode 0 - a new
+// one, or the same one re-formed by a step to or from 40 MHz - so it is sent
+// again after each link-up: from the link event, as a re-form is often over
+// before the video loop looks (seen 2026-10-14: the step to 40 MHz stayed on
+// mode 0), 1 s on and 1 s clear of the radio's own bandwidth steps, which
+// come right at link-up (one sent with them re-formed the link once).
+// Mode 2 was the fastest at both widths and carries
+// more (2026-10-14, 864p120, MCS 10: capture->lit 23.5 vs 23.8 ms and 31.4 vs
+// 25.9 Mbps at 20 MHz, 21.8 vs 22.1-22.9 ms and 44.9 vs 34.5 Mbps at 40).
+// Its uplink is shorter, though (6 symbols at MCS 0 for 12 at MCS -1, ~3 dB
+// less margin by the firmware's numbers, untested at range): RADIO > Radio
+// Frame STANDARD asks for mode 0 instead, here and in the startup setup,
+// for testing it in the field.
+void Ar8030Source::set_frame_mode() {
+    if (!replay_stock_rf) return;
+    bb_dev_handle_t *dev = (bb_dev_handle_t *)bb_dev;
+    if (!dev) return;
+    uint8_t buf[16] = { (uint8_t)frame_mode };
+    printf("ar8030: radio frame mode %d (%s) -> %d\n", frame_mode, frame_mode == 2 ? "short" : "standard",
+           ar_ioctl(dev, (2 << 24) | 16, buf, NULL));
 }
 
 void Ar8030Source::send_prj_rf_config() {
@@ -2503,6 +2533,8 @@ void Ar8030Source::publish_link_stats() {
 
     // The video link's own width, where the events have said (ar_libre).
     if (video_bw_idx_.load() >= 0) st.rf_bw_idx = video_bw_idx_.load();
+    st.radio_frame_us = (float)frame_clock_.local_period();
+    st.radio_frame_mode_want = frame_mode;
 
     last_link_kbps = st.rx_data_rate_kbps;   // for the periodic stat line
     last_bw_idx    = st.rf_bw_idx;           // live RF bandwidth gear
@@ -2770,9 +2802,23 @@ void Ar8030Source::start_stats() {
     }
     link_state_.store(-1);
     stats_thread = std::thread(&Ar8030Source::stats_run, this);
+    frame_clock_.start(
+        [this](uint8_t *b) {
+            bb_dev_handle_t *dev = (bb_dev_handle_t *)bb_dev;
+            uint8_t in[4] = {0x6e, 0x0e, 1, 0}, out[256] = {0};
+            const int rc = dev ? ar_ioctl(dev, 0x01000064, in, out) : -1;
+            if (rc == 0) *b = out[0];
+            return rc;
+        },
+        [this](uint64_t t, double *ap) {
+            if (!ap_off_valid_.load(std::memory_order_acquire)) return false;
+            *ap = (double)t - (double)ap_off_us_.load(std::memory_order_relaxed);
+            return true;
+        });
 }
 
 void Ar8030Source::stop_stats() {
+    frame_clock_.stop();
     if (!stats_thread.joinable()) return;
     {
         std::lock_guard<std::mutex> g(stats_mu);
@@ -3011,6 +3057,19 @@ void Ar8030Source::note_air_version(const uint8_t *pl, size_t n) {
     note_air_announce(ka, ka ? pl[3] : 0, ka ? pl[4] : 0);
 }
 
+// 0x51, kestrel-air's frame (protocol/kestrel_air.h KA_MSG_FRAME): u8
+// generation, u32 the frame (us x 256), u32 where its video part ends on the
+// radio clock (us x 256), u8 radio frames a picture under the frame lock: the
+// frame clock counts our radio's edges from it.
+void Ar8030Source::note_air_frame(const uint8_t *pl, size_t n) {
+    if (n < 10) return;
+    uint32_t tq, pq;
+    memcpy(&tq, pl + 2, 4);
+    memcpy(&pq, pl + 6, 4);
+    if (tq < 1000 * 256 || tq > 20000 * 256 || pq >= tq) return;
+    frame_clock_.set_air_frame(tq / 256.0, pq / 256.0, pl[1], n >= 11 ? pl[10] : 0);
+}
+
 // 0x50, kestrel-air's info message: "key=value" lines (protocol/kestrel_air.h
 // there, KA_MSG_INFO). pl[0] is the cmd byte. Logged when it changes.
 void Ar8030Source::note_air_info(const uint8_t *pl, size_t n) {
@@ -3204,10 +3263,10 @@ void Ar8030Source::bw_poll() {
     if (!dev || t - last < 500) return;
     last = t;
     // Tests: /tmp/kestrel-frame-mode holding 0, 1 or 2 asks the radio for
-    // that TDD frame (SET order 16, as the stock RF setup does at start with
-    // 2): both ends change together; it holds until the link re-forms. At
-    // 20 MHz 0 = 5633.92 us, 1 = 7964.80, 2 = 4650.88; at 40 MHz 4233.60,
-    // 5398.40, 6501.12 (measured 2026-10-14).
+    // that TDD frame (SET order 16, see set_frame_mode()): both ends change
+    // together; it holds until the next link-up puts 2 back. At 20 MHz
+    // 0 = 5633.92 us, 1 = 7964.80, 2 = 4650.88; at 40 MHz 4233.60, 5398.40,
+    // 3250.56 (measured 2026-10-14).
     if (FILE *f = fopen("/tmp/kestrel-frame-mode", "r")) {
         int m = -1;
         if (fscanf(f, "%d", &m) != 1) m = -1;
@@ -3294,11 +3353,50 @@ void Ar8030Source::note_ap_delay(const uint8_t *hdr, size_t len, bool new_pic) {
     const uint32_t rt = (uint32_t)hdr[26] | ((uint32_t)hdr[27] << 8) |
                         ((uint32_t)hdr[28] << 16) | ((uint32_t)hdr[29] << 24);
     const uint64_t here = now_us();
-    const uint64_t ap_us = here - (uint64_t)ap_off_us_.load(std::memory_order_relaxed);
+    // The radio clock now: on the frame's edges when known (both ends read
+    // it there, utils/frame_clock.hpp), else our coarse offset to it.
+    uint64_t ap_us;
+    const bool on_frame = frame_clock_.ap_us(here, &ap_us);
+    if (!on_frame) ap_us = here - (uint64_t)ap_off_us_.load(std::memory_order_relaxed);
     const int64_t frac_us = fine ? ((int64_t)hdr[2] * 1000 + 128) / 256 : 500;
     const int64_t d = (int64_t)(int32_t)((uint32_t)(ap_us / 1000) - rt) * 1000 +
                       (int64_t)(ap_us % 1000) - frac_us;
     if (d < -1000000 || d > 1000000) return;
+    // Right after the frame clock counts its edges from our coarse offset,
+    // which can be a frame or more off: the fastest of a few hundred slices
+    // gets here 2.4 ms to 2.4 ms and a frame after leaving the encoder, or our
+    // count is whole frames off. No sooner: the write into the air's radio
+    // (~1.3 ms) and our radio's hand-up (~1.7) alone take 3; seen 3.6-4.1 ms on
+    // the 3.25 ms frame (40 MHz, mode 2), 5.1-5.9 at 20 MHz (a block written
+    // just in time, its airtime, the radio's lead and hand-over). The window
+    // was half a frame to one and a half, which on 3.25 ms ends at 4.9.
+    // Three 2 s windows, then left alone.
+    if (frame_clock_.count_gen() != fc_count_gen_) {
+        fc_count_gen_ = frame_clock_.count_gen();
+        fc_checks_ = 3;
+        fc_min_d_ = INT64_MAX;
+        fc_n_ = 0;
+        fc_win_ms_ = 0;
+    }
+    if (on_frame && fine && fc_checks_ > 0) {
+        fc_min_d_ = std::min(fc_min_d_, d);
+        fc_n_++;
+        const uint64_t tm = here / 1000;
+        if (!fc_win_ms_) fc_win_ms_ = tm;
+        if (tm - fc_win_ms_ >= 2000) {
+            const double T = frame_clock_.frame_period();
+            if (fc_n_ >= 100 && T > 0) {
+                const int64_t k = (int64_t)std::floor(((double)fc_min_d_ - 2400) / T);
+                printf("ar8030: frame clock: fastest slice %.2f ms%s\n", fc_min_d_ / 1000.0,
+                       k ? ", so our count of edges is off" : "");
+                if (k) frame_clock_.shift(-k);
+                fc_checks_--;
+            }
+            fc_min_d_ = INT64_MAX;
+            fc_n_ = 0;
+            fc_win_ms_ = tm;
+        }
+    }
     const int64_t enc = ka ? u16(35) : (int64_t)hdr[30] * 1000;
     const int64_t queue = ka ? u16(37) : 0;
     if (ka && (hdr[32] & 0x40)) ap_enc_last_.push_back((uint32_t)enc);
@@ -4447,7 +4545,14 @@ void Ar8030Source::run() {
                         last_rehandshake_ms = tl;
                         rehandshakes = 0;
                     }
+                    if (ls == 2 && !frame_mode_due_ms_.load()) frame_mode_due_ms_.store(tl + 1000);   // no event (stock library)
                     last_link_state = ls;
+                }
+                if (frame_mode_changed.exchange(false)) frame_mode_due_ms_.store(tl);   // the menu
+                const uint64_t fm_due = frame_mode_due_ms_.load();
+                if (fm_due && ls == 2 && tl >= fm_due && tl - bw_change_ms_.load() >= 1000) {
+                    frame_mode_due_ms_.store(0);
+                    set_frame_mode();
                 }
             }
         }

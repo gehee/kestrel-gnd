@@ -528,6 +528,7 @@ class OSD {
         float    serial_rate_ = 0;             // frames a second
         int menu_ar_maxbr = 0;     // index into kArMaxBrVals (0 = AUTO, no cap)
         int menu_ar_maxbw = 1;     // index into kArMaxBwVals (1 = 40 MHz)
+        int menu_ar_frame = 0;     // index into kArFrameVals (0 = SHORT, mode 2)
         int menu_cam_ev       = 3;  // index into kEvSteps below (3 = 0.0 EV)
         int menu_cam_sat      = 0;
         int menu_cam_contrast = 0;  // 0-15: the config packs it into a nibble
@@ -592,6 +593,7 @@ class OSD {
         // Reactive HUD intensity: 0=OFF 1=SMALL 2=MEDIUM 3=EXTREME.
         // MEDIUM is the tuned default (see kBankGain/kMaxOffset in msp_osd).
         int  hud_reactivity = 2;
+        bool hud_debug = false;   // HUD > Debug Info: a line of radio details under the right panel
 
         // A row is "modified but not committed" from the moment left/right
         // changes it until Enter applies it. Tracked as a flag per row rather
@@ -625,7 +627,8 @@ class OSD {
         int  menu_step_zone(int row, int dir);
         // HUD rows, in the order they are listed.
         enum HudRow {
-            kHudRowStyle = 0, kHudRowBfOsd, kHudRowVoltage, kHudRowCalib, kHudRowClock, kHudRowDynamic
+            kHudRowStyle = 0, kHudRowBfOsd, kHudRowVoltage, kHudRowCalib, kHudRowClock, kHudRowDynamic,
+            kHudRowDebug
         };
         // A row's help line, which for a few rows depends on the value it is
         // showing; everything else gets its MenuItem::help back.
@@ -646,6 +649,7 @@ class OSD {
         bool menu_show_all_adapters = false;
         bool menu_bg_video = true;
         int  menu_hud_reactivity = 2;
+        bool menu_hud_debug = false;
         // DVR Source row: 0 FPV, 1 SCREEN at 30 captures/s, 2 SCREEN at 60.
         int  menu_dvr_source = 0;
         int  dvr_source_now() const;
@@ -904,6 +908,7 @@ class OSD {
             int   v_w = 0, v_h = 0, fps = 0;
             float mbps = 0.0f;
             float link_mbps = 0.0f;      // what the link carries at its MCS now (the radio's figure), 0 = unknown
+            char  debug[64] = {0};       // HUD > Debug Info's line under the right panel, "" = none
             bool  have_lat = false;
             float lat_med_ms = 0.0f;
             // SPLIT: each slice of the picture on its own, top to bottom (0: none).

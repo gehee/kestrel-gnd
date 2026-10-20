@@ -615,6 +615,8 @@ int main(int argc, char **argv)
 	Ar8030Source::max_kbps      = Settings::getInstance().getInt("ar8030_max_kbps", 0);
 	// The cap on the video link's bandwidth (RF menu, Max Bandwidth): 20 or 40 MHz.
 	Ar8030Source::max_bw_mhz    = Settings::getInstance().getInt("ar8030_max_bw_mhz", 40) == 20 ? 20 : 40;
+	// The radio's TDD frame mode (RADIO > Radio Frame): 2 short, 0 standard.
+	Ar8030Source::frame_mode    = Settings::getInstance().getInt("ar8030_frame_mode", 2) == 0 ? 0 : 2;
 	Ar8030Source::replay_stock_rf = Settings::getInstance().getInt("replay_stock_rf", 1);
 	std::string decoder_name = Settings::getInstance().getString("decoder_name", "rkmpp");
 	// VRR (FreeSync over HDMI): opt-in on Rockchip, where it needs fpvOS's
@@ -1090,6 +1092,12 @@ int main(int argc, char **argv)
                     Ar8030Source::max_bw_mhz = (val == 20) ? 20 : 40;
                     Settings::getInstance().set("ar8030_max_bw_mhz", Ar8030Source::max_bw_mhz);
                     Ar8030Source::request_setting(Ar8030Source::CAM_MAX_BW, Ar8030Source::max_bw_mhz);
+                    return;
+                case 0x30A:
+                    // RF menu, Radio Frame: kept here, sent now and after every link-up.
+                    Ar8030Source::frame_mode = (val == 0) ? 0 : 2;
+                    Settings::getInstance().set("ar8030_frame_mode", Ar8030Source::frame_mode);
+                    Ar8030Source::frame_mode_changed.store(true);
                     return;
                 case 0x301: case 0x302: case 0x303: case 0x304:
                 case 0x305: case 0x306: case 0x307: case 0x308:
