@@ -3345,6 +3345,10 @@ void Ar8030Source::note_ap_delay(const uint8_t *hdr, size_t len, bool new_pic) {
         }
         hdr_height_ = h;
         hdr_fps_ = fps;
+        if (fps >= 10 && fps <= 500) {
+            g_camera_lines.store((int)h, std::memory_order_relaxed);
+            g_camera_fps.store((int)fps, std::memory_order_release);
+        }
     }
     if (!ap_off_valid_.load(std::memory_order_acquire) || len < 31) return;
     auto u16 = [&](int o) { return (int64_t)(hdr[o] | (hdr[o + 1] << 8)) * 10; };

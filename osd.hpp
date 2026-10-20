@@ -431,6 +431,13 @@ class OSD {
         std::string screen_confirm_mode_;             // it: "WxH@R", or "auto"
         uint64_t    screen_confirm_deadline_ms_ = 0;
         int         screen_confirm_left_s();
+        // DISPLAY > Refresh Sync on trial: ON or FREE applied but not saved
+        // until Enter; no answer in 10 s puts the kept value back (a screen
+        // that blanks on it cannot be answered from).
+        bool        sync_confirm_ = false;
+        int         sync_confirm_prev_ = 0;          // the kept value
+        uint64_t    sync_confirm_deadline_ms_ = 0;
+        int         sync_confirm_left_s();
         struct ScreenModeOpt { int w, h, hz; };
         std::vector<ScreenModeOpt> screen_modes_;
         const std::vector<ScreenModeOpt>& screen_modes();
@@ -584,6 +591,9 @@ class OSD {
         float applied_ui_scale = -1.0f;
         int menu_picture_scale = 100;   // whole-picture scale, percent (100 = full)
         int menu_frame_mode = 0;        // FrameMode (frame_mode.hpp)
+        int menu_refresh_sync = 0;      // g_display_lock, for the screen in use
+        int menu_sync_slice = 1;        // g_display_lock_slice: 1 or 2
+        int menu_sync_margin = 0;       // g_display_lock_margin_us, ms: 0..4
 
         int menu_tab = 0; // 0: Video, 1: RF
 
@@ -614,7 +624,8 @@ class OSD {
         // by index in half a dozen places, so the order lives here once and
         // the dispatchers name the row rather than count to it.
         enum DisplayRow {
-            kDispTheme = 0, kDispBgVideo, kDispPicture, kDispUiScale, kDispBrightness, kDispFrameMode
+            kDispTheme = 0, kDispBgVideo, kDispPicture, kDispUiScale, kDispBrightness,
+            kDispHdrAdvanced, kDispFrameMode, kDispRefreshSync, kDispSyncSlice, kDispSyncMargin
         };
         // SYSTEM rows, headers included, in the order they are listed.
         enum SysRow {

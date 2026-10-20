@@ -1,4 +1,5 @@
 #include <ostream>
+#include <cmath>
 #include "renderer.hpp"   // DecodedUnit, for the screen tap
 #include <iostream>
 #include <algorithm>
@@ -15,6 +16,10 @@
 #include "utils/prof.hpp"
 #include "settings.hpp"
 #include "utils/scheduling_helper.hpp"
+#include "frame_mode.hpp"
+
+std::atomic<int> g_camera_fps{0};
+std::atomic<int> g_camera_lines{0};
 
 // Set from main() when --no-osd is given: skips all EGL/GLES bring-up.
 bool g_disable_gl = false;
@@ -38,7 +43,8 @@ void DrmDevice::init(uint16_t mode_width, uint16_t mode_height, uint32_t mode_vr
 	assert(drm_fd >= 0);
 	output_list = (struct modeset_output *)malloc(sizeof(struct modeset_output));
     output_list_original = output_list;
-	ret = modeset_prepare(drm_fd, output_list, mode_width, mode_height, mode_vrefresh);
+	ret = modeset_prepare(drm_fd, output_list, mode_width, mode_height, mode_vrefresh,
+                          follow_camera && g_display_lock.load() != 2 ? follow_fps : 0);
     // No connected display is not fatal: booting headless (or with a flaky HDMI
     // cable) used to fall through the compiled-out assert below onto an
     // UNINITIALIZED output struct. Wait here and pick the display up when it
@@ -48,13 +54,16 @@ void DrmDevice::init(uint16_t mode_width, uint16_t mode_height, uint32_t mode_vr
         fflush(stdout);
         while (ret != 0) {
             sleep(2);
-            ret = modeset_prepare(drm_fd, output_list, mode_width, mode_height, mode_vrefresh);
+            ret = modeset_prepare(drm_fd, output_list, mode_width, mode_height, mode_vrefresh,
+                          follow_camera && g_display_lock.load() != 2 ? follow_fps : 0);
         }
     }
 	assert(!ret);
     printf("modeset_prepare successful. Using connector %u, crtc %u\n", output_list->connector.id, output_list->crtc.id);
     fflush(stdout);
     output_list->allow_vrr = enable_vrr;
+    follow_done_fps_ = follow_camera ? follow_fps : 0;
+    follow_done_lines_ = follow_camera ? follow_lines : 0;
 
     video_zpos = vzpos;
     video_fb_x = 0;
@@ -93,7 +102,7 @@ void DrmDevice::init(uint16_t mode_width, uint16_t mode_height, uint32_t mode_vr
     assert(!ret);
 }
 
-// Probe the connector and, on a disconnected→connected transition, redo the full
+// Look at the connector and, on a disconnected→connected transition, redo the full
 // modeset (the CRTC is left off after an unplug; page_flip commits carry no
 // ALLOW_MODESET, so without this the screen stays black until an app restart).
 // That reuses the mode, framebuffers and GL surface as they are, so it is only
@@ -101,8 +110,11 @@ void DrmDevice::init(uint16_t mode_width, uint16_t mode_height, uint32_t mode_vr
 // other screen - or one that no longer offers the mode - restarts kestrel-gnd,
 // which sets the display up from scratch in that screen's own mode: sent the
 // old mode, a screen that does not take it just stays black.
+// The connector's state as the kernel last knew it (GetConnectorCurrent): its
+// HDMI hot-plug line keeps that up to date and re-reads the EDID when a screen
+// comes. GetConnector forces a probe - an EDID read over HDMI every 2 s.
 void DrmDevice::check_display_hotplug() {
-    drmModeConnector *conn = drmModeGetConnector(drm_fd, output_list->connector.id);
+    drmModeConnector *conn = drmModeGetConnectorCurrent(drm_fd, output_list->connector.id);
     if (!conn) return;
     bool now_connected = (conn->connection == DRM_MODE_CONNECTED);
     bool mode_offered = false;
@@ -115,7 +127,7 @@ void DrmDevice::check_display_hotplug() {
     drmModeFreeConnector(conn);
 
     if (now_connected && !display_connected) {
-        // The probe above re-read the EDID, so sysfs now has the new screen's.
+        // The kernel re-read the EDID when it saw the screen come, so sysfs has the new one's.
         char id[16] = "";
         screen_id(id, sizeof(id));
         if (display_id != id || !mode_offered) {
@@ -148,6 +160,7 @@ void DrmDevice::check_display_hotplug() {
         }
         // video_info=NULL → the full modeset lights the CRTC with the placeholder
         // video FB; the next real video/OSD flip then takes over as usual.
+        std::lock_guard<std::mutex> lk(crtc_mode_m);
         int ret = modeset_perform_modeset(drm_fd, output_list, hotplug_request, NULL,
                                           (osd_fb > 0) ? &osd_plane_info : NULL);
         if (ret < 0)
@@ -264,7 +277,81 @@ void DrmDevice::handle_events() {
             last_hotplug_check_us = now;
             check_display_hotplug();
         }
+        check_follow_camera();
     }
+}
+
+// Screen Mode Auto follows the camera (follow_camera): a frame rate new in
+// the stream puts the screen on the highest refresh that is a whole multiple
+// of it, at the size it has now (the framebuffers and the GL surface are
+// that size) - or, with none, on the highest refresh at that size, Auto's
+// choice without a camera. One modeset, so one blank, as for any mode change.
+// The rate is kept as "camera_fps", and the next start comes up in its mode.
+void DrmDevice::check_follow_camera() {
+    if (refollow_.exchange(false)) follow_done_fps_ = follow_done_lines_ = 0;
+    const int fps = g_camera_fps.load(std::memory_order_acquire);
+    const int lines = g_camera_lines.load(std::memory_order_relaxed);
+    if (!follow_camera || !display_connected || fps <= 0 ||
+        ((uint32_t)fps == follow_done_fps_ && (uint32_t)lines == follow_done_lines_)) return;
+    follow_done_fps_ = (uint32_t)fps;
+    follow_done_lines_ = (uint32_t)lines;
+    if (Settings::getInstance().getInt("camera_fps", 0) != fps)
+        Settings::getInstance().set("camera_fps", fps);
+    if (Settings::getInstance().getInt("camera_lines", 0) != lines)
+        Settings::getInstance().set("camera_lines", lines);
+
+    drmModeConnector *conn = drmModeGetConnectorCurrent(drm_fd, output_list->connector.id);
+    if (!conn) return;
+    const drmModeModeInfo cur = output_list->mode;
+    // A screen that takes any frame length (Refresh Sync FREE) keeps its
+    // fastest mode: the lock makes its frames as long as the camera's, and
+    // its quick scan-out lights the lower rows sooner.
+    int pick = g_display_lock.load() == 2 ? -1
+                                          : modeset_pick_follow(conn, (uint32_t)fps, cur.hdisplay, cur.vdisplay);
+    const bool in_step = pick >= 0;
+    for (int i = 0; !in_step && i < conn->count_modes; i++) {
+        const drmModeModeInfo &m = conn->modes[i];
+        if ((m.flags & DRM_MODE_FLAG_INTERLACE) || m.hdisplay != cur.hdisplay || m.vdisplay != cur.vdisplay)
+            continue;
+        if (pick < 0 || modeset_mode_hz(&m) > modeset_mode_hz(&conn->modes[pick])) pick = i;
+    }
+    drmModeModeInfo m = {};
+    if (pick >= 0) m = conn->modes[pick];
+    drmModeFreeConnector(conn);
+    if (pick < 0) return;
+
+    const bool same = m.clock == cur.clock && m.htotal == cur.htotal && m.vtotal == cur.vtotal &&
+                      m.hsync_start == cur.hsync_start && m.vsync_start == cur.vsync_start;
+    printf("display: camera at %d fps - %s %dx%d@%d (%.3f Hz)%s\n", fps, same ? "staying at" : "changing to",
+           m.hdisplay, m.vdisplay, m.vrefresh, modeset_mode_hz(&m),
+           in_step ? "" : ", the screen has no refresh in step with it at this size");
+    fflush(stdout);
+    if (!same) set_crtc_mode(m);
+}
+
+// The CRTC's mode, and nothing else: the planes keep their buffers and
+// rectangles (atomic state is sticky). Blocking, so after any flip in flight;
+// a page flip submitted meanwhile is refused (EBUSY) and the next one goes.
+bool DrmDevice::set_crtc_mode(const drmModeModeInfo& m) {
+    std::lock_guard<std::mutex> lk(crtc_mode_m);
+    uint32_t blob = 0;
+    if (drmModeCreatePropertyBlob(drm_fd, &m, sizeof(m), &blob) != 0) {
+        perror("display: mode blob");
+        return false;
+    }
+    drmModeAtomicReq *req = drmModeAtomicAlloc();
+    int ret = req ? set_drm_object_property(req, &output_list->crtc, "MODE_ID", blob) : -1;
+    if (ret >= 0) ret = drmModeAtomicCommit(drm_fd, req, DRM_MODE_ATOMIC_ALLOW_MODESET, NULL);
+    if (req) drmModeAtomicFree(req);
+    if (ret < 0) {
+        fprintf(stderr, "display: mode change refused: %s\n", strerror(-ret));
+        drmModeDestroyPropertyBlob(drm_fd, blob);
+        return false;
+    }
+    drmModeDestroyPropertyBlob(drm_fd, output_list->mode_blob_id);
+    output_list->mode_blob_id = blob;
+    output_list->mode = m;
+    return true;
 }
 
 void DrmDevice::init_gl() {

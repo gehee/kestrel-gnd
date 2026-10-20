@@ -638,7 +638,7 @@ void modeset_output_destroy(int fd, struct modeset_output *out)
 	free(out);
 }
 
-struct modeset_output *modeset_output_create(int fd, drmModeRes *res, drmModeConnector *conn, uint16_t mode_width, uint16_t mode_height, uint32_t mode_vrefresh)
+struct modeset_output *modeset_output_create(int fd, drmModeRes *res, drmModeConnector *conn, uint16_t mode_width, uint16_t mode_height, uint32_t mode_vrefresh, uint32_t follow_fps)
 {
 	int ret;
 	struct modeset_output *out;
@@ -738,8 +738,13 @@ struct modeset_output *modeset_output_create(int fd, drmModeRes *res, drmModeCon
                    conn->modes[best].vrefresh);
             fc = best;
 		} 
+    } else if ((fc = modeset_pick_follow(conn, follow_fps, 0, 0)) >= 0) {
+        printf("Auto: %dx%d@%d, in step with the camera's %u fps (%.3f Hz)\n",
+               conn->modes[fc].hdisplay, conn->modes[fc].vdisplay, conn->modes[fc].vrefresh,
+               follow_fps, modeset_mode_hz(&conn->modes[fc]));
     } else {
         // No specific mode requested, auto-select highest refresh rate (and resolution)
+        fc = 0;
         uint32_t max_refresh = 0;
         uint32_t max_area = 0;
         
@@ -847,7 +852,7 @@ out_error:
 }
 
 
-int modeset_prepare(int fd, struct modeset_output *output_list, uint16_t mode_width, uint16_t mode_height, uint32_t mode_vrefresh)
+int modeset_prepare(int fd, struct modeset_output *output_list, uint16_t mode_width, uint16_t mode_height, uint32_t mode_vrefresh, uint32_t follow_fps)
 {
 	drmModeRes *res;
 	drmModeConnector *conn;
@@ -870,7 +875,7 @@ int modeset_prepare(int fd, struct modeset_output *output_list, uint16_t mode_wi
 			continue;
 		}
 
-		out = modeset_output_create(fd, res, conn, mode_width, mode_height, mode_vrefresh);
+		out = modeset_output_create(fd, res, conn, mode_width, mode_height, mode_vrefresh, follow_fps);
 		drmModeFreeConnector(conn);
 		if (!out)
 			continue;

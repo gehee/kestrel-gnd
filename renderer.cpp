@@ -427,6 +427,15 @@ void Renderer::queue_frame(std::shared_ptr<DecodedUnit> du) {
     // The queue drops a repeated id: an early picture and its whole one share a
     // pts, so the early one goes under an id of its own.
     const uint64_t id = du->early ? (du->pts | (1ULL << 63)) : du->pts;
+    if (DisplayLock *l = lock_live_.load(std::memory_order_acquire)) {
+        uint64_t last_in = 0;
+        if (du->slices) {
+            const int n = std::min(du->slices->n.load(std::memory_order_acquire), (int)SliceTimes::kMax);
+            for (int i = 0; i < n; i++) last_in = std::max(last_in, du->slices->s[i].in_us.load(std::memory_order_relaxed));
+        }
+        l->note_unit(du->pts, du->early, get_time_us(), last_in, halves_live_.load(std::memory_order_relaxed),
+                     du->slices ? du->slices->frame_cap_us : 0);
+    }
     decoded_unit_queue->put(DataMsg<std::shared_ptr<DecodedUnit>>(id, du));
 }
 
@@ -457,6 +466,13 @@ void Renderer::run(){
     const double commit_min_slack_us = commit_min_slack_us_ = Settings::getInstance().getFloat("commit_min_slack_ms", 0.6f) * 1000.0;
     if (deadline_commit && render_mode == Atomic)
         printf("renderer: committing %.1f ms before each vblank\n", commit_margin_us / 1000);
+    // DISPLAY > Refresh Sync: the vblank held just after the pictures arrive,
+    // aimed at this deadline (and a little for this thread's own work).
+    if (deadline_commit && render_mode == Atomic && !lock_) {
+        lock_.reset(new DisplayLock(dev, commit_margin_us + 100));
+        lock_live_.store(lock_.get(), std::memory_order_release);
+        lock_->start();
+    }
     // VRR: there is no fixed vblank to aim for - a commit ends the frame being
     // stretched, so each picture goes out the moment it is decoded.
     if (vrr && render_mode == Atomic)
@@ -518,6 +534,7 @@ void Renderer::run(){
                     halves_reset();
                 }
                 halves_mode_ = want;
+                halves_live_.store(want, std::memory_order_relaxed);
             }
             if (halves_mode_) {
                 halves_step();
@@ -783,10 +800,20 @@ bool Renderer::halves_wanted() {
     const double refresh = period > 0 ? 1e6 / period : 0;
     if (pic_rate_hz_ < 5 || refresh <= 0) return halves_mode_;   // no video yet: as it is
     const bool faster = refresh >= pic_rate_hz_ * (halves_mode_ ? 1.05 : 1.15);
+    // Or the display lock holds the vblank just after the tops arrive
+    // (DISPLAY > Refresh Sync): no spare refresh, but each top makes the one
+    // after it - and the lower part goes up a refresh later, under the next
+    // picture's top. Nothing waits behind a late top there (halves_step).
+    const DisplayLock *l = lock_live_.load(std::memory_order_relaxed);
+    // Only when the lock follows the tops (DISPLAY > Sync To SLICE 1): timed
+    // to the last slice, each picture goes up whole just after it instead -
+    // in halves its lower part would wait a second refresh behind its top.
+    halves_locked_ = !faster && l && l->in_step() && g_display_lock_slice.load(std::memory_order_relaxed) != 2;
     char b[96];
-    snprintf(b, sizeof(b), "%.0f Hz screen, %.0f pictures a second", refresh, pic_rate_hz_);
+    snprintf(b, sizeof(b), "%.0f Hz screen, %.0f pictures a second%s", refresh, pic_rate_hz_,
+             halves_locked_ ? ", in step (Refresh Sync)" : "");
     halves_why_ = b;
-    return faster;
+    return faster || halves_locked_;
 }
 
 // Back to nothing in halves. What is on screen is held one flip longer (the
@@ -943,11 +970,15 @@ void Renderer::halves_step() {
     }
     const uint64_t t = t0;
 
-    // Tops, oldest first; a backlog past two is let go down to two.
+    // Tops, oldest first; a backlog past two is let go down to two - past one
+    // at one refresh a picture (halves_locked_): with no spare refresh to catch
+    // up in, a top that missed its vblank would hold every one after it a
+    // refresh late for good, so it gives way to the newer one.
+    const int keep = halves_locked_ ? 1 : 2;
     int waiting = 0;
     for (auto &p : pics_) if (!p.top_shown) waiting++;
     for (auto &p : pics_) {
-        if (waiting <= 2) break;
+        if (waiting <= keep) break;
         if (p.top_shown) continue;
         p.top_shown = p.bottom_shown = true;
         waiting--;

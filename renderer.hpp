@@ -17,6 +17,7 @@ extern "C" {
 #include "dvr.hpp"
 #include "osd.hpp"
 #include "drm.hpp"
+#include "display_lock.hpp"
 #include "utils/scheduling_helper.hpp"
 #include "utils/time_util.h"
 #include "utils/slice_times.hpp"
@@ -206,6 +207,7 @@ class Renderer {
         std::shared_ptr<DecodedUnit> prev_top_, prev_bottom_;   // replaced by the last flip, held until the next
         uint32_t on_cut_ = 0;                      // the row the two meet at
         bool halves_mode_ = false;
+        bool halves_locked_ = false;   // in halves for the display lock, at one refresh a picture
         uint64_t hold_traced_vb_ = 0;
         // When a picture could go up whole but an older picture's lower part
         // is still waiting: 0 its top over that lower part (the lower parts
@@ -220,6 +222,11 @@ class Renderer {
         bool vrr_halves_ = false;
         uint64_t vrr_hold_n_ = 0;          // stands in for the vblank in the hold trace
         double commit_margin_us_ = 1200, commit_min_slack_us_ = 600;
+        // DISPLAY > Refresh Sync (display_lock.hpp), with the deadline commit
+        // only; made in run(), and told of each picture in queue_frame().
+        std::unique_ptr<DisplayLock> lock_;
+        std::atomic<DisplayLock*> lock_live_{nullptr};
+        std::atomic<bool> halves_live_{false};   // halves_mode_, for queue_frame's thread
         unsigned halves_whole_ = 0, halves_split_ = 0, halves_lower_ = 0, halves_waited_ = 0,
                  halves_dropped_ = 0, halves_lower_skipped_ = 0;
         std::atomic<int> pictures_in_{0};          // whole pictures from the decoder (the FPS figure)
@@ -260,7 +267,10 @@ class Renderer {
         int get_or_create_display_buffer(DecodedUnit* frame, DisplayBufferInfo& out_info);
         void reset_stats(uint64_t now);
     public:
-        virtual ~Renderer() { delete decoded_unit_queue; }
+        virtual ~Renderer() {
+            if (lock_) lock_->stop();
+            delete decoded_unit_queue;
+        }
         virtual bool render_frame(DecodedUnit *du);
         uint64_t sensor_offset_us(const DecodedUnit* du);
         virtual void queue_frame(std::shared_ptr<DecodedUnit> du);

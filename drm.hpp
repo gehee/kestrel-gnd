@@ -125,6 +125,14 @@ private:
     drmModeAtomicReq *hotplug_request = nullptr;
     void check_display_hotplug();
 
+    // Auto following the camera (follow_camera): on the event thread too, so
+    // the mode change is never in the middle of a hotplug modeset.
+    uint32_t follow_done_fps_ = 0;     // the camera rate the mode was last chosen for
+    uint32_t follow_done_lines_ = 0;   // and its lines
+    std::atomic<bool> refollow_{false};
+    void check_follow_camera();
+    bool set_crtc_mode(const drmModeModeInfo& m);
+
     // Render-cadence tracking (guarded by stats_mutex, written in the flip handler)
     static const int CADENCE_RING = 256;
     uint32_t cadence_gaps_us[CADENCE_RING] = {0};
@@ -282,11 +290,18 @@ public:
             ? (double)output_list->mode.htotal * row * 1000.0 / output_list->mode.clock : 0;
     }
     int screen_rows() const { return output_list ? output_list->mode.vdisplay : 0; }
-    // One refresh of the current mode, in microseconds.
+    // One refresh, in microseconds: the frame being scanned out, which the
+    // display lock may make longer than the mode's (set_frame_period).
     double frame_period_us() const {
+        const double now = frame_period_now_us_.load(std::memory_order_relaxed);
+        return now > 0 ? now : mode_period_us();
+    }
+    // One refresh of the current mode, in microseconds.
+    double mode_period_us() const {
         return output_list && output_list->mode.clock
             ? (double)output_list->mode.htotal * output_list->mode.vtotal * 1000.0 / output_list->mode.clock : 0;
     }
+    std::atomic<double> frame_period_now_us_{0};
 
 public:
     int drm_fd = -1;
@@ -294,6 +309,24 @@ public:
     // The ID (utils/screen_id.h) of the screen this was set up for, "" if it
     // had none. A different one plugged in later restarts kestrel-gnd.
     std::string display_id;
+    // Screen Mode Auto: the refresh follows the camera's frame rate - set
+    // before init, with the rate last seen ("camera_fps") for the first mode.
+    // A different rate in the stream later (g_camera_fps) changes the mode at
+    // the same size, the highest whole multiple of it the screen offers. No
+    // phase lock: the two clocks still drift apart by their tolerances.
+    bool follow_camera = false;
+    uint32_t follow_fps = 0;
+    // ... and its lines ("camera_lines").
+    uint32_t follow_lines = 0;
+    // The display lock sets each frame's length (Refresh Sync): how long the
+    // one being scanned out is, us, 0 for the mode's own (frame_period_us).
+    void set_frame_period(double us) { frame_period_now_us_.store(us, std::memory_order_relaxed); }
+    // Refresh Sync changed (FREE wants the fastest mode): Auto chooses again.
+    void refollow() { refollow_.store(true); }
+    // Held while the CRTC's mode changes (Auto following the camera, a hotplug
+    // modeset), and by the display lock (display_lock.hpp) around its register
+    // writes: never one over the other's.
+    std::mutex crtc_mode_m;
     // Video variables
 	uint32_t video_frm_width;
 	uint32_t video_frm_height;

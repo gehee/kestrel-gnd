@@ -509,6 +509,18 @@ int main(int argc, char **argv)
 	const std::string screen_key = have_screen_id ? std::string("screen_mode_") + screen_id_buf
 	                                              : std::string("screen_mode");
 	std::string screen_mode_str = Settings::getInstance().getString(screen_key, "");
+	// DISPLAY > Refresh Sync is the screen's too, and off unless turned on for
+	// it: some screens blank on the one-line timing changes it makes.
+	{
+		const int v = Settings::getInstance().getInt(
+			have_screen_id ? std::string("display_lock_") + screen_id_buf : std::string("display_lock"), 0);
+		g_display_lock = v >= 0 && v <= 2 ? v : 0;   // OFF, ON, FREE
+	}
+	g_display_lock_slice = Settings::getInstance().getInt("display_lock_slice", 1) == 2 ? 2 : 1;
+	{
+		const int ms = Settings::getInstance().getInt("display_lock_margin_ms", 0);
+		g_display_lock_margin_us = (ms >= 0 && ms <= 4 ? ms : 0) * 1000;
+	}
 	std::string screen_mode_trial;       // on trial this run, "" for none
 	{
 		const std::string t = Settings::getInstance().getString("screen_mode_try", "");
@@ -976,6 +988,12 @@ int main(int argc, char **argv)
 	if (!simulation_mode) {
 		dev = std::make_shared<DrmDevice>();
 		dev->display_id = screen_id_buf;   // a different screen plugged in restarts us
+		// Auto: the refresh follows the camera, from the rate last seen.
+		dev->follow_camera = !(mode_width > 0 && mode_height > 0 && mode_vrefresh > 0);
+		const int last_fps = Settings::getInstance().getInt("camera_fps", 0);
+		dev->follow_fps = last_fps > 0 ? (uint32_t)last_fps : 0;
+		const int last_lines = Settings::getInstance().getInt("camera_lines", 0);
+		dev->follow_lines = last_lines > 0 ? (uint32_t)last_lines : 0;
 		dev->init(mode_width, mode_height, mode_vrefresh, video_zpos, osd_zpos, enable_vrr);
 
 	}

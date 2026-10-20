@@ -48,6 +48,7 @@
 #include <xf86drmMode.h>
 
 #include "utils/screen_id.h"
+#include "drm/mode_follow.h"
 #include <cairo/cairo.h>
 
 static volatile sig_atomic_t g_stop    = 0;
@@ -104,28 +105,40 @@ static void page_flip_handler(int fd, unsigned int frame, unsigned int sec,
 // screen genuinely goes dark while the panel relocks to the new signal.
 // Falls back to {0,0,0} (caller keeps its own default) if the setting is
 // missing or unparsable - matching main.cpp's own fallback to "whatever the
-// connector prefers" when screen_mode is unset.
-static void read_gnd_screen_mode(uint16_t* w, uint16_t* h, uint32_t* vr) {
-    *w = 0; *h = 0; *vr = 0;
+// connector prefers" when screen_mode is unset. *fps: the camera's frame
+// rate last seen ("camera_fps"), which Auto follows, 0 if none - or if the
+// screen has Refresh Sync FREE ("display_lock_<ID>: 2"), whose Auto is the
+// fastest mode (DrmDevice::check_follow_camera).
+static void read_gnd_screen_mode(uint16_t* w, uint16_t* h, uint32_t* vr, uint32_t* fps) {
+    *w = 0; *h = 0; *vr = 0; *fps = 0;
+    int free_sync = 0;
     // The screen's own entry, screen_mode_<ID>, as main.cpp reads it: unset
     // is auto. screen_mode is only for a screen with no ID. A mode on trial
     // (screen_mode_try) is not the splash's business: kestrel-gnd drops it at
     // start unless it was a restart, and a restart does not show the splash.
-    char id[16], key[40];
-    if (screen_id(id, sizeof(id))) snprintf(key, sizeof(key), "screen_mode_%s:", id);
-    else snprintf(key, sizeof(key), "screen_mode:");
+    char id[16], key[40], lock_key[48];
+    if (screen_id(id, sizeof(id))) {
+        snprintf(key, sizeof(key), "screen_mode_%s:", id);
+        snprintf(lock_key, sizeof(lock_key), "display_lock_%s:", id);
+    } else {
+        snprintf(key, sizeof(key), "screen_mode:");
+        snprintf(lock_key, sizeof(lock_key), "display_lock:");
+    }
     FILE* f = fopen("/etc/kestrel/kestrel-gnd.yaml", "r");
     if (!f) return;
     char line[128];
     while (fgets(line, sizeof(line), f)) {
+        unsigned u;
+        if (sscanf(line, "camera_fps: %u", &u) == 1) { *fps = u; continue; }
+        if (!strncmp(line, lock_key, strlen(lock_key))) { free_sync = atoi(line + strlen(lock_key)) == 2; continue; }
         if (strncmp(line, key, strlen(key)) != 0) continue;
         char* p = line + strlen(key);
         while (*p == ' ' || *p == '"') p++;
         unsigned pw, ph, pr;
         if (sscanf(p, "%ux%u@%u", &pw, &ph, &pr) == 3) { *w = pw; *h = ph; *vr = pr; }
-        break;
     }
     fclose(f);
+    if (free_sync) *fps = 0;
 }
 
 // Ported from drm/drm.c's modeset_output_create() - not reimplemented from
@@ -138,11 +151,12 @@ static void read_gnd_screen_mode(uint16_t* w, uint16_t* h, uint32_t* vr) {
 //   2. screen_mode is set but not on offer - the highest refresh at that
 //      resolution not exceeding what was asked, else the sink's own
 //      preferred mode, else the first.
-//   3. screen_mode is unset - auto-select: highest refresh, resolution only
-//      as a tie-break between modes tied on refresh.
+//   3. screen_mode is unset - auto: in step with the camera's last frame
+//      rate (drm/mode_follow.h, shared), else the highest refresh, resolution
+//      only as a tie-break between modes tied on refresh.
 // Interlaced modes are skipped throughout, same as drm.c.
 static int pick_mode_index(drmModeConnector* conn, uint16_t mode_width,
-                            uint16_t mode_height, uint32_t mode_vrefresh) {
+                            uint16_t mode_height, uint32_t mode_vrefresh, uint32_t camera_fps) {
     if (mode_width > 0 && mode_height > 0 && mode_vrefresh > 0) {
         for (int i = 0; i < conn->count_modes; i++) {
             if (conn->modes[i].hdisplay == mode_width &&
@@ -166,7 +180,9 @@ static int pick_mode_index(drmModeConnector* conn, uint16_t mode_width,
         return (best >= 0) ? best : ((pref >= 0) ? pref : 0);
     }
 
-    int fc = 0;
+    int fc = modeset_pick_follow(conn, camera_fps, 0, 0);
+    if (fc >= 0) return fc;
+    fc = 0;
     uint32_t max_refresh = 0, max_area = 0;
     for (int i = 0; i < conn->count_modes; i++) {
         if (conn->modes[i].flags & DRM_MODE_FLAG_INTERLACE) continue;
@@ -298,9 +314,9 @@ int main(int argc, char** argv) {
     }
     if (!conn) { fprintf(stderr, "kestrel-splash: no connected connector\n"); return 1; }
 
-    uint16_t want_w, want_h; uint32_t want_vr;
-    read_gnd_screen_mode(&want_w, &want_h, &want_vr);
-    drmModeModeInfo mode = conn->modes[pick_mode_index(conn, want_w, want_h, want_vr)];
+    uint16_t want_w, want_h; uint32_t want_vr, camera_fps;
+    read_gnd_screen_mode(&want_w, &want_h, &want_vr, &camera_fps);
+    drmModeModeInfo mode = conn->modes[pick_mode_index(conn, want_w, want_h, want_vr, camera_fps)];
     int W = mode.hdisplay, H = mode.vdisplay;
 
     // Resolve a usable CRTC for this connector.

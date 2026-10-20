@@ -86,6 +86,10 @@ static const int kArFrameVals[]     = { 2, 0 };
 static const char* kArFrameLabels[] = { "SHORT", "STANDARD" };
 static const int kArFrameCount = 2;
 static int ar_frame_index(int mode) { return mode == 0 ? 1 : 0; }
+// DISPLAY > Refresh Sync's values (g_display_lock).
+static const char *refresh_sync_label(int v) {
+    return v == 2 ? "FREE" : v == 1 ? "ON" : "OFF";
+}
 
 std::vector<std::pair<const char*, int>> OSD::ar_rf_items() const {
     std::vector<std::pair<const char*, int>> v;
@@ -586,6 +590,9 @@ OSD::OSD(std::shared_ptr<DrmDevice> dev_, int refresh_frequency_ms_, volatile bo
     menu_show_all_adapters = true;
     menu_bg_video = bg_video_enabled;
     menu_frame_mode = g_frame_mode.load();
+    menu_refresh_sync = g_display_lock.load();
+    menu_sync_slice = g_display_lock_slice.load();
+    menu_sync_margin = g_display_lock_margin_us.load() / 1000;
     menu_hud_reactivity = hud_reactivity;
     menu_hud_debug = hud_debug;
 
@@ -2219,6 +2226,17 @@ void OSD::render_gl() {
             Settings::getInstance().set("imu_cam_tilt_deg", tilt_deg);
             printf("hud: camera tilt %d deg, taken at arming, saved\n", tilt_deg);
         }
+    }
+    // Refresh Sync on trial that nobody kept: back to the kept value.
+    if (sync_confirm_ && sync_confirm_left_s() <= 0) {
+        sync_confirm_ = false;
+        printf("menu: refresh sync %s not kept - back to %s\n", refresh_sync_label(g_display_lock.load()),
+               refresh_sync_label(sync_confirm_prev_));
+        g_display_lock = sync_confirm_prev_;
+        menu_refresh_sync = sync_confirm_prev_;
+        if (dev) dev->refollow();
+        if (menu_open) menu_refresh_options();   // the list's position too, not just the row's label
+        render_requested = true;
     }
     // A screen mode on trial that nobody kept: back to the screen's kept mode.
     if (screen_confirm_ && screen_confirm_left_s() <= 0) {
@@ -4468,6 +4486,12 @@ void OSD::begin_screen_mode_confirm(const std::string& mode) {
     pthread_mutex_unlock(&osd_mutex);
 }
 
+int OSD::sync_confirm_left_s() {
+    const uint64_t now = (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    return now >= sync_confirm_deadline_ms_ ? 0 : (int)((sync_confirm_deadline_ms_ - now + 999) / 1000);
+}
+
 int OSD::screen_confirm_left_s() {
     const uint64_t now = (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -4489,11 +4513,18 @@ std::string OSD::screen_mode_label(int idx) {
 
 // The WiFi board's internal antenna cannot hold a link for the video stream,
 // and the radio sits next to the RC link: say so on the row, on or off.
+
 const char* OSD::menu_help_warning(int tab, int i) {
     if (tab == kTabSystem && i == 3 && screen_confirm_) {
         static char ask[96];
         snprintf(ask, sizeof(ask), "Keep this mode? Enter keeps it - going back in %d s.",
                  screen_confirm_left_s());
+        return ask;
+    }
+    if (tab == 3 && i == kDispRefreshSync && sync_confirm_) {
+        static char ask[96];
+        snprintf(ask, sizeof(ask), "Keep it? Enter keeps it - back to %s in %d s.",
+                 refresh_sync_label(sync_confirm_prev_), sync_confirm_left_s());
         return ask;
     }
     if (tab == kTabSystem && i == 3 && menu_dirty[kTabSystem][3])
@@ -4528,6 +4559,60 @@ const char* OSD::menu_help_text(int tab, int i, const char* fallback) {
                    "only whole pictures go up. No tearing. The default.";
         }
     }
+    if (tab == 3 && i == kDispRefreshSync) {
+        // With the screen's refresh and the camera's rate known (the display
+        // lock's, measured): what the value shown does to this screen in this
+        // video mode, and while it is the one running, whether it holds now.
+        const float hz = g_dl_mode_hz.load(), fps = g_dl_camera_fps.load();
+        if (hz > 0 && fps > 0) {
+            static char t[256];
+            const bool live = menu_refresh_sync == g_display_lock.load();
+            const char* why = g_dl_why.load();
+            char now[96] = "";
+            if (live && menu_refresh_sync) {
+                if (g_dl_holding.load()) snprintf(now, sizeof(now), " Holding now.");
+                else if (why) snprintf(now, sizeof(now), " Now: %s.", why);
+            }
+            switch (menu_refresh_sync) {
+            case 1: {
+                const float k = std::round(hz / fps);
+                if (k >= 1 && std::fabs(hz - k * fps) <= 0.01f * hz)
+                    snprintf(t, sizeof(t), "Holds this screen's %.2f Hz just after each picture, %.0f refresh%s a\n"
+                             "camera frame (%.2f fps). Off if the screen blanks.%s", hz, k, k > 1 ? "es" : "", fps, now);
+                else
+                    snprintf(t, sizeof(t), "Cannot hold here: %.2f Hz is not a whole multiple of the camera's\n"
+                             "%.2f fps. Screen Mode Auto picks one that is, or use FREE.", hz, fps);
+                return t;
+            }
+            case 2: {
+                if (fps > hz / 0.999f) {
+                    snprintf(t, sizeof(t), "Cannot slow this screen: the camera (%.2f fps) is faster than\n"
+                             "its %.2f Hz. Pick a faster screen mode.", fps, hz);
+                    return t;
+                }
+                const float k = std::max(1.0f, std::floor(hz / fps + 1e-6f));
+                char per[40];
+                if (k > 1) snprintf(per, sizeof(per), "%.0f refreshes a camera frame", k);
+                else snprintf(per, sizeof(per), "a refresh a camera frame");
+                snprintf(t, sizeof(t), "Slows this screen from %.2f Hz to %.2f Hz in this video mode, %s.\n"
+                         "Only for screens that take any frame length.%s", hz, k * fps, per, now);
+                return t;
+            }
+            default:
+                snprintf(t, sizeof(t), "The screen refreshes on its own timing: %.2f Hz, the camera %.2f fps.\n"
+                         "ON or FREE hold it in step with the pictures.", hz, fps);
+                return t;
+            }
+        }
+        switch (menu_refresh_sync) {
+        case 1:  return "Holds the refresh just after each picture arrives, a line at a time.\n"
+                        "Needs a refresh in step with the camera (Screen Mode Auto). Off if the screen blanks.";
+        case 2:  return "Each frame made as long as the camera's, at the fastest mode: for screens that\n"
+                        "show their refresh change (118, 100 Hz...) without blanking. Lowest latency.";
+        default: return "The screen refreshes on its own timing. ON or FREE hold it in step with\n"
+                        "the pictures - FREE only for a screen that takes any frame length.";
+        }
+    }
     if (tab == kTabDvr && i == 0) {
         switch (menu_dvr_source) {
         case 1:  return "Records the screen - video and HUD, as you see them - 60 times a second.\n"
@@ -4543,7 +4628,8 @@ const char* OSD::menu_help_text(int tab, int i, const char* fallback) {
         if (dev && dev->output_list)
             snprintf(now, sizeof(now), "%dx%d @ %d Hz", dev->output_list->mode.hdisplay,
                      dev->output_list->mode.vdisplay, dev->output_list->mode.vrefresh);
-        mode = std::string("Showing ") + now + ". Auto picks the highest refresh the screen offers.";
+        mode = std::string("Showing ") + now + ". Auto refreshes in step with the camera's frame rate\n"
+               "where the screen can, else at the highest refresh it offers.";
         return mode.c_str();
     }
     if (tab == kTabSystem && i == kSysTimezone && menu_zone_ >= 0) {
@@ -4704,7 +4790,13 @@ std::vector<OSD::MenuItem> OSD::menu_items(int tab) const {
             {"Picture Size", 1, "Shrink the whole picture if your optics clip the edges."},
             {"UI Scaling", 1, "Size of the HUD's type. The panels stay put."},
             {"Brightness", 1, "Panel backlight. Lifts video and HUD together."},
-            {"Frame Mode", 1, "How pictures go from the radio to the screen."}   // see menu_help_text
+            // How pictures are timed onto the screen: worth leaving alone
+            // unless chasing latency or smoothness.
+            {"ADVANCED", 2},
+            {"Frame Mode", 1, "How pictures go from the radio to the screen."},  // see menu_help_text
+            {"Refresh Sync", 1, ""},                                              // see menu_help_text
+            {"Sync To", 1, "Which slice Refresh Sync times the screen to. SLICE 1: the top of each picture goes up soonest. SLICE 2: the whole picture."},
+            {"Sync Margin", 1, "Refresh Sync's refresh this much later. Fewer pictures miss their refresh (a hitch each), for that much latency: 2 MS, about a third fewer."}
         };
     } else if (tab == kTabDvr) {
         items = {
@@ -5222,6 +5314,47 @@ void OSD::menu_apply_change(int tab, int index, int dir) {
                 Settings::getInstance().set("frame_mode", menu_frame_mode);
                 printf("menu: frame mode %s\n", frame_mode_label(menu_frame_mode));
             }
+        } else if (menu_index == kDispSyncMargin) {
+            // Applied as it is stepped, like Sync To.
+            menu_sync_margin = menu_step(menu_sync_margin, dir, 5);
+            if (!menu_stepping_) {
+                g_display_lock_margin_us = menu_sync_margin * 1000;
+                Settings::getInstance().set("display_lock_margin_ms", menu_sync_margin);
+                printf("menu: refresh sync margin %d ms\n", menu_sync_margin);
+            }
+        } else if (menu_index == kDispSyncSlice) {
+            menu_sync_slice = menu_step(menu_sync_slice - 1, dir, 2) + 1;
+            if (!menu_stepping_) {
+                g_display_lock_slice = menu_sync_slice;
+                Settings::getInstance().set("display_lock_slice", menu_sync_slice);
+                printf("menu: refresh sync to slice %d\n", menu_sync_slice);
+            }
+        } else if (menu_index == kDispRefreshSync) {
+            // The screen's own, like its mode: one that blanks on it keeps it off
+            // while another has it on. FREE also moves Screen Mode Auto to the
+            // fastest mode (and back), so Auto chooses again.
+            // ON and FREE go on trial (sync_confirm_): live at once, kept on
+            // Enter, the kept value back after 10 s without it. OFF, or the
+            // kept value itself, is kept at once.
+            const int was = g_display_lock.load();
+            menu_refresh_sync = menu_step(menu_refresh_sync, dir, 3);
+            if (!menu_stepping_) {
+                const std::string key = screen_id_.empty() ? std::string("display_lock")
+                                                           : "display_lock_" + screen_id_;
+                if (!sync_confirm_) sync_confirm_prev_ = was;
+                g_display_lock = menu_refresh_sync;
+                if (dev) dev->refollow();
+                if (menu_refresh_sync == 0 || menu_refresh_sync == sync_confirm_prev_) {
+                    Settings::getInstance().set(key, menu_refresh_sync);
+                    sync_confirm_ = false;
+                    printf("menu: refresh sync %s\n", refresh_sync_label(menu_refresh_sync));
+                } else {
+                    sync_confirm_ = true;
+                    sync_confirm_deadline_ms_ = (uint64_t)(std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch()).count()) + 10000;
+                    printf("menu: refresh sync %s on trial - Enter keeps it\n", refresh_sync_label(menu_refresh_sync));
+                }
+            }
         }
     } else if (menu_tab == kTabDvr) {
         if (menu_index == 0) {
@@ -5398,6 +5531,12 @@ void OSD::menu_value_text(int tab, int i, char* val_buf, size_t cap) {
                 else                           sprintf(val_buf, "< %d%% >", menu_picture_scale);
             } else if (i == kDispFrameMode) {
                 sprintf(val_buf, "< %s >", frame_mode_label(menu_frame_mode));
+            } else if (i == kDispRefreshSync) {
+                sprintf(val_buf, "< %s >", refresh_sync_label(menu_refresh_sync));
+            } else if (i == kDispSyncSlice) {
+                sprintf(val_buf, "< SLICE %d >", menu_sync_slice);
+            } else if (i == kDispSyncMargin) {
+                sprintf(val_buf, "< %d MS >", menu_sync_margin);
             }
         } else if (menu_tab == kTabDvr) {
             if (i == 0) {
@@ -5635,6 +5774,18 @@ void OSD::handle_key(int key) {
 
     pthread_mutex_lock(&osd_mutex);
 
+    // Refresh Sync on trial: Enter, anywhere in the menu, keeps it.
+    if (sync_confirm_ && (key == 13 || key == '\n')) {
+        sync_confirm_ = false;
+        Settings::getInstance().set(screen_id_.empty() ? std::string("display_lock")
+                                                       : "display_lock_" + screen_id_, g_display_lock.load());
+        printf("menu: refresh sync %s kept for %s\n", refresh_sync_label(g_display_lock.load()),
+               screen_id_.empty() ? "this screen" : screen_id_.c_str());
+        render_requested = true;
+        pthread_cond_signal(&osd_cond);
+        pthread_mutex_unlock(&osd_mutex);
+        return;
+    }
     // A screen mode on trial: Enter, anywhere in the menu, keeps it.
     if (screen_confirm_ && (key == 13 || key == '\n')) {
         screen_confirm_ = false;
@@ -5759,6 +5910,9 @@ void OSD::handle_key(int key) {
              menu_picture_scale = dev->picture_scale_pct;
              menu_bg_video = bg_video_enabled;
              menu_frame_mode = g_frame_mode.load();
+             menu_refresh_sync = g_display_lock.load();
+             menu_sync_slice = g_display_lock_slice.load();
+             menu_sync_margin = g_display_lock_margin_us.load() / 1000;
              menu_hud_reactivity = hud_reactivity;
              menu_hud_debug = hud_debug;
              menu_dvr_source = dvr_source_now();

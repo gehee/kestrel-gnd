@@ -23,6 +23,7 @@
 #include <unistd.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
+#include "mode_follow.h"
 #include <drm_fourcc.h>
 #include <pthread.h>
 #include <assert.h>
@@ -129,9 +130,13 @@ int modeset_setup_framebuffers(int fd, drmModeConnector *conn, struct modeset_ou
 
 void modeset_output_destroy(int fd, struct modeset_output *out);
 
-struct modeset_output *modeset_output_create(int fd, drmModeRes *res, drmModeConnector *conn, uint16_t mode_width, uint16_t mode_height, uint32_t mode_vrefresh);
+/* With no mode asked for (Auto) and follow_fps non-zero, the mode is the one
+ * modeset_pick_follow() finds for it, if any: the screen refreshes in step
+ * with the camera. */
+struct modeset_output *modeset_output_create(int fd, drmModeRes *res, drmModeConnector *conn, uint16_t mode_width, uint16_t mode_height, uint32_t mode_vrefresh, uint32_t follow_fps);
 
-int modeset_prepare(int fd, struct modeset_output *output_list, uint16_t mode_width, uint16_t mode_height, uint32_t mode_vrefresh);
+int modeset_prepare(int fd, struct modeset_output *output_list, uint16_t mode_width, uint16_t mode_height, uint32_t mode_vrefresh, uint32_t follow_fps);
+
 
 int modeset_perform_modeset(int fd, struct modeset_output *out, drmModeAtomicReq * req, plane_info* video_info, plane_info* osd_info);
 

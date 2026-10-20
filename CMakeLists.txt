@@ -39,6 +39,7 @@ set(SOURCE_FILES
         rga_compositor.cpp
         vdec/vdec_ffmpeg.cpp
         renderer.cpp
+        display_lock.cpp
         drm.cpp
 				osd.cpp
         hud_canopy.cpp
