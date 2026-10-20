@@ -97,6 +97,9 @@ class Ar8030Source {
             int  rf_hw = -1;            // the RF board's version, TLV 0x14 of cmd 0x03
             int  proto = 0;             // kestrel-air's protocol and feature bits
             uint8_t feat = 0;
+            // What it has beyond those bits, as it shows it: kAirFeat864p144
+            // (its info), kAirSaidFrameClock, kAirSaidSensorTiming.
+            uint16_t said = 0;
             std::vector<std::pair<std::string, std::string>> kv;   // from 0x50
             std::string get(const char *k) const {
                 for (const auto &e : kv) if (e.first == k) return e.second;
@@ -106,10 +109,10 @@ class Ar8030Source {
         static AirInfo air_info();
         static void clear_air_info();
         // kestrel-air's capabilities, named for the INFO tab, by the feature bit
-        // that says the air unit has it on.
-        struct AirCap { uint8_t bit; const char *key; const char *name; };
-        static const AirCap kAirCaps[7];
-        // What the air unit has on, by name: its feature bits.
+        // (or AirInfo::said bit) that says the air unit has it on.
+        struct AirCap { uint16_t bit; const char *key; const char *name; };
+        static const AirCap kAirCaps[10];
+        // What the air unit has on, by name: its feature bits and what it said.
         static std::vector<std::string> air_cap_names(const AirInfo &a);
         static int air_floor_us;       // fastest capture -> first slice (air_floor_ms), see air_delay_for
         static bool tx_power_auto;
@@ -492,6 +495,10 @@ class Ar8030Source {
         // Said in its info (KA_MSG_INFO), the header's byte being full: 864p144
         // (864p144=1), its OS02K10's 1536x864 window at 144 fps.
         static constexpr uint16_t kAirFeat864p144 = 0x100;
+        // No feature bits, only AirInfo::said, for the INFO tab: its frame
+        // (KA_MSG_FRAME) came, and its info says the sensor's readout.
+        static constexpr uint16_t kAirSaidFrameClock = 0x200;
+        static constexpr uint16_t kAirSaidSensorTiming = 0x400;
         static inline uint16_t air_info_feat_ = 0;   // those bits, from its info (reset with the info)
         static inline bool air_info_seen_ = false;   // its info has come since the link came up
         // The mode stored for this air unit, if it lacks it: the default asked

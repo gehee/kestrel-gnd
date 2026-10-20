@@ -130,16 +130,13 @@ std::vector<std::pair<const char*, int>> OSD::ar_rf_items() const {
     // row index, so this order is free to change.
     if (rf_caps & 16) v.push_back({"Channel",   5});  // RF_CHAN, RF_HOP
     if (rf_caps & 1)  v.push_back({"TX Power",  1});  // RF_TX_POWER
-    // The goggle's radio config, so with any air unit (and still sent to a
-    // kestrel-air that takes it, sky cmd 0x41).
-    v.push_back({"Max Bandwidth", 11});
+    // Max Bandwidth (11), Radio Frame (12) and Steady Latency (15) are
+    // hidden: their settings (ar8030_max_bw_mhz, ar8030_frame_mode,
+    // ar8030_steady) still apply from the yaml, and their handlers stay, so
+    // listing them again is one line each here. Steady Latency needs an
+    // Open8030 with steady mode (request 0x0c5a0037), which its main lacks.
     // Open8030 on the goggle: the MCS its receive policy may go up to.
     if (Ar8030Source::radio_fw == 1) v.push_back({"Max MCS", 14});
-    // ... and steps it down on any block the air radio had to send again.
-    if (Ar8030Source::radio_fw == 1) v.push_back({"Steady Latency", 15});
-    // The frame is the two radios' (SET 16 carries it to the air unit's), so
-    // with any air unit.
-    v.push_back({"Radio Frame", 12});
     v.push_back({"Radio Firmware", 13});
     // MCS, Bandwidth and LNA Mode were removed rather than left visible.
     // BB_SET_MCS has no direction field, so it can only set our own transmit -
@@ -2261,6 +2258,14 @@ void OSD::render_gl() {
         g_display_lock = sync_confirm_prev_;
         menu_refresh_sync = sync_confirm_prev_;
         if (dev) dev->refollow();
+        // Back to OFF takes the Sync Margin row away, maybe from under the selection.
+        if (menu_open && menu_tab == 3) {
+            const int n = (int)menu_items(3).size();
+            if (menu_index >= n) {
+                menu_index = n - 1;
+                if (menu_focus == 2) menu_focus = 1;
+            }
+        }
         if (menu_open) menu_refresh_options();   // the list's position too, not just the row's label
         render_requested = true;
     }
@@ -4707,11 +4712,12 @@ static int video_row(int shown) {
 
 // AIR UNIT > INFO's capabilities rows: their help, which also marks them.
 static const char kAirCapsHelp[] =
-    "What this air unit's kestrel-air has on. Air Timing: its own times in each slice. "
-    "Radio Clock: pictures stamped on the radio's clock. Intra Refresh: no keyframe spikes. "
-    "Camera IMU: the camera's gyro samples with the video. FC IMU: the flight controller's gyro, "
-    "polled, for an air unit with no IMU on its camera. Bandwidth Cap: takes RADIO > Max Bandwidth. "
-    "864p120: VIDEO > Video Mode offers 864p120, a 1536x864 window of the camera at 120 fps.";
+    "What this air unit's kestrel-air has on. Air Timing: its times in each slice. "
+    "Radio Clock: pictures stamped on the radio's clock. Frame Clock: its radio's frame, for exact latency. "
+    "Sensor Timing: readout and exposure, for STATS. Intra Refresh: no keyframe spikes. "
+    "Camera IMU: the camera's gyro with the video. FC IMU: the flight controller's gyro instead. "
+    "Bandwidth Cap: takes the goggle's limit. "
+    "864p120, 864p144: Video Mode offers a 1536x864 window at 120 or 144 fps.";
 
 // A row label made at run time (the capabilities list), kept for good: a
 // MenuItem holds only the pointer, and a set's strings never move.
@@ -4791,6 +4797,10 @@ std::vector<OSD::MenuItem> OSD::menu_items(int tab) const {
                     "The goggle radio's firmware: STOCK, or OPEN8030 (open source) when "
                     "it is installed. Enter applies it: the radio restarts, the picture "
                     "is back in ~10 s."}); break;
+                case 15: items.push_back({it.first, 1,
+                    "Each block the air radio has to send again takes the link one MCS "
+                    "lower at once, and it climbs back only after 5 s without one: steadier "
+                    "latency, less bitrate. OFF, the default: the MCS follows the signal."}); break;
                 default: items.push_back({it.first, 1}); break;
             }
         }
@@ -4825,9 +4835,12 @@ std::vector<OSD::MenuItem> OSD::menu_items(int tab) const {
             {"ADVANCED", 2},
             {"Frame Mode", 1, "How pictures go from the radio to the screen."},  // see menu_help_text
             {"Refresh Sync", 1, ""},                                              // see menu_help_text
-            {"Sync To", 1, "Which slice Refresh Sync times the screen to. SLICE 1: the top of each picture goes up soonest. SLICE 2: the whole picture."},
-            {"Sync Margin", 1, "Refresh Sync's refresh this much later. Fewer pictures miss their refresh (a hitch each), for that much latency: 2 MS, about a third fewer."}
         };
+        // Only while Refresh Sync is ON or FREE: with it OFF the margin does
+        // nothing. Sync To (kDispSyncSlice, after it: which slice the lock
+        // times the screen to) is hidden; display_lock_slice still applies.
+        if (menu_refresh_sync != 0)
+            items.push_back({"Sync Margin", 1, "Refresh Sync's refresh this much later. Fewer pictures miss their refresh (a hitch each), for that much latency: 2 MS, about a third fewer."});
     } else if (tab == kTabDvr) {
         items = {
             {"Source", 1, "What REC captures: the FPV stream, or the screen."},  // see menu_help_text

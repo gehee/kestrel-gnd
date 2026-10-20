@@ -384,19 +384,23 @@ Ar8030Source::AirInfo Ar8030Source::air_info() {
     return air_info_;
 }
 
-const Ar8030Source::AirCap Ar8030Source::kAirCaps[7] = {
+const Ar8030Source::AirCap Ar8030Source::kAirCaps[10] = {
     { kAirFeatLatInfo,      "air-timing",    "Air Timing" },
     { kAirFeatApClock,      "radio-clock",   "Radio Clock" },
+    { kAirSaidFrameClock,   "frame-clock",   "Frame Clock" },
+    { kAirSaidSensorTiming, "sensor-timing", "Sensor Timing" },
     { kAirFeatIntraRefresh, "intra-refresh", "Intra Refresh" },
     { kAirFeatCamImu,       "cam-imu",       "Camera IMU" },
     { kAirFeatFcImu,        "fc-imu",        "FC IMU" },
     { kAirFeatMaxBw,        "bandwidth-cap", "Bandwidth Cap" },
     { kAirFeat864p120,      "864p120",       "864p120" },
+    { kAirFeat864p144,      "864p144",       "864p144" },
 };
 
 std::vector<std::string> Ar8030Source::air_cap_names(const AirInfo &a) {
     std::vector<std::string> out;
-    for (const auto &c : kAirCaps) if (a.feat & c.bit) out.push_back(c.name);
+    const uint16_t have = (uint16_t)(a.feat | a.said);
+    for (const auto &c : kAirCaps) if (have & c.bit) out.push_back(c.name);
     return out;
 }
 
@@ -3116,6 +3120,8 @@ void Ar8030Source::note_air_frame(const uint8_t *pl, size_t n) {
     memcpy(&pq, pl + 6, 4);
     if (tq < 1000 * 256 || tq > 20000 * 256 || pq >= tq) return;
     frame_clock_.set_air_frame(tq / 256.0, pq / 256.0, pl[1], n >= 11 ? pl[10] : 0);
+    std::lock_guard<std::mutex> g(air_info_mtx_);   // once a second
+    air_info_.said |= kAirSaidFrameClock;
 }
 
 // 0x50, kestrel-air's info message: "key=value" lines (protocol/kestrel_air.h
@@ -3164,6 +3170,10 @@ void Ar8030Source::note_air_info(const uint8_t *pl, size_t n) {
         it = kv.erase(it);
     }
     std::lock_guard<std::mutex> g(air_info_mtx_);
+    // For the INFO tab's capabilities: 864p144 as the info says it now; a
+    // readout said once in this link stays said (a new mode's comes late).
+    air_info_.said = (uint16_t)((air_info_.said & ~kAirFeat864p144) | air_info_feat_ |
+                                (air_readout_us_ ? kAirSaidSensorTiming : 0));
     if (kv == air_info_.kv) return;
     air_info_.kv = kv;
     printf("ar8030: air unit info:");

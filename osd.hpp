@@ -626,10 +626,12 @@ class OSD {
         static const int kTabDvr = 4, kTabSystem = 5, kTabAirInfo = 6, kTabAirSerial = 7;
         // DISPLAY rows, in the order they are listed. The tab is dispatched
         // by index in half a dozen places, so the order lives here once and
-        // the dispatchers name the row rather than count to it.
+        // the dispatchers name the row rather than count to it. Sync Margin
+        // is listed only while Refresh Sync is ON or FREE, and Sync To not at
+        // all (hidden, its setting still read): both last, so no row moves.
         enum DisplayRow {
             kDispTheme = 0, kDispBgVideo, kDispPicture, kDispUiScale, kDispBrightness,
-            kDispHdrAdvanced, kDispFrameMode, kDispRefreshSync, kDispSyncSlice, kDispSyncMargin
+            kDispHdrAdvanced, kDispFrameMode, kDispRefreshSync, kDispSyncMargin, kDispSyncSlice
         };
         // SYSTEM rows, headers included, in the order they are listed.
         enum SysRow {
