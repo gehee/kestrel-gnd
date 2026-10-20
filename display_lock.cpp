@@ -130,15 +130,14 @@ bool DisplayLock::map_register() {
     return true;
 }
 
-// Whether to hold the phase now: turned on for this screen, not paused by the
-// /tmp switch (A/B tests), no VRR, and the screen able to keep in step at all.
+// Whether to hold the phase now: turned on for this screen, no VRR, and the
+// screen able to keep in step at all.
 // ON: the refresh a whole multiple of the camera's frame rate - otherwise the
 // pictures sweep through the refresh far faster than a line a frame follows.
 // FREE: the screen's mode no slower than the camera (frames are only made
 // longer than the mode's), and no more than twice as fast.
 bool DisplayLock::usable(int lock, double Pm, double Pc, const char **why) {
     if (!lock) { *why = "off"; return false; }
-    if (access("/tmp/kestrel-displaylock-off", F_OK) == 0) { *why = "paused (/tmp/kestrel-displaylock-off)"; return false; }
     if (dev_->vrr_active()) { *why = "not with VRR"; return false; }
     if (Pc <= 0) { *why = "waiting for the camera's frame rate"; return false; }
     if (lock == 2) {
@@ -308,14 +307,10 @@ void DisplayLock::run() {
 
         // DISPLAY > Sync Margin: the refresh that much later than the least
         // expected wait (fewer pictures past the deadline, more wait for the
-        // rest). Test knob over it: /tmp/kestrel-displaylock-aim, us earlier.
+        // rest).
         if (now >= aim_t + 1000000) {
             aim_t = now;
-            double a = -(double)g_display_lock_margin_us.load(std::memory_order_relaxed);
-            if (FILE *f = fopen("/tmp/kestrel-displaylock-aim", "r")) {
-                if (fscanf(f, "%lf", &a) != 1) a = 0;
-                fclose(f);
-            }
+            const double a = -(double)g_display_lock_margin_us.load(std::memory_order_relaxed);
             if (a != aim_us) {
                 printf("display lock: aiming %.0f us earlier than the least expected wait\n", a);
                 fflush(stdout);

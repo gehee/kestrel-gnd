@@ -8,6 +8,8 @@
 #include <memory>
 #include <vector>
 #include <cassert>
+#include <cstdio>
+#include <unistd.h>
 
 #include "utils/minimp4.h"
 #include "common.hpp"
@@ -198,6 +200,16 @@ class DVR {
             if (to_file && (dvr_file = fopen(filename.c_str(), "w")) == NULL) {
                 printf("ERROR: unable to open %s\n", filename.c_str());
             }
+        }
+
+        // run_dvr closes the file itself; this is for a DVR whose thread never
+        // ran (init() failed, the thread could not start).
+        ~DVR() { if (dvr_file) fclose(dvr_file); }
+        // A recording given up before its thread ran: the file closed and
+        // removed, as if REC had not been pressed.
+        void discard() {
+            if (dvr_file) { fclose(dvr_file); dvr_file = nullptr; }
+            if (to_file && !filename.empty()) ::unlink(filename.c_str());
         }
 
         // DvrRecorder reports the open file's path in the OSD.

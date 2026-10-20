@@ -3375,49 +3375,6 @@ void Ar8030Source::poll_ap_time() {
     }
 }
 
-// Tests, Open8030 on our radio: while /tmp/kestrel-o8030diag exists, once a
-// second its receive MCS policy (request 0x0c5a001e: the row it is on, the
-// MCS it sees, its requests and their answers, the samples it counted bad)
-// and the packets its receiver refused (0x0c5a0017: invalid, the MAC's, and
-// drops - flagged, its 4-deep queue full, other), the counts since the last
-// line. The policy takes refused packets for errors.
-static void open8030_diag_poll() {
-    static uint64_t last = 0;
-    static uint32_t p_req, p_ack, p_to, p_inv, p_mac, p_fl, p_busy, p_oth;
-    if (!arlink_request || access("/tmp/kestrel-o8030diag", F_OK) != 0) return;
-    const uint64_t t = now_ms();
-    if (t - last < 1000) return;
-    last = t;
-    struct {
-        uint32_t samples, requests, acknowledgements, unsolicited, timeouts;
-        uint32_t advertisements, cancellations, state, current, previous, observed;
-        uint32_t average_snr, bad_samples, recent_bad, sample_ms, request_ms, direction_ms;
-        uint32_t rest[64];
-    } m;
-    static uint8_t rx[4096];
-    uint32_t n = 0, nr = 0;
-    memset(&m, 0, sizeof(m));
-    if (arlink_request(0x0c5a001e, nullptr, 0, &m, sizeof(m), &n, 1000) < 0 || n < 68) return;
-    if (arlink_request(0x0c5a0017, nullptr, 0, rx, sizeof(rx), &nr, 1000) < 0 || nr < 4096) nr = 0;
-    auto u32 = [&](size_t o) { uint32_t v; memcpy(&v, rx + o, 4); return v; };
-    const uint32_t inv = nr ? u32(108) : 0, mac = nr ? u32(2104) : 0, fl = nr ? u32(4084) : 0,
-                   busy = nr ? u32(4088) : 0, oth = nr ? u32(4092) : 0;
-    auto mcs = [](uint32_t internal) { return internal < 25 ? (int)internal - 2 : 99; };
-    // The frame stamps (0x0c5a0035): flags, taken / refused, the last's residual.
-    FrameStampInfo fs{};
-    uint32_t nf = 0;
-    const int frc = arlink_request(0x0c5a0035, nullptr, 0, &fs, sizeof(fs), &nf, 500);
-    printf("o8030: mcs %d (sees %d) snr %u pending %u | req +%u ack +%u timeout +%u | bad %u/8 recent %u | "
-           "refused: invalid +%u mac +%u flagged +%u busy +%u other +%u | stamps rc %d flags %u taken %u refused %u "
-           "residual %d us frames %u since %u us | retries %u, steady %u, steps down %u\n",
-           mcs(m.current), mcs(m.observed), m.average_snr, (m.state >> 3) & 1, m.requests - p_req,
-           m.acknowledgements - p_ack, m.timeouts - p_to, m.bad_samples, m.recent_bad, inv - p_inv, mac - p_mac,
-           fl - p_fl, busy - p_busy, oth - p_oth, frc, fs.flags, fs.taken, fs.rejected, fs.residual_us, fs.frames,
-           fs.since_us, fs.retries, fs.steady, fs.retry_steps);
-    p_req = m.requests; p_ack = m.acknowledgements; p_to = m.timeouts;
-    p_inv = inv; p_mac = mac; p_fl = fl; p_busy = busy; p_oth = oth;
-}
-
 // Experiment: `echo G > /tmp/bw.req` puts the video link on bandwidth gear G
 // (bb_bandwidth_e, 0..5 = 1.25, 2.5, 5, 10, 20, 40 MHz; bb_config_*.json starts
 // it, the "br" link, at 5 MHz = 2). The air unit is the AP and transmits the
@@ -3433,7 +3390,6 @@ void Ar8030Source::bw_poll() {
     const uint64_t t = now_ms();
     if (!dev || t - last < 500) return;
     last = t;
-    if (radio_fw == 1) open8030_diag_poll();
     // Open8030 here: the menu's caps (RADIO > Max Bandwidth, Max MCS) on the
     // link - the widest it may go (SET 22, what our radio asks the air's for;
     // live, no restart) and the highest MCS our receive policy may use
@@ -3481,22 +3437,6 @@ void Ar8030Source::bw_poll() {
     // The widest the link may go with a stock air radio (it drops and re-forms
     // the link at every step to or from 40 MHz) is our Open8030 radio's own
     // call: it keeps to 20 MHz until the air radio's frame stamps say Open8030.
-    // Tests: /tmp/kestrel-frame-mode holding 0, 1 or 2 asks the radio for
-    // that TDD frame (SET order 16, see set_frame_mode()): both ends change
-    // together; it holds until the next link-up puts 2 back. At 20 MHz
-    // 0 = 5633.92 us, 1 = 7964.80, 2 = 4650.88; at 40 MHz 4233.60, 5398.40,
-    // 3250.56 (measured 2026-10-14).
-    if (FILE *f = fopen("/tmp/kestrel-frame-mode", "r")) {
-        int m = -1;
-        if (fscanf(f, "%d", &m) != 1) m = -1;
-        fclose(f);
-        unlink("/tmp/kestrel-frame-mode");
-        if (m >= 0 && m <= 2) {
-            uint8_t buf[16] = { (uint8_t)m };
-            printf("ar8030: /tmp/kestrel-frame-mode: %d -> %d\n", m, ar_ioctl(dev, (2 << 24) | 16, buf, NULL));
-            frame_clock_.reframe();
-        }
-    }
     // Tests: /tmp/kestrel-regwrite holding "offset mask value" (hex) changes
     // those bits of one baseband register (0x0a110000 + offset) through
     // GET/SET 100, for A/B tests of radio settings. Logs before and after.
@@ -3533,20 +3473,6 @@ void Ar8030Source::bw_poll() {
             }
             fclose(o);
             printf("ar8030: /tmp/kestrel-regdump -> /tmp/kestrel-regs.txt\n");
-        }
-    }
-    // Tests: /tmp/kestrel-airpower holding a value sets the air unit's TX
-    // power to it as the menu does (sky cmd 0x22): mW from stock's levels, or
-    // under 20 dBm (9..19 - kestrel-air retries a level its radio refuses).
-    // Not saved here; the air unit keeps it until the next one.
-    if (FILE *f = fopen("/tmp/kestrel-airpower", "r")) {
-        int v = 0;
-        if (fscanf(f, "%d", &v) != 1) v = 0;
-        fclose(f);
-        unlink("/tmp/kestrel-airpower");
-        if ((v >= 9 && v < 20) || v == 25 || v == 100 || v == 200 || v == 500) {
-            printf("ar8030: /tmp/kestrel-airpower: %d %s\n", v, v < 20 ? "dBm" : "mW");
-            request_setting(CAM_PWR, v);
         }
     }
     // Tests: /tmp/kestrel-chan holding a frequency in MHz moves the link there
@@ -4678,6 +4604,7 @@ void Ar8030Source::consume_bytes(const uint8_t* data, size_t len) {
             }
             nal_start = i + sc_len;
             i += sc_len;
+            if (nal_start >= n) break;         // the start code ends the buffer: its NAL comes next time
             if (accum[nal_start] != 0x80) continue;
             // A packet header is not Annex-B: its bytes can hold a start code.
             // The capture time's high bytes (18..25) are 01 00 00 00 or zeros,

@@ -4893,7 +4893,7 @@ std::vector<OSD::MenuItem> OSD::menu_items(int tab) const {
                                                "place of Caddx's."});
             items.push_back({"Radio Driver", 0, "What drives the AR8030 radio on the air unit."});
             items.push_back({"Radio Firmware", 0, "What runs on the air unit's AR8030 radio chip: the stock "
-                                                  "firmware, or Open8030, the open one (on a Lite+)."});
+                                                  "firmware, or Open8030, the open one (Lite and Lite+)."});
             items.push_back({"Kernel", 0, "The air unit's Linux kernel (the stock one)."});
             items.push_back({"Camera", 0, "The camera's image sensor."});
             // What it has on, as one comma-separated list: a row of type 4,

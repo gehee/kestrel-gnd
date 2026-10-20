@@ -631,7 +631,7 @@ int main(int argc, char **argv)
 		const int bw = Settings::getInstance().getInt("ar8030_max_bw_mhz", 40);
 		Ar8030Source::max_bw_mhz = bw == 0 || bw == 5 || bw == 10 || bw == 20 ? bw : 40;
 		const int mcs = Settings::getInstance().getInt("ar8030_max_mcs", -1);
-		Ar8030Source::max_mcs = mcs >= 0 && mcs <= 13 ? mcs : -1;
+		Ar8030Source::max_mcs = mcs >= 0 && mcs <= 11 ? mcs : -1;   // the menu's range, AUTO + MCS 0..11
 		Ar8030Source::steady = Settings::getInstance().getInt("ar8030_steady", 0) == 1 ? 1 : 0;
 	}
 	// RADIO > VRX Radio Firmware: Open8030 when its image is on the unit, unless
@@ -1248,6 +1248,10 @@ int main(int argc, char **argv)
 		ret = pthread_join(tid_rend, NULL);
 		assert(!ret);
 		printf("Renderer thread joined.\n");
+		// The display lock's thread reads the DRM device every vblank; it has
+		// to be gone before dev->cleanup() frees that (the renderer object
+		// itself lives to the end of main).
+		renderer->stop_display_lock();
 	}
 	
 	if (dev) dev->cond_signal();

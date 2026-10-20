@@ -1016,6 +1016,12 @@ void WebStream::Impl::on_request(Client* c, const std::string& method, const std
             const uint32_t rate = (uint32_t)DvrRecorder::web_cap_kbps() * 1000 / 8;   // bytes/s
             setsockopt(c->fd, SOL_SOCKET, SO_MAX_PACING_RATE, &rate, sizeof(rate));
         }
+        // A phone that walks out of range without closing: its socket is given
+        // up once nothing it was sent has been acknowledged for this long,
+        // instead of the kernel's 15-30 minutes of retransmission - the viewer
+        // count, and with it the screen encoder, follow.
+        const unsigned user_timeout_ms = 20000;
+        setsockopt(c->fd, IPPROTO_TCP, TCP_USER_TIMEOUT, &user_timeout_ms, sizeof(user_timeout_ms));
         c->streaming = true;
         c->need_key = true;
         viewers++;

@@ -41,8 +41,8 @@ plus camera settings pushed to the air unit over the `FE A5` sky protocol.
 Screen recording rebuilds each frame from what the display scanned out - the
 decoded picture and the OSD, blended with the RK3568's RGA - and encodes it on
 the VEPU at 60 fps, without touching the display, so the live picture loses
-nothing to it (`screen_tap.hpp`). It needs RKMPP and librga; without librga it
-falls back to the DRM writeback connector, which costs the live picture.
+nothing to it (`screen_tap.hpp`). It needs RKMPP and librga; without them there
+is no screen recording, and the log says so.
 
 **Settings** — `kestrel-gnd.yaml` next to the binary.
 
@@ -132,3 +132,16 @@ and the hardware encoder used by screen recording. Linking also needs
 firmware you own rather than shipped by fpvOS — the `fpvos-vendor-libs`
 package stages it. CMake tolerates its absence, so a host build without
 vendor blobs still compiles; `--link ar8030` then has nothing to talk to.
+
+## Third-party code
+
+kestrel-gnd is GPLv3 ([LICENSE](LICENSE)). It carries two pieces under their
+own licences, unchanged:
+
+- `utils/qrcodegen.c`, `utils/qrcodegen.h`: the QR Code generator library by
+  Project Nayuki (<https://www.nayuki.io/page/qr-code-generator-library>),
+  MIT License. It draws the QR codes on SYSTEM › WiFi AP that join a phone to
+  the goggle's network and open the spectator page. The licence text is at
+  the top of both files.
+- `include/rga/`: the im2d API headers of Rockchip's librga, Apache License
+  2.0 (see [include/rga/README.md](include/rga/README.md)).

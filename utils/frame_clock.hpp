@@ -288,12 +288,6 @@ private:
         bool quick = false;
         while (run_) {
             { std::lock_guard<std::mutex> lk(mu_); following_ = false; }
-            // Tests: /tmp/kestrel-frameclock-off - no reads at all.
-            if (access("/tmp/kestrel-frameclock-off", F_OK) == 0) {
-                { std::lock_guard<std::mutex> lk(mu_); valid_ = false; }
-                std::this_thread::sleep_for(std::chrono::milliseconds(500));
-                continue;
-            }
             double Tm = 0, E = 0, pur = 0;
             int rc = -1;
             reframe_ = false;               // what is found now is after it
@@ -383,7 +377,6 @@ private:
                 if (read(&r)) buf.push_back(r);
                 const uint64_t t = mono_us();
                 if (t - last_up < (settled ? 1000000u : 500000u)) continue;
-                if (access("/tmp/kestrel-frameclock-off", F_OK) == 0) break;
                 const double N = ((double)t - (double)last_up) / Tm;
                 last_up = t;
                 if (!buf.empty()) {
@@ -474,6 +467,20 @@ private:
                 if (restarted && !counted && good >= 3 && !restart_logged) {
                     printf("frameclock: the radio clock is %.1f s from the last count: the air unit started again, counted anew\n",
                            (ac_now - last.at(E)) / 1e6);
+                    restart_logged = true;
+                }
+                // A count carried from before this link (the edges lined up
+                // with the old grid) is the old air unit's: with the radio
+                // clock a second or more off it, dropped, and nothing more
+                // carried - else the stale clock was published and every
+                // slice failed the check, with no air figures until the next
+                // reframe. The stamps' count is the air radio's own: kept.
+                if (restarted && counted && !stamped) {
+                    printf("frameclock: the radio clock is %.1f s from the count carried on: the air unit started again, dropped\n",
+                           (ac_now - last.at(E)) / 1e6);
+                    counted = false;
+                    cand.clear();
+                    carried = false;
                     restart_logged = true;
                 }
                 if (!stamped && !counted && carried && !restarted && air && std::fabs(aTt - Tt) < 0.5 && good >= 3 && E - last.E < 60e6 &&

@@ -268,9 +268,12 @@ class Renderer {
         void reset_stats(uint64_t now);
     public:
         virtual ~Renderer() {
-            if (lock_) lock_->stop();
+            stop_display_lock();
             delete decoded_unit_queue;
         }
+        // Stops the display lock's thread (idempotent): before the DRM device
+        // it reads goes away.
+        void stop_display_lock() { if (lock_) lock_->stop(); }
         virtual bool render_frame(DecodedUnit *du);
         uint64_t sensor_offset_us(const DecodedUnit* du);
         virtual void queue_frame(std::shared_ptr<DecodedUnit> du);

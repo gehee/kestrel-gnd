@@ -872,11 +872,24 @@ bool DvrRecorder::start_recording() {
     // nothing is ever written. Renderer only calls init() on the legacy --dvr
     // object, which is always null now.
     // Screen recordings use the display size; the FPV path uses the video size.
-    if (screen && sw > 0 && sh > 0) dvr->init(sw, sh);
-    else                            dvr->init(fw, fh);
+    // A set-up that fails (no display, no RGA, the encoder or the muxer
+    // refusing) is not a recording: the thread would run with nothing to
+    // encode into - a null display dereferenced in screen mode, else an empty
+    // file, REC on the HUD and a web view following a leader that never
+    // composites until REC is pressed again.
+    const int inited = (screen && sw > 0 && sh > 0) ? dvr->init(sw, sh) : dvr->init(fw, fh);
+    if (inited < 0) {
+        printf("DVR: not recording - the %s could not be set up (see above)\n",
+               screen ? "screen encoder" : "muxer");
+        dvr->discard();
+        std::lock_guard<std::mutex> lk(m_);
+        file_.clear();
+        return false;
+    }
     pthread_t tid;
     if (pthread_create(&tid, nullptr, DVR::run_dvr_thread, dvr.get()) != 0) {
         printf("DVR: failed to start writer thread\n");
+        dvr->discard();
         std::lock_guard<std::mutex> lk(m_);
         file_.clear();
         return false;
