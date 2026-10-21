@@ -282,25 +282,35 @@ public:
     bool vrr_active() const { return enable_vrr && output_list && output_list->vrr_capable; }
     // Kernel timestamp (CLOCK_MONOTONIC us) of the last vblank on our CRTC.
     bool last_vblank(uint64_t *ts_us, uint32_t *seq = nullptr);
+    // The current mode, copied under mode_copy_m_: set_crtc_mode assigns it
+    // on the DRM event thread while the display lock and the renderer read it.
+    // A lock of its own rather than crtc_mode_m, which is held across a
+    // blocking modeset: a reader on a vblank-paced thread waits for a 68-byte
+    // copy, never for the modeset.
+    drmModeModeInfo current_mode() const {
+        std::lock_guard<std::mutex> lk(mode_copy_m_);
+        return output_list ? output_list->mode : drmModeModeInfo{};
+    }
     // How long after a vblank the scan-out reaches a screen row, in
     // microseconds. The vblank's time is taken as the start of the active
     // area, which is when it is earliest.
-    double row_time_us(int row) const {
-        return output_list && output_list->mode.clock
-            ? (double)output_list->mode.htotal * row * 1000.0 / output_list->mode.clock : 0;
+    static double row_time_of(const drmModeModeInfo& m, int row) {
+        return m.clock ? (double)m.htotal * row * 1000.0 / m.clock : 0;
     }
-    int screen_rows() const { return output_list ? output_list->mode.vdisplay : 0; }
+    double row_time_us(int row) const { return row_time_of(current_mode(), row); }
+    int screen_rows() const { return current_mode().vdisplay; }
     // One refresh, in microseconds: the frame being scanned out, which the
     // display lock may make longer than the mode's (set_frame_period).
     double frame_period_us() const {
         const double now = frame_period_now_us_.load(std::memory_order_relaxed);
         return now > 0 ? now : mode_period_us();
     }
-    // One refresh of the current mode, in microseconds.
-    double mode_period_us() const {
-        return output_list && output_list->mode.clock
-            ? (double)output_list->mode.htotal * output_list->mode.vtotal * 1000.0 / output_list->mode.clock : 0;
+    // One refresh of a mode, in microseconds.
+    static double period_of(const drmModeModeInfo& m) {
+        return m.clock ? (double)m.htotal * m.vtotal * 1000.0 / m.clock : 0;
     }
+    // ... and of the current one.
+    double mode_period_us() const { return period_of(current_mode()); }
     std::atomic<double> frame_period_now_us_{0};
 
 public:
@@ -327,6 +337,9 @@ public:
     // modeset), and by the display lock (display_lock.hpp) around its register
     // writes: never one over the other's.
     std::mutex crtc_mode_m;
+    // Guards output_list->mode for current_mode(). Taken inside crtc_mode_m by
+    // set_crtc_mode, and never held across anything else: a leaf.
+    mutable std::mutex mode_copy_m_;
     // Video variables
 	uint32_t video_frm_width;
 	uint32_t video_frm_height;

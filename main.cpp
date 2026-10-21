@@ -100,6 +100,9 @@ static void reexec_now(int)
 void kestrel_request_restart()
 {
 	if (stop_requested) return;
+	// The setting that asked for the restart (a screen mode on trial) must be
+	// on disk for the new process, and the forced re-exec below cannot write it.
+	Settings::getInstance().flush();
 	g_restart = 1;
 	stop_requested = 1;
 	signal_stop = true;
@@ -1142,6 +1145,7 @@ int main(int argc, char **argv)
                     if (Ar8030Source::max_bw_mhz != was) {
                         printf("menu: max bandwidth %d MHz - restarting the radio with it\n", Ar8030Source::max_bw_mhz);
                         fflush(stdout);
+                        Settings::getInstance().flush();   // bb_only.sh reads it
                         if (system("setsid sh -c '/etc/init.d/S70kestrel stop; /etc/init.d/S60ar8030 restart; "
                                    "sleep 2; /etc/init.d/S70kestrel start' </dev/null >/dev/null 2>&1 &") != 0)
                             printf("menu: could not restart the radio\n");
@@ -1160,6 +1164,7 @@ int main(int argc, char **argv)
                         printf("menu: radio firmware %s - restarting the radio with it\n",
                                Ar8030Source::radio_fw ? "Open8030" : "stock");
                         fflush(stdout);
+                        Settings::getInstance().flush();   // bb_only.sh reads it
                         if (system("setsid sh -c '/etc/init.d/S70kestrel stop; /etc/init.d/S60ar8030 restart; "
                                    "sleep 2; /etc/init.d/S70kestrel start' </dev/null >/dev/null 2>&1 &") != 0)
                             printf("menu: could not restart the radio\n");
@@ -1285,6 +1290,10 @@ int main(int argc, char **argv)
         printf("Frame thread joined.\n");
     }
 	
+	// Settings are written from a background thread; whatever is still pending
+	// goes now, before a restart or the next start reads the file.
+	Settings::getInstance().flush();
+
 	////////////////////////////////////////////// DRM CLEANUP;
 	if (dev) dev->cleanup();
 

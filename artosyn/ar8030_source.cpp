@@ -554,6 +554,7 @@ void Ar8030Source::on_link_event(const uint8_t* p) {
     if (p[0] != (uint8_t)slot || p[1] > 2) return;
     link_events_.fetch_add(1);
     link_state_.store(p[1]);
+    frame_clock_.set_linked(p[1] == 2);
     if (p[1] == 2) frame_mode_due_ms_.store(now_ms() + 1000);   // see set_frame_mode()
     // A link starts on the config's 5 MHz (gear 2) and widens from there, each
     // step an event 12. A drop that a bandwidth change caused re-forms the same
@@ -2902,6 +2903,7 @@ void Ar8030Source::start_stats() {
         stats_stop = false;
     }
     link_state_.store(-1);
+    frame_clock_.set_linked(false);
     stats_thread = std::thread(&Ar8030Source::stats_run, this);
     // Open8030 on our radio: its frame info (the air radio's clock from the
     // frame stamps). A radio that does not answer is asked again only every
@@ -2973,6 +2975,7 @@ void Ar8030Source::stats_run() {
             int ls = current_link_state();
             if (ls >= 0 && link_events_.load() == events_before) {   // not overtaken
                 link_state_.store(ls);
+                frame_clock_.set_linked(ls == 2);
                 if (osd) osd->update_artosyn_link_state(ls);
             }
         }
@@ -2990,6 +2993,7 @@ void Ar8030Source::stats_run() {
             publish_link_stats();
         }
         publish_chan_scan();             // its own pace: 2 s, 70 ms while the scan screen is up
+        send_caps();                     // when due: after a link-up or a menu change
         // Once a second. It was on the video thread, which then waited for the
         // radio's answer - a lost one held the next picture for a second.
         poll_ap_time();
@@ -3375,22 +3379,12 @@ void Ar8030Source::poll_ap_time() {
     }
 }
 
-// Experiment: `echo G > /tmp/bw.req` puts the video link on bandwidth gear G
-// (bb_bandwidth_e, 0..5 = 1.25, 2.5, 5, 10, 20, 40 MHz; bb_config_*.json starts
-// it, the "br" link, at 5 MHz = 2). The air unit is the AP and transmits the
-// video, so it has to change first: sky cmd 0x24 with gear + 1 to kestrel-air
-// (stock ignores it; its own handshake sends 0 at every link-up), then our
-// receive side. The radio also widens the link by itself after link-up. No new picture 3 s later and both go back to the
-// gear before - kestrel-air does that by itself when the link is gone, since we
-// could not reach it then. Not saved.
-void Ar8030Source::bw_poll() {
-    static int cur = 2, prev = -1;
-    static uint64_t last = 0, at = 0, frames_at = 0;
-    bb_dev_handle_t *dev = (bb_dev_handle_t *)bb_dev;
-    const uint64_t t = now_ms();
-    if (!dev || t - last < 500) return;
-    last = t;
-    // Open8030 here: the menu's caps (RADIO > Max Bandwidth, Max MCS) on the
+// Open8030 here: the menu's caps on the link. On the stats thread: each try
+// is up to a second of SET 22 and two half-second requests, retried every 2 s
+// for as long as the radio does not take them - on the video thread (it was in
+// bw_poll) a radio that stopped answering held the pictures that long.
+void Ar8030Source::send_caps() {
+    // The menu's caps (RADIO > Max Bandwidth, Max MCS) on the
     // link - the widest it may go (SET 22, what our radio asks the air's for;
     // live, no restart) and the highest MCS our receive policy may use
     // (request 0x0c5a0036). Our radio keeps both until changed; sent again at
@@ -3399,7 +3393,9 @@ void Ar8030Source::bw_poll() {
     // AUTO / off: nothing sent at link-up, the radio runs on its own config;
     // chosen from the menu, sent once (40 MHz, MCS none, steady off) to lift
     // what was set before.
-    if (radio_fw == 1 && caps_due.load() && link_state_.load() == 2 && arlink_request) {
+    bb_dev_handle_t *dev = (bb_dev_handle_t *)bb_dev;
+    const uint64_t t = now_ms();
+    if (dev && radio_fw == 1 && caps_due.load() && link_state_.load() == 2 && arlink_request) {
         static uint64_t tried = 0;
         if (t - tried >= 2000) {
             tried = t;
@@ -3434,6 +3430,23 @@ void Ar8030Source::bw_poll() {
             if (taken(rc_bw) && taken(rc_mcs) && taken(rc_st)) { caps_due.store(false); caps_live.store(false); }
         }
     }
+}
+
+// Experiment: `echo G > /tmp/bw.req` puts the video link on bandwidth gear G
+// (bb_bandwidth_e, 0..5 = 1.25, 2.5, 5, 10, 20, 40 MHz; bb_config_*.json starts
+// it, the "br" link, at 5 MHz = 2). The air unit is the AP and transmits the
+// video, so it has to change first: sky cmd 0x24 with gear + 1 to kestrel-air
+// (stock ignores it; its own handshake sends 0 at every link-up), then our
+// receive side. The radio also widens the link by itself after link-up. No new picture 3 s later and both go back to the
+// gear before - kestrel-air does that by itself when the link is gone, since we
+// could not reach it then. Not saved.
+void Ar8030Source::bw_poll() {
+    static int cur = 2, prev = -1;
+    static uint64_t last = 0, at = 0, frames_at = 0;
+    bb_dev_handle_t *dev = (bb_dev_handle_t *)bb_dev;
+    const uint64_t t = now_ms();
+    if (!dev || t - last < 500) return;
+    last = t;
     // The widest the link may go with a stock air radio (it drops and re-forms
     // the link at every step to or from 40 MHz) is our Open8030 radio's own
     // call: it keeps to 20 MHz until the air radio's frame stamps say Open8030.
@@ -4708,6 +4721,7 @@ void Ar8030Source::run() {
                     printf(on_ar_libre() ? "ar8030: %d bring-ups failed - restarting the baseband\n"
                                          : "ar8030: %d bring-ups failed - restarting the daemon\n",
                            connect_fails);
+                    Settings::getInstance().flush();   // bb_only.sh reads it
                     if (system("/etc/init.d/S60ar8030 restart >/dev/null 2>&1") != 0)
                         printf("ar8030: S60ar8030 restart returned non-zero\n");
                     // It backgrounds its own bring-up: loading the driver and

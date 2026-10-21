@@ -246,8 +246,9 @@ void DisplayLock::run() {
             continue;
         }
         const uint64_t now = get_time_us();
-        const drmModeModeInfo mode = dev_->output_list->mode;
-        const double Pm = dev_->mode_period_us(), line = dev_->row_time_us(1);
+        // One copy, so the period and line time are of the mode compared below.
+        const drmModeModeInfo mode = dev_->current_mode();
+        const double Pm = DrmDevice::period_of(mode), line = DrmDevice::row_time_of(mode, 1);
         if (Pm <= 0 || line <= 0) continue;
 
         // A new mode (Screen Mode Auto following the camera, a hotplug): the

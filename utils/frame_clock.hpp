@@ -96,6 +96,13 @@ public:
     // The radio's frame may have changed (a width event, a frame mode set):
     // found again at once.
     void reframe() { reframe_ = true; }
+    // The link's state, from the owner's link events and polls. Unlinked, the
+    // frame is not searched for: each search is 1.5 s of reads back to back on
+    // the radio's request lock, and with no link there is no frame to find.
+    void set_linked(bool on) {
+        if (on && !linked_.exchange(true)) linkups_++;
+        else if (!on) linked_ = false;
+    }
 
     // KA_MSG_FRAME from kestrel-air.
     void set_air_frame(double Tt, double phi, unsigned gen, int frames_per_picture) {
@@ -292,6 +299,9 @@ private:
             int rc = -1;
             reframe_ = false;               // what is found now is after it
             stamps_only(carried, last);     // meanwhile, from the stamps (Open8030)
+            // No link, no frame: wait for one (a quick search stays due).
+            while (run_ && !linked_) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            if (!run_) break;
             // After a change: which of the frames it can be, on our clock by
             // the last count's rate (ours against the radio's holds through it).
             // Twice: a frame mode set is told at once but changes some frames
@@ -330,7 +340,11 @@ private:
                         printf("frameclock: no frame found (%d, %zu reads, %.3f sorted)\n", rc, buf.size(), pur);
                         last_fail_log = mono_us();
                     }
-                    for (int i = 0; i < 20 && run_; i++) {
+                    // Linked and still not found: the next search in 10 s (it was
+                    // 2 s, a burst every 3.5 s for as long as it failed), or at
+                    // once on a link-up or a reframe. The stamps keep their pace.
+                    const unsigned ups = linkups_.load();
+                    for (int i = 0; i < 100 && run_ && linked_ && !reframe_ && linkups_.load() == ups; i++) {
                         if (i % 5 == 0) stamps_only(carried, last);
                         std::this_thread::sleep_for(std::chrono::milliseconds(100));
                     }
@@ -549,7 +563,8 @@ private:
     uint32_t last_taken_ = 0;            // the loop thread: stamps taken, as last read
     uint64_t last_taken_us_ = 0;         // ... and when that count last moved
     uint64_t s_us_ = 0;                  // our time at s64_
-    std::atomic<bool> run_{false}, reframe_{false};
+    std::atomic<bool> run_{false}, reframe_{false}, linked_{false};
+    std::atomic<unsigned> linkups_{0};   // false -> true of linked_
     std::atomic<int64_t> shift_{0};
     std::atomic<unsigned> count_gen_{0}, shifts_taken_{0};
     std::mutex mu_;

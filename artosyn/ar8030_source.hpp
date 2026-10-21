@@ -568,6 +568,7 @@ class Ar8030Source {
         uint64_t ap_log_ms_ = 0;
         void poll_ap_time();
         void bw_poll();                  // /tmp/bw.req: the video link's bandwidth, an experiment
+        void send_caps();                // Open8030: the menu's caps, from the stats thread
         void note_ap_delay(const uint8_t *hdr, size_t len, bool new_pic);
         void note_ap_picture(uint64_t last_recv_us);
         // An intra refresh stream has no keyframes to join on: ask for one.

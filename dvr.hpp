@@ -81,6 +81,17 @@ class DVR {
         DvrFormat format;
 
         MP4E_mux_t *mux;
+        // A muxer still open (init failed after opening it, or the thread
+        // never ran): closed, and its writer with it. run_dvr nulls mux after
+        // its own close, so this never closes one twice.
+        void close_mux() {
+            if (mux) {
+                MP4E_close(mux);
+                mp4_h26x_write_close(&mp4wr);
+                mux = nullptr;
+            }
+            writer.reset();
+        }
         mp4_h26x_writer_t mp4wr;
 
         std::mutex mtx;
@@ -204,10 +215,15 @@ class DVR {
 
         // run_dvr closes the file itself; this is for a DVR whose thread never
         // ran (init() failed, the thread could not start).
-        ~DVR() { if (dvr_file) fclose(dvr_file); }
+        // The muxer first: it writes through the DvrWriter into dvr_file.
+        ~DVR() {
+            close_mux();
+            if (dvr_file) fclose(dvr_file);
+        }
         // A recording given up before its thread ran: the file closed and
         // removed, as if REC had not been pressed.
         void discard() {
+            close_mux();
             if (dvr_file) { fclose(dvr_file); dvr_file = nullptr; }
             if (to_file && !filename.empty()) ::unlink(filename.c_str());
         }

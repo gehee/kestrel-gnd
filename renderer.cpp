@@ -1511,9 +1511,11 @@ void Renderer::update_stats(DecodedUnit *du, uint64_t display_start_ts) {
         if (!all && now < f.vblank_us + 100000) { ++it; continue; }   // a slice still on its way
         if (!all) slice_timeouts_++;
         if (f.slices->counted.exchange(true)) { samples_again_++; it = slice_wait_.erase(it); continue; }
-        auto row_us = [this](int r) { return dev->row_time_us(r); };
+        // One copy of the mode for every row of this picture.
+        const drmModeModeInfo mode = dev->current_mode();
+        auto row_us = [mode](int r) { return DrmDevice::row_time_of(mode, r); };
         const double period = dev->frame_period_us();
-        const int rows = dev->screen_rows();
+        const int rows = mode.vdisplay;
         SliceLatency l;
         int which = 0;
         // Each slice on its own, top to bottom (the HUD and the stats in SPLIT;

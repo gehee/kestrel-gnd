@@ -40,6 +40,7 @@
 // try_force_close_all().
 
 #include "ar8030_source.hpp"
+#include "../settings.hpp"
 
 #include <atomic>
 #include <cstdio>
@@ -350,6 +351,7 @@ void *watchdog_main(void *) {
         int settle = 10 * attempt;
         fprintf(stderr, "[bb-watchdog] re-exec did not clear it - restarting the daemon "
                         "and settling %ds\n", settle);
+        Settings::getInstance().flush();   // bb_only.sh reads it
         if (system("/etc/init.d/S60ar8030 restart >/dev/null 2>&1") != 0)
             fprintf(stderr, "[bb-watchdog] S60ar8030 restart returned non-zero\n");
         for (int i = 0; i < settle && !g_stop.load(); i++) sleep(1);
@@ -377,6 +379,7 @@ void *watchdog_main(void *) {
     setenv("KESTREL_BB_ATTEMPT", nbuf, 1);
 
     fprintf(stderr, "[bb-watchdog] re-exec\n");
+    Settings::getInstance().flush();   // the exec drops the background writer
     fflush(nullptr);
     close_inherited_fds();
     execv("/proc/self/exe", g_argv);

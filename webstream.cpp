@@ -458,7 +458,10 @@ namespace {
 
 constexpr size_t kQueueMax    = 16;                // pictures waiting for the thread
 constexpr int    kSndBuf      = 256 << 10;         // the viewer socket's kernel buffer
-constexpr size_t kDropBytes   = 16u << 20;         // backlog: give up on the viewer
+// A viewer whose backlog has stayed over skip_bytes this long is not catching
+// up: given up on. A size limit cannot say it - mux_item stops queuing at
+// skip_bytes, so the backlog never grows much past it.
+constexpr uint64_t kBehindUs  = 10000000;
 constexpr int    kMaxClients  = 16;               // Safari opens several per video
 constexpr size_t kFileChunk   = 256u << 10;        // file bytes read ahead per client
 
@@ -486,6 +489,7 @@ struct Client {
     int64_t written = 0;            // bytes the muxer has emitted
     int file_fd = -1;               // a recording being served, read in chunks
     uint64_t file_left = 0;         // bytes of it still to read
+    uint64_t behind_since_us = 0;   // backlog over skip_bytes since then, 0 not behind
 
     size_t pending() const { return out.size() - out_off; }
 };
@@ -795,8 +799,15 @@ void WebStream::Impl::loop() {
             if (c->fd < 0) continue;
             if (c->pending()) flush(c);
             if (c->fd < 0) continue;
-            if (c->streaming && c->pending() > kDropBytes) {
-                printf("webstream: viewer %d too far behind, disconnecting\n", c->fd);
+            const bool behind = c->streaming && c->pending() > skip_bytes;
+            if (!behind) {
+                c->behind_since_us = 0;
+            } else if (!c->behind_since_us) {
+                c->behind_since_us = get_time_us();
+            }
+            if (behind && get_time_us() - c->behind_since_us >= kBehindUs) {
+                printf("webstream: viewer %d too far behind for %llu s, disconnecting\n",
+                       c->fd, (unsigned long long)(kBehindUs / 1000000));
                 close(c->fd); c->fd = -1;
             } else if (c->close_after && !c->pending() && c->file_fd < 0) {
                 close(c->fd); c->fd = -1;

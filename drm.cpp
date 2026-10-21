@@ -373,7 +373,10 @@ bool DrmDevice::set_crtc_mode(const drmModeModeInfo& m) {
     }
     drmModeDestroyPropertyBlob(drm_fd, output_list->mode_blob_id);
     output_list->mode_blob_id = blob;
-    output_list->mode = m;
+    {
+        std::lock_guard<std::mutex> mk(mode_copy_m_);
+        output_list->mode = m;
+    }
     return true;
 }
 
@@ -600,7 +603,8 @@ bool DrmDevice::wait_vblank(uint32_t* seq, uint64_t* ts_us) {
 int DrmDevice::refresh_hz() const {
     double p = frame_period_us();
     if (p > 0) return (int)(1e6 / p + 0.5);
-    return output_list && output_list->mode.vrefresh ? (int)output_list->mode.vrefresh : 60;
+    const drmModeModeInfo m = current_mode();
+    return m.vrefresh ? (int)m.vrefresh : 60;
 }
 
 // Picture Size moves the video plane's rectangle, but that rectangle is only

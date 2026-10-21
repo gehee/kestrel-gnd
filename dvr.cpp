@@ -105,11 +105,16 @@ int DVR::init(int frm_width, int frm_height) {
 		// play a fragmented file from its URL.
 		if (format == DvrFormat::FMP4)
 			MP4E_set_finalize(mux);
-		if (MP4E_STATUS_OK != mp4_h26x_write_init(&mp4wr, mux, frm_width, frm_height, codec==VideoCodec::H265))
+		// MP4E_open returns NULL when the file refuses its first write (a full
+		// card), and add_track would dereference it before checking.
+		if (!mux || MP4E_STATUS_OK != mp4_h26x_write_init(&mp4wr, mux, frm_width, frm_height, codec==VideoCodec::H265))
 		{
 			printf("error: mp4_h26x_write_init failed\n");
-			mux = NULL;
-			dvr_file = NULL;
+			// No recording then: the muxer closed before the file it writes
+			// into, and the file too, so run_dvr does not write raw NAL units
+			// into an .mp4 (it only writes with a file and no muxer for RAW).
+			close_mux();
+			if (dvr_file) { fclose(dvr_file); dvr_file = NULL; }
 		}
 		return 0;
 	}
@@ -188,9 +193,9 @@ int DVR::init(int frm_width, int frm_height) {
 		mux = MP4E_open(0 /*sequential_mode*/, format == DvrFormat::FMP4, writer.get(), write_callback);
 		if (format == DvrFormat::FMP4)
 			MP4E_set_finalize(mux);     // as in the camera recording
-		if (MP4E_STATUS_OK != mp4_h26x_write_init(&mp4wr, mux, frm_width, frm_height, 0 /*H.264*/)) {
+		if (!mux || MP4E_STATUS_OK != mp4_h26x_write_init(&mp4wr, mux, frm_width, frm_height, 0 /*H.264*/)) {
 			printf("DVR: mp4_h26x_write_init failed (screen)\n");
-			mux = NULL;
+			close_mux();   // the file is closed by discard() or the destructor
 			return -1;
 		}
 	}
