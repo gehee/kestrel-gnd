@@ -3909,6 +3909,23 @@ void Ar8030Source::emit_nal(const uint8_t* nal, size_t len) {
         }
     }
 
+    // No slice before the decoder has a picture parameter set: it refuses
+    // every one ("PPS id out of range"), and with intra refresh the sets only
+    // come with a keyframe asked for. The resync opens on a keyframe, but its
+    // parameter sets can be lost while the keyframe gets through (a new link
+    // at 5 MHz, then re-formed at the step to 20) - and once past the resync
+    // nothing asked again: video arrived and nothing was ever shown. Until a
+    // valid PPS has come, slices are held back and a keyframe is asked for
+    // every 1.5 s, as the resync does.
+    if (codec == VideoCodec::H265 && is_vcl && !pps_ok_) {
+        if (now_ms() - idr_asked_ms_ >= 1500) {
+            idr_asked_ms_ = now_ms();
+            printf("ar8030: slices but no picture parameter set yet - asking for a keyframe\n");
+            request_air_idr();
+        }
+        return;
+    }
+
     const bool is_param_set = (codec == VideoCodec::H265)
                                   ? (nal_type == 32 || nal_type == 33 || nal_type == 34)
                                   : (nal_type == 7 || nal_type == 8);
@@ -3941,6 +3958,7 @@ void Ar8030Source::emit_nal(const uint8_t* nal, size_t len) {
             } else if (ps_valid && nal_type == 34) {
                 int sid = -1;
                 ps_valid = hevc_pps_ok(nal + 2, len - 2, &sid) && (sps_ids_ok_ >> sid & 1);
+                if (ps_valid) pps_ok_ = true;
             }
         } else {
             ps_valid = ((nal[0] & 0x60) != 0);   // nal_ref_idc != 0

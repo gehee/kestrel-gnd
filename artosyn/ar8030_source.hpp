@@ -597,6 +597,7 @@ class Ar8030Source {
         int      au_hseq_ = -1;          // ...and of the picture being built
         unsigned long long stale_pics = 0, foreign_slices = 0;
         uint16_t sps_ids_ok_ = 0;        // SPS ids a valid SPS has been seen for
+        bool pps_ok_ = false;            // a valid PPS has reached the decoder (H.265)
         // A new clock - the air unit rebooted - also reads as not newer, but
         // runs forward from where it restarted, uninterrupted by live
         // pictures. That many in a row and it is the live stream.
