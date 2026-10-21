@@ -121,8 +121,9 @@ static void read_gnd_screen_mode(uint16_t* w, uint16_t* h, uint32_t* vr, uint32_
         snprintf(key, sizeof(key), "screen_mode_%s:", id);
         snprintf(lock_key, sizeof(lock_key), "display_lock_%s:", id);
     } else {
+        // No EDID ID: Refresh Sync starts off for it (main.cpp), so no lock key.
         snprintf(key, sizeof(key), "screen_mode:");
-        snprintf(lock_key, sizeof(lock_key), "display_lock:");
+        lock_key[0] = 0;
     }
     FILE* f = fopen("/etc/kestrel/kestrel-gnd.yaml", "r");
     if (!f) return;
@@ -130,7 +131,7 @@ static void read_gnd_screen_mode(uint16_t* w, uint16_t* h, uint32_t* vr, uint32_
     while (fgets(line, sizeof(line), f)) {
         unsigned u;
         if (sscanf(line, "camera_fps: %u", &u) == 1) { *fps = u; continue; }
-        if (!strncmp(line, lock_key, strlen(lock_key))) { free_sync = atoi(line + strlen(lock_key)) == 2; continue; }
+        if (lock_key[0] && !strncmp(line, lock_key, strlen(lock_key))) { free_sync = atoi(line + strlen(lock_key)) == 2; continue; }
         if (strncmp(line, key, strlen(key)) != 0) continue;
         char* p = line + strlen(key);
         while (*p == ' ' || *p == '"') p++;

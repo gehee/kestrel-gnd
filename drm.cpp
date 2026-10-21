@@ -117,28 +117,51 @@ void DrmDevice::check_display_hotplug() {
     drmModeConnector *conn = drmModeGetConnectorCurrent(drm_fd, output_list->connector.id);
     if (!conn) return;
     bool now_connected = (conn->connection == DRM_MODE_CONNECTED);
-    bool mode_offered = false;
-    for (int i = 0; now_connected && i < conn->count_modes; i++) {
-        const drmModeModeInfo &m = conn->modes[i];
-        if (m.hdisplay == output_list->mode.hdisplay && m.vdisplay == output_list->mode.vdisplay &&
-            m.vrefresh == output_list->mode.vrefresh)
-            mode_offered = true;
-    }
     drmModeFreeConnector(conn);
 
-    if (now_connected && !display_connected) {
-        // The kernel re-read the EDID when it saw the screen come, so sysfs has the new one's.
-        char id[16] = "";
-        screen_id(id, sizeof(id));
-        if (display_id != id || !mode_offered) {
-            printf("[drm] display hot-plugged: %s screen %s%s - restarting to set it up\n",
-                   display_id != id ? "a different" : "the same", id[0] ? id : "(no EDID ID)",
+    // A screen that came, or one swapped for another within a poll (no
+    // disconnect ever seen): the EDID is read every poll while connected, so a
+    // swap shows as a new ID.
+    char id[16] = "";
+    if (now_connected) screen_id(id, sizeof(id));
+    const bool appeared = now_connected && !display_connected;
+    const bool swapped = now_connected && display_connected && id[0] && display_id != id;
+
+    if (appeared || swapped) {
+        // Refresh Sync off at once: its one-line timing changes are only for
+        // a screen they were tried and kept on, and some screens blank on
+        // them. Back below only for the very screen it was kept for.
+        const int sync_was = g_display_lock.exchange(0);
+        // A forced probe (GetConnector, an EDID read): just after the hot-plug
+        // line rises the connector's current state can still hold the last
+        // screen's EDID and modes, which made a new screen look like the old
+        // one - set up in the old screen's mode, with its Refresh Sync.
+        bool mode_offered = false;
+        if (drmModeConnector *probed = drmModeGetConnector(drm_fd, output_list->connector.id)) {
+            for (int i = 0; i < probed->count_modes; i++) {
+                const drmModeModeInfo &m = probed->modes[i];
+                if (m.hdisplay == output_list->mode.hdisplay && m.vdisplay == output_list->mode.vdisplay &&
+                    m.vrefresh == output_list->mode.vrefresh)
+                    mode_offered = true;
+            }
+            drmModeFreeConnector(probed);
+        }
+        screen_id(id, sizeof(id));   // after the probe, sysfs has this screen's EDID
+        // A different screen, one that does not offer the mode in use, or one
+        // with no EDID ID (nothing tells it from another): restarted, which
+        // sets the display up in that screen's own mode - Screen Mode Auto
+        // picks again - with that screen's own Refresh Sync, off unless kept
+        // for it.
+        if (display_id != id || !mode_offered || !id[0]) {
+            printf("[drm] display hot-plugged: %s screen %s%s - restarting to set it up (refresh sync off)\n",
+                   !id[0] ? "a" : display_id != id ? "a different" : "the same", id[0] ? id : "(no EDID ID)",
                    mode_offered ? "" : ", which does not offer the mode in use");
             fflush(stdout);
             display_connected = now_connected;
             kestrel_request_restart();
             return;
         }
+        g_display_lock = sync_was;   // the same screen, its own kept value
         printf("[drm] display hot-plugged — performing full modeset\n");
         fflush(stdout);
         output_list->initialized = false;        // next commit re-adds connector/crtc props

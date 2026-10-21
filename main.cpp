@@ -509,11 +509,13 @@ int main(int argc, char **argv)
 	const std::string screen_key = have_screen_id ? std::string("screen_mode_") + screen_id_buf
 	                                              : std::string("screen_mode");
 	std::string screen_mode_str = Settings::getInstance().getString(screen_key, "");
-	// DISPLAY > Refresh Sync is the screen's too, and off unless turned on for
-	// it: some screens blank on the one-line timing changes it makes.
+	// DISPLAY > Refresh Sync is the screen's too, and off unless tried and
+	// kept on it: some screens blank on the one-line timing changes it makes.
+	// A screen with no EDID ID cannot be told from another, so it starts off
+	// every time (the menu still turns it on for the run).
 	{
-		const int v = Settings::getInstance().getInt(
-			have_screen_id ? std::string("display_lock_") + screen_id_buf : std::string("display_lock"), 0);
+		const int v = have_screen_id
+			? Settings::getInstance().getInt(std::string("display_lock_") + screen_id_buf, 0) : 0;
 		g_display_lock = v >= 0 && v <= 2 ? v : 0;   // OFF, ON, FREE
 	}
 	g_display_lock_slice = Settings::getInstance().getInt("display_lock_slice", 1) == 2 ? 2 : 1;
