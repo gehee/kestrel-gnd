@@ -1,6 +1,7 @@
 #ifndef AR8030_SOURCE_H
 #define AR8030_SOURCE_H
 
+#include "../utils/hevc_repair.hpp"
 #include <atomic>
 #include <condition_variable>
 #include <deque>
@@ -371,6 +372,7 @@ class Ar8030Source {
         // by a frame interval and understated. The AU's own first-byte arrival
         // is the correct zero point for "glass to glass" on the ground side.
         uint64_t au_first_recv_us = 0;
+        uint64_t au_cap_us_ = 0;        // the open picture's capture stamp (the air unit's clock), 0 if none
 
         // The radio queries behind the HUD run on a thread of their own, so
         // the video never waits for a radio reply: on the video thread the
@@ -723,7 +725,12 @@ class Ar8030Source {
         void emit_nal(const uint8_t* nal, size_t len);
         void flush_access_unit(uint64_t recv_us);
         void update_stats(size_t frame_size);
-        void update_dvr(std::shared_ptr<std::vector<uint8_t>> frame);
+        void update_dvr(std::shared_ptr<std::vector<uint8_t>> frame, uint64_t cap_us);
+        bool au_has_keyframe(const std::vector<uint8_t>& au) const;
+        bool dvr_keyed_ = false;          // the recording running has had its keyframe
+        bool dvr_rec_was_ = false;        // a recording was running at the last picture
+        HevcRepair dvr_repair_;           // its lost pictures and slices replaced by copies
+        uint64_t dvr_idr_asked_ms_ = 0;   // the last keyframe asked for it
 };
 
 #endif

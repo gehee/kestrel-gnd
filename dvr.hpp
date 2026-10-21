@@ -235,6 +235,8 @@ class DVR {
         void set_encoding(int bitrate_bps, int fps_cap, int max_bps = 0) {
             enc_bitrate = bitrate_bps; enc_max_bps = max_bps; enc_fps_cap = fps_cap > 0 ? fps_cap : 60;
         }
+        // Before init(): the highest frame rate the screen is sampled at.
+        void set_fps_cap(int fps) { if (fps > 0) enc_fps_cap = fps; }
         // Before init(): take the screen from l's sampler (an RGA recorder
         // already running) instead of sampling it.
         void set_leader(DVR* l) { leader = l; }
@@ -254,7 +256,10 @@ class DVR {
         int init(int frm_width, int frm_height);
         void run_dvr();
         void stop();
-        void enqueueDvrPacket(std::shared_ptr<std::vector<uint8_t>> frame);
+        // us: the picture's time - its capture stamp where the source has
+        // one, on any one clock (the samples' durations are its differences),
+        // else 0 for now.
+        void enqueueDvrPacket(std::shared_ptr<std::vector<uint8_t>> frame, uint64_t us = 0);
         // The display a screen recording samples (vblanks, the screen tap).
         void set_display_dev(class DrmDevice* d) { disp_dev = d; }
         // Queue depth, so producers can drop instead of growing it without
@@ -290,7 +295,7 @@ class DvrRecorder {
         bool toggle();                       // returns the new recording state
         bool is_recording() const;
         std::string current_file() const;    // basename of the open file, or ""
-        void feed(std::shared_ptr<std::vector<uint8_t>> frame);
+        void feed(std::shared_ptr<std::vector<uint8_t>> frame, uint64_t us = 0);
 
         // The muxer needs the frame size at open time. The legacy --dvr flow
         // got it from Renderer calling DVR::init() on a DVR that already

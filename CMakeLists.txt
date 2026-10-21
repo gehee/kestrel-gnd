@@ -20,6 +20,7 @@ set(SOURCE_FILES
         utils/scheduling_helper.cpp
         utils/mpp_encoder.cpp
         utils/h264_cfr.cpp
+        utils/hevc_repair.cpp
         utils/prof.cpp
         utils/ltrace.cpp
         queue/Queue.cpp

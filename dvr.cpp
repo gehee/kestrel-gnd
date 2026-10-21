@@ -105,6 +105,9 @@ int DVR::init(int frm_width, int frm_height) {
 		// play a fragmented file from its URL.
 		if (format == DvrFormat::FMP4)
 			MP4E_set_finalize(mux);
+		// The camera's 100-144 fps: QuickTime played it as slow motion, slowed
+		// down between a normal-speed first and last few seconds.
+		MP4E_set_full_frame_rate(mux);
 		// MP4E_open returns NULL when the file refuses its first write (a full
 		// card), and add_track would dereference it before checking.
 		if (!mux || MP4E_STATUS_OK != mp4_h26x_write_init(&mp4wr, mux, frm_width, frm_height, codec==VideoCodec::H265))
@@ -131,10 +134,11 @@ int DVR::init(int frm_width, int frm_height) {
 	// only h264_v4l2m2m and no /dev/video* node for it to bind to.
 	//
 	// The file is on the slot grid (H264Cfr makes an unchanged slot a skip
-	// frame): at most enc_fps_cap a second, 60 for a recording - a 120 Hz
-	// screen records every other refresh, and 60 is what players and editors
-	// handle everywhere.
-	const int bitrate = enc_bitrate > 0 ? enc_bitrate : 16000000;
+	// frame): at most enc_fps_cap a second - for a recording dvr_screen_fps,
+	// 100 unless set: a 100 Hz screen records every refresh, a 120 Hz one
+	// every other (60), 240 Hz every third (80).
+	const int bitrate = enc_bitrate > 0 ? enc_bitrate
+	                                    : Settings::getInstance().getInt("dvr_screen_kbps", 20000) * 1000;
 	if (!disp_dev) {
 		printf("DVR: no DRM device - screen recording unavailable\n");
 		return -1;
@@ -165,11 +169,14 @@ int DVR::init(int frm_width, int frm_height) {
 	}
 	screen_fps = fps;
 	if (leader) screen_enc.set_input_count(0);   // it reads the leader's
+	// H.265 (dvr_screen_codec): the same picture in fewer bits. No skip
+	// frames for it yet - an unchanged refresh lengthens the picture before.
+	screen_enc.set_hevc(codec == VideoCodec::H265);
 	if (!screen_enc.init(frm_width, frm_height, fps, bitrate, true /*BT.601, RGA's*/, enc_max_bps)) {
-		printf("DVR: hardware H.264 encoder unavailable - screen recording disabled\n");
+		printf("DVR: hardware encoder unavailable - screen recording disabled\n");
 		return -1;
 	}
-	if (!screen_cfr.init(screen_enc.header())) {
+	if (!screen_enc.hevc() && !screen_cfr.init(screen_enc.header())) {
 		printf("DVR: the encoder's stream is one H264Cfr cannot hold on the slot grid - screen recording disabled\n");
 		screen_enc.deinit();
 		return -1;
@@ -193,7 +200,9 @@ int DVR::init(int frm_width, int frm_height) {
 		mux = MP4E_open(0 /*sequential_mode*/, format == DvrFormat::FMP4, writer.get(), write_callback);
 		if (format == DvrFormat::FMP4)
 			MP4E_set_finalize(mux);     // as in the camera recording
-		if (!mux || MP4E_STATUS_OK != mp4_h26x_write_init(&mp4wr, mux, frm_width, frm_height, 0 /*H.264*/)) {
+		// Above 60 fps Apple's players took it for slow motion (as the camera's).
+		if (mux && fps > 60) MP4E_set_full_frame_rate(mux);
+		if (!mux || MP4E_STATUS_OK != mp4_h26x_write_init(&mp4wr, mux, frm_width, frm_height, screen_enc.hevc())) {
 			printf("DVR: mp4_h26x_write_init failed (screen)\n");
 			close_mux();   // the file is closed by discard() or the destructor
 			return -1;
@@ -209,8 +218,10 @@ int DVR::init(int frm_width, int frm_height) {
 	else if (leader)
 		; // said by DvrRecorder ("follows the screen recording")
 	else
-		printf("DVR: screen recording %dx%d at %d fps, RGA composite of every %d%s refresh\n",
-		       frm_width, frm_height, screen_fps, rga_div, rga_div == 2 ? "nd" : rga_div == 3 ? "rd" : "th");
+		printf("DVR: screen recording %dx%d at %d fps, RGA composite of every %s\n",
+		       frm_width, frm_height, screen_fps,
+		       rga_div == 1 ? "refresh" : rga_div == 2 ? "2nd refresh" : rga_div == 3 ? "3rd refresh"
+		                    : (std::to_string(rga_div) + "th refresh").c_str());
 	return 0;
 }
 
@@ -354,7 +365,9 @@ void DVR::run_screen_rga() {
 		if (!(MP4E_STATUS_OK == r || MP4E_STATUS_BAD_ARGUMENTS == r))
 			printf("DVR: rga mp4_h26x_write_nal err %d\n", r);
 	};
+	int held = 0;   // H.265: slots the next picture's duration takes in (no skip frames)
 	auto skip = [&]() {
+		if (screen_enc.hevc()) { held += period; skips++; return true; }
 		std::vector<uint8_t> sk = screen_cfr.skip_frame();
 		if (sk.empty()) return false;
 		write(sk.data(), sk.size(), period);
@@ -417,6 +430,11 @@ void DVR::run_screen_rga() {
 			auto out = [&](const uint8_t* p_hw, size_t len, bool) {
 				// One bulk copy out of the encoder's uncached output first (see run_screen).
 				pkt_copy_.assign(p_hw, p_hw + len);
+				if (screen_enc.hevc()) {
+					write(pkt_copy_.data(), len, period + held);
+					held = 0;
+					return;
+				}
 				std::vector<uint8_t> au = screen_cfr.rewrite(pkt_copy_.data(), len);
 				write(au.data(), au.size(), period);
 			};
@@ -555,9 +573,11 @@ void DVR::run_dvr() {
 
 	// A sample's duration is the time since the previous picture, which is
 	// the stream's real frame rate - not the configured one. A fixed 1/fps
-	// played a 14 fps stream back four times too fast. Within a quarter of
-	// the nominal interval it snaps to nominal, so radio jitter does not
-	// turn a steady 60 fps into uneven sample times.
+	// played a 14 fps stream back four times too fast. The times are the
+	// pictures' capture stamps where the source has them (the air unit's
+	// clock): their arrival times carried the radio's jitter, every other
+	// sample a little long or short, and stuttered in players. Within a
+	// quarter of the nominal interval it snaps to nominal.
 	const int nominal = 90000 / (video_framerate > 0 ? video_framerate : 60);
 	auto duration_for = [&](uint64_t us) {
 		int dur = nominal;
@@ -634,10 +654,10 @@ size_t DVR::queue_depth() {
 	return dvrQueue.size();
 }
 
-void DVR::enqueueDvrPacket(std::shared_ptr<std::vector<uint8_t>> frame) {
+void DVR::enqueueDvrPacket(std::shared_ptr<std::vector<uint8_t>> frame, uint64_t us) {
 	{
 		std::lock_guard<std::mutex> lock(mtx);
-		dvrQueue.push({frame, get_time_us()});
+		dvrQueue.push({frame, us ? us : get_time_us()});
 	}
 	cv.notify_one();
 }
@@ -858,12 +878,18 @@ bool DvrRecorder::start_recording() {
     // encoder's - is scheduled as an ordinary thread (OrdinaryScheduling).
     OrdinaryScheduling ordinary;
 
-    // Screen recordings are always H.264/MP4 (that is what the VEPU encodes),
-    // regardless of what codec the FPV link is using.
+    // Screen recordings are H.264 (or H.265, dvr_screen_codec) in MP4,
+    // whatever codec the FPV link uses.
+    const bool screen_hevc = Settings::getInstance().getString("dvr_screen_codec", "h265") == "h265";
     std::shared_ptr<DVR> dvr = screen
-        ? std::make_shared<DVR>(base, VideoCodec::H264, fps,
+        ? std::make_shared<DVR>(base, screen_hevc ? VideoCodec::H265 : VideoCodec::H264, fps,
                                 fmt == DvrFormat::MP4 ? DvrFormat::MP4 : DvrFormat::FMP4, stop_signal, true)
         : std::make_shared<DVR>(base, codec, fps, fmt, stop_signal, false);
+    // The screen sampled at most this often (dvr_screen_fps): 100, every
+    // refresh of a 100 Hz screen, the camera's rate in its usual modes -
+    // measured on the VRX with H.265: no picture missed, none with the
+    // encoder behind, RGA ~5.3 ms a frame, the live picture ~0.5 ms later.
+    if (screen) dvr->set_fps_cap(Settings::getInstance().getInt("dvr_screen_fps", 100));
     // The gallery must not take the new file for a finished one while it is
     // being set up: it is the current file from the moment it exists.
     std::string file = dvr->path().substr(dvr->path().find_last_of('/') + 1);
@@ -1074,7 +1100,7 @@ bool DvrRecorder::toggle() {
     return start_recording();
 }
 
-void DvrRecorder::feed(std::shared_ptr<std::vector<uint8_t>> frame) {
+void DvrRecorder::feed(std::shared_ptr<std::vector<uint8_t>> frame, uint64_t us) {
     if (!running_) return;   // cheap no-op when idle
     std::shared_ptr<DVR> dvr;
     std::vector<std::vector<uint8_t>> ps;
@@ -1092,7 +1118,7 @@ void DvrRecorder::feed(std::shared_ptr<std::vector<uint8_t>> frame) {
             dvr->enqueueDvrPacket(std::make_shared<std::vector<uint8_t>>(p));
         printf("DVR: parameter sets arrived - recording video from here\n");
     }
-    dvr->enqueueDvrPacket(frame);
+    dvr->enqueueDvrPacket(frame, us);
 }
 
 void DvrRecorder::shutdown() {

@@ -47,6 +47,9 @@ class MppH264Encoder {
         // Before init(): how many to allocate (0 for an encoder that only
         // reads another's, encode_external()).
         void set_input_count(int n) { n_inputs_ = n; }
+        // Before init(): H.265 instead of H.264 (the VEPU does both).
+        void set_hevc(bool on) { hevc_ = on; }
+        bool hevc() const { return hevc_; }
         int  input_count() const { return (int)bufs_.size(); }
         int  input_dmabuf_fd(int i = 0) const;
         // Encode whatever is already in input buffer i (no memcpy in).
@@ -73,6 +76,7 @@ class MppH264Encoder {
         std::vector<uint8_t> header_;
         int64_t pts_ = 0;
         int    n_inputs_ = kInputBuffers;
+        bool   hevc_ = false;
 };
 
 #endif

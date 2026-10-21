@@ -29,8 +29,8 @@ bool MppH264Encoder::init(int width, int height, int fps, int bitrate_bps, bool 
         printf("MppEnc: mpp_create failed\n");
         return false;
     }
-    if (mpp_init(ctx, MPP_CTX_ENC, MPP_VIDEO_CodingAVC)) {
-        printf("MppEnc: mpp_init(ENC, H.264) failed\n");
+    if (mpp_init(ctx, MPP_CTX_ENC, hevc_ ? MPP_VIDEO_CodingHEVC : MPP_VIDEO_CodingAVC)) {
+        printf("MppEnc: mpp_init(ENC, %s) failed\n", hevc_ ? "H.265" : "H.264");
         mpp_destroy(ctx);
         return false;
     }
@@ -69,6 +69,12 @@ bool MppH264Encoder::init(int width, int height, int fps, int bitrate_bps, bool 
     mpp_enc_cfg_set_s32(cfg, "rc:fps_out_denorm", 1);
     mpp_enc_cfg_set_s32(cfg, "rc:gop",            fps_ * 2);
 
+    if (hevc_) {
+        mpp_enc_cfg_set_s32(cfg, "codec:type",    MPP_VIDEO_CodingHEVC);
+        mpp_enc_cfg_set_s32(cfg, "h265:profile",  1);    // Main
+        // general_level_idc: 4.1 is 1080p60, 5.1 above it.
+        mpp_enc_cfg_set_s32(cfg, "h265:level",    fps_ > 60 ? 153 : 123);
+    } else {
     mpp_enc_cfg_set_s32(cfg, "codec:type",        MPP_VIDEO_CodingAVC);
     mpp_enc_cfg_set_s32(cfg, "h264:profile",      77);   // Main
     // 4.0 covers 1080p30 only; a capture at the display's own rate needs more
@@ -78,6 +84,7 @@ bool MppH264Encoder::init(int width, int height, int fps, int bitrate_bps, bool 
     mpp_enc_cfg_set_s32(cfg, "h264:cabac_en",     1);
     mpp_enc_cfg_set_s32(cfg, "h264:cabac_idc",    0);
     mpp_enc_cfg_set_s32(cfg, "h264:trans8x8",     0);
+    }
 
     MPP_RET ret = mpi->control(ctx, MPP_ENC_SET_CFG, cfg);
     mpp_enc_cfg_deinit(cfg);
@@ -124,8 +131,8 @@ bool MppH264Encoder::init(int width, int height, int fps, int bitrate_bps, bool 
     }
 
     ctx_ = ctx; mpi_ = mpi; frm_grp_ = grp; pts_ = 0;
-    printf("MppEnc: %dx%d @%dfps %d kbps%s NV12 dmabuf-in, %zu byte header\n",
-           w_, h_, fps_, bitrate_bps / 1000, vbr ? " (variable, capped)" : "", header_.size());
+    printf("MppEnc: %s %dx%d @%dfps %d kbps%s NV12 dmabuf-in, %zu byte header\n",
+           hevc_ ? "H.265" : "H.264", w_, h_, fps_, bitrate_bps / 1000, vbr ? " (variable, capped)" : "", header_.size());
     return true;
 }
 
@@ -171,9 +178,10 @@ bool MppH264Encoder::encode_external(void* mpp_buffer, const std::function<void(
         if (len && p) {
             // Keyframe if the payload carries an IDR NAL (type 5).
             bool key = false;
-            for (size_t i = 0; i + 4 < len && i < 64; i++) {
+            for (size_t i = 0; i + 4 < len && i < 128; i++) {
                 if (p[i] == 0 && p[i+1] == 0 && p[i+2] == 1) {
-                    if ((p[i+3] & 0x1F) == 5) { key = true; break; }
+                    const int t = hevc_ ? (p[i+3] >> 1) & 0x3F : p[i+3] & 0x1F;
+                    if (hevc_ ? (t >= 16 && t <= 21) : t == 5) { key = true; break; }
                 }
             }
             sink(p, len, key);

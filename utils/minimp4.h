@@ -480,6 +480,10 @@ int MP4E_set_pps(MP4E_mux_t *mux, int track_id, const void *pps, int bytes);
 *   return error code MP4E_STATUS_*
 */
 int MP4E_set_text_comment(MP4E_mux_t *mux, const char *comment);
+/* fpvOS: mark the movie for playback at its full frame rate. Apple's players
+   (QuickTime, Photos) take a high frame rate movie without it for slow motion,
+   played slowed down between a normal-speed start and end. */
+void MP4E_set_full_frame_rate(MP4E_mux_t *mux);
 
 /**
 *   fpvOS: have a fragmented file made plain by MP4E_close, in place. The
@@ -715,6 +719,7 @@ typedef struct MP4E_mux_tag
     int (*write_callback)(int64_t offset, const void *buffer, size_t size, void *token);
     void *token;
     char *text_comment;
+    int full_frame_rate;   /* fpvOS: MP4E_set_full_frame_rate() */
 
     int sequential_mode_flag;
     int enable_fragmentation; // flag, indicating streaming-friendly 'fragmentation' mode
@@ -856,6 +861,7 @@ MP4E_mux_t *MP4E_open(int sequential_mode_flag, int enable_fragmentation, void *
     mux->write_callback = write_callback;
     mux->token = token;
     mux->text_comment = NULL;
+    mux->full_frame_rate = 0;
     mux->write_pos = sizeof(box_ftyp);
 
     if (!mux->sequential_mode_flag)
@@ -1262,6 +1268,12 @@ static int od_size_of_size(int size)
 *   http://atomicparsley.sourceforge.net/mpeg-4files.html
 *   note that ISO did not specify comment format.
 */
+void MP4E_set_full_frame_rate(MP4E_mux_t *mux)
+{
+    if (mux)
+        mux->full_frame_rate = 1;
+}
+
 int MP4E_set_text_comment(MP4E_mux_t *mux, const char *comment)
 {
     if (!mux || !comment)
@@ -1390,6 +1402,8 @@ static int mp4e_flush_index(MP4E_mux_t *mux)
     index_bytes = FILE_HEADER_BYTES;
     if (mux->text_comment)
         index_bytes += 128 + strlen(mux->text_comment);
+    if (mux->full_frame_rate)
+        index_bytes += 256;
     for (ntr = 0; ntr < ntracks; ntr++)
     {
         track_t *tr = ((track_t*)mux->tracks.data) + ntr;
@@ -1897,6 +1911,40 @@ static int mp4e_flush_index(MP4E_mux_t *mux)
                                 WRITE_1(mux->text_comment[i]);
                             }
                         END_ATOM;
+                    END_ATOM;
+                END_ATOM;
+            END_ATOM;
+        END_ATOM;
+    }
+
+    if (mux->full_frame_rate)
+    {
+        /* fpvOS: com.apple.quicktime.full-frame-rate-playback-intent = 1, a
+           QuickTime metadata item: moov/meta in QuickTime's own form (no
+           version and flags, an 'mdta' handler, the key in 'keys', the
+           value in 'ilst' as a 1-byte signed integer, type 21). The ISO
+           form of meta, with version and flags, was not read. */
+        static const char key[] = "com.apple.quicktime.full-frame-rate-playback-intent";
+        ATOM(BOX_meta);
+            ATOM_FULL(BOX_hdlr, 0);
+                WRITE_4(0);                  // pre_defined
+                WRITE_4(0x6d647461);         // 'mdta'
+                WRITE_4(0); WRITE_4(0); WRITE_4(0);
+                WRITE_1(0);                  // name: empty
+            END_ATOM;
+            ATOM_FULL(FOUR_CHAR_INT('k', 'e', 'y', 's'), 0);
+                WRITE_4(1);                  // entry_count
+                WRITE_4(8 + sizeof(key) - 1);
+                WRITE_4(0x6d647461);         // namespace 'mdta'
+                for (i = 0; i < (int)sizeof(key) - 1; i++)
+                    WRITE_1(key[i]);
+            END_ATOM;
+            ATOM(BOX_ilst);
+                ATOM(1);                     // the item for key 1
+                    ATOM(BOX_data);
+                        WRITE_4(21);         // type: big-endian signed integer
+                        WRITE_4(0);          // locale
+                        WRITE_1(1);
                     END_ATOM;
                 END_ATOM;
             END_ATOM;
@@ -2594,6 +2642,15 @@ int mp4_h26x_write_nal(mp4_h26x_writer_t *h, const unsigned char *nal, int lengt
             break;
         if (h->is_hevc)
         {
+            /* fpvOS: no AUD, end of sequence/stream, filler or SEI (35-40)
+               in the track. An SEI before the first keyframe (MPP's encoder
+               puts two in front of it) was refused, and ERR() then dropped the
+               keyframe behind it in the same packet: the recording waited for
+               a keyframe for ever and came out empty. After it, an SEI became
+               a sample of its own - a picture that is not there. */
+            const int t = sizeof_nal > 0 ? (nal[0] >> 1) & 0x3f : 0;
+            if (t >= 35 && t <= 40)
+                continue;
             ERR(mp4_h265_write_nal(h, nal, sizeof_nal, timeStamp90kHz_next));
             continue;
         }

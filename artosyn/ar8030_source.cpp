@@ -3113,11 +3113,65 @@ void Ar8030Source::update_stats(size_t frame_size) {
     }
 }
 
-void Ar8030Source::update_dvr(std::shared_ptr<std::vector<uint8_t>> frame) {
+void Ar8030Source::update_dvr(std::shared_ptr<std::vector<uint8_t>> frame, uint64_t cap_us) {
     if (osd && osd->is_dvr_screen_enabled()) return;
+    // A recording of the camera's stream starts on a keyframe: the MP4 writer
+    // takes no picture before one. With intra refresh the air unit sends
+    // none unless asked, so a recording got none at all ("0 pictures
+    // written"). While a recording has had no keyframe, one is asked for
+    // every second, as the resync does.
+    DvrRecorder &rec = DvrRecorder::instance();
+    if (!rec.is_recording()) {
+        if (dvr_rec_was_ && (dvr_repair_.pictures_filled() || dvr_repair_.slices_filled()))
+            printf("DVR: the radio lost %u pictures and %u slices of that recording - copies put in their place\n",
+                   dvr_repair_.pictures_filled(), dvr_repair_.slices_filled());
+        dvr_rec_was_ = false;
+        dvr_keyed_ = false;
+    } else if (!dvr_rec_was_) {
+        dvr_rec_was_ = true;
+        dvr_repair_.reset();
+    }
+    if (rec.is_recording() && !dvr_keyed_) {
+        if (au_has_keyframe(*frame)) {
+            dvr_keyed_ = true;
+        } else if (now_ms() - dvr_idr_asked_ms_ >= 1000) {
+            dvr_idr_asked_ms_ = now_ms();
+            printf("ar8030: recording without a keyframe yet - asking for one\n");
+            request_air_idr();
+        }
+    }
+    // The picture's capture stamp for the sample's duration; arrival times
+    // only from an air unit that sends no stamps (then every one is).
+    const uint64_t t = cap_us ? cap_us : au_first_recv_us;
+    // A picture or slice the radio lost: a copy in its place, so the pictures
+    // after it find what they refer to - Apple's decoder stopped at the first
+    // loss and waited for a keyframe that never came (see utils/hevc_repair).
+    if (rec.is_recording() && codec == VideoCodec::H265 && dvr_repair_.active()) {
+        for (auto &u : dvr_repair_.process(*frame, t))
+            rec.feed(std::make_shared<std::vector<uint8_t>>(std::move(u.au)), u.us);
+        return;
+    }
     // Unconditional: DvrRecorder drops the frame when it is not recording, so
     // the rec button can start and stop us without any plumbing here.
-    DvrRecorder::instance().feed(frame);
+    rec.feed(frame, t);
+}
+
+// An access unit (Annex-B) holding a keyframe slice: an IRAP picture in
+// H.265 (types 16-21), an IDR in H.264.
+bool Ar8030Source::au_has_keyframe(const std::vector<uint8_t>& au) const {
+    const size_t n = au.size();
+    for (size_t i = 0; i + 3 < n; i++) {
+        if (au[i] != 0 || au[i + 1] != 0 || au[i + 2] != 1) continue;
+        const uint8_t h = au[i + 3];
+        if (codec == VideoCodec::H265) {
+            const int t = (h >> 1) & 0x3F;
+            if (t >= 16 && t <= 21) return true;
+        } else if ((h & 0x1F) == 5) {
+            return true;
+        }
+        i += 3;
+    }
+    return false;
 }
 
 // The fastest a picture's first slice gets from its capture stamp to our
@@ -4072,6 +4126,10 @@ void Ar8030Source::emit_nal(const uint8_t* nal, size_t len) {
                     au_times_->key = nal_type >= 16 && nal_type <= 21;
                     au_times_->pts = (int64_t)frame_pts;
                 }
+                // The air unit's capture stamp of this picture (its header
+                // comes before its slices): its clock, not ours - only the
+                // differences are used (the recording's sample durations).
+                au_cap_us_ = cap_valid ? cap_us64 : 0;
                 pic_cap_us_ = 0;   // one picture, one capture
                 pic_air_unknown_ = false;
                 au_pts = frame_pts;
@@ -4197,6 +4255,7 @@ void Ar8030Source::emit_nal(const uint8_t* nal, size_t len) {
             }
             if (changed) {
                 DvrRecorder::instance().set_parameter_sets(dvr_param_sets);
+                if (codec == VideoCodec::H265) dvr_repair_.set_parameter_sets(dvr_param_sets);
                 printf("ar8030: cached param set type=%d id=%d len=%zu (%zu total)\n",
                        nal_type, ps_id, unit.size(), dvr_param_sets.size());
             }
@@ -4518,7 +4577,7 @@ void Ar8030Source::flush_access_unit(uint64_t recv_us) {
     // slices" - decoding only the top quarter of the picture and painting the
     // remainder green. One picture must be one sample.
     //
-    if (!au_slices.empty()) update_dvr(std::make_shared<std::vector<uint8_t>>(au_slices));
+    if (!au_slices.empty()) update_dvr(std::make_shared<std::vector<uint8_t>>(au_slices), au_cap_us_);
     au_slices.clear();
     au_open = false;
 }
