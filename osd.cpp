@@ -6426,15 +6426,36 @@ void OSD::notify_video_frame(bool is_keyframe) {
     // The frames that change what the HUD shows: video coming back after a
     // stall (the lock screen, stale-picture dimming and the red rails all key
     // off frame freshness), and the one that confirms video on this link.
+    const uint64_t prev_frame_us = last_fpv_frame_us_;
     bool edge = last_fpv_frame_us_ == 0 || now - last_fpv_frame_us_ > 400000;
     last_fpv_frame_us_ = now;
     if (frames_since_connect_ < ~0u) frames_since_connect_++;
     if (frames_since_connect_ == kFramesForVideo) edge = true;
     if (video_state_ == VideoState::BACKGROUND) {
-        if (is_keyframe) {
+        // The first connection's warp into live video waits for a decent
+        // picture: a link comes up on 5 MHz and widens from there, and its
+        // first second or two of video (a Mbit/s or so) is a smear that the
+        // zoom would land on. Decoding goes on underneath the idle screen;
+        // the warp starts once the video runs above kRevealMbps - or 2 below
+        // the Max Bitrate cap when that is lower - or kRevealTimeoutUs after
+        // the first clean picture if it never does.
+        // Pictures stopping for a while (the link lost before the reveal)
+        // start the wait over.
+        if (reveal_wait_us_ && now - prev_frame_us > 1500000) reveal_wait_us_ = 0;
+        const int cap_kbps = kArMaxBrVals[menu_ar_maxbr];   // 0 = AUTO, no cap
+        const float reveal_mbps = cap_kbps > 0 ? std::min(kRevealMbps, cap_kbps / 1000.0f - 2.0f) : kRevealMbps;
+        if (is_keyframe && !reveal_wait_us_) {
+            reveal_wait_us_ = now;
+            printf("[OSD] First clean keyframe decoded - live FPV once the video is above %.0f Mbit/s\n",
+                   reveal_mbps);
+        }
+        const float mbps = osd_vars.video_bandwidth;
+        const bool good = mbps > reveal_mbps;
+        if (reveal_wait_us_ && (good || now - reveal_wait_us_ >= kRevealTimeoutUs)) {
             video_state_         = VideoState::TRANSITION;
             transition_start_us_ = now;
-            printf("[OSD] First clean keyframe decoded. Starting transition to live FPV.\n");
+            printf("[OSD] Starting transition to live FPV after %.1f s: video %.1f Mbit/s%s\n",
+                   (now - reveal_wait_us_) / 1e6, mbps, good ? "" : " (timed out)");
             edge = true;
         }
     }

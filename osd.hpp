@@ -227,6 +227,12 @@ class OSD {
         // VideoState::TRANSITION (render_gl) instead of the warp being turned
         // off - so this can carry the real duration again.
         static constexpr float TRANSITION_DURATION_US = 450000.0f;
+        // The first connection's warp waits for the video to pass this rate
+        // (or 2 below the Max Bitrate cap, if lower), or for the timeout after
+        // its first clean picture (notify_video_frame).
+        static constexpr float    kRevealMbps      = 5.0f;
+        static constexpr uint64_t kRevealTimeoutUs = 5000000;
+        uint64_t reveal_wait_us_ = 0;   // the first clean picture of the wait, 0 = none yet
 
         BgVideoPlayer* bg_player_ = nullptr;
 
