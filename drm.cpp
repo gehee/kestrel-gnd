@@ -136,17 +136,25 @@ void DrmDevice::check_display_hotplug() {
         // line rises the connector's current state can still hold the last
         // screen's EDID and modes, which made a new screen look like the old
         // one - set up in the old screen's mode, with its Refresh Sync.
+        // A screen's DDC can still be refusing reads just after its hot-plug
+        // line rises ("ddc read failed"): a probe that got no EDID is tried
+        // again, up to ~1 s - only at a hot-plug, while the screen is dark.
         bool mode_offered = false;
-        if (drmModeConnector *probed = drmModeGetConnector(drm_fd, output_list->connector.id)) {
-            for (int i = 0; i < probed->count_modes; i++) {
-                const drmModeModeInfo &m = probed->modes[i];
-                if (m.hdisplay == output_list->mode.hdisplay && m.vdisplay == output_list->mode.vdisplay &&
-                    m.vrefresh == output_list->mode.vrefresh)
-                    mode_offered = true;
+        for (int attempt = 0; attempt < 4; attempt++) {
+            if (attempt) usleep(300000);
+            mode_offered = false;
+            if (drmModeConnector *probed = drmModeGetConnector(drm_fd, output_list->connector.id)) {
+                for (int i = 0; i < probed->count_modes; i++) {
+                    const drmModeModeInfo &m = probed->modes[i];
+                    if (m.hdisplay == output_list->mode.hdisplay && m.vdisplay == output_list->mode.vdisplay &&
+                        m.vrefresh == output_list->mode.vrefresh)
+                        mode_offered = true;
+                }
+                drmModeFreeConnector(probed);
             }
-            drmModeFreeConnector(probed);
+            screen_id(id, sizeof(id));   // after the probe, sysfs has this screen's EDID
+            if (id[0]) break;
         }
-        screen_id(id, sizeof(id));   // after the probe, sysfs has this screen's EDID
         // A different screen, one that does not offer the mode in use, or one
         // with no EDID ID (nothing tells it from another): restarted, which
         // sets the display up in that screen's own mode - Screen Mode Auto
@@ -191,6 +199,13 @@ void DrmDevice::check_display_hotplug() {
     } else if (!now_connected && display_connected) {
         printf("[drm] display unplugged\n");
         fflush(stdout);
+        // A probe now, while nothing is there: only that drops the screen's
+        // EDID and modes. The kernel's HDMI driver (Rockchip dw-hdmi) reuses
+        // the EDID it holds rather than reading the next screen's, so the
+        // next screen - an Alienware after the headset - looked like the
+        // last one and was sent its mode and its Refresh Sync: black.
+        if (drmModeConnector *probed = drmModeGetConnector(drm_fd, output_list->connector.id))
+            drmModeFreeConnector(probed);
     }
     display_connected = now_connected;
 }
