@@ -1080,7 +1080,7 @@ int main(int argc, char **argv)
 
     // Live video in a browser: http://<goggle>/ on the USB link or WiFi.
     if (Settings::getInstance().getBool("web_stream", true))
-        WebStream::instance().start(Settings::getInstance().getInt("web_port", 80), codec);
+        WebStream::instance().start(Settings::getInstance().getInt("web_port", 80));
 
 
     if (osd) {

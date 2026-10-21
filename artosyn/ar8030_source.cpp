@@ -3799,7 +3799,6 @@ void Ar8030Source::emit_nal(const uint8_t* nal, size_t len) {
                         uint16_t gap = (uint16_t)(hseq - last_hseq);
                         if (gap > 1 && gap < 1000) {
                             frames_lost += (gap - 1);
-                            WebStream::instance().gap();   // its viewers restart at a keyframe
                         }
                     }
                     last_hseq = hseq;
@@ -4185,7 +4184,6 @@ void Ar8030Source::emit_nal(const uint8_t* nal, size_t len) {
             }
             if (changed) {
                 DvrRecorder::instance().set_parameter_sets(dvr_param_sets);
-                WebStream::instance().set_parameter_sets(dvr_param_sets);
                 printf("ar8030: cached param set type=%d id=%d len=%zu (%zu total)\n",
                        nal_type, ps_id, unit.size(), dvr_param_sets.size());
             }
@@ -4507,16 +4505,7 @@ void Ar8030Source::flush_access_unit(uint64_t recv_us) {
     // slices" - decoding only the top quarter of the picture and painting the
     // remainder green. One picture must be one sample.
     //
-    // The web viewer gets it too, independently of the DVR's mode (a screen
-    // recording skips update_dvr). One copy serves both.
-    if (!au_slices.empty()) {
-        auto au = std::make_shared<std::vector<uint8_t>>(au_slices);
-        update_dvr(au);
-        const bool key = (codec == VideoCodec::H265)
-                             ? (au_nal_type >= 19 && au_nal_type <= 21)
-                             : (au_nal_type == 5);
-        WebStream::instance().feed(au, key, au_hseq_);
-    }
+    if (!au_slices.empty()) update_dvr(std::make_shared<std::vector<uint8_t>>(au_slices));
     au_slices.clear();
     au_open = false;
 }
@@ -4755,14 +4744,6 @@ void Ar8030Source::run() {
         }
         apply_pending_settings();
         apply_pending_rf();
-        // A web viewer waits for a keyframe to start on. With intra refresh
-        // the air unit sends none by itself (the page sat on "Waiting for a
-        // keyframe" for good), so ask for one, as the resync does.
-        if (air_kestrel_ && (air_feat_ & kAirFeatIntraRefresh) &&
-            WebStream::instance().wants_keyframe() && now_ms() - idr_asked_ms_ >= 1000) {
-            idr_asked_ms_ = now_ms();
-            request_air_idr();
-        }
         // Binding, if the menu or the front-panel button asked for it. One
         // non-blocking step per pass; it owns the baseband only in short
         // bursts, so video and telemetry keep flowing while it runs.

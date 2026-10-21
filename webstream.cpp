@@ -457,8 +457,6 @@ show(location.hash === '#gallery' ? 'gallery' : 'live');
 namespace {
 
 constexpr size_t kQueueMax    = 16;                // pictures waiting for the thread
-constexpr size_t kSkipBytes   = 1u << 20;          // backlog: skip to next keyframe
-constexpr uint64_t kKeyEveryUs = 10000000;         // a keyframe this often while watched
 constexpr int    kSndBuf      = 256 << 10;         // the viewer socket's kernel buffer
 constexpr size_t kDropBytes   = 16u << 20;         // backlog: give up on the viewer
 constexpr int    kMaxClients  = 16;               // Safari opens several per video
@@ -584,19 +582,10 @@ struct WebStream::Impl {
     int wake_fd = -1;
     pthread_t tid = 0;
     std::atomic<bool> run{false};
-    std::atomic<int> viewers{0};   // streaming clients, read lock-free by feed()
-    std::atomic<bool> want_key{false};   // one of them waits for a keyframe
-    // The last keyframe a viewer took, us: with intra refresh the air unit
-    // sends none by itself, and the page can only drop old video up to one.
-    std::atomic<uint64_t> last_key_us{0};
-
-    VideoCodec codec = VideoCodec::H265;
-    // Viewers get the screen, re-encoded (web_source "screen"), not the air
-    // unit's stream: fixed at start.
-    bool screen_mode = false;
+    std::atomic<int> viewers{0};   // streaming clients, read lock-free by feed_screen()
     // Unsent bytes past which a viewer skips to the next keyframe: about a
-    // second at the web view's cap when re-encoding, kSkipBytes otherwise.
-    size_t skip_bytes = kSkipBytes;
+    // second at the web view's cap.
+    size_t skip_bytes = 0;
     std::atomic<bool> want_screen_key{false};
     bool screen_on = false;        // server thread: the encoder asked for
     uint64_t idle_since = 0;       // server thread: no viewer since then, us
@@ -607,20 +596,12 @@ struct WebStream::Impl {
 
     std::mutex m;                  // guards everything below
     std::deque<Item> q;
-    std::vector<std::vector<uint8_t>> ps;
-    int w = 1920, h = 1080;
-    // The screen source (screen_mode): SPS/PPS, size, picture duration, and a
-    // generation that changes with any of them.
+    // The screen source: SPS/PPS, size, picture duration, and a generation
+    // that changes with any of them.
     std::vector<std::vector<uint8_t>> screen_ps;
     int sw = 0, sh = 0, sdur = 0;
     unsigned screen_gen = 0;
-    uint64_t last_us = 0;
-    double frame_us = 1e6 / 60;    // measured picture interval
-    uint64_t win_us = 0;           // ... over pictures counted since then
     unsigned q_dropped = 0;        // pictures dropped off q (the thread behind)
-    unsigned seq_gaps = 0;         // jumps in the air unit's picture counter
-    int last_seq = -1;
-    unsigned win_n = 0;
 
     std::vector<Client*> clients;  // server thread only
 
@@ -644,12 +625,10 @@ WebStream& WebStream::instance() {
     return s;
 }
 
-bool WebStream::start(int port, VideoCodec codec) {
+bool WebStream::start(int port) {
     if (impl_) return true;
     Impl* d = new Impl();
-    d->codec = codec;
-    d->screen_mode = Settings::getInstance().getString("web_source", "screen") != "air";
-    if (d->screen_mode) d->skip_bytes = (size_t)DvrRecorder::web_cap_kbps() * 1000 / 8;
+    d->skip_bytes = (size_t)DvrRecorder::web_cap_kbps() * 1000 / 8;
 
     d->listen_fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
     int one = 1;
@@ -693,72 +672,13 @@ void WebStream::stop() {
     delete d;
 }
 
-void WebStream::set_parameter_sets(const std::vector<std::vector<uint8_t>>& ps) {
-    if (!impl_) return;
-    std::lock_guard<std::mutex> lk(impl_->m);
-    impl_->ps = ps;
-}
-
-void WebStream::set_frame_size(int w, int h) {
-    if (!impl_ || w <= 0 || h <= 0) return;
-    std::lock_guard<std::mutex> lk(impl_->m);
-    impl_->w = w;
-    impl_->h = h;
-}
-
 void WebStream::recording_finished(const std::string& name) {
     if (safe_name(name) && ends_with(name, ".mp4")) dvr_lib::request_thumbnail(name);
 }
 
-void WebStream::feed(const std::shared_ptr<std::vector<uint8_t>>& au, bool key, int seq) {
-    Impl* d = impl_;
-    if (!d || d->screen_mode) return;
-    const uint64_t now = get_time_us();
-    {
-        std::lock_guard<std::mutex> lk(d->m);
-        // The picture rate, measured rather than configured: sample durations
-        // have to match the real rate or the player drifts off the live edge.
-        // Pictures counted over a second or more: they arrive bunched (two in
-        // one radio frame, <2 ms apart), and an average of the gaps that left
-        // out the short ones read 7-10% long - the page fell behind by that
-        // much and jumped ahead every ~15 s.
-        if (!d->win_us || now - d->win_us > 3000000) { d->win_us = now; d->win_n = 0; }
-        else if (++d->win_n >= 60 && now - d->win_us >= 1000000) {
-            const double fu = (double)(now - d->win_us) / d->win_n;
-            if (fu > 2000 && fu < 100000)
-                d->frame_us = d->frame_us == 1e6 / 60 ? fu : 0.7 * d->frame_us + 0.3 * fu;
-            d->win_us = now; d->win_n = 0;
-        }
-        d->last_us = now;
-        // A picture missing before it got here (lost on the radio, or not
-        // assembled): its successors refer to it, so viewers restart at a key.
-        if (seq >= 0 && d->last_seq >= 0 && (uint16_t)(seq - d->last_seq) != 1) d->seq_gaps++;
-        d->last_seq = seq;
-        if (d->viewers.load(std::memory_order_relaxed) == 0) return;   // nobody watching
-        // The thread is behind: drop the oldest - and every viewer then waits
-        // for a keyframe, since the pictures after it refer to it (silently
-        // dropped, Safari stopped with "media failed to decode").
-        if (d->q.size() >= kQueueMax) { d->q.pop_front(); d->q_dropped++; }
-        d->q.push_back({au, key});
-    }
-    uint64_t one = 1;
-    if (write(d->wake_fd, &one, sizeof(one)) < 0) {}
-}
-
-void WebStream::gap() {
-    Impl* d = impl_;
-    if (!d || d->screen_mode || d->viewers.load(std::memory_order_relaxed) == 0) return;
-    std::lock_guard<std::mutex> lk(d->m);
-    d->q_dropped++;
-}
-
-bool WebStream::wants_keyframe() const {
-    return impl_ && !impl_->screen_mode && impl_->want_key.load(std::memory_order_relaxed);
-}
-
 void WebStream::set_screen_source(const std::vector<uint8_t>& header, int w, int h, int dur90k) {
     Impl* d = impl_;
-    if (!d || !d->screen_mode) return;
+    if (!d) return;
     auto ps = split_nals(header.data(), header.size());
     {
         std::lock_guard<std::mutex> lk(d->m);
@@ -780,7 +700,7 @@ void WebStream::set_screen_source(const std::vector<uint8_t>& header, int w, int
 
 bool WebStream::feed_screen(const uint8_t* p, size_t n, int dur) {
     Impl* d = impl_;
-    if (!d || !d->screen_mode || !n) return false;
+    if (!d || !n) return false;
     d->last_screen_us.store(get_time_us(), std::memory_order_relaxed);
     if (d->viewers.load(std::memory_order_relaxed) == 0) return false;
     bool key = false;   // an IDR slice in it
@@ -835,34 +755,25 @@ void WebStream::Impl::loop() {
         std::deque<Item> items;
         std::vector<std::vector<uint8_t>> ps_now;
         int w_now, h_now, dur_now;
-        unsigned dropped = 0, gaps = 0;
+        unsigned dropped = 0;
         {
             std::lock_guard<std::mutex> lk(m);
             items.swap(q);
             dropped = q_dropped; q_dropped = 0;
-            gaps = seq_gaps; seq_gaps = 0;
-            if (screen_mode) {
-                ps_now = screen_ps;
-                w_now = sw; h_now = sh;
-                dur_now = sdur;
-                cur_gen = screen_gen;
-            } else {
-                ps_now = ps;
-                w_now = w; h_now = h;
-                dur_now = (int)(frame_us * 90000.0 / 1e6 + 0.5);
-            }
+            ps_now = screen_ps;
+            w_now = sw; h_now = sh;
+            dur_now = sdur;
+            cur_gen = screen_gen;
         }
         // A new screen source (another encoder, another size): a viewer's
         // muxer was made for the old one, so the page connects again.
-        if (screen_mode)
-            for (Client* c : clients)
-                if (c->streaming && c->mux && c->gen != cur_gen && c->fd >= 0) {
-                    printf("webstream: viewer %d - the screen source changed, reconnecting it\n", c->fd);
-                    close(c->fd); c->fd = -1;
-                }
-        if (dropped || gaps) {
-            printf("webstream: pictures missing (%u dropped behind, %u jumps in the air unit's counter) - "
-                   "viewers restart at the next keyframe\n", dropped, gaps);
+        for (Client* c : clients)
+            if (c->streaming && c->mux && c->gen != cur_gen && c->fd >= 0) {
+                printf("webstream: viewer %d - the screen source changed, reconnecting it\n", c->fd);
+                close(c->fd); c->fd = -1;
+            }
+        if (dropped) {
+            printf("webstream: %u pictures dropped behind - viewers restart at the next keyframe\n", dropped);
             for (Client* c : clients)
                 if (c->streaming) c->need_key = true;
         }
@@ -899,12 +810,7 @@ void WebStream::Impl::loop() {
         // Only once it can take one: a keyframe that comes while it is still
         // behind is skipped like the rest, and costs the radio link for nothing.
         for (Client* c : clients) waiting |= c->streaming && c->need_key && c->pending() <= skip_bytes;
-        // A keyframe every kKeyEveryUs while someone watches: the page trims
-        // the video it has played (memory), and a browser's media buffer drops
-        // every picture after a removed keyframe up to the next one - with
-        // intra refresh there was no next one, and the picture froze at ~8 s.
-        // ~60 KB per keyframe at 1080p, every 10 s, on the radio link.
-        if (screen_mode) {
+        {
             // The screen encoder makes a keyframe every 2 s by itself; one is
             // forced only for a viewer waiting to start. It runs while anyone
             // watches, and a little longer (kScreenIdleUs).
@@ -932,12 +838,6 @@ void WebStream::Impl::loop() {
                     DvrRecorder::instance().set_web_watching(false);
                 }
             }
-        } else {
-            bool watching = false;
-            for (Client* c : clients) watching |= c->streaming && !c->need_key;
-            if (watching && get_time_us() - last_key_us.load(std::memory_order_relaxed) > kKeyEveryUs)
-                waiting = true;
-            want_key.store(waiting, std::memory_order_relaxed);
         }
 
         if (pf[0].revents & POLLIN) accept_one();
@@ -989,13 +889,11 @@ void WebStream::Impl::on_request(Client* c, const std::string& method, const std
     };
 
     if (path == "/" || path == "/index.html") {
-        // Codec strings MSE accepts for this stream: HEVC Main and H.264 High,
-        // at a level high enough for 1080p at 120 fps.
+        // The codec string MSE is given: H.264 Main as the VEPU encodes it,
+        // level 4.2 (1080p60), covering both the web view's encoder and a
+        // screen recording's.
         std::string page = kPage;
-        // The screen: H.264 Main as the VEPU encodes it, level 4.2 (1080p60)
-        // covering both the web view's encoder and a screen recording's.
-        const char* cs = screen_mode ? "avc1.4d402a"
-                       : codec == VideoCodec::H264 ? "avc1.640033" : "hvc1.1.6.L153.B0";
+        const char* cs = "avc1.4d402a";
         const size_t p = page.find("__CODEC__");
         if (p != std::string::npos) page.replace(p, 9, cs);
         reply("200 OK", "text/html; charset=utf-8", page);
@@ -1009,10 +907,10 @@ void WebStream::Impl::on_request(Client* c, const std::string& method, const std
         // stream queued unseen while the page froze, waiting for it to drain
         // over a WiFi that had dipped below the video's rate.
         setsockopt(c->fd, SOL_SOCKET, SO_SNDBUF, &kSndBuf, sizeof(kSndBuf));
-        // Re-encoding: sent at the web view's cap, never faster - a keyframe,
-        // or what piled up while the WiFi stalled, goes out paced instead of
-        // as a burst the goggle's WiFi (and a dozing iPhone) chokes on.
-        if (screen_mode) {
+        // Sent at the web view's cap, never faster - a keyframe, or what
+        // piled up while the WiFi stalled, goes out paced instead of as a
+        // burst the goggle's WiFi (and a dozing iPhone) chokes on.
+        {
             const uint32_t rate = (uint32_t)DvrRecorder::web_cap_kbps() * 1000 / 8;   // bytes/s
             setsockopt(c->fd, SOL_SOCKET, SO_MAX_PACING_RATE, &rate, sizeof(rate));
         }
@@ -1281,8 +1179,7 @@ void WebStream::Impl::mux_item(Client* c, const Item& it,
             c->dur = dur_now > 0 ? dur_now : 750;
             c->gen = cur_gen;
             c->mux = MP4E_open(0, 1 /*fragmented*/, c, mux_write);
-            if (!c->mux || MP4E_STATUS_OK != mp4_h26x_write_init(&c->wr, c->mux, w_now, h_now,
-                                                                 !screen_mode && codec == VideoCodec::H265)) {
+            if (!c->mux || MP4E_STATUS_OK != mp4_h26x_write_init(&c->wr, c->mux, w_now, h_now, 0 /* H.264 */)) {
                 printf("webstream: muxer init failed\n");
                 close(c->fd); c->fd = -1;
                 return;
@@ -1302,11 +1199,10 @@ void WebStream::Impl::mux_item(Client* c, const Item& it,
     // mid-picture - FFmpeg shrugged ("First slice in a frame missing"), the
     // iPhone's hardware decoder refused the lot ("media failed to decode").
     static thread_local std::vector<uint8_t> smp;
-    annexb_to_sample(*it.au, smp, screen_mode);
+    annexb_to_sample(*it.au, smp, true);
     if (!smp.empty())
         MP4E_put_sample(c->mux, c->wr.mux_track_id, smp.data(), (int)smp.size(), c->dur,
                         it.key ? MP4E_SAMPLE_RANDOM_ACCESS : MP4E_SAMPLE_DEFAULT);
-    if (it.key) last_key_us.store(get_time_us(), std::memory_order_relaxed);
 }
 
 void WebStream::Impl::flush(Client* c) {

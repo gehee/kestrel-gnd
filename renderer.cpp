@@ -15,7 +15,6 @@ std::atomic<int> g_frame_mode{kFrameWhole};
 #include <time.h>
 #include "utils/ltrace.hpp"
 #include "dvr.hpp"
-#include "webstream.hpp"
 
 
 
@@ -1171,7 +1170,6 @@ bool Renderer::render_frame(DecodedUnit *du) {
 	    if(dvr) dvr->init(du->width, du->height);
         // Button-driven recordings are created later, so remember the size.
         DvrRecorder::instance().set_frame_size(du->width, du->height);
-        WebStream::instance().set_frame_size(du->width, du->height);
         // Do not return here, see logic below
     }
 
