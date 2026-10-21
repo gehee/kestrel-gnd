@@ -329,7 +329,7 @@ async function gallery() {
   let j;
   try { j = await (await fetch('/api/recordings', { cache: 'no-store' })).json(); }
   catch (e) { l.innerHTML = '<div class="empty">Could not list the recordings.</div>'; return; }
-  if (!j.recordings.length) { l.innerHTML = '<div class="empty">No recordings yet - press REC on the goggle.</div>'; return; }
+  if (!j.recordings.length) { l.innerHTML = '<div class="empty">No recordings yet - press REC on the VRX.</div>'; return; }
   l.innerHTML = '';
   for (const r of j.recordings) {
     const d = document.createElement('div');
@@ -415,12 +415,12 @@ async function tz() {
   } catch (e) { return; }
   el.textContent = '';
   const t = document.createElement('span');
-  t.textContent = 'Goggle time zone: ' + (cur.zone ? cur.zone + ' (' + cur.country_name + ')' : 'not set');
+  t.textContent = 'VRX time zone: ' + (cur.zone ? cur.zone + ' (' + cur.country_name + ')' : 'not set');
   el.appendChild(t);
   if (!mine) return;
   if (!cur.phone) {
     const n = document.createElement('span');
-    n.textContent = '(this phone\'s, ' + mine + ', is not in the goggle\'s list)';
+    n.textContent = '(this phone\'s, ' + mine + ', is not in the VRX\'s list)';
     el.appendChild(n);
   } else if (cur.phone !== cur.zone) {
     const btn = document.createElement('button');

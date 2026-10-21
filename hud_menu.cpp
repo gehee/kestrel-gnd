@@ -98,7 +98,7 @@ void OSD::draw_side_panel(int side, float x, float y, float w, float h, float u)
     const float ring = 3 * u;
 
     // ---- whose settings, and its sections ----
-    px_text(side == 0 ? "GOGGLE" : "AIR UNIT", x + pad, y + pad + 14 * u, 15 * u, 0, T.accent, 1.0f);
+    px_text(side == 0 ? "GROUND UNIT" : "AIR UNIT", x + pad, y + pad + 14 * u, 15 * u, 0, T.accent, 1.0f);
     const std::vector<int> tabs = ui_side_tabs(side);
     float tx = x + pad;
     const float tab_base = y + pad + 52 * u;

@@ -4736,7 +4736,7 @@ static const char kAirCapsHelp[] =
     "Radio Clock: pictures stamped on the radio's clock. Frame Clock: its radio's frame, for exact latency. "
     "Sensor Timing: readout and exposure, for STATS. Intra Refresh: no keyframe spikes. "
     "Camera IMU: the camera's gyro with the video. FC IMU: the flight controller's gyro instead. "
-    "Bandwidth Cap: takes the goggle's limit. "
+    "Bandwidth Cap: takes the VRX's limit. "
     "864p120, 864p144: Video Mode offers a 1536x864 window at 120 or 144 fps.";
 
 // A row label made at run time (the capabilities list), kept for good: a
@@ -4797,7 +4797,7 @@ std::vector<OSD::MenuItem> OSD::menu_items(int tab) const {
         for (auto& it : ar_rf_items()) {
             switch (it.second) {
                 case 9: items.push_back({it.first, 3,
-                    "Pairs this goggle with an air unit. Put the air unit in its "
+                    "Pairs this VRX with an air unit. Put the air unit in its "
                     "pairing mode first: hold its bind button until the LED turns red.",
                     "ENTER: BIND"}); break;
                 case 5: items.push_back({it.first, 3,
@@ -4933,7 +4933,7 @@ std::vector<OSD::MenuItem> OSD::menu_items(int tab) const {
                                                "your licence sets the power."});
         items.push_back({"Area", 1, "Where you fly, starting with the part of the world. Sets the clock and "
                                     "which channels the channel page allows. Or set it from a phone, on the "
-                                    "goggle's web page."});
+                                    "VRX's web page."});
         items.push_back({"Country", 1, "The country you fly in: its rules for the radio's channels."});
         // Only where the country has more than one time zone (in this area):
         // which one the clock shows. The channel rules are per country and do
