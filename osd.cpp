@@ -5906,7 +5906,10 @@ void OSD::handle_key(int key) {
         else if (key == 13 || key == '\n')                                     gk = Gallery::kEnter;
         else if (key == kKeyBack || key == 27)                                  gk = Gallery::kBack;
         else is_gallery_key = false;   // M and the rest wait until it is closed
-        if (is_gallery_key) gallery_.key(gk);
+        if (is_gallery_key) {
+            gallery_.key(gk);
+            playback_ui_key_us_ = get_time_us();   // playback's overlay comes back
+        }
         render_requested = true;
         pthread_cond_signal(&osd_cond);
         pthread_mutex_unlock(&osd_mutex);

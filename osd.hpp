@@ -282,6 +282,11 @@ class OSD {
         uint32_t    live_ext_epoch_ = 0;
         bool        import_live_picture();
         bool        clip_have_frame_ = false;
+        // Playback's title, timeline and key hints: shown for kPlaybackUiHoldUs
+        // after a button, then faded out over kPlaybackUiFadeUs while the
+        // recording plays (always shown paused or ended).
+        uint64_t    playback_ui_key_us_ = 0;   // the last gallery button
+        static constexpr uint64_t kPlaybackUiHoldUs = 3000000, kPlaybackUiFadeUs = 300000;
         // Thumbnails on the GPU, loaded as the strip scrolls to them.
         struct GalleryThumb {
             GLuint   tex = 0;

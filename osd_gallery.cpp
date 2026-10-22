@@ -1613,9 +1613,22 @@ bool OSD::render_gallery(int W, int H) {
     }
 
     // ---- playback ----
+    bool ui_fading = false;
     if (pt > 0.003f && s.sel >= 0 && s.sel < live_i) {
         const Gallery::Item& it = items[s.sel];
-        const float a = std::max(0.0f, (pt - 0.5f) * 2.0f);
+        // Out of the way while the recording plays: a few seconds after the
+        // last button, then faded; any button brings it back. Paused or
+        // ended it stays, it is what the pilot is looking at.
+        float ui = 1.0f;
+        if (s.mode == Gallery::Mode::Playing && !s.paused && !s.ended) {
+            const uint64_t since = now > playback_ui_key_us_ ? now - playback_ui_key_us_ : 0;
+            if (since >= kPlaybackUiHoldUs + kPlaybackUiFadeUs) ui = 0.0f;
+            else if (since > kPlaybackUiHoldUs) {
+                ui = 1.0f - (float)(since - kPlaybackUiHoldUs) / (float)kPlaybackUiFadeUs;
+                ui_fading = true;
+            } else if (since + 100000 >= kPlaybackUiHoldUs) ui_fading = true;   // the fade starts soon
+        }
+        const float a = std::max(0.0f, (pt - 0.5f) * 2.0f) * ui;
         const float m = 48 * u;
         std::string title = Gallery::stamp_label(it.name);
         if (title.empty()) title = it.name;
@@ -1642,7 +1655,7 @@ bool OSD::render_gallery(int W, int H) {
     // Another frame at once while anything moves; a thumbnail or the card read
     // still coming is picked up on the next ordinary refresh.
     // The stats chart moves with time: redraw at the display's rate while it is on screen.
-    const bool busy = animating || stats_visible;
+    const bool busy = animating || stats_visible || ui_fading;
     static const bool no_phase_lock = getenv("KESTREL_NO_PHASELOCK") != nullptr;   // for A/B tests
     phase_lock_.store(busy && !no_phase_lock, std::memory_order_relaxed);
     if (busy) signal_render(prof::kWakeAnim);
