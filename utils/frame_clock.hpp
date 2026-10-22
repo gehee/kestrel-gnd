@@ -65,6 +65,61 @@ struct FrameStampInfo {
     uint32_t retries, steady, retry_steps;   // blocks sent again, steady mode, its steps down
 };
 
+// The air radio's clock from its frame stamps: 32 bits of us (71.6 min),
+// unwrapped. Which 71.6 minutes it is in comes from our radio's copy of the
+// radio clock (the coarse one: whole ms, 32 bits of them - 49.7 days) when the
+// two agree to within kAgree; else from the last stamp, or none - an air unit
+// just started. Counted from the first stamp alone, a kestrel-gnd started
+// after the air unit's 72nd minute was 2^32 us behind the coarse clock and
+// every slice's air stamp (2026-10-22, beta4: +4294969649 us off, slices'
+// times thrown out, flips 100-157 per 5 s of 601 pictures, g2g 25 -> 47 ms).
+class AirClock {
+public:
+    // Our radio's copy is 43-750 ms off the air's at a first count (Open8030),
+    // ~2 ms when settled; another clock (a stale copy right after the air unit
+    // started again) agrees within this by chance 1 time in ~400.
+    static constexpr int64_t kAgree = 5000000;
+    enum Took {
+        kFollowed,    // on from the last stamp
+        kPlaced,      // the first stamp
+        kStarted,     // not where it should be by now: the air unit started again
+        kCorrected,   // whole wraps off our radio's copy: put where that says
+    };
+    // A stamp s32 at our time now (us); coarse: our radio's copy of the radio
+    // clock at now (us), negative: none.
+    Took take(uint32_t s32, uint64_t now, double coarse) {
+        int64_t placed = -1;   // s32 where the coarse clock says, if it agrees
+        if (coarse >= 0) {
+            const int64_t b = std::llround(coarse);
+            const int64_t d = (int32_t)(s32 - (uint32_t)b);
+            if (d > -kAgree && d < kAgree && b + d >= 0) placed = b + d;
+        }
+        Took r = kPlaced;
+        if (known_) {
+            const double expect = (double)s64_ + ((double)now - (double)at_);
+            const int64_t next = (int64_t)s64_ + (int64_t)(int32_t)(s32 - (uint32_t)s64_);
+            if (std::fabs((double)next - expect) < 2e6) {
+                r = placed < 0 || placed == next ? kFollowed : kCorrected;
+                s64_ = (uint64_t)(placed < 0 ? next : placed);
+                at_ = now;
+                return r;
+            }
+            r = kStarted;
+        }
+        s64_ = placed < 0 ? s32 : (uint64_t)placed;
+        at_ = now;
+        known_ = true;
+        return r;
+    }
+    uint64_t us() const { return s64_; }
+    // The wraps it is past (71.6 min each).
+    unsigned wraps() const { return (unsigned)(s64_ >> 32); }
+
+private:
+    uint64_t s64_ = 0, at_ = 0;   // the clock unwrapped, at our time at_
+    bool known_ = false;
+};
+
 class FrameClock {
 public:
     // Our radio's frame info (Open8030; 0: read). Not set or failing: the
@@ -214,19 +269,29 @@ private:
         if (si.taken != last_taken_) { last_taken_ = si.taken; last_taken_us_ = now; return true; }
         return last_taken_us_ && now - last_taken_us_ < 400000;
     }
-    // The air radio's clock (32 bits of us, 71.6 min) unwrapped; taken anew
-    // when it is not where it should be by now - the air unit started again.
+    // The air radio's clock (32 bits of us, 71.6 min) unwrapped (AirClock).
     void take_air_clock(uint32_t s32, uint64_t now) {
-        if (s_known_) {
-            const double expect = (double)s64_ + ((double)now - (double)s_us_);
-            const int64_t next = (int64_t)s64_ + (int64_t)(int32_t)(s32 - (uint32_t)s64_);
-            if (std::fabs((double)next - expect) < 2e6) { s64_ = (uint64_t)next; s_us_ = now; return; }
+        double ac = -1;
+        if (!coarse_ || !coarse_(now, &ac)) ac = -1;
+        const double was = (double)air_.us() + ((double)now - (double)s_us_);
+        switch (air_.take(s32, now, ac)) {
+        case AirClock::kFollowed: break;
+        case AirClock::kStarted:
             printf("frameclock: the air radio's clock is not where it was (%.1f s off): it started again\n",
-                   ((double)next - expect) / 1e6);
+                   ((double)air_.us() - was) / 1e6);
+            [[fallthrough]];
+        case AirClock::kPlaced:
+            if (air_.wraps())
+                printf("frameclock: the air radio's clock is %.1f min in (%u wraps of 71.6 min), by our radio's copy\n",
+                       (double)air_.us() / 60e6, air_.wraps());
+            break;
+        case AirClock::kCorrected:
+            printf("frameclock: the air radio's clock was %+.0f wraps of 71.6 min off our radio's copy: put on it\n",
+                   std::round(((double)air_.us() - was) / 4294967296.0));
+            break;
         }
-        s64_ = s32;
+        s64_ = air_.us();
         s_us_ = now;
-        s_known_ = true;
     }
 
     // Open8030 at both ends, while our radio's frame edge is not found (the
@@ -573,8 +638,8 @@ private:
     // The clock (publish()): good until until_.
     double cE_ = 0, cTm_ = 1, cTt_ = 0, cphi_ = 0, until_ = 0;
     // The frame stamps' clock unwrapped (us; it wraps at 2^32), and where its IRQ 5 falls from our edge.
+    AirClock air_;
     uint64_t s64_ = 0;
-    bool s_known_ = false;
     double g_avg_ = 0;
     unsigned g_n_ = 0;
     int64_t cm_ = 0;
