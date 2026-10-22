@@ -48,6 +48,13 @@ class Vdec {
         // Picture `pts` gets no more slices: decode it as far as it got.
         virtual void stream_end(int64_t pts) { (void)pts; }
 
+        // Whether the decoder itself holds parameter sets to decode against: a
+        // keyframe went in with them, and pictures have come out since (or it
+        // is too soon to tell). False until then, and again after the decoder
+        // was reset or took a run of slices without a picture out - a source
+        // then holds slices back and asks for a keyframe.
+        virtual bool keyframe_in() const { return true; }
+
         // While another decoder runs on the same hardware (a gallery clip, the
         // background video), live pictures go whole: a streamed one holds the
         // decoder between its slices. Counted by the other decoders' owners.

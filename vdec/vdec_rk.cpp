@@ -253,6 +253,7 @@ void VdecRK::run_frame()
 		if (frame) {
 			first_successful_decode = true;
 			last_decoded_frame_time_ms = get_time_ms();
+			fed_since_out_.store(0, std::memory_order_relaxed);
 			uint64_t pts =  mpp_frame_get_pts(frame);
 			static int frame_count = 0;
             // if (frame_count++ % 30 == 0) {
@@ -588,6 +589,7 @@ void VdecRK::feed_packet_to_decoder(void* data_p, int data_len, int64_t pts, uin
                 printf("VdecRK: %d consecutive stalls — resetting the MPP decoder\n",
                        consec_put_stalls);
                 mpi.mpi->reset(mpi.ctx);
+                key_in_.store(false, std::memory_order_relaxed);   // the reset took its parameter sets
                 {
                     std::lock_guard<std::mutex> lock(decoding_stats_mutex);
                     decoding_stats.clear();
@@ -605,6 +607,20 @@ void VdecRK::feed_packet_to_decoder(void* data_p, int data_len, int64_t pts, uin
         usleep(200);
     }
     consec_put_stalls = 0;
+    // MPP holds parameter sets only once a keyframe went in with them. With
+    // intra refresh nothing sends another unless asked, so a keyframe that
+    // never got here - or that MPP could not use, a run of packets with no
+    // picture out - leaves every later slice refused ("PPS id out of range")
+    // for good (2026-10-22, twice in 12 restarts at 864p120). keyframe_in()
+    // says so, and the source asks for a keyframe until one works.
+    if (is_key && !cached_pps.empty()) {
+        key_in_.store(true, std::memory_order_relaxed);
+        fed_since_out_.store(0, std::memory_order_relaxed);
+    } else if (fed_since_out_.fetch_add(1, std::memory_order_relaxed) + 1 == kKeyLostPackets &&
+               key_in_.exchange(false, std::memory_order_relaxed)) {
+        printf("VdecRK: %u packets in and no picture out - the decoder needs a keyframe\n",
+               kKeyLostPackets);
+    }
     if (ltrace::on()) ltrace::rec(ltrace::kDecPut, put_start_us, (uint32_t)pts, get_time_us());
     
     if (attempt > 1) {

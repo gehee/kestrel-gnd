@@ -3991,6 +3991,22 @@ void Ar8030Source::emit_nal(const uint8_t* nal, size_t len) {
         }
         return;
     }
+    // The sets in hand are not the decoder's: it takes them in front of a
+    // keyframe, and only that. The resync can open on a keyframe's second
+    // slice (its first came while the stream was still catching up), which
+    // goes nowhere, and then no keyframe ever reached the decoder - every
+    // slice after refused "PPS id out of range", the link up and no picture
+    // until kestrel-gnd restarted (2026-10-22, 864p120). Until the decoder
+    // has one, only keyframes pass, and one is asked for every 1.5 s.
+    if (codec == VideoCodec::H265 && is_vcl && vdec && decode_enabled && !vdec->keyframe_in() &&
+        !(nal_type >= 19 && nal_type <= 21)) {
+        if (now_ms() - idr_asked_ms_ >= 1500) {
+            idr_asked_ms_ = now_ms();
+            printf("ar8030: the decoder has no keyframe to decode against - asking for one\n");
+            request_air_idr();
+        }
+        return;
+    }
 
     const bool is_param_set = (codec == VideoCodec::H265)
                                   ? (nal_type == 32 || nal_type == 33 || nal_type == 34)
@@ -4167,8 +4183,11 @@ void Ar8030Source::emit_nal(const uint8_t* nal, size_t len) {
                 stream_paused = off;
             }
             if (first_slice) {
+                // Keyframes go whole: they carry the parameter sets the decoder
+                // needs to start on (see keyframe_in), and with intra refresh
+                // come only when asked for - not worth a half-built start.
                 if (stream_decode && !stream_paused && Vdec::stream_holds().load() == 0 &&
-                    !last && last_slice_addr > 0 &&
+                    !last && last_slice_addr > 0 && !(nal_type >= 19 && nal_type <= 21) &&
                     last_slice_count > 1 && vdec->stream_supported()) {
                     if (!stream_pics++)
                         printf("ar8030: decoding each picture from its first slice "

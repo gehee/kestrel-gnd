@@ -59,6 +59,13 @@ class VdecRK : public Vdec {
         std::vector<uint8_t> cached_sps;
         std::vector<uint8_t> cached_pps;
 
+        // MPP has parameter sets only from a keyframe fed with them prepended:
+        // set when one goes in, cleared by a reset or by kKeyLostPackets
+        // packets in a row with no picture out (see keyframe_in()).
+        std::atomic<bool> key_in_{false};
+        std::atomic<unsigned> fed_since_out_{0};
+        static constexpr unsigned kKeyLostPackets = 240;
+
         bool first_successful_decode = false;
         uint64_t last_decoded_frame_time_ms = 0;
         uint64_t last_idr_request_ms = 0;
@@ -115,6 +122,7 @@ class VdecRK : public Vdec {
         void stream_start(void* data_p, int data_len, int64_t pts, uint64_t recv_ts, uint8_t nal_type, uint32_t encode_delay_us, uint32_t processing_delay_us, int slices) override;
         bool stream_append(const void* data, int len, int64_t pts, bool last) override;
         void stream_end(int64_t pts) override;
+        bool keyframe_in() const override { return key_in_.load(std::memory_order_relaxed); }
         void cleanup();
         void run_frame();
 
