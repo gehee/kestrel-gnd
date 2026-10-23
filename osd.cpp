@@ -62,13 +62,15 @@ static const int kArChanVals[]   = { -1, 5740000, 5770000, 5805000, 5839000 };
 static const char* kArChanLabels[] = { "AUTO", "5740", "5770", "5805", "5839" };
 static const int kArChanCount = 5;
 // Max Bitrate: kestrel-air's video bitrate cap, kbps (0 = AUTO: it follows the
-// link, up to 20 Mbps; a cap above that lets kestrel-air go to it, 25 at most,
-// on a link that carries it - 40 MHz). Below the link's own rate it buys a steadier picture
-// and shorter slices on the air; stock air units ignore it.
-static const int kArMaxBrVals[]     = { 0, 6000, 8000, 10000, 12000, 15000, 18000, 20000, 22000, 25000 };
+// link, up to 20 Mbps; a cap above that lets kestrel-air go to it, 40 at most,
+// on a link that carries it - 40 MHz). Below the link's own rate it buys a
+// steadier picture and shorter slices on the air; stock air units ignore it.
+static const int kArMaxBrVals[]     = { 0, 6000, 8000, 10000, 12000, 15000, 18000, 20000, 22000, 25000,
+                                        30000, 35000, 40000 };
 static const char* kArMaxBrLabels[] = { "AUTO", "6 Mbps", "8 Mbps", "10 Mbps", "12 Mbps",
-                                        "15 Mbps", "18 Mbps", "20 Mbps", "22 Mbps", "25 Mbps" };
-static const int kArMaxBrCount = 10;
+                                        "15 Mbps", "18 Mbps", "20 Mbps", "22 Mbps", "25 Mbps",
+                                        "30 Mbps", "35 Mbps", "40 Mbps" };
+static const int kArMaxBrCount = 13;
 static int ar_maxbr_index(int kbps) {
     for (int i = 0; i < kArMaxBrCount; i++) if (kArMaxBrVals[i] == kbps) return i;
     return 0;
