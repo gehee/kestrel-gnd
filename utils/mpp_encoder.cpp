@@ -53,7 +53,9 @@ bool MppH264Encoder::init(int width, int height, int fps, int bitrate_bps, bool 
         mpp_enc_cfg_set_s32(cfg, "prep:colorspace", MPP_FRAME_SPC_SMPTE170M);
         mpp_enc_cfg_set_s32(cfg, "prep:colorprim",  MPP_FRAME_PRI_SMPTE170M);
         mpp_enc_cfg_set_s32(cfg, "prep:colortrc",   MPP_FRAME_TRC_SMPTE170M);
-        mpp_enc_cfg_set_s32(cfg, "prep:colorrange", MPP_FRAME_RANGE_MPEG);
+        // Full range: the screen recording carries the air unit's picture,
+        // which uses 0..255 (and the OSD blended in the same, rga_compositor).
+        mpp_enc_cfg_set_s32(cfg, "prep:colorrange", MPP_FRAME_RANGE_JPEG);
     }
 
     const bool vbr = max_bps > bitrate_bps;

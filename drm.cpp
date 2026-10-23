@@ -913,6 +913,8 @@ bool DrmDevice::page_flip(int fb_id, uint64_t recv_ts, uint64_t dec_start_ts, ui
         set_drm_object_property(output_list->video_request, p2, "CRTC_W", vw);
         set_drm_object_property(output_list->video_request, p2, "CRTC_H", vh - top_vh);
         set_drm_object_property(output_list->video_request, p2, "zpos", video_zpos);
+        set_drm_object_property(output_list->video_request, p2, "COLOR_ENCODING", 0);   // BT.601, as the top
+        set_drm_object_property(output_list->video_request, p2, "COLOR_RANGE", 1);
     } else if (split_on_) {
         set_drm_object_property(output_list->video_request, p2, "FB_ID", 0);
         set_drm_object_property(output_list->video_request, p2, "CRTC_ID", 0);
@@ -930,6 +932,10 @@ bool DrmDevice::page_flip(int fb_id, uint64_t recv_ts, uint64_t dec_start_ts, ui
     set_drm_object_property(output_list->video_request, &output_list->video_plane, "CRTC_W", vw);
     set_drm_object_property(output_list->video_request, &output_list->video_plane, "CRTC_H", top_vh);
     set_drm_object_property(output_list->video_request, &output_list->video_plane, "zpos", video_zpos);
+    // The picture as the air unit encodes it (its VUI): BT.601, full range.
+    // The plane's defaults were BT.709 and full: greens and reds a little off.
+    set_drm_object_property(output_list->video_request, &output_list->video_plane, "COLOR_ENCODING", 0);
+    set_drm_object_property(output_list->video_request, &output_list->video_plane, "COLOR_RANGE", 1);
 
     if (osd_fb > 0) {
         set_drm_object_property(output_list->video_request, &output_list->osd_plane, "FB_ID", osd_fb);

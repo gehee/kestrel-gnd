@@ -96,9 +96,10 @@ bool RgaCompositor::ensure_scratch() {
     return false;
 }
 
-// Video black: Y 16, chroma 128 - what the screen shows where no plane is.
+// Black, full range (the recording's): Y 0, chroma 128 - what the screen
+// shows where no plane is.
 void RgaCompositor::clear_scratch() {
-    memset(scratch_map_, 16, (size_t)w_ * h_);
+    memset(scratch_map_, 0, (size_t)w_ * h_);
     memset(scratch_map_ + (size_t)w_ * h_, 128, (size_t)w_ * h_ / 2);
 }
 
@@ -160,6 +161,12 @@ bool RgaCompositor::compose(const ScreenPair& pair, int osd_fd, uint32_t osd_str
             osd_[osd_fd] = oh;
         }
         rga_buffer_t pat = wrapbuffer_handle(oh, w_, h_, RK_FORMAT_BGRA_8888, (int)(osd_stride / 4), h_);
+        // The picture is blended as it is (YUV, its 0..255: full-range
+        // BT.601, the air unit's VUI), and the recording says full range.
+        // Only the OSD is converted, into limited range: RGA takes no
+        // conversion mode with a YUV source ("Not rgb to yuv"), so the HUD
+        // plays back a little softer (white at 235) - the picture, which
+        // was clipped at 16..235 under the old limited label, is right.
         st = improcess(src, dst, pat, full, full, full, IM_ALPHA_BLEND_DST_OVER | IM_SYNC);
     } else {
         rga_buffer_t none = {};

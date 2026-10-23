@@ -16,6 +16,7 @@
 #include "drm.hpp"
 #include "renderer.hpp"   // DecodedUnit, for the RGA recorder
 #include "settings.hpp"
+#include "frame_mode.hpp"   // g_display_lock, g_dl_camera_fps
 
 // Queued this far, a write waits for the card: ten seconds of the heaviest
 // recording, far more than a sync ever takes.
@@ -138,7 +139,7 @@ int DVR::init(int frm_width, int frm_height) {
 	// 100 unless set: a 100 Hz screen records every refresh, a 120 Hz one
 	// every other (60), 240 Hz every third (80).
 	const int bitrate = enc_bitrate > 0 ? enc_bitrate
-	                                    : Settings::getInstance().getInt("dvr_screen_kbps", 20000) * 1000;
+	                                    : Settings::getInstance().getInt("dvr_screen_kbps", 30000) * 1000;
 	if (!disp_dev) {
 		printf("DVR: no DRM device - screen recording unavailable\n");
 		return -1;
@@ -157,14 +158,23 @@ int DVR::init(int frm_width, int frm_height) {
 		if (fps < 1) fps = 1;
 		rga_slot_ticks = leader->rga_slot_ticks * follow_k;
 	} else {
-		const int hz = disp_dev->refresh_hz();
+		// Refresh Sync FREE holds each refresh as long as a camera frame: the
+		// screen's rate is the camera's, whatever its mode says. Taken from the
+		// lock's target, not the refresh of the moment - a recording started
+		// while the lock was not holding (the video back after a drop) read the
+		// mode's 120 Hz and kept every 2nd refresh, 60 fps, for the whole file.
+		double period_us = disp_dev->frame_period_us();
+		const float cam_fps = g_dl_camera_fps.load(std::memory_order_relaxed);
+		if (g_display_lock.load(std::memory_order_relaxed) == 2 && cam_fps > 0 &&
+		    1e6 / cam_fps >= period_us * 0.999)
+			period_us = 1e6 / cam_fps;
+		const int hz = period_us > 0 ? (int)(1e6 / period_us + 0.5) : disp_dev->refresh_hz();
 		const int want = enc_fps_cap;
 		rga_div = (hz + want - 1) / want;
 		if (rga_div < 1) rga_div = 1;
 		fps = (hz + rga_div / 2) / rga_div;
 		if (fps > enc_fps_cap) fps = enc_fps_cap;
 		if (fps < 1) fps = 1;
-		const double period_us = disp_dev->frame_period_us();
 		rga_slot_ticks = period_us > 0 ? (int)(period_us * rga_div * 0.09 + 0.5) : 90000 / fps;
 	}
 	screen_fps = fps;
