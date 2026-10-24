@@ -3376,8 +3376,8 @@ void Ar8030Source::note_air_announce(bool ka, uint8_t proto, uint8_t feat) {
         // but only to one that widens the link at all (the feature).
         if (max_kbps > 0) request_setting(CAM_MAX_KBPS, max_kbps);
         if (feat & kAirFeatMaxBw) request_setting(CAM_MAX_BW, max_bw_mhz == 0 ? 40 : max_bw_mhz);
-        // Off is its default after a reboot: only on needs saying.
-        if (air_logs) request_setting(CAM_AIR_LOGS, 1);
+        // Off too: an air unit that kept running since an on is still logging.
+        request_setting(CAM_AIR_LOGS, air_logs ? 1 : 0);
     } else {
         printf("ar8030: the air unit is the stock air app (no kestrel-air announcement in its "
                "version message): latency timed from its packet stamps (whole ms), the "
