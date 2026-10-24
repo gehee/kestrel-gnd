@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cctype>
 #include <cmath>
+#include <unistd.h>
 
 // CRC8 lookup table for MSP V2 (same as TX side)
 static uint8_t crc8_dvb_s2(uint8_t crc, unsigned char a) {
@@ -517,12 +518,21 @@ void MspOsd::scrape_locked() {
                     // stopped at the padding left the digits on screen - seen
                     // live as a stray "0" under the canopy with no link up.
                     const char* colon = strchr(line + b, ':');
-                    const char* num = (colon && colon - (line + b) <= 2) ? colon + 1 : line + b;
+                    const bool crsf = colon && colon - (line + b) <= 2;
+                    const char* num = crsf ? colon + 1 : line + b;
                     while (*num == ' ') num++;
                     if (isdigit((unsigned char)*num)) {
                         int v = atoi(num);
                         int e = (int)(num - line);
                         while (e + 1 < GRID_W && isdigit((unsigned char)line[e + 1])) e++;
+                        // Every receiver but CRSF and GHST (Betaflight 4.2
+                        // to 4.5, osdElementLinkQuality): one digit right
+                        // after the glyph, tenths - "{9" is 90-100%. GHST
+                        // pads its 0..100 to two ("{ 7"), so only a lone
+                        // digit with no space before it is tenths. Read as a
+                        // percentage it put the RC track at 9%.
+                        const bool tenths = !crsf && num == line + c + 1 && e == c + 1;
+                        if (tenths) v = v * 10 + 5;
                         if (v >= 0 && v <= 100) { t.have_lq = true; t.lq_pct = v; }
                     }
                 }
@@ -570,6 +580,28 @@ void MspOsd::scrape_locked() {
     // stay purely informational (for a future on-screen readout).
 
     telem = t;
+
+    // `touch /tmp/osd.req`: the canvas as scraped, into /tmp/osd-canvas.txt -
+    // printable characters as they are, glyphs as <hex>. For a flight
+    // controller whose elements do not reach the HUD (which version draws
+    // what, where).
+    if (FILE* rq = fopen("/tmp/osd.req", "r")) {
+        fclose(rq);
+        unlink("/tmp/osd.req");
+        if (FILE* f = fopen("/tmp/osd-canvas.txt", "w")) {
+            for (int r = 0; r < GRID_H; r++) {
+                for (int c = 0; c < GRID_W; c++) {
+                    const uint16_t g = grid[r][c].char_idx;
+                    if (g >= 32 && g <= 126 && g != '<') fputc((int)g, f);
+                    else if (g == 0) fputc(' ', f);
+                    else fprintf(f, "<%02X>", g);
+                }
+                fputc('\n', f);
+            }
+            fprintf(f, "lq %s %d%%\n", t.have_lq ? "read" : "not found", t.lq_pct);
+            fclose(f);
+        }
+    }
 }
 
 BfTelem MspOsd::get_telem() {
