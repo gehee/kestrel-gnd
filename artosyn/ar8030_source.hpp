@@ -297,6 +297,13 @@ class Ar8030Source {
         std::vector<uint8_t> accum;
         uint64_t accum_base_ = 0;        // stream offset of accum[0]
         uint64_t pkt_end_pos_ = 0;       // stream offset just past the open packet's trailer, 0 = unknown
+        // The slice checksum kestrel-air puts in each packet's extras (06 02
+        // <XOR32>): checked once the payload is all here (check_slice_xor).
+        bool     xor_pending_ = false;
+        uint64_t xor_start_ = 0;         // stream offset of the payload
+        uint32_t xor_len_ = 0, xor_want_ = 0;
+        uint64_t xor_checked_ = 0, xor_bad_ = 0, xor_unchecked_ = 0;
+        void     check_slice_xor();
         int64_t frame_pts = 0;
         uint64_t frames_seen = 0;
         long long bytes_received = 0;

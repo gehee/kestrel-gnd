@@ -3106,14 +3106,16 @@ void Ar8030Source::update_stats(size_t frame_size) {
             // Cached by publish_link_stats(), on the stats thread.
             printf("ar8030: rx=%llu bytes nals=%llu frames=%llu lost=%llu telemetry_drained=%llu"
                    " msp=%llu mcs=%d bw=%s MHz link=%.2f Mbps video=%.2f Mbps dist=%d"
-                   " air=%.1fms stale=%llu foreign=%llu snr=%.1fdB freq=%d gains=%d/%d\n",
+                   " air=%.1fms stale=%llu foreign=%llu snr=%.1fdB freq=%d gains=%d/%d"
+                   " damaged=%llu/%llu\n",
                    total_bytes, nal_count, (unsigned long long)frames_seen, frames_lost,
                    ctrl_bytes,
                    msp_bytes, mcs >= 0 ? ar_mcs_label(mcs) : -99, ar_bw_label(last_bw_idx.load()), last_link_kbps.load() / 1000.0,
                    video_bw / 125000.0, dist_m,
                    air_delay_ms < 0.0f ? 0.0f : air_delay_ms, stale_pics, foreign_slices,
                    stat_snr_x10_.load() / 10.0, link_freq_mhz,
-                   stat_gains_.load() & 255, stat_gains_.load() >> 8);
+                   stat_gains_.load() & 255, stat_gains_.load() >> 8,
+                   (unsigned long long)xor_bad_, (unsigned long long)xor_checked_);
         }
         bytes_received = 0;
     }
@@ -4682,6 +4684,31 @@ void Ar8030Source::send_held_slices(bool last) {
     held_pts_ = -1;
 }
 
+// The slice checksum of the packet whose header came last, once its payload
+// is all in accum: XOR of its little-endian u32 words, then of the bytes left
+// over (kestrel-air's ka_xor32). A mismatch is a slice the radio delivered
+// damaged but whole - nothing else counts those: the decoder takes it and
+// draws garbage blocks until intra refresh repairs them.
+void Ar8030Source::check_slice_xor() {
+    if (!xor_pending_) return;
+    if (xor_start_ < accum_base_) { xor_pending_ = false; xor_unchecked_++; return; }
+    const uint64_t end = xor_start_ + xor_len_;
+    if (end > accum_base_ + accum.size()) return;          // not all here yet
+    const uint8_t *b = accum.data() + (size_t)(xor_start_ - accum_base_);
+    uint32_t x = 0;
+    for (uint32_t i = 0; i + 4 <= xor_len_; i += 4)
+        x ^= (uint32_t)b[i] | (uint32_t)b[i + 1] << 8 | (uint32_t)b[i + 2] << 16 | (uint32_t)b[i + 3] << 24;
+    for (uint32_t i = xor_len_ & ~3u; i < xor_len_; i++) x ^= b[i];
+    xor_pending_ = false;
+    xor_checked_++;
+    if (x != xor_want_) {
+        xor_bad_++;
+        if (xor_bad_ <= 5 || xor_bad_ % 100 == 0)
+            printf("ar8030: a slice arrived damaged: checksum %08x, its packet says %08x (%u bytes; %llu of %llu)\n",
+                   x, xor_want_, xor_len_, (unsigned long long)xor_bad_, (unsigned long long)xor_checked_);
+    }
+}
+
 void Ar8030Source::consume_bytes(const uint8_t* data, size_t len) {
     accum.insert(accum.end(), data, data + len);
 
@@ -4727,6 +4754,24 @@ void Ar8030Source::consume_bytes(const uint8_t* data, size_t len) {
             if (sum == h[1] && ext <= 64) {
                 if (nal_start + 42 + ext > n) break;
                 i = nal_start + 42 + ext;
+                // The packet before it is all here by now: its checksum, then
+                // this one's (06 02 <XOR32> in the extras), to check later.
+                check_slice_xor();
+                if (xor_pending_) { xor_pending_ = false; xor_unchecked_++; }
+                const uint32_t pl = (uint32_t)h[4] | ((uint32_t)h[5] << 8) |
+                                    ((uint32_t)h[6] << 16) | ((uint32_t)h[7] << 24);
+                for (uint32_t e = 0; e + 6 <= ext && pl > 0 && pl < AR_MAX_ACCUM;) {
+                    const uint8_t *t = h + 42 + e;
+                    if (t[0] < 2) break;
+                    if (t[0] == 6 && t[1] == 0x02) {
+                        xor_want_ = (uint32_t)t[2] | (uint32_t)t[3] << 8 | (uint32_t)t[4] << 16 | (uint32_t)t[5] << 24;
+                        xor_start_ = accum_base_ + nal_start + 42 + ext;
+                        xor_len_ = pl;
+                        xor_pending_ = true;
+                        break;
+                    }
+                    e += t[0];
+                }
             }
             // A packet header, whole: where its packet ends.
             const uint32_t plen = (uint32_t)h[4] | ((uint32_t)h[5] << 8) |
@@ -4745,6 +4790,7 @@ void Ar8030Source::consume_bytes(const uint8_t* data, size_t len) {
         if (accum[pe - 4] == 0xee && accum[pe - 3] == 0x29 && accum[pe - 2] == 0x55 &&
             accum[pe - 1] == 0x9f) {
             emit_nal(accum.data() + nal_start, pe - nal_start);
+            check_slice_xor();
             accum.erase(accum.begin(), accum.begin() + pe);
             accum_base_ += pe;
             pkt_end_pos_ = 0;
@@ -4753,6 +4799,7 @@ void Ar8030Source::consume_bytes(const uint8_t* data, size_t len) {
         pkt_end_pos_ = 0;
     }
 
+    check_slice_xor();
     // Keep the unterminated tail (from the last start code we saw, or the last
     // 3 bytes which might be a partial start code).
     if (nal_start != SIZE_MAX) {
