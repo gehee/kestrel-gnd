@@ -133,6 +133,7 @@ class Ar8030Source {
         // MHz or a bb_bandwidth_e gear is not established. -1 disables.
         static int  air_bw;
         static int  max_kbps;   // ar8030_max_kbps: the video bitrate cap sent at link-up, 0 = none
+        static bool air_logs;   // hud_debug: the air unit's flight logs, sent at link-up
         static bool stream_decode;   // KESTREL_STREAM_DECODE / stream_decode: 0 (default on)
         static int  max_bw_mhz; // ar8030_max_bw_mhz: the video link bandwidth cap sent at link-up, 5/10/20/40, 0 AUTO (stock: 20 or 40)
         static int  max_mcs;    // ar8030_max_mcs: Open8030 here, the highest MCS its receive policy may use (-1: none)
@@ -216,7 +217,11 @@ class Ar8030Source {
                         CAM_MAX_KBPS,
                         // Ours: the cap on the video link's bandwidth, MHz (20
                         // or 40), sky cmd 0x41 - kestrel-air only. 0x30F.
-                        CAM_MAX_BW };
+                        CAM_MAX_BW,
+                        // Ours: the air unit's flight logs on or off (HUD >
+                        // Debug Info), sky cmd 0x42 - kestrel-air only. Not a
+                        // menu command id (0x310 up are the RF controls).
+                        CAM_AIR_LOGS };
         static void request_setting(int field, int value);
 
         // RF controls. Which of these the baseband actually honours is decided

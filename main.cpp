@@ -486,9 +486,12 @@ int main(int argc, char **argv)
 		Settings::getInstance().load(cfg && *cfg ? cfg : "/etc/kestrel/kestrel-gnd.yaml");
 		// SYSTEM > Time Zone: its TZ, before any thread reads the time.
 		zones::load();
-		// The log on the recordings partition too, named as the recordings
-		// are (fpvOS_YYYYMMDD_HHMMSS.log): it survives a power-off.
-		sd_log::start(Settings::getInstance().getString("dvr_dir", "/media/dvr"));
+		// HUD > Debug Info on: the log on the recordings partition too, named
+		// as the recordings are (fpvOS_YYYYMMDD_HHMMSS.log), so it survives a
+		// power-off; and the air unit's flight logs (sent at link-up).
+		sd_log::init(Settings::getInstance().getString("dvr_dir", "/media/dvr"));
+		Ar8030Source::air_logs = Settings::getInstance().getBool("hud_debug", false);
+		sd_log::set_enabled(Ar8030Source::air_logs);
 		// The low-latency video features, each with a switch that survives a
 		// reboot (the KESTREL_* variables and the /tmp files still work too):
 		//   stream_decode: 0   pictures go to the decoder whole
@@ -1119,6 +1122,11 @@ int main(int argc, char **argv)
                 case 0x316:
                     // AR8030 RF controls from the RF LINK tab (cmd - 0x310).
                     Ar8030Source::request_rf(cmd - 0x310, val);
+                    return;
+                case 0x201: // UI-local: HUD > Debug Info - the logs on the card and the air unit's
+                    sd_log::set_enabled(val != 0);
+                    Ar8030Source::air_logs = val != 0;
+                    Ar8030Source::request_setting(Ar8030Source::CAM_AIR_LOGS, val != 0);
                     return;
                 case 0x30E:
                     // RF menu, Max Bitrate: kept here and sent at every link-up.

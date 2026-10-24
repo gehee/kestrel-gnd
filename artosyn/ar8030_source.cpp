@@ -440,6 +440,7 @@ int Ar8030Source::standby_mode = -1;
 // air-side half below.
 int Ar8030Source::air_bw        = -1;
 int Ar8030Source::max_kbps      = 0;
+bool Ar8030Source::air_logs     = false;
 int Ar8030Source::max_bw_mhz    = 40;
 int Ar8030Source::max_mcs       = -1;
 int Ar8030Source::steady        = 0;
@@ -1981,13 +1982,14 @@ void Ar8030Source::apply_pending_settings() {
             case CAM_BW:        cmd = sky::CMD_SET_BB_BANDWIDTH; name = "air bandwidth";break;
             case CAM_MAX_KBPS:  cmd = sky::CMD_KA_MAX_BITRATE; name = "video bitrate cap"; break;
             case CAM_MAX_BW:    cmd = sky::CMD_KA_MAX_BW;      name = "video link bandwidth cap MHz"; break;
+            case CAM_AIR_LOGS:  cmd = sky::CMD_KA_LOGS;        name = "air flight logs"; break;
             case CAM_PWR:       cmd = sky::CMD_SET_BB_PWR;      name = "air power mW"; break;
             case CAM_FOCUS:     cmd = sky::CMD_SET_CHN_FOCUS;   name = "focus mode";   break;
             default: continue;
         }
         // kestrel-air's own commands: kept for when a kestrel-air announces
         // itself (note_air_announce sends them then), never to the stock app.
-        if ((item.first == CAM_MAX_KBPS || item.first == CAM_MAX_BW) && !air_kestrel_) {
+        if ((item.first == CAM_MAX_KBPS || item.first == CAM_MAX_BW || item.first == CAM_AIR_LOGS) && !air_kestrel_) {
             printf("ar8030: %s = %d kept for a kestrel-air (this air unit %s)\n", name, item.second,
                    air_ver_seen_ ? "is the stock app" : "has not said what it is yet");
             continue;
@@ -2009,7 +2011,7 @@ void Ar8030Source::apply_pending_settings() {
             uint8_t v[2] = { 0, (uint8_t)item.second };
             f = sky_proto.build(cmd, v, sizeof(v));
         } else if (item.first == CAM_STANDBY || item.first == CAM_BW ||
-                   item.first == CAM_MAX_BW) {
+                   item.first == CAM_MAX_BW || item.first == CAM_AIR_LOGS) {
             f = sky_proto.build_u8(cmd, (uint8_t)item.second);
         } else {
             f = sky_proto.build_u32(cmd, (uint32_t)item.second);
@@ -3374,6 +3376,8 @@ void Ar8030Source::note_air_announce(bool ka, uint8_t proto, uint8_t feat) {
         // but only to one that widens the link at all (the feature).
         if (max_kbps > 0) request_setting(CAM_MAX_KBPS, max_kbps);
         if (feat & kAirFeatMaxBw) request_setting(CAM_MAX_BW, max_bw_mhz == 0 ? 40 : max_bw_mhz);
+        // Off is its default after a reboot: only on needs saying.
+        if (air_logs) request_setting(CAM_AIR_LOGS, 1);
     } else {
         printf("ar8030: the air unit is the stock air app (no kestrel-air announcement in its "
                "version message): latency timed from its packet stamps (whole ms), the "

@@ -10,11 +10,16 @@
 // original output and keeps it in memory; another writes that to the card and
 // syncs every 2 s. A card that falls more than 1 MB behind loses text, never
 // time. The newest kKeep logs are kept.
+//
+// Only while HUD > Debug Info is on: each time it is turned on, a new log
+// from then on.
 namespace sd_log {
-// Starts it if dir is a mounted partition (not the plain mount point); says
-// why not otherwise.
-void start(const std::string& dir);
-// stdout and stderr back to where they went before start(): for a re-exec,
+// Where the logs go; nothing is written before set_enabled(true).
+void init(const std::string& dir);
+// On: a new log, if dir is a mounted partition (not the plain mount point;
+// says why not otherwise). Off: what is pending written, the log closed.
+void set_enabled(bool on);
+// stdout and stderr back to where they went before the first log: for a re-exec,
 // whose new process has none of these threads (async-signal-safe).
 void restore_output();
 }

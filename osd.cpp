@@ -5337,6 +5337,7 @@ void OSD::menu_apply_change(int tab, int index, int dir) {
             if (!menu_stepping_) {
                 hud_debug = menu_hud_debug;
                 Settings::getInstance().set("hud_debug", hud_debug);
+                if (cmd_cb) cmd_cb(0x201, hud_debug ? 1 : 0);   // the logs follow it
             }
         }
     } else if (menu_tab == 3) { // DISPLAY
