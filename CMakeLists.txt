@@ -22,6 +22,7 @@ set(SOURCE_FILES
         utils/h264_cfr.cpp
         utils/hevc_repair.cpp
         utils/prof.cpp
+        utils/sd_log.cpp
         utils/ltrace.cpp
         queue/Queue.cpp
         queue/Msg.cpp

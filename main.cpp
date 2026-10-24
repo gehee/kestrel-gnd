@@ -22,6 +22,7 @@ extern "C" {
     bool verbose_rf  = false;
 }
 
+#include "utils/sd_log.hpp"
 #include "frame_mode.hpp"
 #include "webstream.hpp"
 #include "main.hpp"
@@ -93,6 +94,7 @@ static volatile sig_atomic_t g_restart = 0;
 static char** g_main_argv = nullptr;
 static void reexec_now(int)
 {
+	sd_log::restore_output();   // the new process starts its own
 	for (int fd = 3; fd < 1024; fd++) close(fd);
 	execv("/proc/self/exe", g_main_argv);
 	_exit(91);
@@ -484,6 +486,9 @@ int main(int argc, char **argv)
 		Settings::getInstance().load(cfg && *cfg ? cfg : "/etc/kestrel/kestrel-gnd.yaml");
 		// SYSTEM > Time Zone: its TZ, before any thread reads the time.
 		zones::load();
+		// The log on the recordings partition too, named as the recordings
+		// are (fpvOS_YYYYMMDD_HHMMSS.log): it survives a power-off.
+		sd_log::start(Settings::getInstance().getString("dvr_dir", "/media/dvr"));
 		// The low-latency video features, each with a switch that survives a
 		// reboot (the KESTREL_* variables and the /tmp files still work too):
 		//   stream_decode: 0   pictures go to the decoder whole
