@@ -1297,6 +1297,12 @@ std::vector<uint8_t> Ar8030Source::build_config_frame(const uint8_t *tmpl, size_
     size_t bodylen = (lf >> 4) - 1;
     std::vector<uint8_t> body(tmpl + 7, tmpl + 7 + bodylen);
     sky::patch_config_payload(body.data(), body.size(), sky_cfg);
+    // Body offset 45 (u16 LE) is the TX power, mW, which the air unit applies
+    // after the power frame. Left as captured it was stock's 500mW Auto (501):
+    // every handshake - each link-up, each 2.5 s of quiet video - undid the
+    // chosen power, and asked an Ascent Lite (100 mW) for 26 dBm.
+    const int mw = kArPwrLevels[ar_pwr_index(tx_power_mw)].mw;
+    if (body.size() >= 47) { body[45] = (uint8_t)(mw & 0xFF); body[46] = (uint8_t)((mw >> 8) & 0xFF); }
     sky_proto.set_seq(tmpl[3]);                       // replaying stock's handshake
     return sky_proto.build(tmpl[6], body.data(), body.size());
 }
