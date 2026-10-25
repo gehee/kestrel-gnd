@@ -76,6 +76,26 @@ class Ar8030Source {
         static int ap_index;   // which bb_mac_addr_N to use as the AP
         static bool chan_auto; // channel adaptation (scan for the AP)
         static bool chan_manual_cli;   // --ar8030-chan-manual: pinned to freq_khz from the start
+        // The channel page's AUTO (0) or AUTO HOP (1), saved as ar8030_chan_hop.
+        // Both only with SYSTEM > Time Zone set (region_auto_apply): AUTO moves
+        // the link to the quietest channel the country allows when it
+        // connects; AUTO HOP only has the air unit hop by itself on them,
+        // wherever it steers (the ground moves nothing).
+        static std::atomic<int> chan_hop;
+        // How many channels the air unit was given to hop on; 0: it does not hop.
+        static std::atomic<int> region_hop_n;
+        // AUTO's pick is due: at link-up, or AUTO / AUTO HOP just chosen.
+        static std::atomic<bool> region_pick;
+        // Something AUTO's list depends on changed (time zone, licence, Max
+        // Bandwidth; the link-up is noted here): the list goes to the air
+        // unit again, from the radio thread.
+        static std::atomic<bool> region_due;
+        static void region_changed() { region_due.store(true); }
+        // Whether AUTO may take a channel (centre MHz) where the pilot is, at
+        // the width the link runs: at least 20 MHz (a link starts on 5 and
+        // widens), 40 only while it is on 40, never past Max Bandwidth.
+        static bool region_usable(int mhz);
+        static std::atomic<int> link_bw_mhz;   // the link's width now (bandwidth events)
         static int tx_power_dbm;
         static int tx_power_mw;   // stock's encoding: N = hold N mW, N+1 = auto capped at N
         // The power chosen in the menu (saved per air unit); tx_power_mw is it
@@ -221,7 +241,13 @@ class Ar8030Source {
                         // Ours: the air unit's flight logs on or off (HUD >
                         // Debug Info), sky cmd 0x42 - kestrel-air only. Not a
                         // menu command id (0x310 up are the RF controls).
-                        CAM_AIR_LOGS };
+                        CAM_AIR_LOGS,
+                        // Ours, not menu ids either: AUTO in a known country
+                        // (region_auto_apply). The air unit's work channel
+                        // list, sky cmd 0x29 (region_q_lists_, the value its
+                        // length), then its own hopping on or off, sky cmd
+                        // 0x21 (the value the link's channel, kHz).
+                        CAM_WORK_LIST, CAM_HOP_ON, CAM_HOP_OFF };
         static void request_setting(int field, int value);
 
         // RF controls. Which of these the baseband actually honours is decided
@@ -621,7 +647,9 @@ class Ar8030Source {
         bool connect_bb();
         void subscribe_events();    // stock does this before any socket
         void configure_link();      // candidates + freq + bandwidth
-        void send_air_handshake();  // start-streaming frames -> air unit
+        // Start-streaming frames -> air unit. link_up: a new link (not a
+        // re-send after silent video), which is when AUTO picks its channel.
+        void send_air_handshake(bool link_up = false);
         void apply_video_mode();    // --ar8030-mode -> SET_CHN_RES
         void probe_video_modes();   // ask the camera which modes it accepts
         void probe_rf_ioctls();     // which BB_SET_* the local radio accepts
@@ -711,7 +739,32 @@ class Ar8030Source {
 
         // Index of freq_khz in the radio's channel table, or -1. Also yields
         // the full table, which BB_SET_WORK_CHAN_LIST needs.
-        int  chan_index_for_freq(uint32_t freq_khz, uint32_t *freqs, int *n_out);
+        int  chan_index_for_freq(uint32_t freq_khz, uint32_t *freqs, int *n_out, int32_t *power = nullptr);
+        // AUTO / AUTO HOP in a known country, on this thread when region_due:
+        // at each link-up, and whenever what the list depends on changes. AUTO:
+        // a link on a channel off the list is moved to the quietest on it; at a
+        // pick, to that one if clearly quieter. AUTO HOP: only the list and the
+        // air unit's own hopping, no move. Without a country, or with nothing
+        // allowed, the air unit keeps its channel, as before.
+        void region_auto_apply();
+        // The radio's channels AUTO may use where the pilot is, in table order (at most 64).
+        std::vector<uint32_t> region_list(const uint32_t *freqs, int n);
+        // AUTO's choice for a link on cur (0: stay); pick = link-up or AUTO just chosen.
+        uint32_t region_auto_target(uint32_t cur, const uint32_t *freqs, const int32_t *power, int n,
+                                    const std::vector<uint32_t> &want, bool pick);
+        std::vector<uint32_t> region_hs_list_;  // AUTO HOP's list as this link's handshake sent it
+        int ka_hs_feat_ = -1;   // kestrel-air settings in this link's handshake, for these features (-1: none)
+        std::deque<std::vector<uint32_t>> region_q_lists_;   // each queued CAM_WORK_LIST's payload
+        bool region_hop_told_ = false;         // told to hop (kept over a lost link)
+        uint64_t region_retry_ms_ = 0;         // a failed move: not again before
+        uint64_t region_move_ms_ = 0;          // AUTO's last move
+        // Each channel's scan level (dBm, by table index; 0: none yet) taken
+        // while the link was up and NOT on it: the link's own channel reads
+        // our own link (and, while searching, the air unit's beacons), so its
+        // live figure says nothing about what else is there. None for 6 s
+        // after a link-up or a channel move (chan_settle_ms_).
+        std::atomic<int> free_level_[128] = {};
+        std::atomic<uint64_t> chan_settle_ms_{0};
     public:
         // What the air unit announced; false/0 for the stock air app and until
         // its version message has arrived (every few seconds after link-up).

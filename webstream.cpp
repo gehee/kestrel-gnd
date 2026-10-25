@@ -22,6 +22,7 @@
 #include "dvr.hpp"         // also brings utils/minimp4.h, which must be included once
 #include "dvr_library.hpp"
 #include "zones.hpp"
+#include "artosyn/ar8030_source.hpp"
 #include "hud_theme.hpp"
 #include "settings.hpp"
 
@@ -990,6 +991,7 @@ void WebStream::Impl::on_request(Client* c, const std::string& method, const std
                 return;
             }
             zones::select(z);
+            Ar8030Source::region_changed();   // AUTO's channels
             printf("webstream: time zone set to %s from the web page\n", zones::zone(z).name);
         }
         const int z = zones::selected();

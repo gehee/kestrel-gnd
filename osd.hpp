@@ -800,6 +800,7 @@ class OSD {
         float    chan_bar_[64] = {}, chan_peak_[64] = {};        // dBm, by radio channel index
         bool     chan_bars_set_ = false;
         uint64_t chan_anim_us_ = 0, chan_shown_us_ = 0;
+        uint64_t chan_auto_refused_us_ = 0;   // OK on AUTO where it is not offered: its line says why, 3 s
         int      chan_shown_now_[64] = {}, chan_shown_peak_[64] = {};
         int      chan_shown_snr_ = 0, chan_shown_mcs_ = 0;
         bool     chan_shown_linked_ = false;

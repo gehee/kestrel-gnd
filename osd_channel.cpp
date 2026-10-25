@@ -3,7 +3,7 @@
 // the bottom of the picture into it (draw_canopy_ui), so the picture stays in
 // view, full size, while the link moves.
 //
-// One cursor walks AUTO and the radio's channels, sorted by frequency. Bars are
+// One cursor walks AUTO, AUTO HOP and the radio's channels, sorted by frequency. Bars are
 // the radio's averaged scan energy now; a tick above a bar is the 30-second
 // peak, so a channel that only looks quiet gives itself away. A rail along the
 // top of the chart says what the country of SYSTEM > Time Zone allows
@@ -16,8 +16,13 @@
 //
 // Keys: left/right walk (and stop at the ends), up jumps to the quietest
 // channel the pilot may use, by its peak, down back to the link's. OK moves
-// the link there at once, and on AUTO hands the channel back to the radio,
-// which is what the old Channel Hop row did.
+// the link there at once. Two automatic modes, on the channels the country of
+// SYSTEM > Time Zone allows the pilot at the link's width (20 MHz, 40 while
+// it runs 40; power caps stay TX Power's), saved (Ar8030Source::region_auto_apply): AUTO moves the
+// link to the quietest of them when it connects and leaves it there; AUTO HOP
+// only has the air unit hop by itself on them, wherever it steers. Both are offered only
+// then: with no time zone, or nothing allowed, they are greyed out and OK on
+// one says why. A channel picked here holds for the session.
 //
 // Cheap to draw and smooth: its shapes go to the GPU in one batch
 // (osd_screen.cpp), each channel is judged once a frame, and the printed
@@ -76,6 +81,23 @@ int OSD::chan_tx_mw() const {
     return l.automode ? l.mw - 1 : l.mw;
 }
 
+// The two automatic modes' slots come before the channels: the cursor's 0 is
+// AUTO, 1 AUTO HOP, kPre + r the r-th channel by frequency.
+constexpr int kPre = 2;
+const char* const kModeName[kPre] = { "AUTO", "AUTO HOP" };
+
+// How many of the radio's channels AUTO may use where the pilot is (0: AUTO is not offered).
+static int auto_channels(const chan_scan_info& sc) {
+    int k = 0;
+    for (int i = 0; i < std::min(std::max(sc.chan_num, 0), 64); i++) k += Ar8030Source::region_usable(sc.freq_mhz[i]);
+    return k;
+}
+
+// The mode in force: -1 FIXED (a channel picked, or no automatic mode offered), 0 AUTO, 1 AUTO HOP.
+static int chan_mode(const chan_scan_info& sc, int auto_n) {
+    return sc.auto_mode && auto_n > 0 ? Ar8030Source::chan_hop.load() : -1;
+}
+
 // The country whose rules apply (-1: no time zone set), and whether any are known for it.
 static int rules_country(bool& known) {
     const int cc = zones::selected_country();
@@ -120,7 +142,7 @@ void OSD::set_chan_scan(const chan_scan_info& sc) {
     for (int i = 0; i < n; i++) chan_order_[i] = i;
     std::sort(chan_order_, chan_order_ + n, [&](int a, int b) { return sc.freq_mhz[a] < sc.freq_mhz[b]; });
     chan_order_n_ = n;
-    if (menu_scan_sel > n) menu_scan_sel = n;
+    if (menu_scan_sel > n + kPre - 1) menu_scan_sel = n + kPre - 1;
     if (menu_scan_open) { render_requested = true; pthread_cond_signal(&osd_cond); }
     pthread_mutex_unlock(&osd_mutex);
 }
@@ -131,7 +153,7 @@ void OSD::chan_open() {
     menu_scan_sel = 0;
     const int wc = osd_vars.chan_scan.work_chan;
     for (int r = 0; r < chan_order_n_; r++)
-        if (chan_order_[r] == wc) menu_scan_sel = r + 1;
+        if (chan_order_[r] == wc) menu_scan_sel = r + kPre;
     // Everything is placed at once on the first frame, not glided in from wherever it was.
     chan_cursor_x_ = chan_link_x_ = -1.0f;
     chan_bars_set_ = false;
@@ -158,26 +180,36 @@ void OSD::chan_key(int key) {
 
     if (back) { chan_close(); return; }
     if (left)  { if (menu_scan_sel > 0) menu_scan_sel--; return; }
-    if (right) { if (menu_scan_sel < n) menu_scan_sel++; return; }
-    if (up)    { const int q = chan_quietest(); if (q >= 0) menu_scan_sel = q + 1; return; }
+    if (right) { if (menu_scan_sel < n + kPre - 1) menu_scan_sel++; return; }
+    if (up)    { const int q = chan_quietest(); if (q >= 0) menu_scan_sel = q + kPre; return; }
     if (down) {
-        for (int r = 0; r < n; r++) if (chan_order_[r] == sc.work_chan) menu_scan_sel = r + 1;
+        for (int r = 0; r < n; r++) if (chan_order_[r] == sc.work_chan) menu_scan_sel = r + kPre;
         return;
     }
     if (!enter) return;
     // OK acts at once, no question.
-    if (menu_scan_sel == 0) {
-        // Back to AUTO: the radio searches and hops by itself again.
-        if (!sc.auto_mode) {
-            printf("channel page: back to AUTO\n");
+    if (menu_scan_sel < kPre) {
+        const int want = menu_scan_sel, auto_n = auto_channels(sc);
+        // Not offered without a country, or with nothing allowed there: the
+        // line above the chart says why, in the danger colour, for 3 s.
+        if (!auto_n) {
+            printf("channel page: %s refused - %s\n", kModeName[want],
+                   zones::selected_country() < 0 ? "no time zone set" : "no channel allowed");
+            chan_auto_refused_us_ = get_time_us();
+            return;
+        }
+        if (chan_mode(sc, auto_n) == want) return;
+        printf("channel page: %s\n", kModeName[want]);
+        if (cmd_cb) cmd_cb(0x322, want);   // saved; its pick is made now
+        if (!sc.auto_mode) {               // from a picked channel: the ground searches again
             menu_ar_hop = true;
             if (cmd_cb) cmd_cb(0x316, 1);
         }
         return;
     }
-    if (menu_scan_sel > n) return;
+    if (menu_scan_sel > n + kPre - 1) return;
     // Whatever the rules say: they are shown, not enforced.
-    const int ci = chan_order_[menu_scan_sel - 1];
+    const int ci = chan_order_[menu_scan_sel - kPre];
     if (ci == sc.work_chan && !sc.auto_mode) return;   // already fixed there
     // Both ends move: the air unit is told over the sky link and the ground
     // retunes to match (Ar8030Source::set_rf_channel). A channel picked here
@@ -206,10 +238,12 @@ bool OSD::draw_channel_band(int W, int H, float band_x, float band_y, float band
     const int bw = chan_bw_mhz();
     bool rules;
     const int cc = rules_country(rules);
+    const int auto_n = auto_channels(sc);     // 0: AUTO not offered here
+    const int mode = chan_mode(sc, auto_n);
     pthread_mutex_unlock(&osd_mutex);
     const bool lic = zones::licensed();
     const char* cname = cc >= 0 ? zones::country(cc).name : "";
-    if (cur > n) cur = n;
+    if (cur > n + kPre - 1) cur = n + kPre - 1;
 
     // ---- motion ----
     const uint64_t now_us = get_time_us();
@@ -223,8 +257,8 @@ bool OSD::draw_channel_band(int W, int H, float band_x, float band_y, float band
     if (chan_cursor_x_ < 0.0f) chan_cursor_x_ = (float)cur;
     moving |= glide(chan_cursor_x_, (float)cur, dt, 0.055f);
     if (link_r >= 0) {
-        if (chan_link_x_ < 0.0f) chan_link_x_ = (float)(link_r + 1);
-        moving |= glide(chan_link_x_, (float)(link_r + 1), dt, 0.12f);
+        if (chan_link_x_ < 0.0f) chan_link_x_ = (float)(link_r + kPre);
+        moving |= glide(chan_link_x_, (float)(link_r + kPre), dt, 0.12f);
     }
     for (int r = 0; r < n; r++) {
         const int ci = order[r];
@@ -264,13 +298,23 @@ bool OSD::draw_channel_band(int W, int H, float band_x, float band_y, float band
     // ---- what the cursor is on, and where the link is ----
     px_fill(X(2.0f), Y(4.2f), 96.0f * c, 0.12f * c, T.text, 0.85f);
     const char* source = "";
-    if (cur == 0) {
-        snprintf(b, sizeof(b), "AUTO   -   %s", sc.auto_mode ? "the link picks a channel and hops by itself"
-                                                           : "OK lets the link pick and hop by itself again");
-        txt(b, 2.2f, 1.3f, 1.5f, T.text);
+    if (cur < kPre) {
+        const bool refused = chan_auto_refused_us_ && now_us - chan_auto_refused_us_ < 3000000;
+        const float* col = T.text;
+        if (cc < 0 || !auto_n) {
+            if (cc < 0) snprintf(b, sizeof(b), "%s   -   not available: set SYSTEM > Time Zone first", kModeName[cur]);
+            else snprintf(b, sizeof(b), "%s   -   not available: no channel allowed in %s", kModeName[cur], cname);
+            col = refused ? kDanger : T.quiet;
+        } else {
+            if (cur == 0) snprintf(b, sizeof(b), "AUTO   -   %sthe quietest of %d allowed in %s at link-up",
+                                   mode == cur ? "" : "OK: ", auto_n, cname);
+            else snprintf(b, sizeof(b), "AUTO HOP   -   %sthe air unit hops by itself on %d allowed in %s",
+                          mode == cur ? "" : "OK: ", auto_n, cname);
+        }
+        txt(b, 2.2f, 1.3f, 1.5f, col);
     } else if (n > 0) {
-        const int ci = order[cur - 1];
-        const zones::Verdict& v = vd[cur - 1];
+        const int ci = order[cur - kPre];
+        const zones::Verdict& v = vd[cur - kPre];
         source = v.note;
         float x = 2.2f;
         snprintf(b, sizeof(b), "%d MHz", sc.freq_mhz[ci]);
@@ -291,7 +335,7 @@ bool OSD::draw_channel_band(int W, int H, float band_x, float band_y, float band
         } else snprintf(b, sizeof(b), "allowed");
         txt(b, x, 1.55f, 1.15f, lc);
     }
-    snprintf(b, sizeof(b), "LINK %d MHz  %s   %s", link_mhz, sc.auto_mode ? "AUTO" : "FIXED",
+    snprintf(b, sizeof(b), "LINK %d MHz  %s   %s", link_mhz, mode >= 0 ? kModeName[mode] : "FIXED",
              cc >= 0 ? zones::country(cc).code : "");
     txt(b, 97.8f, 1.55f, 1.1f, T.quiet, 2);
 
@@ -301,7 +345,7 @@ bool OSD::draw_channel_band(int W, int H, float band_x, float band_y, float band
     auto Yd = [&](float dbm) { float k = (dbm + 100.0f) / 40.0f; k = std::max(0.0f, std::min(1.0f, k)); return yB - k * (yB - yT); };
     if (n <= 0) txt("SCANNING", (x0 + x1) * 0.5f, (yT + yB) * 0.5f - 1.0f, 2.0f, T.quiet, 1);
 
-    // Slots: AUTO, then each band of channels, a gap between bands (a jump of
+    // Slots: AUTO, AUTO HOP, then each band of channels, a gap between bands (a jump of
     // more than 100 MHz starts a new one).
     int band_of[64], nb = 0, band_lo[8], band_hi[8];
     for (int r = 0; r < n; r++) {
@@ -311,26 +355,29 @@ bool OSD::draw_channel_band(int W, int H, float band_x, float band_y, float band
         band_of[r] = nb - 1;
         band_hi[nb - 1] = r;
     }
-    const float gap = 1.4f;
-    const float units = 1.0f + (float)n + gap * (float)std::max(nb, 1);
+    const float gap = 1.4f, pre_gap = 1.0f;   // pre_gap: between AUTO and HOP, so their names do not run together
+    const float units = (float)kPre + pre_gap + (float)n + gap * (float)std::max(nb, 1);
     const float sw = (x1 - x0) / units, bwid = sw * 0.62f;
-    auto slot_x = [&](int pos) {   // pos 0: AUTO, r + 1: the r-th channel
-        if (pos <= 0 || n <= 0) return x0 + 0.5f * sw;
-        const int r = std::min(pos, n) - 1;
-        return x0 + (1.0f + gap * (float)(band_of[r] + 1) + (float)r + 0.5f) * sw;
+    auto slot_x = [&](int pos) {   // pos 0: AUTO, 1: AUTO HOP, r + kPre: the r-th channel
+        if (pos < kPre || n <= 0) {
+            const float p = (float)std::max(0, std::min(pos, kPre - 1));
+            return x0 + (p * (1.0f + pre_gap) + 0.5f) * sw;
+        }
+        const int r = std::min(pos - kPre, n - 1);
+        return x0 + ((float)kPre + pre_gap + gap * (float)(band_of[r] + 1) + (float)r + 0.5f) * sw;
     };
     // Between slots, for what glides: across a band's gap too.
     auto slot_xf = [&](float pos) {
         const int i = (int)std::floor(pos);
         const float f = pos - (float)i;
-        if (f <= 0.0f || i >= n) return slot_x(i);
+        if (f <= 0.0f || i >= n + kPre - 1) return slot_x(i);
         return slot_x(i) + (slot_x(i + 1) - slot_x(i)) * f;
     };
 
     // The rule rail along the top of the chart: runs of channels that share a verdict.
     const float ry = 6.0f, rh = 1.7f;
     if (n > 0 && !rules) {
-        const float xa = slot_x(1) - sw * 0.5f, xb = slot_x(n) + sw * 0.5f;
+        const float xa = slot_x(kPre) - sw * 0.5f, xb = slot_x(n + kPre - 1) + sw * 0.5f;
         px_frame(X(xa), Y(ry), (xb - xa) * c, rh * c, 0.1f * c, T.quiet, 0.6f);
         if (cc < 0) snprintf(b, sizeof(b), "TIME ZONE NOT SET  -  SYSTEM > TIME ZONE");
         else snprintf(b, sizeof(b), "NO RULES KNOWN FOR %s", cname);
@@ -342,7 +389,7 @@ bool OSD::draw_channel_band(int W, int H, float band_x, float band_y, float band
             int e = r;
             while (e + 1 < n && band_of[e + 1] == band_of[r] && vd[e + 1].state == v.state &&
                    vd[e + 1].cap_mw == v.cap_mw && vd[e + 1].amateur == v.amateur) e++;
-            const float xa = slot_x(r + 1) - sw * 0.5f + 0.08f, xb = slot_x(e + 1) + sw * 0.5f - 0.08f;
+            const float xa = slot_x(r + kPre) - sw * 0.5f + 0.08f, xb = slot_x(e + kPre) + sw * 0.5f - 0.08f;
             const float* col = v.state == zones::kNotAllowed ? kDanger : v.state == zones::kIndoor ? kAmber :
                                v.state == zones::kLicence ? T.data : T.quiet;
             if (v.state == zones::kAllowed)
@@ -364,17 +411,18 @@ bool OSD::draw_channel_band(int W, int H, float band_x, float band_y, float band
         }
     }
 
-    // AUTO: a striped slot of its own.
-    {
-        const float ax = slot_x(0);
+    // AUTO and AUTO HOP: striped slots of their own, greyed out where not offered.
+    for (int k = 0; k < kPre; k++) {
+        const float ax = slot_x(k);
+        const bool on = mode == k;
         px_hatch(X(ax - bwid * 0.5f), Y(yT), bwid * c, (yB - yT) * c,
-                 sc.auto_mode ? T.text : T.quiet, sc.auto_mode ? 0.45f : 0.2f, 0.6f * c, 0.25f * c);
-        txt("AUTO", ax, yB + 0.7f, 0.85f, sc.auto_mode ? T.text : T.quiet, 1);
+                 on ? T.text : T.quiet, on ? 0.45f : auto_n ? 0.2f : 0.08f, 0.6f * c, 0.25f * c);
+        txt(k == 0 ? "AUTO" : "HOP", ax, yB + 0.7f, 0.85f, on ? T.text : T.quiet, 1, auto_n ? 1.0f : 0.5f);
     }
     // The bars, from their glided levels.
     for (int r = 0; r < n; r++) {
         const int ci = order[r];
-        const float x = slot_x(r + 1);
+        const float x = slot_x(r + kPre);
         const float lvl = chan_bar_[ci], pk = chan_peak_[ci];
         const float y = Yd(lvl), py_ = Yd(pk);
         const bool banned = rules && vd[r].state == zones::kNotAllowed;
@@ -397,21 +445,21 @@ bool OSD::draw_channel_band(int W, int H, float band_x, float band_y, float band
     for (int k = 0; k < nb; k++) {
         const int ends[2] = { band_lo[k], band_hi[k] };
         for (int e = 0; e < (ends[0] == ends[1] ? 1 : 2); e++) {
-            if (std::fabs((float)(ends[e] + 1) - chan_cursor_x_) <= 2.5f) continue;
+            if (std::fabs((float)(ends[e] + kPre) - chan_cursor_x_) <= 2.5f) continue;
             snprintf(b, sizeof(b), "%d", sc.freq_mhz[order[ends[e]]]);
-            txt(b, slot_x(ends[e] + 1), yB + 0.7f, 0.8f, T.quiet, 1);
+            txt(b, slot_x(ends[e] + kPre), yB + 0.7f, 0.8f, T.quiet, 1);
         }
         const int lo = sc.freq_mhz[order[band_lo[k]]], hi = sc.freq_mhz[order[band_hi[k]]];
         snprintf(b, sizeof(b), "%.1f GHz", (lo + hi) * 0.5f / 1000.0f);
-        txt(b, (slot_x(band_lo[k] + 1) + slot_x(band_hi[k] + 1)) * 0.5f, yB + 2.4f, 0.9f, T.quiet, 1);
+        txt(b, (slot_x(band_lo[k] + kPre) + slot_x(band_hi[k] + kPre)) * 0.5f, yB + 2.4f, 0.9f, T.quiet, 1);
     }
     // The cursor, gliding.
     {
         const float cx = slot_xf(chan_cursor_x_);
         px_fill(X(cx - sw * 0.62f), Y(yT - 0.5f), sw * 1.24f * c, (yB - yT + 2.5f) * c, T.accent, 0.07f);
         px_frame(X(cx - sw * 0.62f), Y(yT - 0.5f), sw * 1.24f * c, (yB - yT + 2.5f) * c, 0.16f * c, T.accent, 1.0f);
-        if (cur > 0) {
-            snprintf(b, sizeof(b), "%d", sc.freq_mhz[order[cur - 1]]);
+        if (cur >= kPre) {
+            snprintf(b, sizeof(b), "%d", sc.freq_mhz[order[cur - kPre]]);
             const float tw = px_text_w(b, 0.95f * c) / c;
             px_fill(X(cx - tw * 0.5f - 0.3f), Y(yB + 0.5f), (tw + 0.6f) * c, 1.3f * c, T.ground, 1.0f);
             txt(b, cx, yB + 0.65f, 0.95f, T.text, 1);

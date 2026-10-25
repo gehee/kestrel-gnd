@@ -127,8 +127,8 @@ std::vector<std::pair<const char*, int>> OSD::ar_rf_items() const {
         return v;
     }
     // Channel opens the channel page. Channel Hop (id 7) was the other half of
-    // the same decision - picking a channel turns hopping off - and is AUTO on
-    // that page now. Every consumer switches on the item id (.second), not the
+    // the same decision - picking a channel turns hopping off - and is AUTO HOP
+    // on that page now. Every consumer switches on the item id (.second), not the
     // row index, so this order is free to change.
     if (rf_caps & 16) v.push_back({"Channel",   5});  // RF_CHAN, RF_HOP
     if (rf_caps & 1)  v.push_back({"TX Power",  1});  // RF_TX_POWER
@@ -4817,7 +4817,8 @@ std::vector<OSD::MenuItem> OSD::menu_items(int tab) const {
                     "ENTER: BIND"}); break;
                 case 5: items.push_back({it.first, 3,
                     "Where the link sits, what is on every channel and what your "
-                    "country allows. AUTO there lets the link hop by itself.",
+                    "country allows. With SYSTEM > Time Zone set: AUTO takes the quietest "
+                    "allowed channel when the link connects, AUTO HOP lets the air unit hop by itself.",
                     "ENTER: OPEN"}); break;
                 case 1: items.push_back({it.first, 1,
                     "Radio output. More reaches further and runs hotter."}); break;
@@ -5463,11 +5464,12 @@ void OSD::menu_apply_change(int tab, int index, int dir) {
             menu_wifi_ap = menu_step(menu_wifi_ap ? 1 : 0, dir, 2) != 0;
         } else if (menu_index == kSysLicence) {
             menu_licence_ = menu_step(menu_licence_, dir, 2);
-            if (!menu_stepping_) zones::set_licensed(menu_licence_ != 0);
+            if (!menu_stepping_) { zones::set_licensed(menu_licence_ != 0); Ar8030Source::region_changed(); }
         } else if (menu_index >= kSysArea && menu_index <= kSysTimezone) {
             menu_zone_ = menu_step_zone(menu_index, dir);
             if (!menu_stepping_) {
                 zones::select(menu_zone_);
+                Ar8030Source::region_changed();   // AUTO's channels
                 menu_opt_tab_ = -1;   // Country's and Timezone's lists follow the zone
             }
         }
@@ -5562,7 +5564,12 @@ void OSD::menu_value_text(int tab, int i, char* val_buf, size_t cap) {
                         hop = cs.auto_mode != 0;
                     }
                     if (!f) f = osd_vars.artosyn.tx_freq;
-                    if (f) sprintf(val_buf, "%d MHz  %s", f, hop ? "AUTO" : "FIXED");
+                    // AUTO / AUTO HOP only where they are offered (a known country).
+                    bool offered = false;
+                    for (int i = 0; i < std::min(std::max(cs.chan_num, 0), 64) && !offered; i++)
+                        offered = Ar8030Source::region_usable(cs.freq_mhz[i]);
+                    const char* mode = !hop || !offered ? "FIXED" : Ar8030Source::chan_hop.load() ? "AUTO HOP" : "AUTO";
+                    if (f) sprintf(val_buf, "%d MHz  %s", f, mode);
                     else   sprintf(val_buf, "--");
                     break;
                 }

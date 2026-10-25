@@ -646,6 +646,7 @@ int main(int argc, char **argv)
 		const int mcs = Settings::getInstance().getInt("ar8030_max_mcs", -1);
 		Ar8030Source::max_mcs = mcs >= 0 && mcs <= 11 ? mcs : -1;   // the menu's range, AUTO + MCS 0..11
 		Ar8030Source::steady = Settings::getInstance().getInt("ar8030_steady", 0) == 1 ? 1 : 0;
+		Ar8030Source::chan_hop = Settings::getInstance().getInt("ar8030_chan_hop", 0) == 1 ? 1 : 0;
 	}
 	// RADIO > VRX Radio Firmware: Open8030 when its image is on the unit, unless
 	// the menu said STOCK (0) - as bb_only.sh decides what it uploads.
@@ -1149,6 +1150,7 @@ int main(int argc, char **argv)
                             Ar8030Source::max_bw_mhz == 0 || Ar8030Source::max_bw_mhz >= 40 ? 40 : 20);
                         Ar8030Source::caps_live.store(true);
                         Ar8030Source::caps_due.store(true);
+                        Ar8030Source::region_changed();   // AUTO's channels are judged within this cap
                         return;
                     }
                     const int was = Ar8030Source::max_bw_mhz;
@@ -1191,6 +1193,13 @@ int main(int argc, char **argv)
                     Settings::getInstance().set("ar8030_max_mcs", Ar8030Source::max_mcs);
                     Ar8030Source::caps_live.store(true);
                     Ar8030Source::caps_due.store(true);
+                    return;
+                case 0x322:
+                    // Channel page: AUTO (0) or AUTO HOP (1). Saved; picks now.
+                    Ar8030Source::chan_hop = val == 1 ? 1 : 0;
+                    Settings::getInstance().set("ar8030_chan_hop", Ar8030Source::chan_hop.load());
+                    Ar8030Source::region_pick = true;
+                    Ar8030Source::region_changed();
                     return;
                 case 0x321:
                     // RADIO > Steady Latency (Open8030 here): a block the air radio

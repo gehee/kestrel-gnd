@@ -169,6 +169,10 @@ Verdict judge(int c, int centre_mhz, int bw_mhz, bool licensed) {
     return v;
 }
 
+bool usable(int c, int centre_mhz, int bw_mhz, bool licensed) {
+    return judge(c, centre_mhz, bw_mhz, licensed).state == kAllowed;
+}
+
 int selected() { return g_sel.load(); }
 
 int selected_country() {

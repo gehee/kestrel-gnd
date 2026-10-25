@@ -89,6 +89,11 @@ struct Verdict {
 // otherwise inside those and the amateur band together needs the licence;
 // otherwise not allowed. kNoRules when nothing is known for the country.
 Verdict judge(int c, int centre_mhz, int bw_mhz, bool licensed);
+// Whether the link may take that channel on its own (the channel page's AUTO,
+// which then hops among such channels): allowed for this pilot over its whole
+// width, outdoors. Channels only: a power cap is the TX Power setting's to
+// keep, not a reason to leave a channel out. Never with no rules.
+bool usable(int c, int centre_mhz, int bw_mhz, bool licensed);
 
 // The amateur band of an ITU region (1-3), MHz; false for none.
 bool amateur_band(int region, int& lo_mhz, int& hi_mhz);
