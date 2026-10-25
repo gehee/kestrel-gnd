@@ -28,6 +28,23 @@
 // `have_*` false is the normal state, not an error: the HUD leaves the slot
 // empty rather than printing a zero that looks like a measurement.
 struct BfTelem {
+    // The OSD elements the canopy can show a value of: the glyphs and figures
+    // of each, as the scrape read them (MspOsd::draw_region's hide).
+    enum Elem : uint8_t {
+        kElCellV  = 1 << 0,   // average cell voltage, with its battery icon
+        kElPackV  = 1 << 1,   // pack voltage, idem
+        kElAmps   = 1 << 2,
+        kElTimer  = 1 << 3,   // the timer whose figure was read (timer_s)
+        kElArm    = 1 << 4,   // DISARMED
+        kElMode   = 1 << 5,   // the flight mode
+        kElSpeed  = 1 << 6,
+        kElLq     = 1 << 7,   // Link Quality
+    };
+    // Elem bits of the values below read off the OSD canvas here, not
+    // asked of the flight controller over MSP by the air unit (MSP_STATUS,
+    // MSP_ANALOG, the polled groups): the elements that alone carry what the
+    // canopy shows.
+    unsigned osd_src = 0;
     bool  have_cell_v = false;  float cell_v    = 0.0f;  // V, per cell
     bool  have_pack_v = false;  float pack_v    = 0.0f;  // V, whole pack
     bool  have_amps   = false;  float amps      = 0.0f;  // A
@@ -88,6 +105,9 @@ class MspOsd {
         static const int GRID_H = 20;
         Cell grid[GRID_H][GRID_W];
         Cell pending_grid[GRID_H][GRID_W]; // Back buffer for Double Buffering
+        // Which element each cell of grid belongs to (BfTelem::Elem, 0 = none), as the
+        // last scrape found them: what draw_region can leave out.
+        uint8_t elem_[GRID_H][GRID_W];
         
         // Double buffer?
         // MSP_DP_DRAW_SCREEN commits changes.
@@ -207,7 +227,8 @@ class MspOsd {
         MspCounts msp_counts();
         
         void draw(math::Mat4& projection, math::Mat4& view, std::function<void(float x, float y, const std::vector<uint16_t>& span)> draw_span_cb);
-        void draw_region(int r_start, int c_start, int r_cnt, int c_cnt, float x, float y, std::function<void(float x, float y, const std::vector<uint16_t>& span)> draw_span_cb);
+        // hide: BfTelem::Elem bits whose cells are drawn as blank.
+        void draw_region(int r_start, int c_start, int r_cnt, int c_cnt, float x, float y, std::function<void(float x, float y, const std::vector<uint16_t>& span)> draw_span_cb, unsigned hide = 0);
         void set_scale(float scale) { m_scale = scale; }
         void set_cell_size(float w, float h) { m_cell_w = w; m_cell_h = h; }
         void get_cell_size(float& w, float& h) { w = m_cell_w; h = m_cell_h; }

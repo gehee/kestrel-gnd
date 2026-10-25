@@ -3651,10 +3651,14 @@ void OSD::render_gl() {
     // Full 53x20 Betaflight canvas, centred and fitted to the visible area.
     // Drawn on the centre matrix so it stays flat: the side panels are rotated
     // into perspective, which is wrong for a character grid the pilot reads.
-    // With the canopy up, the cells holding the elements the canopy already
-    // shows (voltage, current, timer, mode, RSSI, attitude...) are left
-    // blank, so a figure is never on screen twice. With the HUD off the
-    // canvas is drawn whole - it is the whole picture then.
+    // With the canopy up, the elements whose values it shows read off this
+    // canvas are left blank, so a figure is never on screen twice: the
+    // voltage it shows (cell or pack, HUD > Canopy Voltage), current, flight
+    // mode, speed, Link Quality, DISARMED, and armed the timer it counts. A
+    // value the air unit got from the flight controller over MSP instead
+    // leaves its element drawn, as do RSSI, altitude, attitude and the rest.
+    // With the canopy off the canvas is drawn whole - it is the whole picture
+    // then.
     //
     // Never while the canopy is awake: its unfolded blades are meant to be
     // the topmost thing on screen, but this canvas is 53x20
@@ -3689,10 +3693,19 @@ void OSD::render_gl() {
         msp_osd.set_cell_size(cw, ch);
         // draw_region()'s y is the first row's baseline and rows descend from
         // it, so start one cell below the top of the fitted block.
+        unsigned hide = 0;
+        if (canopy_on) {
+            hide = (volt_mode == 1 ? BfTelem::kElPackV : BfTelem::kElCellV) | BfTelem::kElAmps |
+                   BfTelem::kElMode | BfTelem::kElSpeed | BfTelem::kElLq | BfTelem::kElArm;
+            if (canopy_arm_prev_ == 1) hide |= BfTelem::kElTimer;   // the canopy's timer slot, armed
+            // Only where the canopy's value is that element's: one the flight
+            // controller sends over MSP leaves its element on the canvas.
+            hide &= msp_osd.get_telem().osd_src;
+        }
         msp_osd.draw_region(0, 0, gh, gw,
                             -((float)gw * cw) / 2.0f,
                             ((float)gh * ch) / 2.0f - ch,
-                            draw_msp_span_func);
+                            draw_msp_span_func, hide);
     }
 
     prof::mark(prof::kBfGrid);

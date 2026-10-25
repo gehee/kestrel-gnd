@@ -23,6 +23,7 @@ static uint8_t crc8_dvb_s2(uint8_t crc, unsigned char a) {
 }
 
 MspOsd::MspOsd() {
+    memset(elem_, 0, sizeof(elem_));
     clear();
 }
 
@@ -248,8 +249,11 @@ bool MspOsd::handle_batched_displayport(const uint8_t* payload, size_t size) {
 #define BF_SYM_VOLT      0x06
 #define BF_SYM_AMP_A     0x08
 #define BF_SYM_AMP_B     0x9A
-#define BF_SYM_KMH       0x0A
-#define BF_SYM_MPH       0x0B
+// Speed: "<SYM_SPEED> 42<KPH>" (osdElementGpsSpeed). 0x0A/0x0B, read here
+// before, are stick-overlay sprites (osd_symbols.h).
+#define BF_SYM_SPEED     0x70
+#define BF_SYM_KMH       0x9E
+#define BF_SYM_MPH       0x9D
 #define BF_SYM_ALT_M     0x0C
 // Betaflight's timer symbols live in the high range, not at 0x0F/0x10. The
 // capture from this aircraft shows SYM_FLY_M (0x9C) beside its 00:00, which is
@@ -399,6 +403,16 @@ void MspOsd::scrape_locked() {
     BfTelem t;
     t.stamp_us = get_time_us();
 
+    // Each element read is marked as it is read, glyph and figure together,
+    // so what is hidden and what was found cannot disagree.
+    memset(elem_, 0, sizeof(elem_));
+    auto mark = [&](int r, int b, int e, uint8_t k) {
+        if (b < 0) b = 0;
+        if (e >= GRID_W) e = GRID_W - 1;
+        for (int c = b; c <= e; c++) elem_[r][c] = k;
+    };
+    int timer_r = -1, timer_b = 0, timer_e = 0;   // the timer read last: the one in t
+
     // One row at a time, as a plain char string: every value Betaflight draws
     // sits on a single row, and the units are single glyphs beside the digits.
     char line[GRID_W + 1];
@@ -417,7 +431,7 @@ void MspOsd::scrape_locked() {
         for (int c = 0; c < GRID_W; c++) {
             uint16_t g = raw[c];
 
-            if (g == BF_SYM_DISARMED) { saw_disarmed_glyph = true; }
+            if (g == BF_SYM_DISARMED) { saw_disarmed_glyph = true; mark(r, c, c, BfTelem::kElArm); }
 
             // Number to the LEFT of a unit glyph: "16.4<V>", "18.4<A>".
             if (g == BF_SYM_VOLT || g == BF_SYM_AMP_A || g == BF_SYM_AMP_B ||
@@ -434,22 +448,28 @@ void MspOsd::scrape_locked() {
                         memcpy(num, line + b, n);
                         num[n] = 0;
                         float v = strtof(num, nullptr);
+                        // The element's marker glyph, left of the figure past
+                        // its padding: the battery icon, SYM_SPEED.
+                        int lead = b - 1;
+                        while (lead >= 0 && line[lead] == ' ' && raw[lead] == ' ') lead--;
+                        const bool batt = lead >= 0 && raw[lead] >= 0x90 && raw[lead] <= 0x96;
+                        const bool spd  = lead >= 0 && raw[lead] == BF_SYM_SPEED;
                         switch (g) {
                         case BF_SYM_VOLT:
                             // One glyph serves both the pack reading and the
                             // average-cell one. 5V splits them.
-                            if (v > 0.0f && v < 5.0f)  { t.have_cell_v = true; t.cell_v = v; }
-                            else if (v >= 5.0f)        { t.have_pack_v = true; t.pack_v = v; }
+                            if (v > 0.0f && v < 5.0f)  { t.have_cell_v = true; t.cell_v = v; t.osd_src |= BfTelem::kElCellV; mark(r, batt ? lead : b, c, BfTelem::kElCellV); }
+                            else if (v >= 5.0f)        { t.have_pack_v = true; t.pack_v = v; t.osd_src |= BfTelem::kElPackV; mark(r, batt ? lead : b, c, BfTelem::kElPackV); }
                             break;
                         case BF_SYM_AMP_A:
                         case BF_SYM_AMP_B:
-                            t.have_amps = true; t.amps = v; break;
+                            t.have_amps = true; t.amps = v; t.osd_src |= BfTelem::kElAmps; mark(r, b, c, BfTelem::kElAmps); break;
                         case BF_SYM_ALT_M:
                             t.have_alt = true;  t.alt_m = v; break;
                         case BF_SYM_KMH:
-                            t.have_speed = true; t.speed_kmh = v; break;
+                            t.have_speed = true; t.speed_kmh = v; t.osd_src |= BfTelem::kElSpeed; mark(r, spd ? lead : b, c, BfTelem::kElSpeed); break;
                         case BF_SYM_MPH:
-                            t.have_speed = true; t.speed_kmh = v * 1.609344f; break;
+                            t.have_speed = true; t.speed_kmh = v * 1.609344f; t.osd_src |= BfTelem::kElSpeed; mark(r, spd ? lead : b, c, BfTelem::kElSpeed); break;
                         }
                     }
                 }
@@ -474,14 +494,16 @@ void MspOsd::scrape_locked() {
                 int b = c + 1;
                 while (b < GRID_W && line[b] == ' ') b++;
                 if (is_timer) {
-                    // Read, for the arm state below, but never masked: the
-                    // canopy runs its own flight timer off the arm transition,
-                    // so whether Betaflight's timers show as well is the
-                    // pilot's call, made in Betaflight's OSD setup.
+                    // Read for the arm state below, and the canopy shows it
+                    // armed: the one read last is the one it shows.
                     int mm, ss;
                     if (b + 4 < GRID_W && sscanf(line + b, "%d:%d", &mm, &ss) == 2) {
                         t.have_timer = true;
                         t.timer_s = mm * 60 + ss;
+                        t.osd_src |= BfTelem::kElTimer;
+                        int e = b;
+                        while (e + 1 < GRID_W && line[e + 1] != ' ') e++;
+                        timer_r = r; timer_b = c; timer_e = e;
                     }
                 } else if (g == BF_SYM_RSSI) {
                     // Two different elements share this glyph: a percentage,
@@ -490,7 +512,7 @@ void MspOsd::scrape_locked() {
                     // isdigit() rejected the minus sign outright, and the
                     // 0..100 range check would have thrown it away anyway.
                     //
-                    // None of the three is masked: the canopy's RC track is
+                    // None of the three is hidden: the canopy's RC track is
                     // Link Quality only, so Betaflight's RSSI stays on screen.
                     if (b < GRID_W && line[b] == '-') {
                         int v = atoi(line + b);
@@ -500,7 +522,7 @@ void MspOsd::scrape_locked() {
                         // "<rssi>  10MW" - the RC link's power, which the
                         // canopy does not show (its power readout is the
                         // VTX's). A figure running straight into letters is
-                        // that one, so it is neither read as RSSI nor masked.
+                        // that one, so it is neither read as RSSI nor hidden.
                         int e = b;
                         while (e + 1 < GRID_W && isdigit((unsigned char)line[e + 1])) e++;
                         bool unit = e + 1 < GRID_W && isalpha((unsigned char)line[e + 1]);
@@ -512,9 +534,9 @@ void MspOsd::scrape_locked() {
                     // percentage. Take the figure after the colon when there
                     // is one.
                     //
-                    // Masked through the end of that figure, not to the first
+                    // Hidden through the end of that figure, not to the first
                     // space: CRSF right-aligns the LQ in three places, so
-                    // anything under 100 reads "{2:  0" and a mask that
+                    // anything under 100 reads "{2:  0" and hiding that
                     // stopped at the padding left the digits on screen - seen
                     // live as a stray "0" under the canopy with no link up.
                     const char* colon = strchr(line + b, ':');
@@ -533,7 +555,7 @@ void MspOsd::scrape_locked() {
                         // percentage it put the RC track at 9%.
                         const bool tenths = !crsf && num == line + c + 1 && e == c + 1;
                         if (tenths) v = v * 10 + 5;
-                        if (v >= 0 && v <= 100) { t.have_lq = true; t.lq_pct = v; }
+                        if (v >= 0 && v <= 100) { t.have_lq = true; t.lq_pct = v; t.osd_src |= BfTelem::kElLq; mark(r, c, e, BfTelem::kElLq); }
                     }
                 }
             }
@@ -545,6 +567,8 @@ void MspOsd::scrape_locked() {
                 if (!hit) continue;
                 t.have_mode = true;
                 snprintf(t.mode, sizeof(t.mode), "%s", kBfModes[m]);
+                t.osd_src |= BfTelem::kElMode;
+                mark(r, (int)(hit - line), (int)(hit - line) + (int)strlen(kBfModes[m]) - 1, BfTelem::kElMode);
                 // "HOR " and "AIR " carry their trailing space in the table so
                 // they cannot match inside a longer word; the HUD does not
                 // want to draw it.
@@ -553,14 +577,19 @@ void MspOsd::scrape_locked() {
                 break;
             }
         }
-        if (strstr(line, "DISARMED")) saw_disarmed_text = true;
+        if (const char* dz = strstr(line, "DISARMED")) {
+            saw_disarmed_text = true;
+            mark(r, (int)(dz - line), (int)(dz - line) + 7, BfTelem::kElArm);
+        }
     }
+    if (timer_r >= 0) mark(timer_r, timer_b, timer_e, BfTelem::kElTimer);
 
     // Arm state. The flight timer is the only element that is unambiguous
     // about it - Betaflight only advances it while armed - so a timer that
     // moved in the last 3s means armed and one that has not means disarmed.
     // Without a timer element fall back to whatever says DISARMED outright,
     // and failing that leave it unknown so the HUD draws neither state.
+    if (saw_disarmed_glyph || saw_disarmed_text) t.osd_src |= BfTelem::kElArm;
     if (t.have_timer) {
         if (last_timer_s >= 0 && t.timer_s != last_timer_s) timer_moved_us = t.stamp_us;
         last_timer_s = t.timer_s;
@@ -616,15 +645,17 @@ BfTelem MspOsd::get_telem() {
     // dropped link stops asserting a state rather than freezing on the last.
     if (msp_status_us_ && now - msp_status_us_ < 2000000ULL) {
         t.arm = msp_arm_;
+        t.osd_src &= ~BfTelem::kElArm;
         if (msp_arm_ == 1 && msp_armed_since_) {
             t.have_timer = true;
             t.timer_s = (int)((now - msp_armed_since_) / 1000000ULL);
+            t.osd_src &= ~BfTelem::kElTimer;
         }
     }
     if (msp_analog_us_ && now - msp_analog_us_ < 2000000ULL) {
         if (msp_have_rssi_)   { t.have_rssi = true;   t.rssi_pct = msp_rssi_pct_; }
-        if (msp_have_pack_v_) { t.have_pack_v = true; t.pack_v = msp_pack_v_; }
-        if (msp_have_amps_)   { t.have_amps = true;   t.amps = msp_amps_; }
+        if (msp_have_pack_v_) { t.have_pack_v = true; t.pack_v = msp_pack_v_; t.osd_src &= ~BfTelem::kElPackV; }
+        if (msp_have_amps_)   { t.have_amps = true;   t.amps = msp_amps_; t.osd_src &= ~BfTelem::kElAmps; }
     }
     // scan_osd_values(): the grid-independent recovery of voltage/mode (see
     // its comment) - this FC's MSP_ANALOG never carries pack voltage
@@ -650,9 +681,10 @@ BfTelem MspOsd::get_telem() {
     // when the grid has nothing at all.
     if (raw_values_us_ && now - raw_values_us_ < 300000000ULL) {
         bool raw_is_newer = raw_values_us_ > telem.stamp_us;
-        if (raw_have_cell_v_ && (raw_is_newer || !t.have_cell_v)) { t.have_cell_v = true; t.cell_v = raw_cell_v_; }
-        if (raw_have_pack_v_ && (raw_is_newer || !t.have_pack_v)) { t.have_pack_v = true; t.pack_v = raw_pack_v_; }
-        if (raw_have_mode_   && (raw_is_newer || !t.have_mode))   { t.have_mode = true; snprintf(t.mode, sizeof(t.mode), "%s", raw_mode_); }
+        // Off the OSD too (its raw bytes).
+        if (raw_have_cell_v_ && (raw_is_newer || !t.have_cell_v)) { t.have_cell_v = true; t.cell_v = raw_cell_v_; t.osd_src |= BfTelem::kElCellV; }
+        if (raw_have_pack_v_ && (raw_is_newer || !t.have_pack_v)) { t.have_pack_v = true; t.pack_v = raw_pack_v_; t.osd_src |= BfTelem::kElPackV; }
+        if (raw_have_mode_   && (raw_is_newer || !t.have_mode))   { t.have_mode = true; snprintf(t.mode, sizeof(t.mode), "%s", raw_mode_); t.osd_src |= BfTelem::kElMode; }
     }
     // The polled values win over the OSD text: exact, and there whether or not the
     // pilot enabled an OSD element. Each group goes stale after 2 s (GPS 4 s: it is
@@ -665,9 +697,9 @@ BfTelem MspOsd::get_telem() {
             return false;
         };
         if (s.have_batt && fresh(MspTelem::G_BATT, 2000)) {
-            if (s.pack_v > 0.5f) { t.have_pack_v = true; t.pack_v = s.pack_v; }
-            if (s.cells > 0 && s.pack_v > 0.5f) { t.have_cell_v = true; t.cell_v = s.pack_v / s.cells; }
-            t.have_amps = true; t.amps = s.amps;
+            if (s.pack_v > 0.5f) { t.have_pack_v = true; t.pack_v = s.pack_v; t.osd_src &= ~BfTelem::kElPackV; }
+            if (s.cells > 0 && s.pack_v > 0.5f) { t.have_cell_v = true; t.cell_v = s.pack_v / s.cells; t.osd_src &= ~BfTelem::kElCellV; }
+            t.have_amps = true; t.amps = s.amps; t.osd_src &= ~BfTelem::kElAmps;
             if (s.capacity_mah > 0) {
                 int pct = 100 - (int)((100LL * s.mah_drawn) / s.capacity_mah);
                 t.have_batt_pct = true; t.batt_pct = pct < 0 ? 0 : pct > 100 ? 100 : pct;
@@ -678,13 +710,13 @@ BfTelem MspOsd::get_telem() {
             t.have_gps = true; t.gps_fix = s.fix; t.sats = s.sats;
             if (s.fix >= 1) {
                 t.have_pos = true; t.lat = s.lat; t.lon = s.lon;
-                t.have_speed = true; t.speed_kmh = s.gps_speed_kmh;
+                t.have_speed = true; t.speed_kmh = s.gps_speed_kmh; t.osd_src &= ~BfTelem::kElSpeed;
             }
         }
         if (s.have_home && fresh(MspTelem::G_HOME, 4000)) {
             t.have_home = true; t.home_dist_m = s.home_dist_m; t.home_dir_deg = s.home_dir_deg;
         }
-        if (s.have_modes && fresh(MspTelem::G_MODES, 2000)) { t.have_mode = true; snprintf(t.mode, sizeof(t.mode), "%s", s.mode); }
+        if (s.have_modes && fresh(MspTelem::G_MODES, 2000)) { t.have_mode = true; snprintf(t.mode, sizeof(t.mode), "%s", s.mode); t.osd_src &= ~BfTelem::kElMode; }
     }
     for (int i = 0; i < 6; i++) if (mt_us_[i] > t.stamp_us) t.stamp_us = mt_us_[i];
     // t.stamp_us so far is only the last successful FULL grid parse
@@ -967,14 +999,14 @@ void MspOsd::draw(math::Mat4& projection, math::Mat4& view, std::function<void(f
     }
 }
 
-void MspOsd::draw_region(int r_start, int c_start, int r_cnt, int c_cnt, float x, float y, std::function<void(float x, float y, const std::vector<uint16_t>& span)> draw_span_cb) {
+void MspOsd::draw_region(int r_start, int c_start, int r_cnt, int c_cnt, float x, float y, std::function<void(float x, float y, const std::vector<uint16_t>& span)> draw_span_cb, unsigned hide) {
     std::lock_guard<std::mutex> lock(mtx);
 
     const float cell_w = m_cell_w;
     const float cell_h = m_cell_h;
     auto blank = [&](int r, int c) {
         uint16_t ch = grid[r][c].char_idx;
-        return ch == 0 || ch == ' ';
+        return ch == 0 || ch == ' ' || (elem_[r][c] & hide);
     };
     
     for(int r = r_start; r < r_start + r_cnt && r < GRID_H; r++) {
@@ -993,7 +1025,7 @@ void MspOsd::draw_region(int r_start, int c_start, int r_cnt, int c_cnt, float x
                     if (blank(r, c)) {
                         if (current_ch == ' ' && !span.empty() && is_text(span.back()) &&
                             c + 1 < c_start + c_cnt && c + 1 < GRID_W &&
-                            is_text(grid[r][c + 1].char_idx)) {
+                            !blank(r, c + 1) && is_text(grid[r][c + 1].char_idx)) {
                             span.push_back(' ');
                             c++;
                             continue;
@@ -1173,6 +1205,7 @@ void MspOsd::reset_screen() {
     // grid is what the renderer reads, and a frame may not arrive to carry a
     // cleared pending across.
     memset(grid, 0, sizeof(grid));
+    memset(elem_, 0, sizeof(elem_));
     clear_internal();
     telem = BfTelem();
 
