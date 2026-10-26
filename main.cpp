@@ -28,7 +28,8 @@ extern "C" {
 #include "main.hpp"
 #include "drm.hpp"
 #include "osd.hpp"
-#include "vdec/vdec_helper.hpp"
+#include "hal/decoder.hpp"
+#include "render/gl_context.hpp"
 #include "renderer.hpp"
 #include "utils/ltrace.hpp"
 #include "utils/vrx_buttons.hpp"
@@ -1022,6 +1023,8 @@ int main(int argc, char **argv)
 		const int last_lines = Settings::getInstance().getInt("camera_lines", 0);
 		dev->follow_lines = last_lines > 0 ? (uint32_t)last_lines : 0;
 		dev->init(mode_width, mode_height, mode_vrefresh, video_zpos, osd_zpos, enable_vrr);
+		if (!g_disable_gl) GlContext::instance().init(dev->drm_fd);
+		else printf("GL/EGL disabled (--no-osd): GPU stays idle\n");
 
 	}
 
@@ -1037,7 +1040,7 @@ int main(int argc, char **argv)
 	std::shared_ptr<Vdec> vdec;
 
 	if (!simulation_mode) {
-		// With --no-osd there is no EGL display/context (init_gl() was skipped),
+		// With --no-osd there is no EGL display/context (GlContext was not made),
 		// so constructing the OSD would segfault as soon as its thread calls
 		// eglMakeCurrent(). The video plane is driven by the Renderer via DRM
 		// and does not need GL.
@@ -1055,7 +1058,7 @@ int main(int argc, char **argv)
 		
 		renderer = std::make_shared<Renderer>(render_mode, dev, dvr, osd, &signal_stop, console_stats);
 		dev->flips_are_frames = (render_mode == Atomic);   // the stats screen reads flip timing as smoothness
-		vdec = new_vdec(codec, decoder_name, renderer, dev, &signal_stop);
+		vdec = hal::make_decoder(codec, decoder_name, renderer, dev, &signal_stop);
 	}
 
     // 2. Start Video/UI threads IMMEDIATELY

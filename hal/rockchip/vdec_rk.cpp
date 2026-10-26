@@ -1,7 +1,7 @@
 #include "vdec_rk.hpp"
 #include <atomic>
 #include <algorithm>
-#include "../utils/ltrace.hpp"
+#include "utils/ltrace.hpp"
 
 #include <assert.h>
 #include <xf86drm.h>

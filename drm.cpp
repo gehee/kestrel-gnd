@@ -9,6 +9,7 @@
 #include <unistd.h>
 
 #include "drm.hpp"
+#include "hal/plane_rules.hpp"
 #include "utils/ltrace.hpp"
 #include "common.hpp"             // kestrel_request_restart
 #include "utils/screen_id.h"
@@ -21,8 +22,6 @@
 std::atomic<int> g_camera_fps{0};
 std::atomic<int> g_camera_lines{0};
 
-// Set from main() when --no-osd is given: skips all EGL/GLES bring-up.
-bool g_disable_gl = false;
 
 
 void DrmDevice::init(uint16_t mode_width, uint16_t mode_height, uint32_t mode_vrefresh, int vzpos, int ozpos, bool vrr) {
@@ -85,12 +84,6 @@ void DrmDevice::init(uint16_t mode_width, uint16_t mode_height, uint32_t mode_vr
 	assert(!ret);
     ret = pthread_cond_init(&flip_cond, NULL);
 	assert(!ret);
-
-    if (!g_disable_gl) {
-        init_gl();
-    } else {
-        printf("GL/EGL disabled (--no-osd): GPU stays idle\n");
-    }
 
     display_connected = true;                    // init requires a connected display
     hotplug_request = drmModeAtomicAlloc();
@@ -393,106 +386,6 @@ bool DrmDevice::set_crtc_mode(const drmModeModeInfo& m) {
         output_list->mode = m;
     }
     return true;
-}
-
-void DrmDevice::init_gl() {
-    // Create GBM device
-    gbm_dev = gbm_create_device(drm_fd);
-    if (!gbm_dev) {
-        fprintf(stderr, "Failed to create GBM device\n");
-        return;
-    }
-
-    // Initialize EGL
-    // libmali's legacy eglGetDisplay(gbm) returns NULL on RK3568; use the GBM
-    // platform display instead (verified working via egltest).
-    {
-        PFNEGLGETPLATFORMDISPLAYEXTPROC getPlatDisp =
-            (PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress("eglGetPlatformDisplayEXT");
-        egl_display = getPlatDisp ? getPlatDisp(EGL_PLATFORM_GBM_KHR, gbm_dev, nullptr)
-                                  : eglGetDisplay((EGLNativeDisplayType)gbm_dev);
-    }
-    if (egl_display == EGL_NO_DISPLAY) {
-        fprintf(stderr, "Failed to get EGL display\n");
-        return;
-    }
-
-    EGLint major, minor;
-    if (!eglInitialize(egl_display, &major, &minor)) {
-        fprintf(stderr, "Failed to initialize EGL\n");
-        return;
-    }
-
-    printf("EGL Initialized: %d.%d\n", major, minor);
-
-    // Bind GLES API
-    eglBindAPI(EGL_OPENGL_ES_API);
-
-    // Find EGL Config. No multisampling unless hud_msaa is set.
-    //
-    // 4x MSAA was the default, and on this Mali-G52 it was most of the HUD's
-    // cost: the only multisampled window config also carries a 24-bit depth
-    // and 8-bit stencil buffer, and a 1080p frame took 15 ms of GPU time
-    // (measured from its native fence) against 6 ms without - which held the
-    // GPU at 800 MHz permanently instead of letting it idle at 200. The HUD
-    // is flat 2D; the antialiasing it bought was on the thin slanted rails.
-    // Mesa swrast/softpipe has no MSAA window config at all, hence the
-    // fallback when it is asked for.
-    const EGLint config_attribs_msaa[] = {
-        EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
-        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
-        EGL_RED_SIZE, 8,
-        EGL_GREEN_SIZE, 8,
-        EGL_BLUE_SIZE, 8,
-        EGL_ALPHA_SIZE, 8,
-        EGL_SAMPLE_BUFFERS, 1,
-        EGL_SAMPLES, 4,
-        EGL_NONE
-    };
-    const EGLint config_attribs_plain[] = {
-        EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
-        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
-        EGL_RED_SIZE, 8,
-        EGL_GREEN_SIZE, 8,
-        EGL_BLUE_SIZE, 8,
-        EGL_ALPHA_SIZE, 8,
-        EGL_NONE
-    };
-
-    EGLint num_configs = 0;
-    const bool try_msaa = Settings::getInstance().getBool("hud_msaa", false);
-    if (!try_msaa || !eglChooseConfig(egl_display, config_attribs_msaa, &egl_config, 1, &num_configs) || num_configs == 0) {
-        if (try_msaa) fprintf(stderr, "No 4x MSAA EGL config available; retrying without MSAA\n");
-        if (!eglChooseConfig(egl_display, config_attribs_plain, &egl_config, 1, &num_configs) || num_configs == 0) {
-            fprintf(stderr, "Failed to choose EGL config (error: 0x%x)\n", eglGetError());
-            return;
-        }
-    }
-
-    {
-        EGLint id = 0, samples = 0, sbuf = 0, depth = 0, stencil = 0;
-        eglGetConfigAttrib(egl_display, egl_config, EGL_CONFIG_ID, &id);
-        eglGetConfigAttrib(egl_display, egl_config, EGL_SAMPLES, &samples);
-        eglGetConfigAttrib(egl_display, egl_config, EGL_SAMPLE_BUFFERS, &sbuf);
-        eglGetConfigAttrib(egl_display, egl_config, EGL_DEPTH_SIZE, &depth);
-        eglGetConfigAttrib(egl_display, egl_config, EGL_STENCIL_SIZE, &stencil);
-        printf("EGL config %d: samples %d (buffers %d), depth %d, stencil %d\n",
-               id, samples, sbuf, depth, stencil);
-    }
-
-    // Create EGL Context
-    const EGLint context_attribs[] = {
-        EGL_CONTEXT_CLIENT_VERSION, 2,
-        EGL_NONE
-    };
-
-    egl_context = eglCreateContext(egl_display, egl_config, EGL_NO_CONTEXT, context_attribs);
-    if (egl_context == EGL_NO_CONTEXT) {
-        fprintf(stderr, "Failed to create EGL context\n");
-        return;
-    }
-
-    printf("EGL Context Created\n");
 }
 
 void DrmDevice::set_osd_fb(uint32_t fb_id) {
@@ -865,8 +758,9 @@ bool DrmDevice::page_flip(int fb_id, uint64_t recv_ts, uint64_t dec_start_ts, ui
     // Destination rectangle for the video plane, shrunk about the screen
     // centre by picture_scale_pct. At 100 these are exactly the full-screen
     // rectangles this code always used, so the default path is untouched.
-    // Sizes and offsets are kept even: the video plane is YUV and the VOP
-    // wants 2-pixel alignment for it, and the OSD follows for symmetry.
+    // Sizes and offsets are kept to the controller's alignment (hal/
+    // plane_rules: 2 pixels on the VOP2, the video plane being YUV), and the
+    // OSD follows for symmetry.
     // Only the VIDEO plane is scaled here. The OSD sits on a Smart window,
     // and on this VOP2 Smart windows have no scaler: a smaller CRTC_W/H is
     // accepted by the atomic check and then silently ignored (verified in
@@ -882,17 +776,20 @@ bool DrmDevice::page_flip(int fb_id, uint64_t recv_ts, uint64_t dec_start_ts, ui
     // shows is cut at the same row and each plane scales its own part. Both
     // planes keep at least two rows, so the second one never goes off (that
     // costs the VOP2 a frame).
-    // The VOP2 makes a plane under 4x4 invisible (and says so on every commit):
-    // each keeps at least 4 rows of source and of screen.
-    const bool split = split_row >= 2 && bottom_fb > 0 && has_split_plane() && sh >= 16 && vh >= 8;
-    uint32_t srow = split_row & ~1u;
+    // The controller hides a plane under min_rows (4x4 on the VOP2, and it
+    // says so on every commit): each keeps at least that many rows of source
+    // and of screen.
+    const hal::PlaneRules &pr = hal::plane_rules();
+    const int mr = pr.min_rows;
+    const bool split = split_row >= 2 && bottom_fb > 0 && has_split_plane() && sh >= 4 * mr && vh >= 2 * mr;
+    uint32_t srow = pr.down(split_row);
     int top_sh = sh, top_vh = vh;
     if (split) {
-        srow = std::max(srow, (uint32_t)(sy + 4));
-        srow = std::min(srow, (uint32_t)(sy + sh - 4)) & ~1u;
+        srow = std::max(srow, (uint32_t)(sy + mr));
+        srow = pr.down(std::min(srow, (uint32_t)(sy + sh - mr)));
         top_sh = (int)srow - sy;
-        top_vh = (int)((int64_t)top_sh * vh / sh) & ~1;
-        top_vh = std::max(4, std::min(top_vh, vh - 4));
+        top_vh = pr.down((int)((int64_t)top_sh * vh / sh));
+        top_vh = std::max(mr, std::min(top_vh, vh - mr));
     }
     {
         pthread_mutex_lock(&stats_mutex);
@@ -1189,12 +1086,13 @@ void DrmDevice::set_picture_scale(int pct) {
 
 void DrmDevice::picture_rect(int base_w, int base_h, int &x, int &y, int &w, int &h) const {
     if (picture_scale_pct >= 100) { x = 0; y = 0; w = base_w; h = base_h; return; }
-    // Even sizes and offsets: the video plane is YUV and the VOP wants
-    // 2-pixel alignment for it; the OSD follows so the two edges coincide.
-    w = (base_w * picture_scale_pct / 100) & ~1;
-    h = (base_h * picture_scale_pct / 100) & ~1;
-    x = ((base_w - w) / 2) & ~1;
-    y = ((base_h - h) / 2) & ~1;
+    // Sizes and offsets to the controller's alignment (2 on the VOP2, the
+    // video plane being YUV); the OSD follows so the two edges coincide.
+    const hal::PlaneRules &pr = hal::plane_rules();
+    w = pr.down(base_w * picture_scale_pct / 100);
+    h = pr.down(base_h * picture_scale_pct / 100);
+    x = pr.down((base_w - w) / 2);
+    y = pr.down((base_h - h) / 2);
 }
 
 void DrmDevice::stage_tile(const Tile& t) {
@@ -1209,22 +1107,24 @@ void DrmDevice::stage_tile(const Tile& t) {
 // put the on-screen part's edge before the tile's own, a negative offset into the
 // picture, and the plane refused the whole commit.
 DrmDevice::Tile DrmDevice::even_tile(const Tile& t) {
+    const hal::PlaneRules &pr = hal::plane_rules();
     Tile e = t;
-    e.x = t.x & ~1;
-    e.y = t.y & ~1;
-    e.w = t.w & ~1;
-    e.h = t.h & ~1;
+    e.x = pr.down(t.x);
+    e.y = pr.down(t.y);
+    e.w = pr.down(t.w);
+    e.h = pr.down(t.h);
     return e;
 }
 
 bool DrmDevice::tile_on_screen(const Tile& t, int sw, int sh, int &x0, int &y0, int &x1, int &y1) {
-    if (!t.active || t.w < 2 || t.h < 2) return false;
+    const hal::PlaneRules &pr = hal::plane_rules();
+    if (!t.active || t.w < pr.align || t.h < pr.align) return false;
     const Tile e = even_tile(t);
     x0 = std::max(e.x, 0);
     y0 = std::max(e.y, 0);
-    x1 = std::min(e.x + e.w, sw & ~1);
-    y1 = std::min(e.y + e.h, sh & ~1);
-    return x1 - x0 >= 2 && y1 - y0 >= 2;
+    x1 = std::min(e.x + e.w, pr.down(sw));
+    y1 = std::min(e.y + e.h, pr.down(sh));
+    return x1 - x0 >= pr.align && y1 - y0 >= pr.align;
 }
 
 // The picture rectangle, or the gallery's tile. A tile the strip has scrolled
@@ -1237,19 +1137,21 @@ void DrmDevice::video_geometry(const Tile& tile, int &dx, int &dy, int &dw, int 
     picture_rect(video_fb_width, video_fb_height, dx, dy, dw, dh);
     dx += video_fb_x; dy += video_fb_y;
     sx = 0; sy = 0; sw = (int)video_frm_width; sh = (int)video_frm_height;
-    if (!tile.active || tile.w < 2 || tile.h < 2 || sw < 2 || sh < 2) return;
+    const hal::PlaneRules &pr = hal::plane_rules();
+    const int a = pr.align;
+    if (!tile.active || tile.w < a || tile.h < a || sw < a || sh < a) return;
 
     int x0, y0, x1, y1;
     if (!tile_on_screen(tile, output_list->mode.hdisplay, output_list->mode.vdisplay, x0, y0, x1, y1)) return;
 
     const Tile e = even_tile(tile);
     dx = x0; dy = y0; dw = x1 - x0; dh = y1 - y0;
-    sx = (int)((int64_t)(x0 - e.x) * video_frm_width / e.w) & ~1;
-    sy = (int)((int64_t)(y0 - e.y) * video_frm_height / e.h) & ~1;
-    sw = (int)((int64_t)(x1 - x0) * video_frm_width / e.w) & ~1;
-    sh = (int)((int64_t)(y1 - y0) * video_frm_height / e.h) & ~1;
-    sw = std::max(2, std::min(sw, (int)video_frm_width - sx));
-    sh = std::max(2, std::min(sh, (int)video_frm_height - sy));
+    sx = pr.down((int)((int64_t)(x0 - e.x) * video_frm_width / e.w));
+    sy = pr.down((int)((int64_t)(y0 - e.y) * video_frm_height / e.h));
+    sw = pr.down((int)((int64_t)(x1 - x0) * video_frm_width / e.w));
+    sh = pr.down((int)((int64_t)(y1 - y0) * video_frm_height / e.h));
+    sw = std::max(a, std::min(sw, (int)video_frm_width - sx));
+    sh = std::max(a, std::min(sh, (int)video_frm_height - sy));
 }
 
 void DrmDevice::perform_modeset_video(int fb_id) {

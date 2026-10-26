@@ -15,13 +15,6 @@
 
 extern "C" {
     #include "drm/drm.h"
-    #include <gbm.h>
-    #include <EGL/egl.h>
-    #include <EGL/eglext.h>
-    #include <GLES2/gl2.h>
-    #include <GLES2/gl2ext.h>
-
-extern bool g_disable_gl;
 }
 
 struct FlipStats {
@@ -96,11 +89,6 @@ private:
     std::atomic<uint64_t> last_video_flip_us{0};   // last video flip submitted
     uint64_t last_pageflip_ts = 0;
 
-    // GBM/EGL state
-    struct gbm_device *gbm_dev = nullptr;
-    EGLDisplay egl_display = EGL_NO_DISPLAY;
-    EGLContext egl_context = EGL_NO_CONTEXT;
-    
     pthread_t event_thread;
     std::atomic<bool> event_thread_exit{false};
     std::atomic<bool> flip_pending{false};  // Atomic to prevent races with event thread
@@ -153,9 +141,6 @@ private:
         flip_log_[(flip_log_head_ + flip_log_n_) % FLIP_LOG] = { t_us, gap_us };
         if (flip_log_n_ < FLIP_LOG) flip_log_n_++; else flip_log_head_ = (flip_log_head_ + 1) % FLIP_LOG;
     }
-
-public:
-    EGLConfig egl_config;
 
 public:
     void init(uint16_t mode_width, uint16_t mode_height, uint32_t mode_vrefresh, int video_zpos, int osd_zpos, bool enable_vrr = true);
@@ -270,11 +255,6 @@ public:
     static void* drm_event_thread_func(void* arg);
     void handle_events();
 
-    // OpenGL OSD helpers
-    void init_gl();
-    void* get_egl_display() { return egl_display; }
-    void* get_egl_context() { return egl_context; }
-    struct gbm_device* get_gbm_device() { return gbm_dev; }
     int get_osd_zpos() { return osd_zpos; }
     bool is_flip_pending() { return flip_pending; }
     // VRR on: allowed by the settings and the sink is vrr_capable (FreeSync).

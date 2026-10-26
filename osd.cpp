@@ -39,6 +39,7 @@ extern "C" uint64_t gbm_bo_get_modifier(struct gbm_bo *bo);
 #include "icons/logo.h"
 #include "betaflight_glyphs.hpp"
 #include "kestrel_gnd_config.h"
+#include "render/gl_context.hpp"
 #include "hal/probe.hpp"
 
 
@@ -474,8 +475,8 @@ OSD::OSD(std::shared_ptr<DrmDevice> dev_, int refresh_frequency_ms_, volatile bo
     tid_dvr_menu_active = false;
     tid_dvr_menu = 0;
     
-    display = (EGLDisplay)dev->get_egl_display();
-    context = (EGLContext)dev->get_egl_context();
+    display = GlContext::instance().display();
+    context = GlContext::instance().context();
     
     pthread_mutex_init(&osd_mutex, NULL);
     // Monotonic: the render loop's deadlines come from get_time_us(), and a
@@ -711,14 +712,14 @@ void OSD::signal_render(prof::Wake why) {
 void OSD::init_gl_buffers() {
     auto output = dev->output_list;
     // For OSD, we use a single GBM surface and lock the buffers as they come
-    struct gbm_surface *gs = gbm_surface_create(dev->get_gbm_device(), output->mode.hdisplay, output->mode.vdisplay,
+    struct gbm_surface *gs = gbm_surface_create(GlContext::instance().gbm(), output->mode.hdisplay, output->mode.vdisplay,
                                              GBM_FORMAT_ARGB8888, GBM_BO_USE_RENDERING | GBM_BO_USE_SCANOUT);
     if (!gs) {
         fprintf(stderr, "Failed to create GBM surface\n");
         return;
     }
 
-    EGLSurface surf = eglCreateWindowSurface(display, dev->egl_config, (EGLNativeWindowType)gs, NULL);
+    EGLSurface surf = eglCreateWindowSurface(display, GlContext::instance().config(), (EGLNativeWindowType)gs, NULL);
     if (surf == EGL_NO_SURFACE) {
         fprintf(stderr, "Failed to create EGL surface from GBM surface (error: 0x%x)\n", eglGetError());
         return;

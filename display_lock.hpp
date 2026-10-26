@@ -7,13 +7,15 @@
 #include <thread>
 
 class DrmDevice;
+namespace hal { class FrameLength; }
 
 // DISPLAY > Refresh Sync: the screen's refresh held in step with the pictures,
 // on the goggle alone. It watches when each picture reaches the renderer, finds
 // the vblank position that makes the expected wait least (a picture past the
 // commit deadline waits a whole refresh more), and moves the vblank there by
-// making frames longer or shorter (RK3568 VOP2: DSP_VTOTAL_VS_END's
-// undocumented immediate bit, from /dev/mem; a write holds until the next).
+// making frames longer or shorter through the HAL's frame-length control
+// (hal/frame_length.hpp; on the RK3568 the VOP2's DSP_VTOTAL_VS_END and its
+// undocumented immediate bit).
 //
 // Per screen ("display_lock_<screen ID>"), off unless turned on, as screens
 // differ: the AW3225QF blanks on any change.
@@ -73,9 +75,7 @@ private:
     int caps_mode_ = 0;               // (lines << 16) | fps they are of
     uint64_t last_pts_ = UINT64_MAX, early_pts_ = UINT64_MAX, early_t_ = 0;
 
-    volatile uint32_t *reg_ = nullptr;
-    void *map_ = nullptr;
-    uint32_t orig_ = 0;               // the register as the mode has it, immediate bit clear
+    std::unique_ptr<hal::FrameLength> fl_;   // the display controller's frame length
     uint32_t mode_vtotal_ = 0, mode_clock_ = 0;
     int d_ = 0;                       // lines in the register now (0: the mode's own)
     bool released_ = true;

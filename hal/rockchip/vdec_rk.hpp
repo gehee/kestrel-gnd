@@ -12,7 +12,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include "vdec.hpp"
+#include "vdec/vdec.hpp"
 #include "renderer.hpp"
 
 #define MAX_FRAMES 16		// min 16 and 20+ recommended (mpp/readme.txt)

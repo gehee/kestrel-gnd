@@ -19,7 +19,6 @@ set(SOURCE_FILES
         utils/screen_id.c
         utils/qrcodegen.c
         utils/scheduling_helper.cpp
-        utils/mpp_encoder.cpp
         utils/h264_cfr.cpp
         utils/hevc_repair.cpp
         utils/prof.cpp
@@ -39,7 +38,6 @@ set(SOURCE_FILES
         fpv_rules.cpp
         dvr_recover.cpp
         screen_tap.cpp
-        rga_compositor.cpp
         vdec/vdec_ffmpeg.cpp
         renderer.cpp
         display_lock.cpp
@@ -63,13 +61,19 @@ set(SOURCE_FILES
         artosyn/ar8030_sky.cpp
         artosyn/bb_sdk_shim.cpp
         hal/probe.cpp
+        render/gl_context.cpp
+        hal/decoder.cpp
+        hal/screen_out.cpp
+        hal/frame_length.cpp
+        hal/plane_rules.cpp
         bsp/vrx_pro.cpp
         bsp/pc.cpp
         main.cpp)
 
 if(USE_RKMPP)
     message(STATUS "Building with rkmpp")
-    list(APPEND SOURCE_FILES vdec/vdec_rk.cpp)
+    list(APPEND SOURCE_FILES hal/rockchip/vdec_rk.cpp hal/rockchip/mpp_encoder.cpp
+                             hal/rockchip/rga_compositor.cpp hal/rockchip/vop2_frame_length.cpp)
     add_definitions(-DUSE_RKMPP)
 endif()
 
@@ -234,6 +238,18 @@ if(KESTREL_TESTS)
     endfunction()
     kestrel_test(bsp_test bsp/vrx_pro.cpp bsp/pc.cpp)
     kestrel_test(probe_test hal/probe.cpp bsp/vrx_pro.cpp bsp/pc.cpp)
+    set(_hal_test_srcs hal/screen_out.cpp hal/frame_length.cpp hal/plane_rules.cpp hal/rockchip/vop2_frame_length.cpp)
+    if(KESTREL_HAL STREQUAL "rockchip")
+        list(APPEND _hal_test_srcs hal/rockchip/mpp_encoder.cpp hal/rockchip/rga_compositor.cpp)
+    endif()
+    kestrel_test(hal_test ${_hal_test_srcs})
+    if(KESTREL_HAL STREQUAL "rockchip")
+        target_link_libraries(hal_test rockchip_mpp)
+        if(RGA_LIB)
+            target_compile_definitions(hal_test PRIVATE USE_RGA)
+            target_link_libraries(hal_test ${RGA_LIB})
+        endif()
+    endif()
     kestrel_test(air_clock_test)
     # utils/sd_log.cpp first: the order in which the old exit crash showed
     # every time (see the test's header).

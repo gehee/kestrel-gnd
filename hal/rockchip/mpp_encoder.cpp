@@ -1,16 +1,7 @@
 #include "mpp_encoder.hpp"
 
-// The RK3568 VEPU is only reachable through Rockchip MPP, so this translation
-// unit needs <rockchip/rk_mpi.h> - a header that exists only in an RK sysroot.
-// It was compiled unconditionally, so any build without RKMPP (a host build for
-// working on the OSD, say) died here rather than at a missing feature.
-//
-// The file stays in SOURCE_FILES rather than moving into the USE_RKMPP block,
-// because dvr.hpp holds an MppH264Encoder *by value* - the symbols have to
-// exist either way. Without RKMPP they resolve to stubs: init() fails, ready()
-// stays false, and DVR already treats both as "screen recording unavailable"
-// (dvr.cpp:49 and :83). The device build defines USE_RKMPP, so it is unchanged.
-#ifdef USE_RKMPP
+// The RK3568 VEPU, reachable only through Rockchip MPP. Built only with
+// KESTREL_HAL=rockchip; other builds get the HAL's no-encoder stand-in.
 
 #include <cstdio>
 #include <cstring>
@@ -214,15 +205,3 @@ void MppH264Encoder::deinit() {
     header_.clear();
 }
 
-#else   // !USE_RKMPP - no hardware encoder on this build
-
-MppH264Encoder::~MppH264Encoder() {}
-bool MppH264Encoder::init(int, int, int, int, bool, int) { return false; }
-int  MppH264Encoder::input_dmabuf_fd(int) const { return -1; }
-void MppH264Encoder::deinit() {}
-void MppH264Encoder::force_idr() {}
-bool MppH264Encoder::encode_external(void*, const std::function<void(const uint8_t*, size_t, bool)>&) { return false; }
-bool MppH264Encoder::encode_buffer(
-        int, const std::function<void(const uint8_t*, size_t, bool)>&) { return false; }
-
-#endif  // USE_RKMPP

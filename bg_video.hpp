@@ -7,12 +7,9 @@
 #include <string>
 #include <GLES2/gl2.h>
 
-// Forward declarations only — including vdec_rk.hpp here would create an
-// include cycle (vdec_rk.hpp -> renderer.hpp -> osd.hpp -> bg_video.hpp).
-// The full type is included in bg_video.cpp.
-#ifdef USE_RKMPP
-class VdecRK;
-#endif
+// Forward declarations only - including the decoder headers here would
+// create an include cycle (vdec -> renderer.hpp -> osd.hpp -> bg_video.hpp).
+class Vdec;
 class DrmDevice;
 
 // Metadata for a hardware-decoded frame that lives in VPU memory (DRM_PRIME).
@@ -33,14 +30,14 @@ struct BgDrmFrame {
 // decoder (h264_rkmpp on RK3588).
 //
 // Two frame delivery paths, selected automatically:
-//   DRM path  (hardware decoder, USE_RKMPP build):
+//   DRM path  (the HAL's hardware decoder, where it has one):
 //     get_latest_drm_frame() — returns VPU DMA-BUF metadata for zero-copy
 //     EGL import by the caller; no CPU pixel copy.
 //   CPU path  (software decoder fallback):
 //     upload_latest_frame()  — uploads BGRA data to a GL_TEXTURE_2D.
 class BgVideoPlayer {
 public:
-    // `dev` is needed to construct the VdecRK hardware decoder (DRM buffer
+    // `dev` is needed to construct the hardware decoder (DRM buffer
     // allocation). The decoder feeds frames back through a sink into the same
     // zero-copy DRM path (get_latest_drm_frame) the GL/OSD layer already uses.
     //
@@ -102,9 +99,7 @@ private:
     // known). Reuses the same path as the live FPV feed; its output is routed
     // to front_drm_ via a frame sink instead of the video plane.
     std::shared_ptr<DrmDevice> dev_;
-#ifdef USE_RKMPP
-    std::unique_ptr<VdecRK> vdec_;
-#endif
+    std::unique_ptr<Vdec> vdec_;   // the HAL's background decoder
 
     // DRM double-buffer (hardware path)
     BgDrmFrame front_drm_, back_drm_;

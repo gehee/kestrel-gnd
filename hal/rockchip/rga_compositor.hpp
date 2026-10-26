@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "screen_tap.hpp"
+#include "hal/screen_out.hpp"
 
 // Rebuilds one refresh of the screen in the encoder's input buffer: the
 // decoded picture where the video plane showed it, the OSD over it - with the
@@ -29,21 +30,21 @@
 // shows video. They cannot be set explicitly here: librga refuses a colour
 // mode for what it counts as an NV12-to-NV12 operation. The encoder tags the
 // file BT.601 to match (MppH264Encoder::init).
-class RgaCompositor {
+class RgaCompositor : public hal::ScreenCompositor {
 public:
-    ~RgaCompositor() { deinit(); }
+    ~RgaCompositor() override { deinit(); }
 
     // Whether RGA is there to use at all (/dev/rga and the library).
     static bool available();
 
     // screen_w x screen_h: the size of the recording, the screen's.
     // enc_fds: the encoder's NV12 input buffers, screen-sized, stride = width.
-    bool init(int screen_w, int screen_h, const std::vector<int>& enc_fds);
-    void deinit();
+    bool init(int screen_w, int screen_h, const std::vector<int>& enc_fds) override;
+    void deinit() override;
 
     // Composite pair into encoder buffer enc_idx. osd_fd/osd_stride: the OSD
     // fb's DMA-BUF and pitch in bytes (-1 if there is no OSD). us: RGA time.
-    bool compose(const ScreenPair& pair, int osd_fd, uint32_t osd_stride, int enc_idx, uint32_t* us);
+    bool compose(const ScreenPair& pair, int osd_fd, uint32_t osd_stride, int enc_idx, uint32_t* us) override;
 
 private:
     int w_ = 0, h_ = 0;

@@ -1,7 +1,6 @@
 #include "bg_video.hpp"
-#ifdef USE_RKMPP
-#include "vdec/vdec_rk.hpp"   // full VdecRK / DrmDevice / DecodedUnit
-#endif
+#include "hal/decoder.hpp"
+#include "renderer.hpp"           // DecodedUnit
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -92,10 +91,8 @@ void* BgVideoPlayer::thread_func(void* arg) {
     return nullptr;
 }
 
-#ifdef USE_RKMPP
-
 // Feed one Annex-B NAL (with its start code) to the decoder, computing its type.
-static void bg_feed_nal(VdecRK* vdec, const uint8_t* nal, int len,
+static void bg_feed_nal(Vdec* vdec, const uint8_t* nal, int len,
                         int64_t pts, bool is_h265) {
     if (len < 4) return;
     int sc = (nal[2] == 1) ? 3 : 4;   // 00 00 01 -> 3,  00 00 00 01 -> 4
@@ -107,7 +104,7 @@ static void bg_feed_nal(VdecRK* vdec, const uint8_t* nal, int len,
 
 // Split an Annex-B buffer into NAL units (each kept with its start code) and
 // feed them one at a time — matching how the live feed pipeline feeds VdecRK.
-static void bg_feed_annexb(VdecRK* vdec, const uint8_t* buf, int size,
+static void bg_feed_annexb(Vdec* vdec, const uint8_t* buf, int size,
                            int64_t pts, bool is_h265) {
     int i = 0, nal_begin = -1;
     while (i + 3 <= size) {
@@ -133,7 +130,7 @@ static void bg_feed_annexb(VdecRK* vdec, const uint8_t* buf, int size,
 // path (ar8030_source.cpp, "feed them as a single access unit") has the same
 // rule. So the picture's slice NALs are gathered into one packet; parameter sets
 // and the rest go in alone, where the decoder caches or drops them.
-static void bg_feed_access_unit(VdecRK* vdec, const uint8_t* buf, int size,
+static void bg_feed_access_unit(Vdec* vdec, const uint8_t* buf, int size,
                                 int64_t pts, bool is_h265) {
     std::vector<uint8_t> au;
     uint8_t au_type = 0;
@@ -171,6 +168,19 @@ static void bg_feed_access_unit(VdecRK* vdec, const uint8_t* buf, int size,
 }
 
 void BgVideoPlayer::decode_loop() {
+    // The clip plays through a hardware decoder straight to DRM buffers, and
+    // only where the HAL has one; elsewhere the OSD keeps its still background
+    // and the live feed still decodes as it always does.
+    if (!hal::has_background_decoder()) {
+        static bool warned = false;
+        if (!warned) {
+            fprintf(stderr, "[BgVideo] disabled: no hardware decoder for it in this build\n");
+            warned = true;
+        }
+        running_ = false;
+        return;
+    }
+
     // Lower priority so the GL/OSD thread isn't starved during VPU init.
     setpriority(PRIO_PROCESS, 0, 5);
 
@@ -227,11 +237,7 @@ void BgVideoPlayer::decode_loop() {
     // latency, and MPP does not reorder, so the background clip MUST be encoded
     // without B-frames (IPPP) — otherwise B-frames present in decode order and
     // appear to play backwards. background.mp4 is encoded -bf 0 accordingly.
-    vdec_.reset(new VdecRK(vcodec, nullptr, dev_, &vdec_stop_));
-    Vdec::stream_holds()++;              // live pictures go whole while this one decodes
-    vdec_->set_output_timeout(100); // ms, so run_frame can notice stop()
-
-    vdec_->set_frame_sink([this](std::shared_ptr<DecodedUnit> du) {
+    vdec_ = hal::make_background_decoder(vcodec, dev_, &vdec_stop_, [this](std::shared_ptr<DecodedUnit> du) {
         BgDrmFrame bf;
         bf.fd        = du->prime_fd;
         bf.width     = (int)du->width;
@@ -255,8 +261,9 @@ void BgVideoPlayer::decode_loop() {
 
         if (on_new_frame) on_new_frame();
     });
+    Vdec::stream_holds()++;              // live pictures go whole while this one decodes
 
-    fprintf(stderr, "[BgVideo] hardware decode via VdecRK (%s)\n", is_h265 ? "h265" : "h264");
+    fprintf(stderr, "[BgVideo] hardware decode via the HAL (%s)\n", is_h265 ? "h265" : "h264");
     pthread_create(&vdec_thread_, nullptr, Vdec::run_frame_thread, vdec_.get());
 
     // ---- Feed loop: demux -> annexb -> NALs -> VdecRK, paced to source fps ----
@@ -400,20 +407,3 @@ void BgVideoPlayer::decode_loop() {
     avformat_close_input(&fmt);
 }
 
-#else  // !USE_RKMPP
-
-// The zero-copy DRM background-video path is built on the RK3588 MPP decoder
-// (VdecRK) and has no software/VAAPI equivalent wired up. On non-rkmpp builds
-// the player is a no-op: the OSD falls back to its static background, while the
-// live FPV feed still decodes via the ffmpeg/VAAPI path.
-void BgVideoPlayer::decode_loop() {
-    static bool warned = false;
-    if (!warned) {
-        fprintf(stderr, "[BgVideo] disabled: built without USE_RKMPP "
-                        "(no MPP hardware decoder)\n");
-        warned = true;
-    }
-    running_ = false;
-}
-
-#endif // USE_RKMPP

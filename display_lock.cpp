@@ -1,5 +1,6 @@
 #include "display_lock.hpp"
 #include "drm.hpp"
+#include "hal/frame_length.hpp"
 #include "frame_mode.hpp"
 #include "settings.hpp"
 #include "utils/scheduling_helper.hpp"
@@ -9,9 +10,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <fcntl.h>
-#include <sys/mman.h>
-#include <unistd.h>
 #include <vector>
 
 std::atomic<int> g_display_lock{0};
@@ -22,9 +20,6 @@ std::atomic<bool> g_dl_holding{false};
 std::atomic<const char*> g_dl_why{nullptr};
 
 namespace {
-const uint32_t kVop2Base = 0xfe040000u;   // RK3568 / RK3566
-const uint32_t kVtotalReg = 0x0c50;       // VP0's DSP_VTOTAL_VS_END, VPn's 0x100 further on each
-const uint32_t kImd = 1u << 15;           // applies to the frame being scanned out
 const uint64_t kWindowUs = 2000000;       // arrivals looked at: the last 2 s
 const size_t kMinSamples = 50;
 const double kStayUs = 30;                // a better position by less than this is not worth a move
@@ -42,7 +37,6 @@ DisplayLock::DisplayLock(std::shared_ptr<DrmDevice> dev, double cutoff_us) : dev
 
 DisplayLock::~DisplayLock() {
     stop();
-    if (map_) munmap(map_, 0x1000);
 }
 
 void DisplayLock::start() {
@@ -101,33 +95,10 @@ double DisplayLock::camera_period_us() {
     return n > 0 ? span / n : 0;
 }
 
-// The RK3568's (and RK3566's) VOP2 only: the address and the immediate bit are
-// that display controller's.
+// The display controller's frame length, from the HAL; false where it has none.
 bool DisplayLock::map_register() {
-    char compat[512] = {};
-    if (FILE *f = fopen("/proc/device-tree/compatible", "r")) {
-        const size_t n = fread(compat, 1, sizeof(compat) - 1, f);
-        fclose(f);
-        for (size_t i = 0; i < n; i++) if (!compat[i]) compat[i] = ' ';
-    }
-    if (!strstr(compat, "rockchip,rk3568") && !strstr(compat, "rockchip,rk3566")) {
-        printf("display lock: not an RK3568 - Refresh Sync is not available\n");
-        return false;
-    }
-    const int fd = open("/dev/mem", O_RDWR | O_SYNC);
-    if (fd < 0) {
-        perror("display lock: /dev/mem");
-        return false;
-    }
-    void *m = mmap(nullptr, 0x1000, PROT_READ | PROT_WRITE, MAP_SHARED, fd, kVop2Base);
-    close(fd);
-    if (m == MAP_FAILED) {
-        perror("display lock: mmap");
-        return false;
-    }
-    map_ = m;
-    reg_ = (volatile uint32_t *)((uint8_t *)map_ + kVtotalReg + 0x100 * dev_->output_list->crtc_index);
-    return true;
+    fl_ = hal::map_frame_length(dev_->output_list->crtc_index);
+    return fl_ != nullptr;
 }
 
 // Whether to hold the phase now: turned on for this screen, no VRR, and the
@@ -163,7 +134,7 @@ bool DisplayLock::write_lines(int d, uint64_t vb_us, double P) {
     if (m.vtotal != mode_vtotal_ || m.clock != mode_clock_) return false;
     const uint64_t now = get_time_us();
     if (now < vb_us || (double)(now - vb_us) >= P / 2) return false;
-    *reg_ = (orig_ & ~(0x1fffu << 16)) | (((mode_vtotal_ + d) & 0x1fff) << 16) | kImd;
+    fl_->set_total((int)mode_vtotal_ + d);
     d_ = d;
     released_ = false;
     return true;
@@ -174,7 +145,7 @@ bool DisplayLock::write_lines(int d, uint64_t vb_us, double P) {
 void DisplayLock::release() {
     std::lock_guard<std::mutex> lk(dev_->crtc_mode_m);
     const drmModeModeInfo &m = dev_->output_list->mode;
-    if (m.vtotal == mode_vtotal_ && m.clock == mode_clock_) *reg_ = orig_;
+    if (m.vtotal == mode_vtotal_ && m.clock == mode_clock_) fl_->restore();
     released_ = true;
 }
 
@@ -353,25 +324,22 @@ void DisplayLock::run() {
             fflush(stdout);
         }
 
-        // The register as the mode set it: vtotal and the sync width. Off by a
-        // little is ours, left by a run that did not get to put it back.
+        // The controller's frame length as the mode set it (vtotal and the
+        // sync width).
         if (!mode_vtotal_) {
-            const uint32_t raw = *reg_, v = raw & ~kImd;
-            const int vt = (int)((v >> 16) & 0x1fff);
-            if ((int)(v & 0x1fff) != mode.vsync_end - mode.vsync_start || vt < (int)mode.vtotal - 1 ||
-                vt > 2 * (int)mode.vtotal) {
+            hal::FrameLength::Seen seen;
+            if (!fl_->take_mode(mode.vtotal, mode.vsync_end - mode.vsync_start, &seen)) {
                 static bool said = false;
                 if (!said) {
                     said = true;
                     printf("display lock: the display controller's total (0x%08x) is not the mode's (%u lines) - off\n",
-                           v, mode.vtotal);
+                           seen.value, mode.vtotal);
                 }
                 continue;
             }
-            orig_ = (v & ~(0x1fffu << 16)) | ((uint32_t)mode.vtotal << 16);
             mode_vtotal_ = mode.vtotal;
-            d_ = vt - (int)mode.vtotal;          // brought back below like any other
-            released_ = d_ == 0 && !(raw & kImd);
+            d_ = seen.total - (int)mode.vtotal;  // brought back below like any other
+            released_ = d_ == 0 && !seen.held;
         }
 
         // The grid the vblank is held to: the mode's refresh (ON), or one
@@ -477,7 +445,7 @@ void DisplayLock::run() {
     }
     in_step_ = false;
     dev_->set_frame_period(0);
-    if (reg_ && !released_) {
+    if (fl_ && !released_) {
         uint32_t s;
         uint64_t t;
         const double P = dev_->mode_period_us();

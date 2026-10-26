@@ -144,7 +144,7 @@ int DVR::init(int frm_width, int frm_height) {
 		printf("DVR: no DRM device - screen recording unavailable\n");
 		return -1;
 	}
-	if (!RgaCompositor::available()) {
+	if (!hal::screen_compositor_available()) {
 		printf("DVR: no RGA (/dev/rga) - screen recording unavailable\n");
 		return -1;
 	}
@@ -178,25 +178,25 @@ int DVR::init(int frm_width, int frm_height) {
 		rga_slot_ticks = period_us > 0 ? (int)(period_us * rga_div * 0.09 + 0.5) : 90000 / fps;
 	}
 	screen_fps = fps;
-	if (leader) screen_enc.set_input_count(0);   // it reads the leader's
+	if (leader) screen_enc->set_input_count(0);   // it reads the leader's
 	// H.265 (dvr_screen_codec): the same picture in fewer bits. No skip
 	// frames for it yet - an unchanged refresh lengthens the picture before.
-	screen_enc.set_hevc(codec == VideoCodec::H265);
-	if (!screen_enc.init(frm_width, frm_height, fps, bitrate, true /*BT.601, RGA's*/, enc_max_bps)) {
+	screen_enc->set_hevc(codec == VideoCodec::H265);
+	if (!screen_enc->init(frm_width, frm_height, fps, bitrate, true /*BT.601, RGA's*/, enc_max_bps)) {
 		printf("DVR: hardware encoder unavailable - screen recording disabled\n");
 		return -1;
 	}
-	if (!screen_enc.hevc() && !screen_cfr.init(screen_enc.header())) {
+	if (!screen_enc->hevc() && !screen_cfr.init(screen_enc->header())) {
 		printf("DVR: the encoder's stream is one H264Cfr cannot hold on the slot grid - screen recording disabled\n");
-		screen_enc.deinit();
+		screen_enc->deinit();
 		return -1;
 	}
 	if (!leader) {
 		std::vector<int> fds;
-		for (int i = 0; i < screen_enc.input_count(); i++) fds.push_back(screen_enc.input_dmabuf_fd(i));
-		if (!rga.init(frm_width, frm_height, fds)) {
+		for (int i = 0; i < screen_enc->input_count(); i++) fds.push_back(screen_enc->input_dmabuf_fd(i));
+		if (!rga->init(frm_width, frm_height, fds)) {
 			printf("DVR: RGA unusable - screen recording unavailable\n");
-			screen_enc.deinit();
+			screen_enc->deinit();
 			return -1;
 		}
 	}
@@ -212,16 +212,16 @@ int DVR::init(int frm_width, int frm_height) {
 			MP4E_set_finalize(mux);     // as in the camera recording
 		// Above 60 fps Apple's players took it for slow motion (as the camera's).
 		if (mux && fps > 60) MP4E_set_full_frame_rate(mux);
-		if (!mux || MP4E_STATUS_OK != mp4_h26x_write_init(&mp4wr, mux, frm_width, frm_height, screen_enc.hevc())) {
+		if (!mux || MP4E_STATUS_OK != mp4_h26x_write_init(&mp4wr, mux, frm_width, frm_height, screen_enc->hevc())) {
 			printf("DVR: mp4_h26x_write_init failed (screen)\n");
 			close_mux();   // the file is closed by discard() or the destructor
 			return -1;
 		}
 	}
 	// SPS/PPS first, exactly as the FPV path primes its parameter sets.
-	if (mux && !screen_enc.header().empty())
-		mp4_h26x_write_nal(&mp4wr, screen_enc.header().data(),
-		                   (int)screen_enc.header().size(), 90000 / fps);
+	if (mux && !screen_enc->header().empty())
+		mp4_h26x_write_nal(&mp4wr, screen_enc->header().data(),
+		                   (int)screen_enc->header().size(), 90000 / fps);
 	if (!to_file)
 		printf("DVR: screen encoder for the web view, %dx%d at %d fps, %d kbit/s\n",
 		       frm_width, frm_height, screen_fps, bitrate / 1000);
@@ -248,7 +248,7 @@ void DVR::run_screen_rga() {
 		std::lock_guard<std::mutex> lk(qm);
 		shots.clear();
 		free_bufs.clear();
-		for (int i = 0; i < screen_enc.input_count(); i++) { free_bufs.push_back(i); buf_refs[i] = 0; }
+		for (int i = 0; i < screen_enc->input_count(); i++) { free_bufs.push_back(i); buf_refs[i] = 0; }
 	}
 	std::atomic<bool> sampling{true};
 	ScreenTap& tap = disp_dev->tap;
@@ -337,7 +337,7 @@ void DVR::run_screen_rga() {
 			uint32_t stride = 0;
 			const int osd_fd = p.osd_fb ? disp_dev->osd_fb_dmabuf(p.osd_fb, &stride) : -1;
 			uint32_t us = 0;
-			const bool ok = rga.compose(p, osd_fd, stride, idx, &us);
+			const bool ok = rga->compose(p, osd_fd, stride, idx, &us);
 			// The picture goes back to the decoder from here: let go before
 			// telling the tap, which a resolution change waits on.
 			p.video.reset();
@@ -377,7 +377,7 @@ void DVR::run_screen_rga() {
 	};
 	int held = 0;   // H.265: slots the next picture's duration takes in (no skip frames)
 	auto skip = [&]() {
-		if (screen_enc.hevc()) { held += period; skips++; return true; }
+		if (screen_enc->hevc()) { held += period; skips++; return true; }
 		std::vector<uint8_t> sk = screen_cfr.skip_frame();
 		if (sk.empty()) return false;
 		write(sk.data(), sk.size(), period);
@@ -440,7 +440,7 @@ void DVR::run_screen_rga() {
 			auto out = [&](const uint8_t* p_hw, size_t len, bool) {
 				// One bulk copy out of the encoder's uncached output first (see run_screen).
 				pkt_copy_.assign(p_hw, p_hw + len);
-				if (screen_enc.hevc()) {
+				if (screen_enc->hevc()) {
 					write(pkt_copy_.data(), len, period + held);
 					held = 0;
 					return;
@@ -450,10 +450,10 @@ void DVR::run_screen_rga() {
 			};
 			if (leader) {
 				// The leader's composite, read in place, then let go.
-				screen_enc.encode_external(leader->screen_enc.input_buffer(s.idx), out);
+				screen_enc->encode_external(leader->screen_enc->input_buffer(s.idx), out);
 				leader->follower_done(s.idx);
 			} else {
-				screen_enc.encode_buffer(s.idx, out);
+				screen_enc->encode_buffer(s.idx, out);
 				keep_latest(s.idx);
 			}
 			frames++;
@@ -527,7 +527,7 @@ void DVR::run_screen_rga() {
 
 void DVR::release_buf(int idx) {
 	std::lock_guard<std::mutex> lk(qm);
-	if (idx < 0 || idx >= MppH264Encoder::kInputBuffers) return;
+	if (idx < 0 || idx >= hal::ScreenEncoder::kInputBuffers) return;
 	if (--buf_refs[idx] <= 0) { buf_refs[idx] = 0; free_bufs.push_back(idx); }
 }
 
@@ -550,7 +550,7 @@ void DVR::idr_if_wanted() {
 	const uint64_t now = get_time_us();
 	if (now - last_forced_idr_us < 1000000) return;
 	last_forced_idr_us = now;
-	screen_enc.force_idr();
+	screen_enc->force_idr();
 }
 
 void DVR::stop() {
@@ -570,8 +570,8 @@ void DVR::run_dvr() {
 			mp4_h26x_write_close(&mp4wr);
 			mux = NULL;
 		}
-		rga.deinit();
-		screen_enc.deinit();
+		rga->deinit();
+		screen_enc->deinit();
 		writer.reset();             // everything written and synced
 		if (dvr_file) {
 			fclose(dvr_file);
@@ -648,7 +648,7 @@ void DVR::run_dvr() {
 		mux = NULL;
 	}
 	if (record_screen) {
-		screen_enc.deinit();
+		screen_enc->deinit();
 	}
 	writer.reset();                 // everything written and synced
 	if (dvr_file) {

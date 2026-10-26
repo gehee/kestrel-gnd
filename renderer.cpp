@@ -7,6 +7,7 @@ extern "C"{
 #include <iomanip>
 
 #include "renderer.hpp"
+#include "hal/plane_rules.hpp"
 #include "frame_mode.hpp"
 
 std::atomic<int> g_frame_mode{kFrameWhole};
@@ -883,7 +884,7 @@ bool Renderer::halves_commit(const std::shared_ptr<DecodedUnit> &top, const std:
         // scaled each plane filters its own part: one fixed place, not the
         // last split's (which jumps to the top on intra-refresh starts).
         low = top;
-        cut = (top->height / 2) & ~1u;
+        cut = hal::plane_rules().down(top->height / 2);
         if (on_cut_ >= top->height / 4 && on_cut_ < top->height) cut = on_cut_;
     }
     split_next_row_ = cut;
@@ -1005,7 +1006,7 @@ void Renderer::halves_step() {
     auto cut_for = [](const DecodedUnit *du) -> uint32_t {
         const uint32_t end = du->slices ? du->slices->first_end() : 0;
         if (end <= 32 + 2 || end >= du->height) return 0;
-        return (end - 32) & ~1u;
+        return hal::plane_rules().down(end - 32);
     };
     const bool can_split = dev->split_possible();
 

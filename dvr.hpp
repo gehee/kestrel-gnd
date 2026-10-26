@@ -13,9 +13,8 @@
 
 #include "utils/minimp4.h"
 #include "common.hpp"
-#include "utils/mpp_encoder.hpp"
 #include "utils/h264_cfr.hpp"
-#include "rga_compositor.hpp"
+#include "hal/screen_out.hpp"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -111,24 +110,24 @@ class DVR {
         bool record_screen;
         int64_t frame_pts;
         bool should_exit;
-        // Screen recording encodes on the RK3568 VEPU through MPP. ffmpeg on
-        // this board only offers h264_v4l2m2m and there are no /dev/video*
-        // nodes, so the ffmpeg encoder path can never open.
-        MppH264Encoder screen_enc;
+        // Screen recording's encoder, from the HAL (on the VRX Pro the RK3568
+        // VEPU through MPP: ffmpeg there only offers h264_v4l2m2m, with no
+        // /dev/video* node to open).
+        std::unique_ptr<hal::ScreenEncoder> screen_enc = hal::make_screen_encoder();
         // Holds the screen recording at the display's refresh rate: scan-outs
         // that showed no new picture become skip frames (see h264_cfr.hpp).
         H264Cfr screen_cfr;
         std::vector<uint8_t> pkt_copy_;   // encoder output, copied to cached memory
         int     screen_fps = 60;
         class DrmDevice* disp_dev = nullptr;
-        // The screen rebuilt by RGA from what the display scanned out, every
-        // rga_div-th refresh.
+        // The screen rebuilt by the HAL's compositor (RGA on the VRX Pro) from
+        // what the display scanned out, every rga_div-th refresh.
         int  rga_div = 2;
         // One slot of the recording in 90 kHz ticks: rga_div refreshes of the
         // screen's real rate, not of the rounded fps (144 Hz at 30 fps is a
         // slot every 5 refreshes, 28.8 fps).
         int  rga_slot_ticks = 1500;
-        RgaCompositor rga;
+        std::unique_ptr<hal::ScreenCompositor> rga = hal::make_screen_compositor();
         void run_screen_rga();
         // A screen encoder that writes no file: the web view's (to_file false).
         bool to_file = true;
@@ -145,7 +144,7 @@ class DVR {
         std::deque<int> free_bufs;
         // Holders of each encoder input (under qm): the composite on its way
         // to the encoder, the latest one kept for a follower, the follower.
-        int  buf_refs[MppH264Encoder::kInputBuffers] = {0};
+        int  buf_refs[hal::ScreenEncoder::kInputBuffers] = {0};
         void release_buf(int idx);
         // Following another RGA recorder (the web view's encoder while a
         // screen recording runs - the screen has one sampler, and RGA no time
@@ -248,9 +247,9 @@ class DVR {
             want_fresh = sink_wants_key;
         }
         // After init(): the encoder's SPS/PPS (Annex-B), size and frame period.
-        const std::vector<uint8_t>& screen_header() const { return screen_enc.header(); }
-        int screen_width() const { return screen_enc.width(); }
-        int screen_height() const { return screen_enc.height(); }
+        const std::vector<uint8_t>& screen_header() const { return screen_enc->header(); }
+        int screen_width() const { return screen_enc->width(); }
+        int screen_height() const { return screen_enc->height(); }
         int screen_period_ticks() const { return rga_slot_ticks; }
 
         int init(int frm_width, int frm_height);
