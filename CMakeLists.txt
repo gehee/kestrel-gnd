@@ -11,6 +11,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_compile_options("-Wno-address-of-packed-member")
+include(cmake/features.cmake)
 set(TARGET kestrel-gnd)
 set(SOURCE_FILES
         drm/drm.c
@@ -61,6 +62,9 @@ set(SOURCE_FILES
         artosyn/bb_watchdog.cpp
         artosyn/ar8030_sky.cpp
         artosyn/bb_sdk_shim.cpp
+        hal/probe.cpp
+        bsp/vrx_pro.cpp
+        bsp/pc.cpp
         main.cpp)
 
 if(USE_RKMPP)
@@ -204,6 +208,7 @@ target_sources(${TARGET} PRIVATE ${KESTREL_GND_STAMP})
 add_dependencies(${TARGET} kestrel-gnd-stamp)
 
 configure_file(kestrel_gnd_config.h.in kestrel_gnd_config.h)
+configure_file(kestrel_gnd_features.h.in kestrel_gnd_features.h)
 target_include_directories(${TARGET} PUBLIC "${PROJECT_BINARY_DIR}")
 
 # Kept commented for years because kestrel was always deployed by copying the
@@ -214,3 +219,30 @@ include(GNUInstallDirs)
 install(TARGETS ${TARGET} kestrel-splash
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
+
+# Unit tests: cmake -DKESTREL_TESTS=ON, then ctest. Each test is one program
+# that exits non-zero on a failure, so a cross build's binaries also run on
+# the unit as they are.
+option(KESTREL_TESTS "Build the unit tests (run them with ctest)" OFF)
+if(KESTREL_TESTS)
+    enable_testing()
+    function(kestrel_test name)
+        add_executable(${name} tools/test/${name}.cpp ${ARGN})
+        target_include_directories(${name} PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/stab ${PROJECT_BINARY_DIR})
+        target_link_libraries(${name} pthread)
+        add_test(NAME ${name} COMMAND ${name})
+    endfunction()
+    kestrel_test(bsp_test bsp/vrx_pro.cpp bsp/pc.cpp)
+    kestrel_test(probe_test hal/probe.cpp bsp/vrx_pro.cpp bsp/pc.cpp)
+    kestrel_test(air_clock_test)
+    # utils/sd_log.cpp first: the order in which the old exit crash showed
+    # every time (see the test's header).
+    add_executable(sd_log_test utils/sd_log.cpp tools/test/sd_log_test.cpp)
+    target_include_directories(sd_log_test PRIVATE ${CMAKE_SOURCE_DIR} ${PROJECT_BINARY_DIR})
+    target_link_libraries(sd_log_test pthread)
+    add_test(NAME sd_log_test COMMAND sd_log_test)
+    kestrel_test(imu_stream_test stab/imu_stream.cpp)
+    kestrel_test(msp_telem_test msp_telem.cpp)
+    kestrel_test(msp_osd_hide_test msp_osd.cpp msp_telem.cpp stab/imu_stream.cpp)
+    kestrel_test(msp_osd_lq_test msp_osd.cpp msp_telem.cpp stab/imu_stream.cpp)
+endif()

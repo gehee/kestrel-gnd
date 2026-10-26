@@ -32,6 +32,7 @@ extern "C" {
 #include "renderer.hpp"
 #include "utils/ltrace.hpp"
 #include "utils/vrx_buttons.hpp"
+#include "hal/probe.hpp"
 #include "artosyn/ar8030_source.hpp"
 #include "artosyn/bb_watchdog.hpp"
 #include "artosyn/bb_client.h"
@@ -138,7 +139,7 @@ void sig_handler(int signum)
 void* vrx_button_thread_func(void* arg) {
 	OSD* osd = (OSD*)arg;
 	SchedulingHelper::set_thread_params_max_realtime("VRX_BTN", 10);
-	VrxButtons buttons;
+	VrxButtons buttons(hal::board().buttons);
 	// The signal handler only sets a flag: DvrRecorder::toggle() takes a lock
 	// and opens files, none of which is safe to do inside a signal.
 	auto service_rec_signal = [&]() {
@@ -150,18 +151,18 @@ void* vrx_button_thread_func(void* arg) {
 		if (osd) osd->signal_render(prof::kWakeInput);
 	};
 	if (!buttons.available()) {
-		printf("VRX buttons: SARADC channel not readable, front panel disabled\n");
+		printf("VRX buttons: no front-panel ADC channel on this board, front panel disabled\n");
 		return nullptr;
 	}
-	printf("VRX buttons: front panel active (SARADC ladder)\n");
+	printf("VRX buttons: front panel active (ADC ladder)\n");
 	// The BIND button is a separate ADC channel, not part of the ladder above.
 	// Polled on this same thread because it is the same kind of device and the
 	// cadence suits it; see utils/vrx_buttons.hpp for why it is read directly
 	// rather than through its input device.
-	VrxBindButton bind_button;
+	VrxBindButton bind_button(hal::board().bind);
 	const bool have_bind = bind_button.available();
 	printf("VRX buttons: bind button %s\n",
-	       have_bind ? "active (SARADC ch0)" : "NOT readable - bind via the menu");
+	       have_bind ? "active (ADC)" : "NOT readable - bind via the menu");
 	while (!signal_stop) {
 		service_rec_signal();
 		if (have_bind && bind_button.pressed()) {
@@ -650,7 +651,8 @@ int main(int argc, char **argv)
 	}
 	// RADIO > VRX Radio Firmware: Open8030 when its image is on the unit, unless
 	// the menu said STOCK (0) - as bb_only.sh decides what it uploads.
-	Ar8030Source::radio_fw      = access("/lib/firmware/open8030-vrxpro-usb.img", R_OK) == 0 &&
+	const char *open8030_fw = hal::board().radio.open8030_fw;
+	Ar8030Source::radio_fw      = *open8030_fw && access(open8030_fw, R_OK) == 0 &&
 	                              Settings::getInstance().getInt("ar8030_firmware", 1) != 0 ? 1 : 0;
 	// The radio's TDD frame mode (RADIO > Radio Frame): 2 short, 0 standard.
 	Ar8030Source::frame_mode    = Settings::getInstance().getInt("ar8030_frame_mode", 2) == 0 ? 0 : 2;

@@ -39,6 +39,7 @@ extern "C" uint64_t gbm_bo_get_modifier(struct gbm_bo *bo);
 #include "icons/logo.h"
 #include "betaflight_glyphs.hpp"
 #include "kestrel_gnd_config.h"
+#include "hal/probe.hpp"
 
 
 // The TX Power row holds the power chosen; it shows (and Enter sends) it
@@ -2910,32 +2911,28 @@ void OSD::render_gl() {
         static float    vrx_temp_c  = 0.0f;
         static uint64_t vrx_temp_ms = 0;
 
-        // This goggle's own supply voltage.
+        // This box's own supply voltage, from the ADC channel, divider and
+        // averaging its BSP gives (bsp/vrx_pro.cpp has where the VRX Pro's
+        // come from). It is NOT on the baseband, despite the AR8030 having an
+        // ADC - that channel is an NTC thermistor stock uses to drive the fan.
         //
-        // It is NOT on the baseband, despite the AR8030 having an ADC - that
-        // channel is an NTC thermistor stock uses to drive the fan. The
-        // battery is on the RK3568's own SARADC, channel 5, read as a bare
-        // IIO attribute with no consumer node, which is why the device tree
-        // shows no battery anywhere and /sys/class/power_supply is empty.
+        //   pin_mV    = raw * ref_mv / full_raw
+        //   avg       = mean of the last `average` pin_mV samples
+        //   supply_mV = avg * divider - offset_mv
         //
-        // Recovered from ar_ldy_gnd (read at 0xa7ee8, scaled at 0x98678):
-        //
-        //   pin_mV  = raw * 1800 / 1024        10-bit SARADC, 1.8V reference
-        //   avg     = mean of the last 10 pin_mV samples
-        //   batt_mV = avg * 16 - 300           16:1 divider, 300mV offset trim
-        //
-        // Full scale is 1800*16-300 = 28.5V, which is the 1S-6S range stock's
-        // own cell-count auto-detect covers. Stock samples about every 400ms
-        // and discards the first conversion of each cycle; both are copied
-        // here because a divider this steep turns one bad count into 16mV.
+        // Stock samples about every 400ms and discards the first conversion
+        // of each cycle; both are copied here because a steep divider turns
+        // one bad count into many millivolts.
+        const bsp::SupplyAdc &supply = hal::board().supply;
+        const int vavg = supply.average > 0 && supply.average <= 16 ? supply.average : 1;
         static float    vrx_volts   = 0.0f;
         static uint64_t vrx_volts_ms = 0;
-        static int      vbuf[10] = {0};
+        static int      vbuf[16] = {0};
         static int      vcount = 0, vhead = 0;
         uint64_t temp_now_ms = get_time_ms();
         if (temp_now_ms - vrx_temp_ms > 2000) {   // sysfs read - not every frame
             vrx_temp_ms = temp_now_ms;
-            FILE *tf = fopen("/sys/class/thermal/thermal_zone0/temp", "r");
+            FILE *tf = fopen(hal::board().thermal_zone, "r");
             if (tf) {
                 int millideg = 0;
                 if (fscanf(tf, "%d", &millideg) == 1) vrx_temp_c = millideg / 1000.0f;
@@ -2943,9 +2940,9 @@ void OSD::render_gl() {
                 fclose(tf);
             }
         }
-        if (temp_now_ms - vrx_volts_ms > 400) {
+        if (temp_now_ms - vrx_volts_ms > 400 && *supply.adc.path) {
             vrx_volts_ms = temp_now_ms;
-            FILE *vf = fopen("/sys/bus/iio/devices/iio:device0/in_voltage5_raw", "r");
+            FILE *vf = fopen(supply.adc.path, "r");
             if (vf) {
                 int raw = -1, first = -1;
                 // Discard the first conversion, as stock does.
@@ -2955,14 +2952,14 @@ void OSD::render_gl() {
                 }
                 fclose(vf);
                 if (raw >= 0) {
-                    int pin_mv = raw * 1800 / 1024;
+                    int pin_mv = bsp::adc_mv(supply.adc, raw);
                     vbuf[vhead] = pin_mv;
-                    vhead = (vhead + 1) % 10;
-                    if (vcount < 10) vcount++;
+                    vhead = (vhead + 1) % vavg;
+                    if (vcount < vavg) vcount++;
                     int sum = 0;
                     for (int i = 0; i < vcount; i++) sum += vbuf[i];
                     int avg = sum / vcount;          // live from the first sample
-                    int batt_mv = avg * 16 - 300;
+                    int batt_mv = bsp::supply_mv(supply, avg);
                     vrx_volts = batt_mv > 0 ? batt_mv / 1000.0f : 0.0f;
                 }
             }
