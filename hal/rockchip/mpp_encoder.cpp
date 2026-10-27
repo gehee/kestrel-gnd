@@ -1,4 +1,4 @@
-#include "mpp_encoder.hpp"
+#include "hal/rockchip/mpp_encoder.hpp"
 
 // The RK3568 VEPU, reachable only through Rockchip MPP. Built only with
 // KESTREL_HAL=rockchip; other builds get the HAL's no-encoder stand-in.

@@ -1,6 +1,6 @@
 #include "render/canvas_gles.hpp"
 
-#include "osd.hpp"
+#include "hud/osd.hpp"
 
 namespace render {
 

@@ -6,7 +6,7 @@
 #include <utility>
 #include <vector>
 
-#include "screen_tap.hpp"
+#include "display/screen_tap.hpp"
 #include "hal/screen_out.hpp"
 
 // Rebuilds one refresh of the screen in the encoder's input buffer: the

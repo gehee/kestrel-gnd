@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-#include "artosyn/ar8030_source.hpp"
+#include "radio/ar8030_source.hpp"
 
 namespace hud {
 

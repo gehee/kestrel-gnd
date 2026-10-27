@@ -1,7 +1,7 @@
 #include "hal/decoder.hpp"
 
 #include "kestrel_gnd_features.h"
-#include "vdec/vdec_ffmpeg.hpp"
+#include "hal/ffmpeg/vdec_ffmpeg.hpp"
 #if KESTREL_HAL_ROCKCHIP
 #include "hal/rockchip/vdec_rk.hpp"
 #endif

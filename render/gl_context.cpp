@@ -2,7 +2,7 @@
 
 #include <cstdio>
 
-#include "settings.hpp"
+#include "core/settings.hpp"
 
 // Set from main() when --no-osd is given: skips all EGL/GLES bring-up.
 bool g_disable_gl = false;

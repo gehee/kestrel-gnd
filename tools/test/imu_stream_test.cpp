@@ -1,13 +1,13 @@
-// Host test of stab/imu_stream.cpp's recent_rate_dps: a synthetic SEI NAL as kestrel-air --imu builds it.
-//   g++ -std=c++17 -I. -Istab -o imu_stream_test tools/test/imu_stream_test.cpp stab/imu_stream.cpp && ./imu_stream_test
+// Host test of motion/imu_stream.cpp's recent_rate_dps: a synthetic SEI NAL as kestrel-air --imu builds it.
+//   g++ -std=c++17 -I. -o imu_stream_test tools/test/imu_stream_test.cpp motion/imu_stream.cpp && ./imu_stream_test
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <thread>
 #include <vector>
-#include "stab/imu_stream.hpp"
-#include "cam_tilt.hpp"
+#include "motion/imu_stream.hpp"
+#include "core/cam_tilt.hpp"
 
 static int fails;
 #define CHECK(c) do { if (!(c)) { fails++; std::printf("FAIL line %d: %s\n", __LINE__, #c); } } while (0)
@@ -45,7 +45,7 @@ static std::vector<uint8_t> sei(uint64_t t0, int n, int gx, int gy, int gz, int 
 }
 
 int main() {
-    auto& imu = stab::ImuStream::get();
+    auto& imu = motion::ImuStream::get();
     double w[3];
     CHECK(!imu.recent_rate_dps(20000, w));                           // nothing yet
     // 164 dps in 16.4 LSB/dps units = 2690 LSB: 164 deg/s about the IMU's y axis (the camera's pan).
@@ -82,9 +82,9 @@ int main() {
         const double a = 25 * M_PI / 180, yaw = 90, roll = 60, pitch = 40;
         double wc[3] = { pitch, yaw * std::cos(a) + roll * std::sin(a), -yaw * std::sin(a) + roll * std::cos(a) };   // camera axes
         double wa[3];
-        stab::to_aircraft_rates(wc, 25.0, wa);
+        motion::to_aircraft_rates(wc, 25.0, wa);
         CHECK(std::fabs(wa[0] - pitch) < 1e-6 && std::fabs(wa[1] - yaw) < 1e-6 && std::fabs(wa[2] - roll) < 1e-6);
-        stab::to_aircraft_rates(wc, 0.0, wa);                              // no tilt: the camera's own axes
+        motion::to_aircraft_rates(wc, 0.0, wa);                              // no tilt: the camera's own axes
         CHECK(std::fabs(wa[1] - wc[1]) < 1e-9 && std::fabs(wa[2] - wc[2]) < 1e-9);
     }
 

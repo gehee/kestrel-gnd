@@ -6,9 +6,9 @@
 #include <memory>
 #include <string>
 
-#include "common.hpp"      // VideoCodec
+#include "core/common.hpp"      // VideoCodec
 #include "kestrel_gnd_features.h"
-#include "vdec/vdec.hpp"
+#include "hal/vdec.hpp"
 
 class Renderer;
 class DrmDevice;

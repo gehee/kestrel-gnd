@@ -1,4 +1,4 @@
-#include "rga_compositor.hpp"
+#include "hal/rockchip/rga_compositor.hpp"
 
 #include <cstdio>
 #include <cstring>
@@ -8,7 +8,7 @@
 #include <sys/mman.h>
 #include <linux/dma-heap.h>
 
-#include "renderer.hpp"   // DecodedUnit
+#include "display/renderer.hpp"   // DecodedUnit
 #include "utils/time_util.h"
 
 #ifdef USE_RGA

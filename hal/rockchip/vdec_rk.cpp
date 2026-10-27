@@ -1,4 +1,4 @@
-#include "vdec_rk.hpp"
+#include "hal/rockchip/vdec_rk.hpp"
 #include <atomic>
 #include <algorithm>
 #include "utils/ltrace.hpp"
@@ -8,8 +8,8 @@
 #include <xf86drmMode.h>
 #include <sys/ioctl.h>
 
-#include "common.hpp"
-#include "frame_mode.hpp"
+#include "core/common.hpp"
+#include "core/frame_mode.hpp"
 #include "utils/scheduling_helper.hpp"
 #include "utils/time_util.h"
 

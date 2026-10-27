@@ -3,8 +3,8 @@
 #include <cstdio>
 #include <cstdlib>
 
-#include "artosyn/ar8030_source.hpp"
-#include "settings.hpp"
+#include "radio/ar8030_source.hpp"
+#include "core/settings.hpp"
 #include "utils/sd_log.hpp"
 
 namespace hud {

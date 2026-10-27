@@ -94,6 +94,24 @@ left alone rather than rewritten. All of them are pushed to the radio as the
 candidate list at startup, and `--ar8030-ap-index N` picks which one to
 associate with when several are known.
 
+## Source layout
+
+| Folder | What is in it |
+|---|---|
+| `core/` | `main`, settings, the phone view's web server, the WiFi access point, time zones and their channel rules |
+| `radio/` | the AR8030 radio: the video and control link, the air unit's messages, the bind |
+| `display/` | KMS (`drm`, and the C helpers in `kms/`), the renderer that puts pictures up, the refresh lock, the screen tap |
+| `hud/` | the HUD, menu and gallery (`osd*`, `hud_*`, `gallery*`), their state snapshot and the menu's actions |
+| `render/` | the canvas the screens draw with, and the GL context |
+| `dvr/` | recording, the recordings library, repairing a recording |
+| `msp/` | the flight controller's MSP OSD and telemetry, Betaflight's glyphs |
+| `hal/` | the hardware interfaces (the decoder in `vdec.hpp`) and their backends: `hal/rockchip/` for the VRX Pro, `hal/ffmpeg/` for the software decoder |
+| `bsp/` | one file of facts per box (`vrx_pro.cpp`) |
+| `motion/` | the air unit's IMU samples, carried in the video stream, and quaternions |
+| `utils/`, `queue/`, `icons/` | helpers, the message queue, icons |
+| `splash/` | the boot splash program |
+| `tools/test/` | unit tests (`-DKESTREL_TESTS=ON`); `tools/vdec_test.cpp` is a by-hand decoder test, not built |
+
 ## Building
 
 ```sh
