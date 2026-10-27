@@ -11,14 +11,14 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_compile_options("-Wno-address-of-packed-member")
+include(cmake/features.cmake)
 set(TARGET kestrel-gnd)
 set(SOURCE_FILES
-        drm/drm.c
+        display/kms/drm.c
         utils/copy_utils.c
         utils/screen_id.c
         utils/qrcodegen.c
         utils/scheduling_helper.cpp
-        utils/mpp_encoder.cpp
         utils/h264_cfr.cpp
         utils/hevc_repair.cpp
         utils/prof.cpp
@@ -26,46 +26,58 @@ set(SOURCE_FILES
         utils/ltrace.cpp
         queue/Queue.cpp
         queue/Msg.cpp
-        dvr.cpp
-        dvr_library.cpp
-        gallery.cpp
-        gallery_stats.cpp
-        osd_gallery.cpp
-        osd_screen.cpp
-        osd_channel.cpp
-        zones.cpp
-        zones_data.cpp
-        fpv_rules.cpp
-        dvr_recover.cpp
-        screen_tap.cpp
-        rga_compositor.cpp
-        vdec/vdec_ffmpeg.cpp
-        renderer.cpp
-        display_lock.cpp
-        drm.cpp
-				osd.cpp
-        hud_canopy.cpp
-        hud_lock.cpp
-        hud_theme.cpp
-        hud_menu.cpp
-        vec_icons.cpp
-        bg_video.cpp
-        betaflight_glyphs.cpp
-        settings.cpp
-        msp_osd.cpp
-        msp_telem.cpp
-        stab/imu_stream.cpp
-        webstream.cpp
-        wifi_ap.cpp
-        artosyn/ar8030_source.cpp
-        artosyn/bb_watchdog.cpp
-        artosyn/ar8030_sky.cpp
-        artosyn/bb_sdk_shim.cpp
-        main.cpp)
+        dvr/dvr.cpp
+        dvr/dvr_library.cpp
+        hud/gallery.cpp
+        hud/gallery_stats.cpp
+        hud/osd_gallery.cpp
+        hud/osd_screen.cpp
+        hud/osd_channel.cpp
+        core/zones.cpp
+        core/zones_data.cpp
+        core/fpv_rules.cpp
+        dvr/dvr_recover.cpp
+        display/screen_tap.cpp
+        hal/ffmpeg/vdec_ffmpeg.cpp
+        display/renderer.cpp
+        display/display_lock.cpp
+        display/drm.cpp
+				hud/osd.cpp
+        hud/hud_canopy.cpp
+        hud/hud_lock.cpp
+        hud/hud_theme.cpp
+        hud/hud_menu.cpp
+        hud/vec_icons.cpp
+        hud/bg_video.cpp
+        msp/betaflight_glyphs.cpp
+        core/settings.cpp
+        msp/msp_osd.cpp
+        msp/msp_telem.cpp
+        motion/imu_stream.cpp
+        core/webstream.cpp
+        core/wifi_ap.cpp
+        radio/ar8030_source.cpp
+        radio/bb_watchdog.cpp
+        radio/ar8030_sky.cpp
+        radio/bb_sdk_shim.cpp
+        hal/caps.cpp
+        render/gl_context.cpp
+        render/canvas_gles.cpp
+        render/text_cache.cpp
+        hud/dispatch.cpp
+        hud/state.cpp
+        hal/decoder.cpp
+        hal/screen_out.cpp
+        hal/frame_length.cpp
+        hal/plane_rules.cpp
+        bsp/board.cpp
+        ${KESTREL_BOARD_SRC}
+        core/main.cpp)
 
 if(USE_RKMPP)
     message(STATUS "Building with rkmpp")
-    list(APPEND SOURCE_FILES vdec/vdec_rk.cpp)
+    list(APPEND SOURCE_FILES hal/rockchip/vdec_rk.cpp hal/rockchip/mpp_encoder.cpp
+                             hal/rockchip/rga_compositor.cpp hal/rockchip/vop2_frame_length.cpp)
     add_definitions(-DUSE_RKMPP)
 endif()
 
@@ -117,7 +129,7 @@ endif()
 if(AR8030_LIB)
     message(STATUS "AR8030 client library: ${AR8030_LIB}")
     target_link_libraries(${TARGET} ${AR8030_LIB} dl)
-    # artosyn/bb_sdk_shim.cpp overrides get_bb_ioctl_cmdiptlen() inside
+    # radio/bb_sdk_shim.cpp overrides get_bb_ioctl_cmdiptlen() inside
     # libar8030_client.so. That only works if the executable exports its
     # dynamic symbols, so this flag is load-bearing, not a debug convenience.
     set_target_properties(${TARGET} PROPERTIES ENABLE_EXPORTS ON)
@@ -147,7 +159,7 @@ endif()
 
 # kestrel-splash — tiny standalone DRM/cairo boot splash (no GL/MPP).
 # Links only libdrm + cairo (both already in DEPS).
-add_executable(kestrel-splash splash.c utils/screen_id.c)
+add_executable(kestrel-splash splash/splash.c utils/screen_id.c)
 target_link_libraries(kestrel-splash ${DEPS_LIBRARIES} m)
 
 # kestrel-gpio-joystick — GPIO/ADC joystick → uinput mapper for OSD menu
@@ -204,6 +216,7 @@ target_sources(${TARGET} PRIVATE ${KESTREL_GND_STAMP})
 add_dependencies(${TARGET} kestrel-gnd-stamp)
 
 configure_file(kestrel_gnd_config.h.in kestrel_gnd_config.h)
+configure_file(kestrel_gnd_features.h.in kestrel_gnd_features.h)
 target_include_directories(${TARGET} PUBLIC "${PROJECT_BINARY_DIR}")
 
 # Kept commented for years because kestrel was always deployed by copying the
@@ -214,3 +227,54 @@ include(GNUInstallDirs)
 install(TARGETS ${TARGET} kestrel-splash
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
+
+# Unit tests: cmake -DKESTREL_TESTS=ON, then ctest. Each test is one program
+# that exits non-zero on a failure, so a cross build's binaries also run on
+# the unit as they are.
+option(KESTREL_TESTS "Build the unit tests (run them with ctest)" OFF)
+if(KESTREL_TESTS)
+    enable_testing()
+    function(kestrel_test name)
+        add_executable(${name} tools/test/${name}.cpp ${ARGN})
+        target_include_directories(${name} PRIVATE ${CMAKE_SOURCE_DIR} ${PROJECT_BINARY_DIR})
+        target_link_libraries(${name} pthread)
+        add_test(NAME ${name} COMMAND ${name})
+    endfunction()
+    kestrel_test(bsp_test bsp/board.cpp bsp/vrx_pro.cpp bsp/pc.cpp)
+    set(_hal_test_srcs hal/screen_out.cpp hal/frame_length.cpp hal/plane_rules.cpp hal/rockchip/vop2_frame_length.cpp)
+    if(KESTREL_HAL STREQUAL "rockchip")
+        list(APPEND _hal_test_srcs hal/rockchip/mpp_encoder.cpp hal/rockchip/rga_compositor.cpp)
+    endif()
+    kestrel_test(hal_test ${_hal_test_srcs})
+    if(KESTREL_HAL STREQUAL "rockchip")
+        target_link_libraries(hal_test rockchip_mpp)
+        if(RGA_LIB)
+            target_compile_definitions(hal_test PRIVATE USE_RGA)
+            target_link_libraries(hal_test ${RGA_LIB})
+        endif()
+    endif()
+    kestrel_test(canvas_test)
+    set(_caps_test_srcs hal/caps.cpp core/wifi_ap.cpp core/settings.cpp hal/screen_out.cpp)
+    if(KESTREL_HAL STREQUAL "rockchip")
+        list(APPEND _caps_test_srcs hal/rockchip/mpp_encoder.cpp hal/rockchip/rga_compositor.cpp)
+    endif()
+    kestrel_test(caps_test ${_caps_test_srcs})
+    if(KESTREL_HAL STREQUAL "rockchip")
+        target_link_libraries(caps_test rockchip_mpp)
+        if(RGA_LIB)
+            target_compile_definitions(caps_test PRIVATE USE_RGA)
+            target_link_libraries(caps_test ${RGA_LIB})
+        endif()
+    endif()
+    kestrel_test(air_clock_test)
+    # utils/sd_log.cpp first: the order in which the old exit crash showed
+    # every time (see the test's header).
+    add_executable(sd_log_test utils/sd_log.cpp tools/test/sd_log_test.cpp)
+    target_include_directories(sd_log_test PRIVATE ${CMAKE_SOURCE_DIR} ${PROJECT_BINARY_DIR})
+    target_link_libraries(sd_log_test pthread)
+    add_test(NAME sd_log_test COMMAND sd_log_test)
+    kestrel_test(imu_stream_test motion/imu_stream.cpp)
+    kestrel_test(msp_telem_test msp/msp_telem.cpp)
+    kestrel_test(msp_osd_hide_test msp/msp_osd.cpp msp/msp_telem.cpp motion/imu_stream.cpp)
+    kestrel_test(msp_osd_lq_test msp/msp_osd.cpp msp/msp_telem.cpp motion/imu_stream.cpp)
+endif()

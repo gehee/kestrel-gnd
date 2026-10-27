@@ -1,0 +1,16 @@
+#pragma once
+// Generated from cmake/features.cmake: which HAL backends and features this
+// binary was built with. Every macro is defined, to 0 or 1, so test them with
+// #if, never #ifdef.
+
+#define KESTREL_HAL_ROCKCHIP @KESTREL_HAL_ROCKCHIP@
+#define KESTREL_HAL_AR9311   @KESTREL_HAL_AR9311@
+#define KESTREL_HAL_PC       @KESTREL_HAL_PC@
+
+#define KESTREL_BOARD_VRXPRO @KESTREL_BOARD_VRXPRO@
+#define KESTREL_BOARD_PC     @KESTREL_BOARD_PC@
+
+#cmakedefine01 KESTREL_GLES
+#cmakedefine01 KESTREL_STREAM_DECODE
+#cmakedefine01 KESTREL_SCREEN_ENC
+#cmakedefine01 KESTREL_WIFI

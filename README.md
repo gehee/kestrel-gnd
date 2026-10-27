@@ -94,11 +94,64 @@ left alone rather than rewritten. All of them are pushed to the radio as the
 candidate list at startup, and `--ar8030-ap-index N` picks which one to
 associate with when several are known.
 
+## Source layout
+
+| Folder | What is in it |
+|---|---|
+| `core/` | `main`, settings, the phone view's web server, the WiFi access point, time zones and their channel rules |
+| `radio/` | the AR8030 radio: the video and control link, the air unit's messages, the bind |
+| `display/` | KMS (`drm`, and the C helpers in `kms/`), the renderer that puts pictures up, the refresh lock, the screen tap |
+| `hud/` | the HUD, menu and gallery (`osd*`, `hud_*`, `gallery*`), their state snapshot and the menu's actions |
+| `render/` | the canvas the screens draw with, and the GL context |
+| `dvr/` | recording, the recordings library, repairing a recording |
+| `msp/` | the flight controller's MSP OSD and telemetry, Betaflight's glyphs |
+| `hal/` | the hardware interfaces (the decoder in `vdec.hpp`) and their backends: `hal/rockchip/` for the VRX Pro, `hal/ffmpeg/` for the software decoder |
+| `bsp/` | one file of facts per box (`vrx_pro.cpp`, `pc.cpp`); `KESTREL_BOARD` picks which one is built in |
+| `motion/` | the air unit's IMU samples, carried in the video stream, and quaternions |
+| `utils/`, `queue/`, `icons/` | helpers, the message queue, icons |
+| `splash/` | the boot splash program |
+| `tools/test/` | unit tests (`-DKESTREL_TESTS=ON`); `tools/vdec_test.cpp` is a by-hand decoder test, not built |
+
 ## Building
 
 ```sh
-cmake -S . -B build -DUSE_RKMPP=ON && cmake --build build -j
+cmake -S . -B build -DKESTREL_HAL=rockchip && cmake --build build -j
 ```
+
+### Build options
+
+`KESTREL_HAL` picks the set of hardware backends: `rockchip` for the VRX Pro
+(MPP decoder, RGA, the VOP2 display lock), or `pc` for a host build with the
+ffmpeg decoder. `-DUSE_RKMPP=ON`, which older fpvOS releases pass, still
+means `rockchip`.
+
+`KESTREL_BOARD` picks the box: `vrxpro` (the default with `rockchip`) or
+`pc` (no buttons, no ADC; the default otherwise). Each box's facts are one
+file in `bsp/`, and only the chosen box's file is compiled in: fpvOS builds
+one image per box, so nothing is detected at run time.
+
+Features are switched at build time, so a box that can't run one doesn't
+carry its code. fpvOS sets them from its Kconfig options, one set per board:
+
+| Option | Default | What it adds |
+|---|---|---|
+| `KESTREL_GLES` | on | draws the HUD, menu and gallery with GLES; required until there is a CPU canvas |
+| `KESTREL_STREAM_DECODE` | on with `rockchip` | per-slice decode, early presentation and the per-half presenter |
+| `KESTREL_SCREEN_ENC` | on with `rockchip` | screen recording and the phone view's encoder |
+| `KESTREL_WIFI` | on | the WiFi access point (off: the menu says the system has none) |
+
+The choices are in the generated `kestrel_gnd_features.h`, every one defined
+to 0 or 1.
+
+### Tests
+
+```sh
+cmake -S . -B build -DKESTREL_TESTS=ON && cmake --build build -j && ctest --test-dir build
+```
+
+The unit tests are in `tools/test`, one program each, exiting non-zero on a
+failure. Built with the device toolchain they run on the unit as they are:
+copy them over and run each one. None of them touches the hardware.
 
 ### Cross-compiling for the VRX Pro
 
@@ -126,12 +179,11 @@ included. There is no release branch; the tag is the release. To build a
 branch's current head instead of the pin, without a local checkout, pass
 `KESTREL_BRANCH=main` to make.
 
-`USE_RKMPP=ON` is required for the device: it pulls in the Rockchip decoder
-and the hardware encoder used by screen recording. Linking also needs
-`libar8030_client.so`, the proprietary AR8030 client, which is extracted from
-firmware you own rather than shipped by fpvOS — the `fpvos-vendor-libs`
-package stages it. CMake tolerates its absence, so a host build without
-vendor blobs still compiles; `--link ar8030` then has nothing to talk to.
+`KESTREL_HAL=rockchip` is required for the device: it pulls in the Rockchip
+decoder and the hardware encoder used by screen recording. Linking also needs
+`libar8030_client.so`, the radio client library. fpvOS builds it from
+ar_libre's `lib/`; for a host build, build that library with the host
+compiler and pass it as `-DAR8030_LIB=/path/to/libar8030_client.so`.
 
 ## Third-party code
 

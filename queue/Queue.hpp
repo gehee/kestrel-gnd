@@ -1,5 +1,5 @@
 #pragma once
-#include "Msg.hpp"
+#include "queue/Msg.hpp"
 #include <memory>
 #include <chrono>
 #include <condition_variable>

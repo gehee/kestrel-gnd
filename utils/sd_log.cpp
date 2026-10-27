@@ -1,4 +1,4 @@
-#include "sd_log.hpp"
+#include "utils/sd_log.hpp"
 
 #include <algorithm>
 #include <condition_variable>
@@ -22,14 +22,31 @@ constexpr size_t kKeep = 30;              // logs kept on the card
 constexpr size_t kMaxPending = 1 << 20;   // text not yet on the card, at most
 constexpr int kSyncMs = 2000;
 
-std::string log_dir;
-int out_fd = -1;     // where stdout went before (the service's log), once redirected
-std::mutex m;        // the three below
-std::condition_variable cv;
-int file_fd = -1;    // the log on the card, -1 while off
-std::string pending;
-size_t dropped = 0;
-std::mutex write_m;  // one writer on the card at a time (the thread, or turning off)
+// Everything the reader and writer threads touch. They are detached and run
+// until the process ends, so this is made once and never destroyed: as plain
+// globals, exit() ran their destructors while the writer could still be
+// swapping `pending` (a double free, SIGABRT in sd-log-write after
+// "kestrel-gnd done."), and exit's own flush of stdout reaches the reader.
+struct State {
+    std::string log_dir;
+    int out_fd = -1;     // where stdout went before (the service's log), once redirected
+    std::mutex m;        // the three below
+    std::condition_variable cv;
+    int file_fd = -1;    // the log on the card, -1 while off
+    std::string pending;
+    size_t dropped = 0;
+    std::mutex write_m;  // one writer on the card at a time (the thread, or turning off)
+};
+State& state = *new State();   // never deleted, on purpose
+
+std::string& log_dir = state.log_dir;
+int& out_fd = state.out_fd;
+std::mutex& m = state.m;
+std::condition_variable& cv = state.cv;
+int& file_fd = state.file_fd;
+std::string& pending = state.pending;
+size_t& dropped = state.dropped;
+std::mutex& write_m = state.write_m;
 
 // Oldest first by the time in the name; the newest kKeep - 1 stay, the one
 // about to be made is the kKeep-th.

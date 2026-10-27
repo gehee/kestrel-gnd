@@ -3,7 +3,7 @@
 #include <cstdio>
 #include <cstring>
 #include <vector>
-#include "msp_telem.hpp"
+#include "msp/msp_telem.hpp"
 
 static int fails;
 #define CHECK(c) do { if (!(c)) { fails++; std::printf("FAIL line %d: %s\n", __LINE__, #c); } } while (0)

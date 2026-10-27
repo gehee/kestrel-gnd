@@ -41,7 +41,7 @@
 // from the first step and through any change of the frame (exact()). Before
 // the edge is found (each search, after a link forms or a frame changes) the
 // stamps alone set it, to the request's round trip (stamps_only()).
-#include "frame_edge.h"
+#include "utils/frame_edge.h"
 
 #include <algorithm>
 #include <atomic>
