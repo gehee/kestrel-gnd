@@ -620,7 +620,7 @@ bool OSD::render_gallery(int W, int H) {
         submit(v, a_pos_, a_uv_);
     };
     auto text_width = [&](const std::string& str, float font_px) {
-        return this->text_width(str.c_str(), font_px * 1.6f);
+        return canvas_->text_width(str.c_str(), font_px * 1.6f);
     };
     auto pill = [&](const std::string& str, float x, float y, float font_px, const float* bg, float bg_a,
                     const float* fg, float a) {

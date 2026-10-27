@@ -62,6 +62,9 @@ set(SOURCE_FILES
         artosyn/bb_sdk_shim.cpp
         hal/probe.cpp
         render/gl_context.cpp
+        render/canvas_gles.cpp
+        hud/dispatch.cpp
+        hud/state.cpp
         hal/decoder.cpp
         hal/screen_out.cpp
         hal/frame_length.cpp
@@ -250,6 +253,7 @@ if(KESTREL_TESTS)
             target_link_libraries(hal_test ${RGA_LIB})
         endif()
     endif()
+    kestrel_test(canvas_test)
     kestrel_test(air_clock_test)
     # utils/sd_log.cpp first: the order in which the old exit crash showed
     # every time (see the test's header).

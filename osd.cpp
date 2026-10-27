@@ -41,13 +41,15 @@ extern "C" uint64_t gbm_bo_get_modifier(struct gbm_bo *bo);
 #include "kestrel_gnd_config.h"
 #include "render/gl_context.hpp"
 #include "hal/probe.hpp"
+#include "hud/state.hpp"
+#include "render/canvas_gles.hpp"
 
 
 // The TX Power row holds the power chosen; it shows (and Enter sends) it
 // fitted to the air unit connected, and -- until that unit has said what it is
 // (its levels are not known before: a Lite+ would be offered a Lite's).
 void OSD::set_air_power_levels() {
-    if (!menu_open) menu_ar_power = Ar8030Source::tx_power_want_mw;
+    if (!menu_open) menu_ar_power = hud::read_radio().tx_power_want_mw;
 }
 
 // AR8030 RF menu. The rows are Channel (the channel page, where AUTO is the
@@ -140,7 +142,7 @@ std::vector<std::pair<const char*, int>> OSD::ar_rf_items() const {
     // listing them again is one line each here. Steady Latency needs an
     // Open8030 with steady mode (request 0x0c5a0037), which its main lacks.
     // Open8030 on the goggle: the MCS its receive policy may go up to.
-    if (Ar8030Source::radio_fw == 1) v.push_back({"Max MCS", 14});
+    if (radio_->radio_fw == 1) v.push_back({"Max MCS", 14});
     v.push_back({"VRX Radio Firmware", 13});
     // MCS, Bandwidth and LNA Mode were removed rather than left visible.
     // BB_SET_MCS has no direction field, so it can only set our own transmit -
@@ -477,6 +479,8 @@ OSD::OSD(std::shared_ptr<DrmDevice> dev_, int refresh_frequency_ms_, volatile bo
     
     display = GlContext::instance().display();
     context = GlContext::instance().context();
+    radio_ = std::make_shared<hud::RadioState>(hud::read_radio());
+    canvas_.reset(new render::CanvasGles(this));
     
     pthread_mutex_init(&osd_mutex, NULL);
     // Monotonic: the render loop's deadlines come from get_time_us(), and a
@@ -1646,7 +1650,7 @@ void OSD::draw_hex_panel(float x, float y, float w, float h, float alpha, float 
             float a = grid_a_base * fade_x * fade_top;
             
             if (a > 0.01f) {
-                draw_poly({p1, {p1.x, p1.y + 0.003f}, {p2.x, p2.y + 0.003f}, p2}, a, 1.0f, 1.0f, 1.0f);
+                canvas_->poly({p1, {p1.x, p1.y + 0.003f}, {p2.x, p2.y + 0.003f}, p2}, a, 1.0f, 1.0f, 1.0f);
             }
         }
     }
@@ -1670,7 +1674,7 @@ void OSD::draw_hex_panel(float x, float y, float w, float h, float alpha, float 
             float a = grid_a_base * fade_x * fade_top;
             
             if (a > 0.01f) {
-                draw_poly({p1, {p1.x + 0.002f, p1.y}, {p2.x + 0.002f, p2.y}, p2}, a, 1.0f, 1.0f, 1.0f);
+                canvas_->poly({p1, {p1.x + 0.002f, p1.y}, {p2.x + 0.002f, p2.y}, p2}, a, 1.0f, 1.0f, 1.0f);
             }
         }
     }
@@ -1733,7 +1737,7 @@ void OSD::draw_grid_arc(float cx, float cy, float r_inner, float r_outer, float 
         float r = r_inner + (r_outer - r_inner) * ratio;
         // Exponential fade top-wards
         float a = alpha * 0.25f * (1.0f - ratio * ratio);
-        draw_arc(cx, cy, r, r + 0.004f, start_angle, end_angle, a, 1.0f, 1.0f, 1.0f);
+        canvas_->arc(cx, cy, r, r + 0.004f, start_angle, end_angle, a, 1.0f, 1.0f, 1.0f);
     }
     
     // 2. Radial Spokes (Perspective Convergence)
@@ -1754,7 +1758,7 @@ void OSD::draw_grid_arc(float cx, float cy, float r_inner, float r_outer, float 
             {rx2 + 0.003f, ry2}, {rx2, ry2}
         };
         glUniform1i(u_use_shading_, 0);
-        draw_poly(line, v_alpha, 1.0f, 1.0f, 1.0f);
+        canvas_->poly(line, v_alpha, 1.0f, 1.0f, 1.0f);
     }
 }
 
@@ -1899,7 +1903,7 @@ void OSD::draw_text(const char* text, float x, float y, float scale, bool right_
         tx = x - text_width_units;
     }
     
-    draw_icon(cached.tex, tx, y, scale * aspect, scale, r, g, b);
+    canvas_->icon(cached.tex, tx, y, scale * aspect, scale, r, g, b);
 }
 
 // Same as draw_text, but only the left `reveal` fraction (0..1) of the
@@ -1930,7 +1934,7 @@ void OSD::draw_text_wipe(const char* text, float x, float y, float scale,
     if (right_align) tx = x - cached.text_w * px_to_units;
 
     if (reveal >= 1.0f) {
-        draw_icon(cached.tex, tx, y, (float)cached.w * px_to_units, scale, r, g, b);
+        canvas_->icon(cached.tex, tx, y, (float)cached.w * px_to_units, scale, r, g, b);
         return;
     }
 
@@ -1992,7 +1996,7 @@ void OSD::draw_stacked_bar(float x, float y, float w, float h, float slant, bool
     auto draw_seg = [&](int count, float r, float g, float b, float a = 0.9f) {
         if (count <= 0) return;
         for(int i=0; i<count; i++) {
-             draw_trapezoid(cx, y, seg_w, h, 1.0f, 0.0f, a, r, g, b);
+             canvas_->trapezoid(cx, y, seg_w, h, 1.0f, 0.0f, a, r, g, b);
              cx += step;
         }
     };
@@ -2015,7 +2019,7 @@ void OSD::draw_signal_bar(float x, float y, float w, float h, float value, float
     float g = norm;
     float b = 0.2f;
     
-    draw_panel(x, y, w * norm, h, 0.9f, r, g, b);
+    canvas_->panel(x, y, w * norm, h, 0.9f, r, g, b);
 }
 
 // Hand buffers back to GBM - so the GPU may draw into them again - once the
@@ -2171,6 +2175,7 @@ void OSD::render_gl() {
 
     // --- THREAD SAFETY: Copy shared state ---
     pthread_mutex_lock(&osd_mutex);
+    *radio_ = hud::read_radio();   // the radio as this frame shows it
     // Keep the history graphs SCROLLING through dead air: when no frame has
     // arrived for 150ms, backfill zero "gap" entries at ~30/s so an outage
     // draws as a flat gap in the timeline instead of freezing the graph on
@@ -2504,7 +2509,7 @@ void OSD::render_gl() {
         // whatever that plane last held. Only while acquiring - once there is a
         // picture the fading lock rides over it, because holding black to buy
         // the animation time would hide video we already have.
-        draw_panel(-frustum_w, -frustum_h, frustum_w * 2.0f, frustum_h * 2.0f,
+        canvas_->panel(-frustum_w, -frustum_h, frustum_w * 2.0f, frustum_h * 2.0f,
                    1.0f, 0.0f, 0.0f, 0.0f);
     } else if (!lock_screen && vs == VideoState::BACKGROUND) {
         if (bg_video_enabled) {
@@ -2600,13 +2605,13 @@ void OSD::render_gl() {
             // both layers drop it before either is inked.
             for (auto& p : shadow_passes) {
                 if (alpha_loc != -1) glVertexAttrib1f(alpha_loc, 1.0f);
-                draw_icon(idle_title_tex_,    cx + p.dx, cy + p.dy, base_w, base_h, p.r, p.g, p.b);
-                draw_icon(idle_title_os_tex_, cx + p.dx, cy + p.dy, base_w, base_h, p.r, p.g, p.b);
+                canvas_->icon(idle_title_tex_,    cx + p.dx, cy + p.dy, base_w, base_h, p.r, p.g, p.b);
+                canvas_->icon(idle_title_os_tex_, cx + p.dx, cy + p.dy, base_w, base_h, p.r, p.g, p.b);
             }
             if (alpha_loc != -1) glVertexAttrib1f(alpha_loc, 1.0f);
-            draw_icon(idle_title_tex_,    cx, cy, base_w, base_h,
+            canvas_->icon(idle_title_tex_,    cx, cy, base_w, base_h,
                       TT.text[0],   TT.text[1],   TT.text[2]);
-            draw_icon(idle_title_os_tex_, cx, cy, base_w, base_h,
+            canvas_->icon(idle_title_os_tex_, cx, cy, base_w, base_h,
                       TT.accent[0], TT.accent[1], TT.accent[2]);
 
             // "Ready" in the theme's accent, sitting where the boot splash's
@@ -2616,7 +2621,7 @@ void OSD::render_gl() {
             if (ready_a > 0.003f) {
                 float ready_scale    = 0.18f * osd_vars.ui_scale;   // 3x - the first size read too small
                 float ready_y_centre = -frustum_h * 0.7f;
-                float ready_w        = text_width("Ready", ready_scale);
+                float ready_w        = canvas_->text_width("Ready", ready_scale);
                 float ready_x        = title_dx - ready_w * 0.5f;
                 float ready_y        = ready_y_centre - ready_scale * 0.5f;
 
@@ -2633,10 +2638,10 @@ void OSD::render_gl() {
                 };
                 for (auto& p : ready_shadow) {
                     if (alpha_loc != -1) glVertexAttrib1f(alpha_loc, p.a * ready_a);
-                    draw_text("Ready", ready_x + p.dx, ready_y + p.dy, ready_scale, false, p.r, p.g, p.b);
+                    canvas_->text("Ready", ready_x + p.dx, ready_y + p.dy, ready_scale, false, p.r, p.g, p.b);
                 }
                 if (alpha_loc != -1) glVertexAttrib1f(alpha_loc, ready_a);
-                draw_text("Ready", ready_x, ready_y, ready_scale, false,
+                canvas_->text("Ready", ready_x, ready_y, ready_scale, false,
                           TT.accent[0], TT.accent[1], TT.accent[2]);
                 if (alpha_loc != -1) glVertexAttrib1f(alpha_loc, 1.0f);
             }
@@ -2719,7 +2724,7 @@ void OSD::render_gl() {
     // --- GLOBAL BACKGROUND SHADE ---
     // A large, extremely subtle hexagonal shade behind everything
     glUniformMatrix4fv(u_mvp_, 1, GL_FALSE, mvp_hud_c);
-    draw_hex_panel(-frustum_w, -frustum_h, frustum_w * 2.0f, frustum_h * 2.0f, 0.5f, bg_r, bg_g, bg_b, false);
+    canvas_->hex_panel(-frustum_w, -frustum_h, frustum_w * 2.0f, frustum_h * 2.0f, 0.5f, bg_r, bg_g, bg_b, false);
     
     // 2/3. Left and Right Matrices (panel yaw +/-0.26 rad / ~15 deg), each with
     // the dynamic bank and translation shift. The panel's own yaw goes on
@@ -2858,9 +2863,9 @@ void OSD::render_gl() {
                 if (char_tex_cache[char_idx] != 0) {
                     const float qw = char_w_px_[char_idx] / px_per_unit_x;
                     if (pass == 0)
-                        draw_icon(char_tex_cache[char_idx], cx + sx, y - sy, qw, ch, 0.0f, 0.0f, 0.0f, 0.55f);
+                        canvas_->icon(char_tex_cache[char_idx], cx + sx, y - sy, qw, ch, 0.0f, 0.0f, 0.0f, 0.55f);
                     else
-                        draw_icon(char_tex_cache[char_idx], cx, y, qw, ch,
+                        canvas_->icon(char_tex_cache[char_idx], cx, y, qw, ch,
                                   msp_theme.text[0], msp_theme.text[1], msp_theme.text[2], 0.92f);
                 }
                 pen_px += char_adv_px_[char_idx];
@@ -3055,9 +3060,9 @@ void OSD::render_gl() {
         // setting is about wanting the time on screen, not about hiding that
         // the goggle is writing to the card.
         if (want_clock || rec_now) {
-            const float clk_w = want_clock ? text_width(clock_buf, clk_scale) : 0.0f;
-            const float sep_w = (want_clock && rec_now) ? text_width("\xE2\x80\xA2", clk_scale) : 0.0f;
-            const float rec_w = rec_now ? text_width(rec_buf, clk_scale) : 0.0f;
+            const float clk_w = want_clock ? canvas_->text_width(clock_buf, clk_scale) : 0.0f;
+            const float sep_w = (want_clock && rec_now) ? canvas_->text_width("\xE2\x80\xA2", clk_scale) : 0.0f;
+            const float rec_w = rec_now ? canvas_->text_width(rec_buf, clk_scale) : 0.0f;
             const float dot_w = rec_now ? icon_sz * 0.45f : 0.0f;
 
             float total = 0.0f;
@@ -3068,22 +3073,22 @@ void OSD::render_gl() {
             float x = -total * 0.5f;
             glUniformMatrix4fv(u_mvp_, 1, GL_FALSE, mvp_top);
             if (want_clock) {
-                draw_icon(clock_tex, x, clk_y, icon_sz, icon_sz, 1.0f, 1.0f, 1.0f);
+                canvas_->icon(clock_tex, x, clk_y, icon_sz, icon_sz, 1.0f, 1.0f, 1.0f);
                 x += icon_sz + icon_gap;
-                draw_text(clock_buf, x, clk_y, clk_scale, false, 1.0f, 1.0f, 1.0f);
+                canvas_->text(clock_buf, x, clk_y, clk_scale, false, 1.0f, 1.0f, 1.0f);
                 x += clk_w;
             }
             if (want_clock && rec_now) {
                 x += gap;
-                draw_text("\xE2\x80\xA2", x, clk_y, clk_scale, false, 0.45f, 0.5f, 0.55f);
+                canvas_->text("\xE2\x80\xA2", x, clk_y, clk_scale, false, 0.45f, 0.5f, 0.55f);
                 x += sep_w + gap;
             }
             if (rec_now) {
                 // The same red the canopy's indicator uses, and a dot rather
                 // than a word so it reads as a state at a glance.
-                draw_panel(x, clk_y + clk_scale * 0.30f, dot_w, dot_w, 1.0f, 1.0f, 0.25f, 0.25f);
+                canvas_->panel(x, clk_y + clk_scale * 0.30f, dot_w, dot_w, 1.0f, 1.0f, 0.25f, 0.25f);
                 x += dot_w + icon_gap;
-                draw_text(rec_buf, x, clk_y, clk_scale, false, 1.0f, 0.35f, 0.35f);
+                canvas_->text(rec_buf, x, clk_y, clk_scale, false, 1.0f, 0.35f, 0.35f);
             }
         }
 
@@ -3103,7 +3108,7 @@ void OSD::render_gl() {
     // full size. Its own clock, so a bind does not restart an acquiring pass
     // that happens to be running.
     {
-        const int bst = Ar8030Source::bind_state.load();
+        const int bst = radio_->bind_state;
         static uint64_t bind_anim_us = 0, bind_locked_us = 0;
         if (bst != Ar8030Source::BIND_IDLE) {
             if (!bind_anim_us) bind_anim_us = get_time_us();
@@ -3117,10 +3122,10 @@ void OSD::render_gl() {
             }
 
             char head[48], sub[64];
-            const unsigned p = Ar8030Source::bind_peer.load();
+            const unsigned p = radio_->bind_peer;
             if (bst == Ar8030Source::BIND_RUNNING) {
                 snprintf(head, sizeof(head), "BINDING   %ds",
-                         Ar8030Source::bind_secs_left.load());
+                         radio_->bind_secs_left);
                 snprintf(sub, sizeof(sub), "Push the bind button on the air unit");
             } else if (bst == Ar8030Source::BIND_OK) {
                 snprintf(head, sizeof(head), "BOUND");
@@ -3170,7 +3175,7 @@ void OSD::render_gl() {
     // gradient still fades towards the screen edge, so this raises the strong
     // end rather than flattening the look.
     if (legacy_panels)
-        draw_hex_panel(bg_bx, panel_bottom_y, panel_width, panel_height, 0.95f, bg_r, bg_g, bg_b, true);
+        canvas_->hex_panel(bg_bx, panel_bottom_y, panel_width, panel_height, 0.95f, bg_r, bg_g, bg_b, true);
     
     float data_mbps = video_active ? v_bw : 0.0f;
     int mcs = (!link_stats_copy.antennas.empty()) ? link_stats_copy.antennas[0].mcs_index : 0;
@@ -3210,7 +3215,7 @@ void OSD::render_gl() {
     float ldim = video_active ? 1.0f : 0.5f;
 
     if (legacy_panels)
-    draw_stacked_bar(bx + hud_margin_l, current_ly, 0.85f * s, bar_h, m_slant, false,
+    canvas_->stacked_bar(bx + hud_margin_l, current_ly, 0.85f * s, bar_h, m_slant, false,
                      r_proc, cyan_r * ldim, cyan_g * ldim, cyan_b * ldim,
                      r_net, 0.012f * ldim, 0.808f * ldim, 0.643f * ldim, // Teal for RF
                      r_dec, 0.918f * ldim, 0.769f * ldim, 0.208f * ldim, // Yellow for Dec
@@ -3233,7 +3238,7 @@ void OSD::render_gl() {
         sprintf(buf, "LATENCY (gnd): 0.0ms | MAX: 0.0ms");
     }
     if (legacy_panels) {
-        draw_text(buf, bx + hud_margin_l, current_ly, 0.07f * s, false, ldim, ldim, ldim);
+        canvas_->text(buf, bx + hud_margin_l, current_ly, 0.07f * s, false, ldim, ldim, ldim);
         current_ly += 0.085f * s;
     }
 
@@ -3259,7 +3264,7 @@ void OSD::render_gl() {
     } else {
         sprintf(buf, "[dec:0.0, disp:0.0]  (ground)");
     }
-    draw_text(buf, bx + hud_margin_l, current_ly, 0.058f * s, false, ldim * 0.8f, ldim * 0.8f, ldim * 0.8f);
+    canvas_->text(buf, bx + hud_margin_l, current_ly, 0.058f * s, false, ldim * 0.8f, ldim * 0.8f, ldim * 0.8f);
     current_ly += 0.09f * s;
     }   // hud_verbose
 
@@ -3271,7 +3276,7 @@ void OSD::render_gl() {
         } else {
             sprintf(buf, "- | 0 FPS | 0.0 Mbps");
         }
-        draw_text(buf, bx + hud_margin_l, current_ly, 0.07f * s, false, ldim, ldim, ldim);
+        canvas_->text(buf, bx + hud_margin_l, current_ly, 0.07f * s, false, ldim, ldim, ldim);
         current_ly += 0.09f * s;
     }
 
@@ -3287,11 +3292,11 @@ void OSD::render_gl() {
         float dot_x = bx + hud_margin_l;
         sprintf(buf, "   REC  %u:%02u", secs / 60, secs % 60);
         if (legacy_panels) {
-            draw_poly({{dot_x, current_ly + 0.012f},
+            canvas_->poly({{dot_x, current_ly + 0.012f},
                        {dot_x + 0.018f * s, current_ly + 0.012f},
                        {dot_x + 0.018f * s, current_ly + 0.030f},
                        {dot_x, current_ly + 0.030f}}, 1.0f, 0.95f, 0.15f, 0.15f);
-            draw_text(buf, dot_x, current_ly, 0.07f * s, false, 1.0f, 0.35f, 0.35f);
+            canvas_->text(buf, dot_x, current_ly, 0.07f * s, false, 1.0f, 0.35f, 0.35f);
         }
         current_ly += 0.09f * s;
     } else {
@@ -3311,7 +3316,7 @@ void OSD::render_gl() {
     // --- BOTTOM RIGHT: AR803x RF Link Stats ---
     glUniformMatrix4fv(u_mvp_, 1, GL_FALSE, mvp_r);
     if (legacy_panels)
-        draw_hex_panel(bg_rx, panel_bottom_y, panel_width, panel_height, 0.95f, bg_r, bg_g, bg_b, true);
+        canvas_->hex_panel(bg_rx, panel_bottom_y, panel_width, panel_height, 0.95f, bg_r, bg_g, bg_b, true);
 
     {
         // Debounce the badge: the baseband's status RPC blips for a poll or two
@@ -3422,16 +3427,16 @@ void OSD::render_gl() {
         float h_main = total_gauge_h - h_thin - h_gap;
         if (connected) {
             auto snr_rgb = get_snr_color(snr_norm);
-            draw_stacked_bar(bar_x, current_ry + h_thin + h_gap, 0.85f * s, h_main, 0.0f, true,
+            canvas_->stacked_bar(bar_x, current_ry + h_thin + h_gap, 0.85f * s, h_main, 0.0f, true,
                              snr_norm, snr_rgb[0] * dim, snr_rgb[1] * dim, snr_rgb[2] * dim);
             // The theme's neon green, fixed rather than value-coloured: while
             // the two strips are being compared it has to be obvious at a
             // glance which is which, and green reads as distinct from the
             // cyan/amber/red the MCS blocks cycle through.
-            draw_stacked_bar(bar_x, current_ry, 0.85f * s, h_thin, 0.0f, true,
+            canvas_->stacked_bar(bar_x, current_ry, 0.85f * s, h_thin, 0.0f, true,
                              quality, neon_r * dim, neon_g * dim, neon_b * dim);
         } else {
-            draw_stacked_bar(bar_x, current_ry + h_thin + h_gap, 0.85f * s, h_main, 0.0f, true,
+            canvas_->stacked_bar(bar_x, current_ry + h_thin + h_gap, 0.85f * s, h_main, 0.0f, true,
                              1.0f, 1.0f * dim, 0.75f * dim, 0.20f * dim);
         }
         }
@@ -3459,7 +3464,7 @@ void OSD::render_gl() {
                 char pw[24]; pwr_text(pw, sizeof(pw));
                 sprintf(buf, "LINK %d%%  %+.1f dB  %s", (int)(health + 0.5f), margin_db, pw);
             }
-            draw_text(buf, outer_x, current_ry, 0.07f * s, true,
+            canvas_->text(buf, outer_x, current_ry, 0.07f * s, true,
                       hc[0] * dim, hc[1] * dim, hc[2] * dim);
             // "STANDBY | " sits on the same line but keeps its own amber, so
             // it reads as a mode flag rather than part of the link health. Only
@@ -3468,8 +3473,8 @@ void OSD::render_gl() {
             // only echoes the Auto Standby setting. The line is right-aligned,
             // so it is placed by measuring the LINK text.
             if (vtx_low_power) {
-                float link_w = text_width(buf, 0.07f * s);
-                draw_text("STANDBY | ", outer_x - link_w, current_ry, 0.07f * s, true,
+                float link_w = canvas_->text_width(buf, 0.07f * s);
+                canvas_->text("STANDBY | ", outer_x - link_w, current_ry, 0.07f * s, true,
                           1.0f, 0.75f, 0.20f);
             }
             current_ry += rs;
@@ -3477,11 +3482,11 @@ void OSD::render_gl() {
             // Not connected: same line, same shape, amber "IDLE | " flag. The
             // row used to vanish entirely, leaving a gap above the gauge.
             sprintf(buf, "LINK 0%%");
-            draw_text(buf, outer_x, current_ry, 0.07f * s, true, dim, dim, dim);
-            float link_w = text_width(buf, 0.07f * s);
+            canvas_->text(buf, outer_x, current_ry, 0.07f * s, true, dim, dim, dim);
+            float link_w = canvas_->text_width(buf, 0.07f * s);
             // Same amber as the bar below it, dim included - without the * dim
             // the label read noticeably brighter than the gauge it labels.
-            draw_text("IDLE | ", outer_x - link_w, current_ry, 0.07f * s, true,
+            canvas_->text("IDLE | ", outer_x - link_w, current_ry, 0.07f * s, true,
                       1.0f * dim, 0.75f * dim, 0.20f * dim);
             current_ry += rs;
         }
@@ -3502,7 +3507,7 @@ void OSD::render_gl() {
         if (legacy_panels && hud_verbose) {
             char pw[24]; pwr_text(pw, sizeof(pw));
             sprintf(buf, "SNR: %.1f dB  PWR: %s", artosyn_copy.snr, pw);
-            draw_text(buf, outer_x, current_ry, 0.07f * s, true, dim, dim, dim);
+            canvas_->text(buf, outer_x, current_ry, 0.07f * s, true, dim, dim, dim);
             current_ry += rs;
         }
 
@@ -3514,7 +3519,7 @@ void OSD::render_gl() {
             float ldpc_ok = std::max(0.0f, std::min(1.0f, 1.0f - artosyn_copy.ldpc_error)) * 100.0f;
             sprintf(buf, "Gain: %d/%d  LDPC: %.2f%%",
                     artosyn_copy.gains_cur, artosyn_copy.gains_max, ldpc_ok);
-            draw_text(buf, outer_x, current_ry, 0.07f * s, true, dim, dim, dim);
+            canvas_->text(buf, outer_x, current_ry, 0.07f * s, true, dim, dim, dim);
             current_ry += rs;
         }
 
@@ -3526,7 +3531,7 @@ void OSD::render_gl() {
         if (legacy_panels) {
             sprintf(buf, "RX MCS%d  %.2f Mbps", ar_mcs_label(artosyn_copy.rx_mcs_val),
                     artosyn_copy.rx_data_rate_kbps / 1000.0f);
-            draw_text(buf, outer_x, current_ry, 0.07f * s, true, dim, dim, dim);
+            canvas_->text(buf, outer_x, current_ry, 0.07f * s, true, dim, dim, dim);
             current_ry += rs;
         }
 
@@ -3547,7 +3552,7 @@ void OSD::render_gl() {
                         artosyn_copy.tx_freq, ar_bw_label(artosyn_copy.rf_bw_idx));
             else
                 sprintf(buf, "BW: %s MHz", ar_bw_label(artosyn_copy.rf_bw_idx));
-            draw_text(buf, outer_x, current_ry, 0.07f * s, true, dim, dim, dim);
+            canvas_->text(buf, outer_x, current_ry, 0.07f * s, true, dim, dim, dim);
             current_ry += rs;
         }
 
@@ -3738,7 +3743,7 @@ void OSD::render_gl() {
             }
             glUniformMatrix4fv(u_mvp_, 1, GL_FALSE, mvp_c);
             // 15% of the picture's height deep, at 75% strength.
-            draw_rail_glow(frustum_w, frustum_h, 0.30f * frustum_h, 0.75f * a, r, g, b);
+            canvas_->rail_glow(frustum_w, frustum_h, 0.30f * frustum_h, 0.75f * a, r, g, b);
         }
         link_watch_ = canopy.link_up;
         // Fading in or out, or the red pulse: keep frames coming.
@@ -4466,11 +4471,11 @@ void OSD::menu_action_status(int tab, int i, char* hint, size_t hcap,
     if (tab == 1) {
         auto rfi = ar_rf_items();
         if (i < (int)rfi.size() && rfi[i].second == 9) {
-            const unsigned p = Ar8030Source::bind_peer.load();
-            switch (Ar8030Source::bind_state.load()) {
+            const unsigned p = radio_->bind_peer;
+            switch (radio_->bind_state) {
                 case Ar8030Source::BIND_RUNNING:
                     snprintf(hint, hcap, "ENTER: CANCEL");
-                    snprintf(status, scap, "BINDING  %ds", Ar8030Source::bind_secs_left.load());
+                    snprintf(status, scap, "BINDING  %ds", radio_->bind_secs_left);
                     break;
                 case Ar8030Source::BIND_OK:
                     snprintf(status, scap, "BOUND  %02X:%02X:%02X:%02X",
@@ -4890,7 +4895,7 @@ std::vector<OSD::MenuItem> OSD::menu_items(int tab) const {
         // Version), worked out as stock does, so they read the same for either air
         // app. The rest only when kestrel-air answers: what makes it fpvOS. Rows
         // come and go with that, so the values go by label (menu_value_text).
-        const Ar8030Source::AirInfo a = Ar8030Source::air_info();
+        const Ar8030Source::AirInfo &a = radio_->air;
         items = {
             {"AIR UNIT", 2},
             {"Model", 0, "The air unit on the other end of the link, as it reports itself."},
@@ -4912,7 +4917,7 @@ std::vector<OSD::MenuItem> OSD::menu_items(int tab) const {
             items.push_back({"Camera", 0, "The camera's image sensor."});
             // What it has on, as one comma-separated list: a row of type 4,
             // which the blade wraps over as many lines as it takes.
-            const std::vector<std::string> caps = Ar8030Source::air_cap_names(a);
+            const std::vector<std::string> caps = hud::air_cap_names(a);
             if (!caps.empty()) {
                 items.push_back({"CAPABILITIES", 2});
                 std::string list;
@@ -5283,7 +5288,7 @@ void OSD::menu_apply_change(int tab, int index, int dir) {
                    {
                        // The levels this air unit is offered (common.hpp);
                        // none before it has said what it is.
-                       const int prj = Ar8030Source::air_prj.load();
+                       const int prj = hud::read_radio().air_prj;
                        if (prj <= 0) break;
                        ar_pwr_offer o = ar_pwr_offered(prj);
                        int i = ar_pwr_offer_index(prj, ar_pwr_fit(prj, menu_ar_power));
@@ -5293,7 +5298,7 @@ void OSD::menu_apply_change(int tab, int index, int dir) {
                    break;
                case 8: menu_ar_standby = menu_step(menu_ar_standby ? 1 : 0, dir, 2) != 0; break;  // forced on Enter
                case 11:   // applied on Enter; stock's radio: 20 or 40 only
-                   if (Ar8030Source::radio_fw == 1) menu_ar_maxbw = menu_step(menu_ar_maxbw, dir, kArMaxBwCount);
+                   if (hud::read_radio().radio_fw == 1) menu_ar_maxbw = menu_step(menu_ar_maxbw, dir, kArMaxBwCount);
                    else menu_ar_maxbw = menu_ar_maxbw == 4 ? 3 : 4;
                    break;
                case 14: menu_ar_maxmcs = menu_step(menu_ar_maxmcs, dir, kArMaxMcsCount); break;  // applied on Enter
@@ -5349,7 +5354,7 @@ void OSD::menu_apply_change(int tab, int index, int dir) {
             if (!menu_stepping_) {
                 hud_debug = menu_hud_debug;
                 Settings::getInstance().set("hud_debug", hud_debug);
-                if (cmd_cb) cmd_cb(0x201, hud_debug ? 1 : 0);   // the logs follow it
+                if (act_) act_(hud::action::DebugInfo{hud_debug});   // the logs follow it
             }
         }
     } else if (menu_tab == 3) { // DISPLAY
@@ -5462,12 +5467,12 @@ void OSD::menu_apply_change(int tab, int index, int dir) {
             menu_wifi_ap = menu_step(menu_wifi_ap ? 1 : 0, dir, 2) != 0;
         } else if (menu_index == kSysLicence) {
             menu_licence_ = menu_step(menu_licence_, dir, 2);
-            if (!menu_stepping_) { zones::set_licensed(menu_licence_ != 0); Ar8030Source::region_changed(); }
+            if (!menu_stepping_) { zones::set_licensed(menu_licence_ != 0); if (act_) act_(hud::action::RegionChanged{}); }
         } else if (menu_index >= kSysArea && menu_index <= kSysTimezone) {
             menu_zone_ = menu_step_zone(menu_index, dir);
             if (!menu_stepping_) {
                 zones::select(menu_zone_);
-                Ar8030Source::region_changed();   // AUTO's channels
+                if (act_) act_(hud::action::RegionChanged{});   // AUTO's channels
                 menu_opt_tab_ = -1;   // Country's and Timezone's lists follow the zone
             }
         }
@@ -5556,7 +5561,7 @@ void OSD::menu_value_text(int tab, int i, char* val_buf, size_t cap) {
                     // the channel page, where it is moved.
                     const chan_scan_info &cs = osd_vars.chan_scan;
                     int f = 0;
-                    bool hop = Ar8030Source::chan_auto;
+                    bool hop = radio_->chan_auto;
                     if (cs.last_update_ms && cs.work_chan < cs.chan_num) {
                         f = cs.freq_mhz[cs.work_chan];
                         hop = cs.auto_mode != 0;
@@ -5565,14 +5570,14 @@ void OSD::menu_value_text(int tab, int i, char* val_buf, size_t cap) {
                     // AUTO / AUTO HOP only where they are offered (a known country).
                     bool offered = false;
                     for (int i = 0; i < std::min(std::max(cs.chan_num, 0), 64) && !offered; i++)
-                        offered = Ar8030Source::region_usable(cs.freq_mhz[i]);
-                    const char* mode = !hop || !offered ? "FIXED" : Ar8030Source::chan_hop.load() ? "AUTO HOP" : "AUTO";
+                        offered = hud::channel_usable(cs.freq_mhz[i]);
+                    const char* mode = !hop || !offered ? "FIXED" : radio_->chan_hop ? "AUTO HOP" : "AUTO";
                     if (f) sprintf(val_buf, "%d MHz  %s", f, mode);
                     else   sprintf(val_buf, "--");
                     break;
                 }
                 case 1: {   // TX power: -- until the air unit has said what it is
-                    const int prj = Ar8030Source::air_prj.load();
+                    const int prj = radio_->air_prj;
                     if (prj <= 0) sprintf(val_buf, "--");
                     else sprintf(val_buf, "< %s >", kArPwrLevels[ar_pwr_index(ar_pwr_fit(prj, menu_ar_power))].label);
                     break;
@@ -5664,8 +5669,8 @@ void OSD::menu_value_text(int tab, int i, char* val_buf, size_t cap) {
             const std::vector<MenuItem> rows = menu_items(tab);
             const char* L = (i >= 0 && i < (int)rows.size()) ? rows[i].label : "";
             const bool linked = osd_vars.artosyn.state == 2;
-            const Ar8030Source::AirInfo a = linked ? Ar8030Source::air_info() : Ar8030Source::AirInfo();
-            const int prj = linked ? Ar8030Source::air_prj.load() : 0;
+            const Ar8030Source::AirInfo a = linked ? radio_->air : Ar8030Source::AirInfo();
+            const int prj = linked ? radio_->air_prj : 0;
             std::string v;
             if (!strcmp(L, "Model")) {
                 v = a.get("model");
@@ -6012,7 +6017,7 @@ void OSD::handle_key(int key) {
              }
              menu_scan_open = false;
              menu_synced = false;
-             if (cmd_cb) cmd_cb(0x0E, 0);
+             if (act_) act_(hud::action::Unknown{0xe, 0});
              memset(menu_dirty, 0, sizeof(menu_dirty));   // re-seeded = nothing pending
              menu_bf_osd = bf_osd;
              menu_clock_mode = clock_mode;
@@ -6036,15 +6041,16 @@ void OSD::handle_key(int key) {
              // Seed the RF rows from what the radio and the air unit report.
              // This air unit's own (Ar8030Source::load_sky_link), which the
              // radio is running with.
-             menu_ar_power = Ar8030Source::tx_power_want_mw;   // shown fitted to the air unit (or --)
+             const hud::RadioState rs = hud::read_radio();
+             menu_ar_power = rs.tx_power_want_mw;   // shown fitted to the air unit (or --)
              menu_ar_standby = air_standby;   // start the row at the air's real state
-             menu_ar_hop = Ar8030Source::chan_auto;
-             menu_ar_maxbr = ar_maxbr_index(Ar8030Source::max_kbps);
-             menu_ar_maxbw = ar_maxbw_index(Ar8030Source::max_bw_mhz);
-             menu_ar_frame = ar_frame_index(Ar8030Source::frame_mode);
-             menu_ar_maxmcs = Ar8030Source::max_mcs < 0 ? 0 : Ar8030Source::max_mcs + 1;
-             menu_ar_steady = Ar8030Source::steady;
-             menu_ar_fw = Ar8030Source::radio_fw;
+             menu_ar_hop = rs.chan_auto;
+             menu_ar_maxbr = ar_maxbr_index(rs.max_kbps);
+             menu_ar_maxbw = ar_maxbw_index(rs.max_bw_mhz);
+             menu_ar_frame = ar_frame_index(rs.frame_mode);
+             menu_ar_maxmcs = rs.max_mcs < 0 ? 0 : rs.max_mcs + 1;
+             menu_ar_steady = rs.steady;
+             menu_ar_fw = rs.radio_fw;
              menu_refresh_options();      // seeded: work out what row 0 shows
         }
         render_requested = true;
@@ -6223,15 +6229,15 @@ void OSD::handle_key(int key) {
             if (menu_tab == 0) {
                 // 0x01 = video mode (routed to SET_CHN_RES in main); 0x300+n are
                 // the AR8030 camera settings, kept out of the kestrel-air id space.
-                if (cmd_cb) {
+                if (act_) {
                     switch (video_row(menu_index)) {
-                        case 0: cmd_cb(0x01,  menu_video_mode); break;
-                        case 3: cmd_cb(0x301, kEvSteps[menu_cam_ev]); break;
-                        case 5: cmd_cb(0x302, menu_cam_sat); break;
-                        case 6: cmd_cb(0x303, menu_cam_contrast); break;
-                        case 7: cmd_cb(0x304, menu_cam_sharp); break;
-                        case 2: cmd_cb(0x305, kSceneVals[menu_cam_scene]); break;
-                        case 4: cmd_cb(0x307, wb_kelvin(menu_cam_wb)); break;
+                        case 0: act_(hud::action::VideoMode{menu_video_mode}); break;
+                        case 3: act_(hud::action::CameraSetting{Ar8030Source::CAM_EV, kEvSteps[menu_cam_ev]}); break;
+                        case 5: act_(hud::action::CameraSetting{Ar8030Source::CAM_SAT, menu_cam_sat}); break;
+                        case 6: act_(hud::action::CameraSetting{Ar8030Source::CAM_CONTRAST, menu_cam_contrast}); break;
+                        case 7: act_(hud::action::CameraSetting{Ar8030Source::CAM_SHARPNESS, menu_cam_sharp}); break;
+                        case 2: act_(hud::action::CameraSetting{Ar8030Source::CAM_SCENE, kSceneVals[menu_cam_scene]}); break;
+                        case 4: act_(hud::action::CameraSetting{Ar8030Source::CAM_AWB, wb_kelvin(menu_cam_wb)}); break;
                         case 1:
                             // 0x30B = CAM_ANGLE -> sky cmd 0x06. The camera
                             // accepts this and reports the new angle back in
@@ -6240,15 +6246,15 @@ void OSD::handle_key(int key) {
                             // mode, which is what makes the camera reconfigure
                             // the channel (section 21.7). Order matters: the
                             // angle has to be set before the mode is re-applied.
-                            cmd_cb(0x30B, menu_cam_flip ? 1 : 0);
-                            cmd_cb(0x01,  menu_video_mode);
+                            act_(hud::action::CameraSetting{Ar8030Source::CAM_ANGLE, menu_cam_flip ? 1 : 0});
+                            act_(hud::action::VideoMode{menu_video_mode});
                             break;
                         // 0x30D = CAM_3DNR. No sky command exists for it, so
                         // the source re-sends CMD_SET_CONFIG instead.
-                        case 8: cmd_cb(0x30D, kDnrVals[menu_cam_3dnr]); break;
-                        case 9: cmd_cb(0x306, menu_cam_focus ? 1 : 0); break;
+                        case 8: act_(hud::action::CameraSetting{Ar8030Source::CAM_3DNR, kDnrVals[menu_cam_3dnr]}); break;
+                        case 9: act_(hud::action::CameraSetting{Ar8030Source::CAM_FOCUS, menu_cam_focus ? 1 : 0}); break;
                         // Max Bitrate: saved, and sent again at every link-up.
-                        case 10: cmd_cb(0x30E, kArMaxBrVals[menu_ar_maxbr]); break;
+                        case 10: act_(hud::action::MaxBitrate{kArMaxBrVals[menu_ar_maxbr]}); break;
                         default: break;
                     }
                 }
@@ -6258,14 +6264,14 @@ void OSD::handle_key(int key) {
                 // a second SDK client would fight the source
                 // for the daemon's single owner slot.
                 auto rfi = ar_rf_items();
-                if (cmd_cb && menu_index >= 0 && menu_index < (int)rfi.size()) {
+                if (act_ && menu_index >= 0 && menu_index < (int)rfi.size()) {
                     switch (rfi[menu_index].second) {
                         case 5:
                             chan_open();
                             break;
                         case 1: {   // saved per air unit there; nothing before it is known
-                            const int prj = Ar8030Source::air_prj.load();
-                            if (prj > 0) cmd_cb(0x311, ar_pwr_fit(prj, menu_ar_power));
+                            const int prj = hud::read_radio().air_prj;
+                            if (prj > 0) act_(hud::action::RfControl{Ar8030Source::RF_TX_POWER, ar_pwr_fit(prj, menu_ar_power)});
                             break;
                         }
                         case 8:
@@ -6274,27 +6280,27 @@ void OSD::handle_key(int key) {
                             // the air overrides it via fpv_sky_standby_mode_thread
                             // (auto-parks when idle, exits when flying). Stock offers
                             // the same temporary force from its menu.
-                            cmd_cb(0x308, menu_ar_standby ? 1 : 0);
+                            act_(hud::action::CameraSetting{Ar8030Source::CAM_STANDBY, menu_ar_standby ? 1 : 0});
                             break;
                         case 11:
                             // Saved and sent to the air unit; again at every link-up.
-                            cmd_cb(0x30F, kArMaxBwVals[menu_ar_maxbw]);
+                            act_(hud::action::MaxBandwidth{kArMaxBwVals[menu_ar_maxbw]});
                             break;
                         case 12:
                             // Saved and sent to the radio now; again after every link-up.
-                            cmd_cb(0x30A, kArFrameVals[menu_ar_frame]);
+                            act_(hud::action::RadioFrame{kArFrameVals[menu_ar_frame]});
                             break;
                         case 14:
                             // Saved and sent to our radio now; again after every link-up.
-                            cmd_cb(0x320, menu_ar_maxmcs - 1);
+                            act_(hud::action::MaxMcs{menu_ar_maxmcs - 1});
                             break;
                         case 15:
                             // Saved and sent to our radio now; again after every link-up.
-                            cmd_cb(0x321, menu_ar_steady);
+                            act_(hud::action::SteadyLatency{menu_ar_steady == 1});
                             break;
                         case 13:
                             // Saved; a change restarts the radio with that firmware.
-                            cmd_cb(0x309, menu_ar_fw);
+                            act_(hud::action::RadioFirmware{menu_ar_fw});
                             break;
                         case 9:
                             // Bind. Parked for the RX thread - the menu runs on the
@@ -6304,7 +6310,7 @@ void OSD::handle_key(int key) {
                             // dispatch below it is only the no-capabilities
                             // fallback, which is why a handler there alone left
                             // this row's Enter doing nothing.
-                            Ar8030Source::request_bind();
+                            act_(hud::action::Bind{});
                             break;
                         default: break;
                     }
@@ -6402,30 +6408,30 @@ void OSD::update_menu_from_tx(int cmd, int val) {
         // setting nothing has written since pinning was removed.)
         air_chan_mode = val;
         if (val == 1) {
-            if (!rf_chan_asserted && cmd_cb) {
+            if (!rf_chan_asserted && act_) {
                 rf_chan_asserted = true;
-                cmd_cb(0x107, 1);                 // re-assert AUTO on the AP
+                act_(hud::action::Unknown{0x107, 1});                 // re-assert AUTO on the AP
             }
         }
     }
     else if (cmd == 0x11) {
         // AIR-owned forced channel: re-assert on our AP radio once per link
         // session (channel is AP-arbitrated and resets to config on re-pair).
-        if (air_chan_mode != 1 && !rf_chan_asserted && cmd_cb) {
+        if (air_chan_mode != 1 && !rf_chan_asserted && act_) {
             rf_chan_asserted = true;
             printf("[rf] re-asserting AIR-owned channel %d on the AP\n", val);
-            cmd_cb(0x107, 0);
-            cmd_cb(0x101, val);
+            act_(hud::action::Unknown{0x107, 0});
+            act_(hud::action::Unknown{0x101, val});
         }
     }
     else if (cmd == 0x14) {
         // AIR-owned RF bandwidth. The AP arbitrates bandwidth and resets it to
         // config on every re-pair, so re-assert the persisted value ONCE per
         // link session (rf_bw_applied is re-armed on link drop).
-        if (val != rf_bw_applied && cmd_cb) {
+        if (val != rf_bw_applied && act_) {
             rf_bw_applied = val;
             printf("[rf] re-asserting AIR-owned bandwidth enum %d on the AP\n", val);
-            cmd_cb(0x104, val);
+            act_(hud::action::Unknown{0x104, val});
         }
     }
     

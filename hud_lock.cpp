@@ -149,7 +149,7 @@ void OSD::draw_signal_lock(float frustum_w, float frustum_h, const float* mvp,
         // In as it leaves the edge, out as it lands - a ring that vanished on
         // arrival would read as something being absorbed rather than closing.
         float a = fminf(1.0f, p * 5.0f) * (1.0f - p) * 0.65f * fade;
-        draw_arc(cx, cy, r, r + 0.0035f, 0.0f, 2.0f * (float)M_PI, a,
+        canvas_->arc(cx, cy, r, r + 0.0035f, 0.0f, 2.0f * (float)M_PI, a,
                  kCyanR, kCyanG, kCyanB);
     }
 
@@ -167,21 +167,21 @@ void OSD::draw_signal_lock(float frustum_w, float frustum_h, const float* mvp,
         float alpha = 0.9f * (1.0f - clampf((lp - 0.75f) / 0.25f, 0.0f, 1.0f)) * fade;
         float r = 0.37f * U;
         if (alpha > 0.001f)
-            draw_arc(cx, cy, r, r + 0.005f, sweep_a, sweep_a + span, alpha,
+            canvas_->arc(cx, cy, r, r + 0.005f, sweep_a, sweep_a + span, alpha,
                      kLimeR, kLimeG, kLimeB);
     }
 
     // --- signal arc: a ring that fills to the lock -------------------------
     {
         float r = 0.163f * U;
-        draw_arc(cx, cy, r, r + 0.004f, 0.0f, 2.0f * (float)M_PI, 0.28f * fade,
+        canvas_->arc(cx, cy, r, r + 0.004f, 0.0f, 2.0f * (float)M_PI, 0.28f * fade,
                  kMuteR, kMuteG, kMuteB);
         if (lp <= 0.0f) {
             // Nothing is known about how close a frame is, so this must not
             // read as progress. A segment orbiting the ring says "working"
             // without claiming a fraction of anything.
             float a = ph * 1.6f;
-            draw_arc(cx, cy, r, r + 0.005f, a, a + 1.15f, 0.9f * fade,
+            canvas_->arc(cx, cy, r, r + 0.005f, a, a + 1.15f, 0.9f * fade,
                      kCyanR, kCyanG, kCyanB);
         }
         float fill = lpE;
@@ -189,7 +189,7 @@ void OSD::draw_signal_lock(float frustum_w, float frustum_h, const float* mvp,
             // From twelve o'clock, clockwise, which is the direction a gauge is
             // read even when it is decorative.
             float a0 = -(float)M_PI * 0.5f;
-            draw_arc(cx, cy, r, r + 0.005f, a0, a0 + fill * 2.0f * (float)M_PI, 0.95f * fade,
+            canvas_->arc(cx, cy, r, r + 0.005f, a0, a0 + fill * 2.0f * (float)M_PI, 0.95f * fade,
                      locked ? kLimeR : kCyanR, locked ? kLimeG : kCyanG,
                      locked ? kLimeB : kCyanB);
         }
@@ -227,12 +227,12 @@ void OSD::draw_signal_lock(float frustum_w, float frustum_h, const float* mvp,
             // flush and the angle is square rather than notched.
             float ox = px + qx * h, oy = py + qy * h;
             // horizontal arm, running inward
-            draw_poly({{ox,             oy - h},
+            canvas_->poly({{ox,             oy - h},
                        {ox - qx * arm,  oy - h},
                        {ox - qx * arm,  oy + h},
                        {ox,             oy + h}}, a, br, bg, bb);
             // vertical arm, running inward
-            draw_poly({{ox - h, oy},
+            canvas_->poly({{ox - h, oy},
                        {ox - h, oy - qy * arm},
                        {ox + h, oy - qy * arm},
                        {ox + h, oy}}, a, br, bg, bb);
@@ -248,7 +248,7 @@ void OSD::draw_signal_lock(float frustum_w, float frustum_h, const float* mvp,
         if (tex) {
             float h = rGlyph * 2.0f, w = h * asp;
             float lit = (0.55f + 0.45f * lpE) * fade;
-            draw_icon(tex, cx - w * 0.5f, cy - h * 0.5f, w, h, lit, lit, lit);
+            canvas_->icon(tex, cx - w * 0.5f, cy - h * 0.5f, w, h, lit, lit, lit);
         }
     }
 
@@ -258,7 +258,7 @@ void OSD::draw_signal_lock(float frustum_w, float frustum_h, const float* mvp,
         float fp = clampf((lp - 0.75f) / 0.25f, 0.0f, 1.0f);
         if (lp > 0.75f && fp < 1.0f) {
             float r = rGlyph + fp * 0.19f * U;
-            draw_arc(cx, cy, r, r + 0.008f, 0.0f, 2.0f * (float)M_PI,
+            canvas_->arc(cx, cy, r, r + 0.008f, 0.0f, 2.0f * (float)M_PI,
                      (1.0f - fp) * 0.8f * fade, kWhite, kWhite, kWhite);
         }
     }
@@ -273,7 +273,7 @@ void OSD::draw_signal_lock(float frustum_w, float frustum_h, const float* mvp,
         // the centre and their arms run 0.031 past that, so anything nearer
         // than 0.40 gets walked through on every pass.
         float ty = cy - fmaxf(0.40f * U, 0.34f * s * text_scale);
-        draw_text(head, -text_width(head, title) * 0.5f, ty, title, false,
+        canvas_->text(head, -canvas_->text_width(head, title) * 0.5f, ty, title, false,
                   kWhite * fade, kWhite * fade, kWhite * fade);
 
         char stage[48];
@@ -290,7 +290,7 @@ void OSD::draw_signal_lock(float frustum_w, float frustum_h, const float* mvp,
         // Stage 3 is the last one this screen can show - past it there is a
         // picture, and the screen is gone.
         (void)idx;
-        draw_text(stage, -text_width(stage, sub) * 0.5f,
+        canvas_->text(stage, -canvas_->text_width(stage, sub) * 0.5f,
                   ty - fmaxf(0.075f * U, 0.105f * s * text_scale), sub, false,
                   sr, sg, sb);
     }

@@ -22,6 +22,12 @@
 #include "bg_video.hpp"
 #include "gallery.hpp"
 #include "gallery_stats.hpp"
+#include "hud/actions.hpp"
+#include "render/canvas.hpp"
+
+namespace render { class CanvasGles; }
+
+namespace hud { struct RadioState; }
 
 struct DecodedUnit;
 class DVR;
@@ -149,6 +155,7 @@ void osd_set_menu_at_start(bool on);
 void osd_set_menu_start_tab(int t);
 
 class OSD {
+    friend class render::CanvasGles;   // the GLES canvas draws with the OSD's GL
     private:
         std::shared_ptr<DrmDevice> dev;
 
@@ -684,7 +691,14 @@ class OSD {
         // DVR Source row: 0 FPV, 1 SCREEN at 30 captures/s, 2 SCREEN at 60.
         int  menu_dvr_source = 0;
         int  dvr_source_now() const;
-        std::function<void(int, int)> cmd_cb;
+        std::function<void(const hud::Action&)> act_;   // what the menu asks for (hud/actions.hpp)
+        // The radio as this frame shows it (hud/state.hpp): taken under
+        // osd_mutex at the start of each frame, read by the drawing code and,
+        // under the same mutex, by key handling's menu text.
+        std::shared_ptr<hud::RadioState> radio_;
+        // What the screens draw their panels, text, arcs and bars with
+        // (render/canvas.hpp): CanvasGles on this OSD's GL.
+        std::unique_ptr<render::Canvas> canvas_;
         int drift_request = 0;
 
         std::string decoder_name;
@@ -1050,7 +1064,7 @@ class OSD {
         // app restarts in the screen's kept mode.
         void begin_screen_mode_confirm(const std::string& mode);
         std::string get_decoder_name() const { return decoder_name; }
-        void set_command_callback(std::function<void(int, int)> cb) { cmd_cb = cb; }
+        void set_action_handler(std::function<void(const hud::Action&)> h) { act_ = std::move(h); }
         void set_rf_caps(unsigned caps) { rf_caps = caps; }
         // Air unit reports low-power/standby (sky cmd 0x03, TLV tag 0x12).
         // Keep the menu value in step with the air's own report so the row shows

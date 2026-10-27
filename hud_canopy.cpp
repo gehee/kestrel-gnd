@@ -527,7 +527,7 @@ void OSD::draw_canopy_hud(const CanopyIn& in) {
     }
 
 
-    // Text sizes, in the same units draw_text() takes elsewhere in the HUD.
+    // Text sizes, in the same units canvas_->text() takes elsewhere in the HUD.
     const float T_BIG   = 0.185f * sd;   // 46px headline
     const float T_UNIT  = 0.082f * sd;   // 19-20px unit / secondary figure
     const float T_SMALL = 0.055f * sd;   // 13px unit suffix
@@ -539,7 +539,7 @@ void OSD::draw_canopy_hud(const CanopyIn& in) {
     // smaller it was not legible in flight.
     const float T_STATE = 0.125f * sd;   // between T_BIG (0.185) and T_UNIT (0.082)
 
-    // draw_text() places the BOTTOM of the glyph box at y, and the cairo
+    // canvas_->text() places the BOTTOM of the glyph box at y, and the cairo
     // surface behind it draws the baseline at row 48 of 64 - a quarter of the
     // way up. So two sizes drawn at one y do NOT share a baseline: the smaller
     // sits low by a quarter of the difference, which is what made the current
@@ -547,7 +547,7 @@ void OSD::draw_canopy_hud(const CanopyIn& in) {
     // BL() converts a baseline to the y draw_text wants, for any size.
     auto BL = [](float baseline, float size) { return baseline - 0.25f * size; };
 
-    // ...and the same problem bit the icons. draw_icon() takes the bottom of
+    // ...and the same problem bit the icons. canvas_->icon() takes the bottom of
     // its quad, so an icon given the text's y sat level with the bottom of the
     // glyph BOX - descender space included - and therefore low against the
     // letters. IY() centres an icon on the text's box instead, which is what
@@ -585,11 +585,11 @@ void OSD::draw_canopy_hud(const CanopyIn& in) {
     auto num_adv = [&](const char* sN, float size) {
         char ref[32];
         size_t n = strlen(sN);
-        if (n >= sizeof(ref)) return text_width(sN, size);
+        if (n >= sizeof(ref)) return canvas_->text_width(sN, size);
         for (size_t i = 0; i < n; i++)
             ref[i] = isdigit((unsigned char)sN[i]) ? '0' : sN[i];
         ref[n] = 0;
-        return text_width(ref, size);
+        return canvas_->text_width(ref, size);
     };
 
     // Arm state colours the rules, and changing it is not instant: the new
@@ -701,7 +701,7 @@ void OSD::draw_canopy_hud(const CanopyIn& in) {
             const float s = b[i], e = b[i + 1];
             if (e - s <= 1e-4f) continue;
             const float* c = (0.5f * (s + e) < cut) ? head : tail;
-            draw_fade_rule(X(s), y, X(e), y, th, A(s), c[0], c[1], c[2], A(e));
+            canvas_->fade_rule(X(s), y, X(e), y, th, A(s), c[0], c[1], c[2], A(e));
         }
     };
 
@@ -743,7 +743,7 @@ void OSD::draw_canopy_hud(const CanopyIn& in) {
         }
         float wa[4];
         for (int i = 0; i < 4; i++) wa[i] = kWedgeA[i] * f_shade * idle_dim;
-        draw_fade_wedge(xs, tops, bots, wa, 4, kShadeR, kShadeG, kShadeB);
+        canvas_->fade_wedge(xs, tops, bots, wa, 4, kShadeR, kShadeG, kShadeB);
     }
 
     // Where the state label sits: level with the current figure in the
@@ -756,10 +756,10 @@ void OSD::draw_canopy_hud(const CanopyIn& in) {
     if (in.rec_active) {
         float x = LXo(kEdge), y = MY(440.0f);
         float d = 9.0f * U;
-        draw_poly({{x, y}, {x + d, y}, {x + d, y + d}, {x, y + d}},
+        canvas_->poly({{x, y}, {x + d, y}, {x + d, y + d}, {x, y + d}},
                   1.0f, 0.95f, 0.15f, 0.15f);
         snprintf(buf, sizeof(buf), "REC %u:%02u", in.rec_secs / 60, in.rec_secs % 60);
-        draw_text(buf, x + d + 8.0f * U, MY(442.0f), T_ROW, false, 1.0f, 0.35f, 0.35f);
+        canvas_->text(buf, x + d + 8.0f * U, MY(442.0f), T_ROW, false, 1.0f, 0.35f, 0.35f);
     }
 
     // Headline: voltage, then current in the small slot. Voltage is per cell by
@@ -772,25 +772,25 @@ void OSD::draw_canopy_hud(const CanopyIn& in) {
         float vv    = (volt_mode == 1) ? in.bf.pack_v      : in.bf.cell_v;
         if (have_v) {
             snprintf(buf, sizeof(buf), "%.2f", vv);
-            draw_text(buf, x, BL(base, T_BIG), T_BIG, false,
+            canvas_->text(buf, x, BL(base, T_BIG), T_BIG, false,
                       kWhiteR * dim, kWhiteG * dim, kWhiteB * dim);
             x += num_adv(buf, T_BIG);
-            draw_text("V", x, BL(base, T_UNIT), T_UNIT, false, ur, ug, ub);
-            x += text_width("V", T_UNIT) + 10.0f * U;
+            canvas_->text("V", x, BL(base, T_UNIT), T_UNIT, false, ur, ug, ub);
+            x += canvas_->text_width("V", T_UNIT) + 10.0f * U;
         } else {
-            draw_text("--", x, BL(base, T_BIG), T_BIG, false, 0.45f, 0.45f, 0.45f);
-            x += text_width("--", T_BIG) + 10.0f * U;
+            canvas_->text("--", x, BL(base, T_BIG), T_BIG, false, 0.45f, 0.45f, 0.45f);
+            x += canvas_->text_width("--", T_BIG) + 10.0f * U;
         }
         if (in.bf.have_amps) {
-            draw_text("\xE2\x80\xA2", x, BL(base, T_UNIT), T_UNIT, false,
+            canvas_->text("\xE2\x80\xA2", x, BL(base, T_UNIT), T_UNIT, false,
                       dim * 0.42f, dim * 0.42f, dim * 0.42f);
-            x += text_width("\xE2\x80\xA2", T_UNIT) + 10.0f * U;
+            x += canvas_->text_width("\xE2\x80\xA2", T_UNIT) + 10.0f * U;
             state_x = x;                            // the state label lines up here
             snprintf(buf, sizeof(buf), "%.1f", in.bf.amps);
-            draw_text(buf, x, BL(base, T_UNIT), T_UNIT, false,
+            canvas_->text(buf, x, BL(base, T_UNIT), T_UNIT, false,
                       dim * 0.82f, dim * 0.82f, dim * 0.82f);
             x += num_adv(buf, T_UNIT);
-            draw_text("A", x, BL(base, T_SMALL), T_SMALL, false, ur, ug, ub);
+            canvas_->text("A", x, BL(base, T_SMALL), T_SMALL, false, ur, ug, ub);
         }
     }
 
@@ -821,7 +821,7 @@ void OSD::draw_canopy_hud(const CanopyIn& in) {
             // against the voltage, which put it far closer to the big number
             // than to anything it belongs with.
             float lx    = (state_x - LX) / UX;       // back to design units
-            float tw_px = text_width(tag, T_STATE) / UX;
+            float tw_px = canvas_->text_width(tag, T_STATE) / UX;
             float gap_a = lx - 8.0f, gap_b = lx + tw_px + 10.0f;
             rule(true, -kBleed, gap_a, y, 2.2f * U, kRailAlpha);
             if (gap_b < kFrameEnd)
@@ -835,7 +835,7 @@ void OSD::draw_canopy_hud(const CanopyIn& in) {
             // Centred on the rail: half the glyph height sits below the line,
             // half above, so growing the label does not walk it off the rule.
             float half_px = (T_STATE / U) * 0.5f;
-            draw_text(tag, LXo(lx), MY(456.0f + half_px), T_STATE, false, lc[0], lc[1], lc[2]);
+            canvas_->text(tag, LXo(lx), MY(456.0f + half_px), T_STATE, false, lc[0], lc[1], lc[2]);
         } else {
             // No label to interrupt it (no flight controller talking): the rail runs the
             // full length, to the same boundary as the other rails and the right panel's,
@@ -876,22 +876,22 @@ void OSD::draw_canopy_hud(const CanopyIn& in) {
         // Track names sit at the same strength as the track they name - they
         // are part of the gauge, not a caption under it, and held back at
         // 0.55/0.62 they read as disabled next to a lit bar.
-        draw_text("CELL", LXo(kEdge), MY(527.0f), T_LABEL, false,
+        canvas_->text("CELL", LXo(kEdge), MY(527.0f), T_LABEL, false,
                   kWhiteR * dim, kWhiteG * dim, kWhiteB * dim);
         // The track starts a fixed gap after the widest of the two names, not
         // at a hard-coded inset. The inset was a guess at how wide the labels
         // would render, and this font is condensed and unspaced where the
         // design's was not - so the guess left a third of the panel empty
         // between a name and the thing it names. Measure instead.
-        float lab_w = fmaxf(text_width("CELL", T_LABEL), text_width("SAG", T_LABEL));
+        float lab_w = fmaxf(canvas_->text_width("CELL", T_LABEL), canvas_->text_width("SAG", T_LABEL));
         float tx0   = LXo(kEdge) + lab_w + kLabelGap * UX;
         float tw    = LXo(271.0f) - tx0;
-        draw_seg_track(tx0, MY(525.0f), tw, 9.0f * U, kSegsMain,
+        canvas_->seg_track(tx0, MY(525.0f), tw, 9.0f * U, kSegsMain,
                        lvl, true, kCyanR, kCyanG, kCyanB, 0.70f * dim, 1.00f * dim,
                        f_block);
-        draw_text("SAG", LXo(kEdge), MY(537.0f), T_LABEL, false,
+        canvas_->text("SAG", LXo(kEdge), MY(537.0f), T_LABEL, false,
                   kLimeR * dim, kLimeG * dim, kLimeB * dim);
-        draw_seg_track(tx0, MY(534.0f), tw, 4.0f * U, kSegsMain,
+        canvas_->seg_track(tx0, MY(534.0f), tw, 4.0f * U, kSegsMain,
                        sag, true, kLimeR, kLimeG, kLimeB, 0.60f * dim, 1.00f * dim,
                        f_block);
     }
@@ -920,7 +920,7 @@ void OSD::draw_canopy_hud(const CanopyIn& in) {
         if (!t) return;
         float h = ih, w = ih * asp;
         if (w > iw) { w = iw; h = iw / asp; }
-        draw_icon(t, x + (iw - w) * 0.5f, IY(base, T_ROW, h), w, h, r, g, b);
+        canvas_->icon(t, x + (iw - w) * 0.5f, IY(base, T_ROW, h), w, h, r, g, b);
     };
     // Icon and label are one object, so they share a colour - and that colour
     // is the theme's text white, the same one the voltage reading above uses.
@@ -937,18 +937,18 @@ void OSD::draw_canopy_hud(const CanopyIn& in) {
         icon(VecIcon::Drone, x, base, ir, ig, ib);
         x += iw + igap;
         if (in.bf.have_mode) {
-            draw_text(in.bf.mode, x, BL(base, T_ROW), T_ROW, false, tr, tg, tb);
-            x += text_width(in.bf.mode, T_ROW) + igap;
+            canvas_->text(in.bf.mode, x, BL(base, T_ROW), T_ROW, false, tr, tg, tb);
+            x += canvas_->text_width(in.bf.mode, T_ROW) + igap;
         }
         if (in.dist_m >= 0) {
-            draw_text("\xE2\x80\xA2", x, BL(base, T_ROW), T_ROW, false,
+            canvas_->text("\xE2\x80\xA2", x, BL(base, T_ROW), T_ROW, false,
                       tr * 0.68f, tg * 0.68f, tb * 0.68f);
-            x += text_width("\xE2\x80\xA2", T_ROW) + igap;
+            x += canvas_->text_width("\xE2\x80\xA2", T_ROW) + igap;
             icon(VecIcon::Distance, x, base, ir, ig, ib);
             x += iw + igap;
             if (in.dist_m >= 1000) snprintf(buf, sizeof(buf), "%.2fkm", in.dist_m / 1000.0f);
             else                   snprintf(buf, sizeof(buf), "%dm", in.dist_m);
-            draw_text(buf, x, BL(base, T_ROW), T_ROW, false, tr, tg, tb);
+            canvas_->text(buf, x, BL(base, T_ROW), T_ROW, false, tr, tg, tb);
         }
     }
 
@@ -964,8 +964,8 @@ void OSD::draw_canopy_hud(const CanopyIn& in) {
         snprintf(buf, sizeof(buf), "VRX %.0fC", in.vrx_temp_c);
         float vr, vg, vb;
         temp_rgb(in.vrx_temp_c, tr, tg, tb, vr, vg, vb);
-        draw_text(buf, x, BL(base, T_ROW), T_ROW, false, vr, vg, vb);
-        x += text_width(buf, T_ROW);              // the end of what is drawn so far
+        canvas_->text(buf, x, BL(base, T_ROW), T_ROW, false, vr, vg, vb);
+        x += canvas_->text_width(buf, T_ROW);              // the end of what is drawn so far
 
         // The goggle's own supply, beside its temperature - the two readings
         // that are about this unit rather than the aircraft. Drawn only when
@@ -978,8 +978,8 @@ void OSD::draw_canopy_hud(const CanopyIn& in) {
             float br, bg, bb;
             volt_rgb(pc, tr, tg, tb, br, bg, bb);
             snprintf(buf, sizeof(buf), "%.1fV", in.vrx_volts);
-            draw_text(buf, x, BL(base, T_ROW), T_ROW, false, br, bg, bb);
-            x += text_width(buf, T_ROW);
+            canvas_->text(buf, x, BL(base, T_ROW), T_ROW, false, br, bg, bb);
+            x += canvas_->text_width(buf, T_ROW);
         }
 
         // The goggle's WiFi access point on: a 2.4 GHz transmitter beside the
@@ -987,7 +987,7 @@ void OSD::draw_canopy_hud(const CanopyIn& in) {
         // In the theme's accent, the colour of live state.
         if (in.wifi_on) {
             x += igap * 1.6f;
-            draw_text("WIFI", x, BL(base, T_ROW), T_ROW, false, kLimeR * dim, kLimeG * dim, kLimeB * dim);
+            canvas_->text("WIFI", x, BL(base, T_ROW), T_ROW, false, kLimeR * dim, kLimeG * dim, kLimeB * dim);
         }
     }
 
@@ -1011,7 +1011,7 @@ void OSD::draw_canopy_hud(const CanopyIn& in) {
         }
         float wa[4];
         for (int i = 0; i < 4; i++) wa[i] = kWedgeA[i] * f_shade * idle_dim;
-        draw_fade_wedge(xs, tops, bots, wa, 4, kShadeR, kShadeG, kShadeB);
+        canvas_->fade_wedge(xs, tops, bots, wa, 4, kShadeR, kShadeG, kShadeB);
     }
     // STANDBY's geometry, worked out here rather than down in the rail block
     // because the reveal below is derived from it. lx puts STANDBY's first
@@ -1027,8 +1027,8 @@ void OSD::draw_canopy_hud(const CanopyIn& in) {
     // jitter across a 65+ unit range frame to frame.
     const char* kStandbyTag = "STANDBY";
     constexpr float kCornerX = 300.0f;
-    const float sb_disarmed_end = (kEdge + 46.0f) + text_width("DISARMED", T_STATE) / UX;
-    const float sb_tw_px = text_width(kStandbyTag, T_STATE) / UX;
+    const float sb_disarmed_end = (kEdge + 46.0f) + canvas_->text_width("DISARMED", T_STATE) / UX;
+    const float sb_tw_px = canvas_->text_width(kStandbyTag, T_STATE) / UX;
     const float sb_lx    = sb_disarmed_end - sb_tw_px;
 
     // Drives STANDBY's wipe-reveal (draw_text_wipe, below): unlike ARMED/
@@ -1077,7 +1077,7 @@ void OSD::draw_canopy_hud(const CanopyIn& in) {
             // there is no distance reading when the link is down - which is
             // the only time this label is drawn.
             const float lx = 150.0f;
-            float tw_px = text_width(tag, T_STATE) / UX;
+            float tw_px = canvas_->text_width(tag, T_STATE) / UX;
             // The gap opens from the middle of where the word will be, so the
             // rail parts around the label rather than the label appearing in a
             // hole that was already waiting for it.
@@ -1093,7 +1093,7 @@ void OSD::draw_canopy_hud(const CanopyIn& in) {
             // with everything else would hide the answer along with the
             // question. draw_text has no alpha, so this is the fade.
             float half_px = (T_STATE / U) * 0.5f;
-            draw_text(tag, RXo(lx), MY(456.0f + half_px), T_STATE, true,
+            canvas_->text(tag, RXo(lx), MY(456.0f + half_px), T_STATE, true,
                       kIdleR * mark, kIdleG * mark, kIdleB * mark);
         } else if (standby_reveal > 0.0f) {
             // Same slot IDLE uses, for the one other state worth breaking
@@ -1134,7 +1134,7 @@ void OSD::draw_canopy_hud(const CanopyIn& in) {
             if (gap_b < kFrameEnd)
                 rule(false, gap_b, kFrameEnd, y, 2.2f * U, kRailAlpha);
             float half_px = (T_STATE / U) * 0.5f;
-            draw_text_wipe(tag, RXo(lx), MY(456.0f + half_px), T_STATE, true,
+            canvas_->text_wipe(tag, RXo(lx), MY(456.0f + half_px), T_STATE, true,
                            kRestR, kRestG, kRestB, standby_reveal);
         } else {
             // Same boundary every other rail on this instrument stops at -
@@ -1152,24 +1152,24 @@ void OSD::draw_canopy_hud(const CanopyIn& in) {
         float x    = RXo(kEdge);
         float base = MY(512.0f) + 0.25f * T_BIG;   // one baseline for the row
         if (in.bf.have_speed) {
-            draw_text("km/h", x, BL(base, T_SMALL), T_SMALL, true, lur, lug, lub);
-            x -= text_width("km/h", T_SMALL);
+            canvas_->text("km/h", x, BL(base, T_SMALL), T_SMALL, true, lur, lug, lub);
+            x -= canvas_->text_width("km/h", T_SMALL);
             snprintf(buf, sizeof(buf), "%.0f", in.bf.speed_kmh);
-            draw_text(buf, x, BL(base, T_BIG), T_BIG, true,
+            canvas_->text(buf, x, BL(base, T_BIG), T_BIG, true,
                       kWhiteR * dim, kWhiteG * dim, kWhiteB * dim);
-            x -= text_width(buf, T_BIG) + 10.0f * U;
+            x -= canvas_->text_width(buf, T_BIG) + 10.0f * U;
         } else {
-            draw_text("--", x, BL(base, T_BIG), T_BIG, true, 0.45f, 0.45f, 0.45f);
-            x -= text_width("--", T_BIG) + 10.0f * U;
+            canvas_->text("--", x, BL(base, T_BIG), T_BIG, true, 0.45f, 0.45f, 0.45f);
+            x -= canvas_->text_width("--", T_BIG) + 10.0f * U;
         }
         if (in.dist_m >= 0) {
-            draw_text("\xE2\x80\xA2", x, BL(base, T_UNIT), T_UNIT, true,
+            canvas_->text("\xE2\x80\xA2", x, BL(base, T_UNIT), T_UNIT, true,
                       ldim * 0.42f, ldim * 0.42f, ldim * 0.42f);
-            x -= text_width("\xE2\x80\xA2", T_UNIT) + 10.0f * U;
-            draw_text("m", x, BL(base, T_SMALL), T_SMALL, true, lur, lug, lub);
-            x -= text_width("m", T_SMALL);
+            x -= canvas_->text_width("\xE2\x80\xA2", T_UNIT) + 10.0f * U;
+            canvas_->text("m", x, BL(base, T_SMALL), T_SMALL, true, lur, lug, lub);
+            x -= canvas_->text_width("m", T_SMALL);
             snprintf(buf, sizeof(buf), "%d", in.dist_m);
-            draw_text(buf, x, BL(base, T_UNIT), T_UNIT, true,
+            canvas_->text(buf, x, BL(base, T_UNIT), T_UNIT, true,
                       ldim * 0.82f, ldim * 0.82f, ldim * 0.82f);
         }
     }
@@ -1185,12 +1185,12 @@ void OSD::draw_canopy_hud(const CanopyIn& in) {
         float rc = 0.0f;
         bool have_rc = false;
         if (in.bf.have_lq) { rc = in.bf.lq_pct / 100.0f; have_rc = true; }
-        draw_text("RC", RXo(kEdge), MY(527.0f), T_LABEL, true,
+        canvas_->text("RC", RXo(kEdge), MY(527.0f), T_LABEL, true,
                   kWhiteR * ldim, kWhiteG * ldim, kWhiteB * ldim);
-        float rlab_w = fmaxf(text_width("RC", T_LABEL), text_width("VIDEO", T_LABEL));
+        float rlab_w = fmaxf(canvas_->text_width("RC", T_LABEL), canvas_->text_width("VIDEO", T_LABEL));
         float rx0    = RXo(271.0f);
         float rtw    = (RXo(kEdge) - rlab_w - kLabelGap * UX) - rx0;
-        draw_seg_track(rx0, MY(525.0f), rtw, 9.0f * U, kSegsMain,
+        canvas_->seg_track(rx0, MY(525.0f), rtw, 9.0f * U, kSegsMain,
                        have_rc ? rc : 0.0f, false, kCyanR, kCyanG, kCyanB,
                        0.70f * ldim, 1.00f * ldim, f_block);
         // Amber, then red, with the screen-edge warning (see link_warn_hold):
@@ -1198,9 +1198,9 @@ void OSD::draw_canopy_hud(const CanopyIn& in) {
         float vr = kLimeR, vg = kLimeG, vb = kLimeB;
         if (in.link_warn >= 2)      { vr = 1.0f; vg = 0.30f; vb = 0.25f; }
         else if (in.link_warn == 1) { vr = 1.0f; vg = 0.72f; vb = 0.15f; }
-        draw_text("VIDEO", RXo(kEdge), MY(537.0f), T_LABEL, true,
+        canvas_->text("VIDEO", RXo(kEdge), MY(537.0f), T_LABEL, true,
                   vr * ldim, vg * ldim, vb * ldim);
-        draw_seg_track(rx0, MY(534.0f), rtw, 4.0f * U, kSegsThin,
+        canvas_->seg_track(rx0, MY(534.0f), rtw, 4.0f * U, kSegsThin,
                        in.mcs_norm, false, vr, vg, vb,
                        0.55f * ldim, 0.85f * ldim, f_block);
     }
@@ -1246,16 +1246,16 @@ void OSD::draw_canopy_hud(const CanopyIn& in) {
         // already coloured for the rest of the line.
         if (lead[0] && tp[0]) {
             const float by = BL(base, T_ROW);
-            draw_text(tp, x, by, T_ROW, true, vtxr, vtxg, vtxb);
+            canvas_->text(tp, x, by, T_ROW, true, vtxr, vtxg, vtxb);
             char with_sep[56];
             snprintf(with_sep, sizeof(with_sep), "%s \xE2\x80\xA2 ", lead);
-            draw_text(with_sep, x - text_width(tp, T_ROW), by, T_ROW, true, ltr, ltg, ltb);
+            canvas_->text(with_sep, x - canvas_->text_width(tp, T_ROW), by, T_ROW, true, ltr, ltg, ltb);
         } else if (lead[0]) {
-            draw_text(lead, x, BL(base, T_ROW), T_ROW, true, ltr, ltg, ltb);
+            canvas_->text(lead, x, BL(base, T_ROW), T_ROW, true, ltr, ltg, ltb);
         } else if (tp[0]) {
             char solo[24];
             snprintf(solo, sizeof(solo), "VTX %s", tp);
-            draw_text(solo, x, BL(base, T_ROW), T_ROW, true, vtxr, vtxg, vtxb);
+            canvas_->text(solo, x, BL(base, T_ROW), T_ROW, true, vtxr, vtxg, vtxb);
         }
     }
 
@@ -1303,14 +1303,14 @@ void OSD::draw_canopy_hud(const CanopyIn& in) {
         float x    = RXo(kEdge) - iw;
         icon(VecIcon::Goggles, x, base, lir, lig, lib);
         x -= igap;
-        draw_text(buf, x, BL(base, T_ROW), T_ROW, true, ltr, ltg, ltb);
+        canvas_->text(buf, x, BL(base, T_ROW), T_ROW, true, ltr, ltg, ltb);
     }
 
     // HUD > Debug Info: one line under the panel's bottom rail (596), lined
     // up with the rows' text.
     if (in.debug[0]) {
         const float base = MY(612.0f) + 0.25f * T_LABEL;
-        draw_text(in.debug, RXo(kEdge) - iw - igap, BL(base, T_LABEL), T_LABEL, true, ltr, ltg, ltb);
+        canvas_->text(in.debug, RXo(kEdge) - iw - igap, BL(base, T_LABEL), T_LABEL, true, ltr, ltg, ltb);
     }
 }
 
@@ -1338,10 +1338,10 @@ void OSD::draw_canopy_pick(const CanopyIn& in, float pick) {
         const float* lc = on ? TH.text : TH.quiet;
         const float x = left ? F.LXo(kEdge) : F.RXo(kEdge);
         if (a_alpha_factor_ != -1) glVertexAttrib1f(a_alpha_factor_, pick);
-        draw_text(left ? "<  GROUND UNIT" : "AIR UNIT  >", x, BL(name_base, T_NAME), T_NAME, !left,
+        canvas_->text(left ? "<  GROUND UNIT" : "AIR UNIT  >", x, BL(name_base, T_NAME), T_NAME, !left,
                   nc[0], nc[1], nc[2]);
         if (a_alpha_factor_ != -1) glVertexAttrib1f(a_alpha_factor_, pick * (on ? 0.85f : 0.6f));
-        draw_text(left ? "HUD   DISPLAY   DVR   SYSTEM" : "VIDEO   RADIO   SERIAL   INFO", x, BL(list_base, T_LIST), T_LIST, !left,
+        canvas_->text(left ? "HUD   DISPLAY   DVR   SYSTEM" : "VIDEO   RADIO   SERIAL   INFO", x, BL(list_base, T_LIST), T_LIST, !left,
                   lc[0], lc[1], lc[2]);
     }
     if (a_alpha_factor_ != -1) glVertexAttrib1f(a_alpha_factor_, 1.0f);

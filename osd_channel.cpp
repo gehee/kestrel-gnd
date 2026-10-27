@@ -34,6 +34,7 @@
 
 #include "osd.hpp"
 #include "artosyn/ar8030_source.hpp"
+#include "hud/state.hpp"
 #include "hud_theme.hpp"
 #include "zones.hpp"
 #include "utils/time_util.h"
@@ -77,7 +78,7 @@ int OSD::chan_bw_mhz() const {
 
 // The power the air unit sends at, in mW; an AUTO level counts as its cap.
 int OSD::chan_tx_mw() const {
-    const ar_pwr_level& l = kArPwrLevels[ar_pwr_index(Ar8030Source::tx_power_mw)];
+    const ar_pwr_level& l = kArPwrLevels[ar_pwr_index(hud::read_radio().tx_power_mw)];
     return l.automode ? l.mw - 1 : l.mw;
 }
 
@@ -89,13 +90,13 @@ const char* const kModeName[kPre] = { "AUTO", "AUTO HOP" };
 // How many of the radio's channels AUTO may use where the pilot is (0: AUTO is not offered).
 static int auto_channels(const chan_scan_info& sc) {
     int k = 0;
-    for (int i = 0; i < std::min(std::max(sc.chan_num, 0), 64); i++) k += Ar8030Source::region_usable(sc.freq_mhz[i]);
+    for (int i = 0; i < std::min(std::max(sc.chan_num, 0), 64); i++) k += hud::channel_usable(sc.freq_mhz[i]);
     return k;
 }
 
 // The mode in force: -1 FIXED (a channel picked, or no automatic mode offered), 0 AUTO, 1 AUTO HOP.
 static int chan_mode(const chan_scan_info& sc, int auto_n) {
-    return sc.auto_mode && auto_n > 0 ? Ar8030Source::chan_hop.load() : -1;
+    return sc.auto_mode && auto_n > 0 ? hud::read_radio().chan_hop : -1;
 }
 
 // The country whose rules apply (-1: no time zone set), and whether any are known for it.
@@ -159,12 +160,12 @@ void OSD::chan_open() {
     chan_bars_set_ = false;
     chan_shown_us_ = 0;
     chan_anim_us_ = 0;
-    if (cmd_cb) cmd_cb(0x200, 1);   // poll the scan fast while it is open
+    if (act_) act_(hud::action::ScanScreen{true});   // poll the scan fast while it is open
 }
 
 void OSD::chan_close() {
     menu_scan_open = false;
-    if (cmd_cb) cmd_cb(0x200, 0);   // back to slow background polling
+    if (act_) act_(hud::action::ScanScreen{false});   // back to slow background polling
 }
 
 // A key while the page is open. Called under osd_mutex.
@@ -200,10 +201,10 @@ void OSD::chan_key(int key) {
         }
         if (chan_mode(sc, auto_n) == want) return;
         printf("channel page: %s\n", kModeName[want]);
-        if (cmd_cb) cmd_cb(0x322, want);   // saved; its pick is made now
+        if (act_) act_(hud::action::ChannelHop{want == 1});   // saved; its pick is made now
         if (!sc.auto_mode) {               // from a picked channel: the ground searches again
             menu_ar_hop = true;
-            if (cmd_cb) cmd_cb(0x316, 1);
+            if (act_) act_(hud::action::RfControl{Ar8030Source::RF_HOP, 1});
         }
         return;
     }
@@ -217,7 +218,7 @@ void OSD::chan_key(int key) {
     const int mhz = sc.freq_mhz[ci];
     if (mhz > 0) {
         printf("channel page: moving the link to %d MHz\n", mhz);
-        Ar8030Source::request_rf(Ar8030Source::RF_CHAN, mhz * 1000);
+        if (act_) act_(hud::action::RfControl{Ar8030Source::RF_CHAN, mhz * 1000});
         menu_ar_hop = false;
     }
 }

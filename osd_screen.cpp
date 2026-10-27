@@ -143,7 +143,7 @@ void OSD::px_hatch(float x, float y, float w, float h, const float* c, float a, 
 }
 
 float OSD::px_text_w(const char* s, float font_px) {
-    return text_width(s, font_px * 1.6f);   // the texture is drawn at 40 px in 64
+    return canvas_->text_width(s, font_px * 1.6f);   // the texture is drawn at 40 px in 64
 }
 
 // align: 0 left of x, 1 centred on it, 2 right of it. `baseline` is where the

@@ -29,6 +29,7 @@ extern "C" {
 #include "drm.hpp"
 #include "osd.hpp"
 #include "hal/decoder.hpp"
+#include "hud/actions.hpp"
 #include "render/gl_context.hpp"
 #include "renderer.hpp"
 #include "utils/ltrace.hpp"
@@ -1119,125 +1120,7 @@ int main(int argc, char **argv)
     }
 
     if (osd) {
-        osd->set_command_callback([&](int cmd, int val) {
-            switch(cmd) {
-                case 0x200: // UI-local: channel-scan screen open/close → fast/slow chan_info polling
-                    Ar8030Source::scan_active = (val != 0);
-                    break;
-                case 0x311: case 0x312: case 0x313: case 0x314: case 0x315:
-                case 0x316:
-                    // AR8030 RF controls from the RF LINK tab (cmd - 0x310).
-                    Ar8030Source::request_rf(cmd - 0x310, val);
-                    return;
-                case 0x201: // UI-local: HUD > Debug Info - the logs on the card and the air unit's
-                    sd_log::set_enabled(val != 0);
-                    Ar8030Source::air_logs = val != 0;
-                    Ar8030Source::request_setting(Ar8030Source::CAM_AIR_LOGS, val != 0);
-                    return;
-                case 0x30E:
-                    // RF menu, Max Bitrate: kept here and sent at every link-up.
-                    Ar8030Source::max_kbps = val;
-                    Settings::getInstance().set("ar8030_max_kbps", val);
-                    Ar8030Source::request_setting(Ar8030Source::CAM_MAX_KBPS, val);
-                    return;
-                case 0x30F: {
-                    // RF menu, Max Bandwidth: kept here (and sent to a kestrel-air
-                    // that takes it, at every link-up). Open8030 here: our radio
-                    // takes it live (SET 22), 5 to 40 MHz. Stock: the goggle's
-                    // radio config caps the width (bb_only.sh picks it from this
-                    // setting), loaded with the radio: a change restarts the
-                    // radio, and kestrel-gnd with it, as the driver cannot go
-                    // while kestrel-gnd holds it - from a shell of its own.
-                    if (Ar8030Source::radio_fw == 1) {
-                        Ar8030Source::max_bw_mhz = val == 0 || val == 5 || val == 10 || val == 20 ? val : 40;
-                        Settings::getInstance().set("ar8030_max_bw_mhz", Ar8030Source::max_bw_mhz);
-                        Ar8030Source::request_setting(Ar8030Source::CAM_MAX_BW,
-                            Ar8030Source::max_bw_mhz == 0 || Ar8030Source::max_bw_mhz >= 40 ? 40 : 20);
-                        Ar8030Source::caps_live.store(true);
-                        Ar8030Source::caps_due.store(true);
-                        Ar8030Source::region_changed();   // AUTO's channels are judged within this cap
-                        return;
-                    }
-                    const int was = Ar8030Source::max_bw_mhz;
-                    Ar8030Source::max_bw_mhz = (val == 20) ? 20 : 40;
-                    Settings::getInstance().set("ar8030_max_bw_mhz", Ar8030Source::max_bw_mhz);
-                    Ar8030Source::request_setting(Ar8030Source::CAM_MAX_BW, Ar8030Source::max_bw_mhz);
-                    if (Ar8030Source::max_bw_mhz != was) {
-                        printf("menu: max bandwidth %d MHz - restarting the radio with it\n", Ar8030Source::max_bw_mhz);
-                        fflush(stdout);
-                        Settings::getInstance().flush();   // bb_only.sh reads it
-                        if (system("setsid sh -c '/etc/init.d/S70kestrel stop; /etc/init.d/S60ar8030 restart; "
-                                   "sleep 2; /etc/init.d/S70kestrel start' </dev/null >/dev/null 2>&1 &") != 0)
-                            printf("menu: could not restart the radio\n");
-                    }
-                    return;
-                }
-                case 0x309: {
-                    // RADIO > VRX Radio Firmware: which baseband firmware bb_only.sh
-                    // uploads with the radio (0 stock, 1 Open8030, when its image
-                    // is on the unit). Loaded with the radio, so a change restarts
-                    // the radio and kestrel-gnd, as Max Bandwidth does.
-                    const int was = Ar8030Source::radio_fw;
-                    Ar8030Source::radio_fw = val == 1 ? 1 : 0;
-                    Settings::getInstance().set("ar8030_firmware", Ar8030Source::radio_fw);
-                    if (Ar8030Source::radio_fw != was) {
-                        printf("menu: radio firmware %s - restarting the radio with it\n",
-                               Ar8030Source::radio_fw ? "Open8030" : "stock");
-                        fflush(stdout);
-                        Settings::getInstance().flush();   // bb_only.sh reads it
-                        if (system("setsid sh -c '/etc/init.d/S70kestrel stop; /etc/init.d/S60ar8030 restart; "
-                                   "sleep 2; /etc/init.d/S70kestrel start' </dev/null >/dev/null 2>&1 &") != 0)
-                            printf("menu: could not restart the radio\n");
-                    }
-                    return;
-                }
-                case 0x320:
-                    // RADIO > Max MCS (Open8030 here): the highest MCS our radio's
-                    // receive policy may use, -1 none. Live; again at every link-up.
-                    Ar8030Source::max_mcs = val >= 0 && val <= 13 ? val : -1;
-                    Settings::getInstance().set("ar8030_max_mcs", Ar8030Source::max_mcs);
-                    Ar8030Source::caps_live.store(true);
-                    Ar8030Source::caps_due.store(true);
-                    return;
-                case 0x322:
-                    // Channel page: AUTO (0) or AUTO HOP (1). Saved; picks now.
-                    Ar8030Source::chan_hop = val == 1 ? 1 : 0;
-                    Settings::getInstance().set("ar8030_chan_hop", Ar8030Source::chan_hop.load());
-                    Ar8030Source::region_pick = true;
-                    Ar8030Source::region_changed();
-                    return;
-                case 0x321:
-                    // RADIO > Steady Latency (Open8030 here): a block the air radio
-                    // sent again steps our radio's MCS down. Live; again at link-up.
-                    Ar8030Source::steady = val == 1 ? 1 : 0;
-                    Settings::getInstance().set("ar8030_steady", Ar8030Source::steady);
-                    Ar8030Source::caps_live.store(true);
-                    Ar8030Source::caps_due.store(true);
-                    return;
-                case 0x30A:
-                    // RF menu, Radio Frame: kept here, sent now and after every link-up.
-                    Ar8030Source::frame_mode = (val == 0) ? 0 : 2;
-                    Settings::getInstance().set("ar8030_frame_mode", Ar8030Source::frame_mode);
-                    Ar8030Source::frame_mode_changed.store(true);
-                    return;
-                case 0x301: case 0x302: case 0x303: case 0x304:
-                case 0x305: case 0x306: case 0x307: case 0x308:
-                case 0x30B: case 0x30C: case 0x30D:
-                    // AR8030 camera settings from the VIDEO tab. The field ids
-                    // line up with Ar8030Source::CamField (cmd - 0x300).
-                    Ar8030Source::request_setting(cmd - 0x300, val);
-                    return;
-                case 0x01:
-                    // Video mode. With the AR8030 the camera is reached over the
-                    // baseband's port-2 control socket (SET_CHN_RES), not the
-                    // kestrel-air UDP link, and it has its own list of modes.
-                    Ar8030Source::request_mode_index(val);
-                    return;
-                default:
-                    printf("Unknown command 0x%x = %d\n", cmd, val);
-                    return;
-            }
-        });
+        osd->set_action_handler(hud::dispatch);
 
     }
     pthread_t tid_dvr;
