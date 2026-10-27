@@ -40,8 +40,9 @@ extern "C" uint64_t gbm_bo_get_modifier(struct gbm_bo *bo);
 #include "msp/betaflight_glyphs.hpp"
 #include "kestrel_gnd_config.h"
 #include "render/gl_context.hpp"
-#include "hal/probe.hpp"
+#include "bsp/bsp.hpp"
 #include "hud/state.hpp"
+#include "hal/caps.hpp"
 #include "render/canvas_gles.hpp"
 
 
@@ -2929,7 +2930,7 @@ void OSD::render_gl() {
         // Stock samples about every 400ms and discards the first conversion
         // of each cycle; both are copied here because a steep divider turns
         // one bad count into many millivolts.
-        const bsp::SupplyAdc &supply = hal::board().supply;
+        const bsp::SupplyAdc &supply = bsp::board().supply;
         const int vavg = supply.average > 0 && supply.average <= 16 ? supply.average : 1;
         static float    vrx_volts   = 0.0f;
         static uint64_t vrx_volts_ms = 0;
@@ -2938,7 +2939,7 @@ void OSD::render_gl() {
         uint64_t temp_now_ms = get_time_ms();
         if (temp_now_ms - vrx_temp_ms > 2000) {   // sysfs read - not every frame
             vrx_temp_ms = temp_now_ms;
-            FILE *tf = fopen(hal::board().thermal_zone, "r");
+            FILE *tf = fopen(bsp::board().thermal_zone, "r");
             if (tf) {
                 int millideg = 0;
                 if (fscanf(tf, "%d", &millideg) == 1) vrx_temp_c = millideg / 1000.0f;
@@ -4877,16 +4878,20 @@ std::vector<OSD::MenuItem> OSD::menu_items(int tab) const {
             // unless chasing latency or smoothness.
             {"ADVANCED", 2},
             {"Frame Mode", 1, "How pictures go from the radio to the screen."},  // see menu_help_text
-            {"Refresh Sync", 1, ""},                                              // see menu_help_text
         };
-        // Only while Refresh Sync is ON or FREE: with it OFF the margin does
-        // nothing. Sync To (kDispSyncSlice, after it: which slice the lock
-        // times the screen to) is hidden; display_lock_slice still applies.
-        if (menu_refresh_sync != 0)
+        // Refresh Sync only where the display controller's frame length can be
+        // set (hal::caps), and Sync Margin only while it is ON or FREE: with it
+        // OFF the margin does nothing. Sync To (kDispSyncSlice, after it: which
+        // slice the lock times the screen to) is hidden; display_lock_slice
+        // still applies.
+        if (hal::caps().phase_lock)
+            items.push_back({"Refresh Sync", 1, ""});                            // see menu_help_text
+        if (hal::caps().phase_lock && menu_refresh_sync != 0)
             items.push_back({"Sync Margin", 1, "Refresh Sync's refresh this much later. Fewer pictures miss their refresh (a hitch each), for that much latency: 2 MS, about a third fewer."});
     } else if (tab == kTabDvr) {
         items = {
-            {"Source", 1, "What REC captures: the FPV stream, or the screen."},  // see menu_help_text
+            // A reading where the screen cannot be recorded: FPV is all there is.
+            {"Source", hal::caps().screen_enc ? 1 : 0, "What REC captures: the FPV stream, or the screen."},  // see menu_help_text
             {"Folder", 0, "Where recordings are written."},
             {"Space Left", 0, "Room remaining on the recordings partition."}
         };
@@ -5460,7 +5465,7 @@ void OSD::menu_apply_change(int tab, int index, int dir) {
             // Only stages the choice: the display is set up once, at start,
             // so Enter saves it and restarts kestrel (below).
             menu_screen_mode = menu_step(screen_mode_menu(), dir, (int)screen_modes().size() + 1);
-        } else if (menu_index == 4 && wifi_ap_available()) {
+        } else if (menu_index == 4 && hal::caps().wifi_ap) {
             // Only stages the choice. Enter applies it (below, with DVR
             // Source), so turning the radio on always passes through the
             // pending state, whose help line is the antenna warning.
@@ -5742,7 +5747,7 @@ void OSD::menu_value_text(int tab, int i, char* val_buf, size_t cap) {
                 else
                     sprintf(val_buf, "< %s >", screen_mode_label(screen_mode_menu()).c_str());
             } else if (i == 4) {
-                if (wifi_ap_available())
+                if (hal::caps().wifi_ap)
                     sprintf(val_buf, "< %s >", menu_wifi_ap ? "ON" : "OFF");
                 else
                     sprintf(val_buf, "N/A");
@@ -6368,7 +6373,7 @@ void OSD::handle_key(int key) {
                     printf("menu: screen mode %s on trial - restarting to apply it\n", v);
                     kestrel_request_restart();
                 }
-                if (menu_index == 4 && wifi_ap_available()) {
+                if (menu_index == 4 && hal::caps().wifi_ap) {
                     wifi_ap_set(menu_wifi_ap != 0);   // for this session only
                 }
             }

@@ -2,6 +2,7 @@
 #define MINIMP4_IMPLEMENTATION
 
 #include "dvr/dvr.hpp"
+#include "hal/caps.hpp"
 #include <unistd.h>
 #include <time.h>
 #include <atomic>
@@ -144,8 +145,8 @@ int DVR::init(int frm_width, int frm_height) {
 		printf("DVR: no DRM device - screen recording unavailable\n");
 		return -1;
 	}
-	if (!hal::screen_compositor_available()) {
-		printf("DVR: no RGA (/dev/rga) - screen recording unavailable\n");
+	if (!hal::caps().screen_enc) {
+		printf("DVR: no screen compositor here (on the VRX Pro: RGA, /dev/rga) - screen recording unavailable\n");
 		return -1;
 	}
 	int fps;

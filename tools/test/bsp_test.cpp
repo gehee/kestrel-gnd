@@ -8,6 +8,7 @@
 #include <string>
 
 #include "bsp/bsp.hpp"
+#include "kestrel_gnd_features.h"
 #include "utils/vrx_buttons.hpp"
 
 static int fails;
@@ -171,7 +172,19 @@ static void test_bind() {
     for (int i = 0; i < 5; i++) CHECK(!missing.pressed());
 }
 
+// The build's box is the one board() gives.
+static void test_build_board() {
+    const std::string name = bsp::board().name;
+#if KESTREL_BOARD_VRXPRO
+    CHECK(name == "vrx_pro");
+#else
+    CHECK(name == "pc");
+#endif
+    CHECK(&bsp::board() == &bsp::board());
+}
+
 int main() {
+    test_build_board();
     test_vrx_pro_tables();
     test_pc_board_has_nothing();
     test_panel();

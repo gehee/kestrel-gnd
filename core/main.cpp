@@ -29,13 +29,14 @@ extern "C" {
 #include "display/drm.hpp"
 #include "hud/osd.hpp"
 #include "hal/decoder.hpp"
+#include "hal/caps.hpp"
 #include "kestrel_gnd_features.h"
 #include "hud/actions.hpp"
 #include "render/gl_context.hpp"
 #include "display/renderer.hpp"
 #include "utils/ltrace.hpp"
 #include "utils/vrx_buttons.hpp"
-#include "hal/probe.hpp"
+#include "bsp/bsp.hpp"
 #include "radio/ar8030_source.hpp"
 #include "radio/bb_watchdog.hpp"
 #include "radio/bb_client.h"
@@ -142,7 +143,7 @@ void sig_handler(int signum)
 void* vrx_button_thread_func(void* arg) {
 	OSD* osd = (OSD*)arg;
 	SchedulingHelper::set_thread_params_max_realtime("VRX_BTN", 10);
-	VrxButtons buttons(hal::board().buttons);
+	VrxButtons buttons(bsp::board().buttons);
 	// The signal handler only sets a flag: DvrRecorder::toggle() takes a lock
 	// and opens files, none of which is safe to do inside a signal.
 	auto service_rec_signal = [&]() {
@@ -162,7 +163,7 @@ void* vrx_button_thread_func(void* arg) {
 	// Polled on this same thread because it is the same kind of device and the
 	// cadence suits it; see utils/vrx_buttons.hpp for why it is read directly
 	// rather than through its input device.
-	VrxBindButton bind_button(hal::board().bind);
+	VrxBindButton bind_button(bsp::board().bind);
 	const bool have_bind = bind_button.available();
 	printf("VRX buttons: bind button %s\n",
 	       have_bind ? "active (ADC)" : "NOT readable - bind via the menu");
@@ -657,7 +658,9 @@ int main(int argc, char **argv)
 	}
 	// RADIO > VRX Radio Firmware: Open8030 when its image is on the unit, unless
 	// the menu said STOCK (0) - as bb_only.sh decides what it uploads.
-	const char *open8030_fw = hal::board().radio.open8030_fw;
+	printf("board: %s\n", bsp::board().name);
+	hal::caps();   // worked out once, before any thread; logged
+	const char *open8030_fw = bsp::board().radio.open8030_fw;
 	Ar8030Source::radio_fw      = *open8030_fw && access(open8030_fw, R_OK) == 0 &&
 	                              Settings::getInstance().getInt("ar8030_firmware", 1) != 0 ? 1 : 0;
 	// The radio's TDD frame mode (RADIO > Radio Frame): 2 short, 0 standard.

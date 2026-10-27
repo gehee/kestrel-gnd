@@ -106,7 +106,7 @@ associate with when several are known.
 | `dvr/` | recording, the recordings library, repairing a recording |
 | `msp/` | the flight controller's MSP OSD and telemetry, Betaflight's glyphs |
 | `hal/` | the hardware interfaces (the decoder in `vdec.hpp`) and their backends: `hal/rockchip/` for the VRX Pro, `hal/ffmpeg/` for the software decoder |
-| `bsp/` | one file of facts per box (`vrx_pro.cpp`) |
+| `bsp/` | one file of facts per box (`vrx_pro.cpp`, `pc.cpp`); `KESTREL_BOARD` picks which one is built in |
 | `motion/` | the air unit's IMU samples, carried in the video stream, and quaternions |
 | `utils/`, `queue/`, `icons/` | helpers, the message queue, icons |
 | `splash/` | the boot splash program |
@@ -124,6 +124,11 @@ cmake -S . -B build -DKESTREL_HAL=rockchip && cmake --build build -j
 (MPP decoder, RGA, the VOP2 display lock), or `pc` for a host build with the
 ffmpeg decoder. `-DUSE_RKMPP=ON`, which older fpvOS releases pass, still
 means `rockchip`.
+
+`KESTREL_BOARD` picks the box: `vrxpro` (the default with `rockchip`) or
+`pc` (no buttons, no ADC; the default otherwise). Each box's facts are one
+file in `bsp/`, and only the chosen box's file is compiled in: fpvOS builds
+one image per box, so nothing is detected at run time.
 
 Features are switched at build time, so a box that can't run one doesn't
 carry its code. fpvOS sets them from its Kconfig options, one set per board:

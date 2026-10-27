@@ -1,7 +1,7 @@
 #pragma once
 // Board support: the facts of one box, and no logic. Each box kestrel-gnd
-// runs on has one Board, filled in its own file (bsp/vrx_pro.cpp, ...), and
-// hal::board() picks the one this unit is at startup.
+// runs on has one Board, filled in its own file (bsp/vrx_pro.cpp, ...); the
+// build picks the box (KESTREL_BOARD) and compiles only its file in.
 //
 // A path left empty means the box has no such thing; code reading it treats
 // that as "not fitted", exactly as it treats a path it can't open.
@@ -74,7 +74,11 @@ inline int supply_mv(const SupplyAdc &s, int avg_pin_mv) {
     return avg_pin_mv * s.divider - s.offset_mv;
 }
 
+// Each box's facts, one per bsp/<box>.cpp.
 const Board &vrx_pro();
 const Board &pc();
+
+// The box this build is for (KESTREL_BOARD).
+const Board &board();
 
 }  // namespace bsp

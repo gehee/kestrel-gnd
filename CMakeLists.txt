@@ -60,7 +60,7 @@ set(SOURCE_FILES
         radio/bb_watchdog.cpp
         radio/ar8030_sky.cpp
         radio/bb_sdk_shim.cpp
-        hal/probe.cpp
+        hal/caps.cpp
         render/gl_context.cpp
         render/canvas_gles.cpp
         hud/dispatch.cpp
@@ -69,8 +69,8 @@ set(SOURCE_FILES
         hal/screen_out.cpp
         hal/frame_length.cpp
         hal/plane_rules.cpp
-        bsp/vrx_pro.cpp
-        bsp/pc.cpp
+        bsp/board.cpp
+        ${KESTREL_BOARD_SRC}
         core/main.cpp)
 
 if(USE_RKMPP)
@@ -239,8 +239,7 @@ if(KESTREL_TESTS)
         target_link_libraries(${name} pthread)
         add_test(NAME ${name} COMMAND ${name})
     endfunction()
-    kestrel_test(bsp_test bsp/vrx_pro.cpp bsp/pc.cpp)
-    kestrel_test(probe_test hal/probe.cpp bsp/vrx_pro.cpp bsp/pc.cpp)
+    kestrel_test(bsp_test bsp/board.cpp bsp/vrx_pro.cpp bsp/pc.cpp)
     set(_hal_test_srcs hal/screen_out.cpp hal/frame_length.cpp hal/plane_rules.cpp hal/rockchip/vop2_frame_length.cpp)
     if(KESTREL_HAL STREQUAL "rockchip")
         list(APPEND _hal_test_srcs hal/rockchip/mpp_encoder.cpp hal/rockchip/rga_compositor.cpp)
@@ -254,6 +253,18 @@ if(KESTREL_TESTS)
         endif()
     endif()
     kestrel_test(canvas_test)
+    set(_caps_test_srcs hal/caps.cpp core/wifi_ap.cpp core/settings.cpp hal/screen_out.cpp)
+    if(KESTREL_HAL STREQUAL "rockchip")
+        list(APPEND _caps_test_srcs hal/rockchip/mpp_encoder.cpp hal/rockchip/rga_compositor.cpp)
+    endif()
+    kestrel_test(caps_test ${_caps_test_srcs})
+    if(KESTREL_HAL STREQUAL "rockchip")
+        target_link_libraries(caps_test rockchip_mpp)
+        if(RGA_LIB)
+            target_compile_definitions(caps_test PRIVATE USE_RGA)
+            target_link_libraries(caps_test ${RGA_LIB})
+        endif()
+    endif()
     kestrel_test(air_clock_test)
     # utils/sd_log.cpp first: the order in which the old exit crash showed
     # every time (see the test's header).

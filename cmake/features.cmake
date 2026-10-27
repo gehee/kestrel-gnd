@@ -6,9 +6,9 @@
 # fpvOS keeps building the same binary.
 #
 # The choices land in kestrel_gnd_features.h as 0/1 macros (KESTREL_HAL_*,
-# KESTREL_FEAT_*). A feature that is off is meant to be left out of the
-# binary, not hidden at run time; what a particular unit or screen can do
-# is a separate, run-time question (Caps).
+# KESTREL_BOARD_*, KESTREL_*). A feature that is off is meant to be left
+# out of the binary, not hidden at run time; what a particular screen or
+# system can do is a separate, run-time question (Caps).
 
 if(USE_RKMPP)
     set(_kestrel_hal_default rockchip)
@@ -32,6 +32,36 @@ elseif(KESTREL_HAL STREQUAL "ar9311")
 else()
     message(FATAL_ERROR "KESTREL_HAL=${KESTREL_HAL}: expected rockchip or pc")
 endif()
+
+# The box this build is for: its buttons, supply ADC, thermal zone and radio
+# firmware (bsp/<box>.cpp). fpvOS builds one image per box, so the box is
+# known here and only its file is compiled in.
+if(KESTREL_HAL STREQUAL "rockchip")
+    set(_kestrel_board_default vrxpro)
+else()
+    set(_kestrel_board_default pc)
+endif()
+set(KESTREL_BOARD ${_kestrel_board_default} CACHE STRING
+    "Box: vrxpro (Caddx VRX Pro) or pc (no buttons, no ADC)")
+set_property(CACHE KESTREL_BOARD PROPERTY STRINGS vrxpro pc)
+if(KESTREL_BOARD STREQUAL "vrxpro")
+    if(NOT KESTREL_HAL STREQUAL "rockchip")
+        message(FATAL_ERROR "KESTREL_BOARD=vrxpro needs KESTREL_HAL=rockchip")
+    endif()
+    set(KESTREL_BOARD_SRC bsp/vrx_pro.cpp)
+elseif(KESTREL_BOARD STREQUAL "pc")
+    set(KESTREL_BOARD_SRC bsp/pc.cpp)
+else()
+    message(FATAL_ERROR "KESTREL_BOARD=${KESTREL_BOARD}: expected vrxpro or pc")
+endif()
+string(TOUPPER "${KESTREL_BOARD}" _kestrel_board_upper)
+foreach(_board VRXPRO PC)
+    if(_board STREQUAL _kestrel_board_upper)
+        set(KESTREL_BOARD_${_board} 1)
+    else()
+        set(KESTREL_BOARD_${_board} 0)
+    endif()
+endforeach()
 
 # Features only the Rockchip backends have default to on there and off elsewhere.
 if(KESTREL_HAL STREQUAL "rockchip")
@@ -67,7 +97,7 @@ foreach(_hal ROCKCHIP AR9311 PC)
     endif()
 endforeach()
 
-message(STATUS "kestrel-gnd HAL: ${KESTREL_HAL}")
+message(STATUS "kestrel-gnd HAL: ${KESTREL_HAL}, board: ${KESTREL_BOARD}")
 foreach(_feat GLES STREAM_DECODE SCREEN_ENC WIFI)
     message(STATUS "  KESTREL_${_feat}: ${KESTREL_${_feat}}")
 endforeach()

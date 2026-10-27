@@ -24,9 +24,6 @@ extern "C" {
 #include <functional>
 #include "queue/Queue.hpp"
 
-#define MAX_FRAMES 24		// min 16 and 20+ recommended (mpp/readme.txt)
-#define READ_BUF_SIZE (1024*1024) // SZ_1M https://github.com/rockchip-linux/mpp/blob/ed377c99a733e2cdbcc457a6aa3f0fcd438a9dff/osal/inc/mpp_common.h#L179
-
 enum RenderMode {
     Disable,     // No rendering (benchmarking only)
     Atomic,      // V-Sync enabled (tear-free)
