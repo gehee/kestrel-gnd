@@ -63,6 +63,7 @@ set(SOURCE_FILES
         hal/caps.cpp
         render/gl_context.cpp
         render/canvas_gles.cpp
+        render/text_cache.cpp
         hud/dispatch.cpp
         hud/state.cpp
         hal/decoder.cpp

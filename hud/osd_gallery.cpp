@@ -414,7 +414,7 @@ void OSD::gallery_prewarm() {
         "| vblank  : mid-screen",
         "1080p", "720p",
     };
-    for (const char* w : words) ensure_text_texture(w);
+    for (const char* w : words) text_cache_.ensure(w);
 }
 
 // One frame of the gallery. False once it has closed (the HUD draws instead).
@@ -496,13 +496,13 @@ bool OSD::render_gallery(int W, int H) {
     glDisable(GL_SCISSOR_TEST);
     glEnable(GL_BLEND);
     glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-    glUseProgram(shader_program);
+    glUseProgram(gl2d_.program);
     const float mvp[16] = { 2.0f / W, 0, 0, 0,  0, 2.0f / H, 0, 0,  0, 0, 1, 0,  -1, -1, 0, 1 };
-    glUniformMatrix4fv(u_mvp_, 1, GL_FALSE, mvp);
-    if (a_alpha_factor_ != -1) glVertexAttrib1f(a_alpha_factor_, 1.0f);
+    glUniformMatrix4fv(gl2d_.u_mvp, 1, GL_FALSE, mvp);
+    if (gl2d_.a_alpha_factor != -1) glVertexAttrib1f(gl2d_.a_alpha_factor, 1.0f);
 
     auto submit = [&](const float* verts, GLint pos_loc, GLint uv_loc) {
-        glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        glBindBuffer(GL_ARRAY_BUFFER, gl2d_.vbo);
         glBufferData(GL_ARRAY_BUFFER, 20 * sizeof(float), verts, GL_DYNAMIC_DRAW);
         glEnableVertexAttribArray(pos_loc);
         glVertexAttribPointer(pos_loc, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)0);
@@ -530,8 +530,8 @@ bool OSD::render_gallery(int W, int H) {
         glDrawArrays(GL_TRIANGLE_STRIP, 0, (GLsizei)(fbatch.size() / 6));
         glDisableVertexAttribArray(flat_pos_);
         glDisableVertexAttribArray(flat_col_);
-        glUseProgram(shader_program);
-        glUniformMatrix4fv(u_mvp_, 1, GL_FALSE, mvp);
+        glUseProgram(gl2d_.program);
+        glUniformMatrix4fv(gl2d_.u_mvp, 1, GL_FALSE, mvp);
         fbatch.clear();
     };
     // Everything below is laid out from the top left with y down; these turn it
@@ -544,11 +544,11 @@ bool OSD::render_gallery(int W, int H) {
         // The shader multiplies (colour, alpha) by alpha: pre-scale the colour so
         // what lands is (c * a, a), a plain premultiplied fill.
         const float sa = std::sqrt(a);
-        glUniform1i(u_is_text_, 0);
-        glUniform1i(u_use_shading_, 0);
-        glUniform4f(u_color_, c[0] * sa, c[1] * sa, c[2] * sa, 1.0f);
-        glUniform1f(u_alpha_, sa);
-        submit(v, a_pos_, a_uv_);
+        glUniform1i(gl2d_.u_is_text, 0);
+        glUniform1i(gl2d_.u_use_shading, 0);
+        glUniform4f(gl2d_.u_color, c[0] * sa, c[1] * sa, c[2] * sa, 1.0f);
+        glUniform1f(gl2d_.u_alpha, sa);
+        submit(v, gl2d_.a_pos, gl2d_.a_uv);
     };
     auto tex_quad = [&](GLuint tex, const Gallery::Rect& r, float a) {
         if (!tex || a <= 0.003f) return;
@@ -557,12 +557,12 @@ bool OSD::render_gallery(int W, int H) {
         const float v[] = { x, gy, 0, 0, 1,  x + r.w, gy, 0, 1, 1,  x, gy + r.h, 0, 0, 0,  x + r.w, gy + r.h, 0, 1, 0 };
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, tex);
-        glUniform1i(u_tex_, 0);
-        glUniform1i(u_is_text_, 1);
-        glUniform1i(u_use_shading_, 0);
-        glUniform4f(u_color_, 1, 1, 1, 1);
-        glUniform1f(u_alpha_, a);
-        submit(v, a_pos_, a_uv_);
+        glUniform1i(gl2d_.u_tex, 0);
+        glUniform1i(gl2d_.u_is_text, 1);
+        glUniform1i(gl2d_.u_use_shading, 0);
+        glUniform4f(gl2d_.u_color, 1, 1, 1, 1);
+        glUniform1f(gl2d_.u_alpha, a);
+        submit(v, gl2d_.a_pos, gl2d_.a_uv);
     };
     auto ext_quad = [&](const Gallery::Rect& r, GLuint ext_tex) {
         if (!bg_ext_shader_ || !ext_tex) return;
@@ -575,8 +575,8 @@ bool OSD::render_gallery(int W, int H) {
         glUniformMatrix4fv(glGetUniformLocation(bg_ext_shader_, "mvp"), 1, GL_FALSE, mvp);
         glUniform1i(glGetUniformLocation(bg_ext_shader_, "tex"), 0);
         submit(v, glGetAttribLocation(bg_ext_shader_, "pos"), glGetAttribLocation(bg_ext_shader_, "uv"));
-        glUseProgram(shader_program);
-        glUniformMatrix4fv(u_mvp_, 1, GL_FALSE, mvp);
+        glUseProgram(gl2d_.program);
+        glUniformMatrix4fv(gl2d_.u_mvp, 1, GL_FALSE, mvp);
     };
     // The copy of the screen, premultiplied as the OSD plane holds it, drawn
     // over the rectangle r (centre-based, y down) that the whole screen maps to.
@@ -592,8 +592,8 @@ bool OSD::render_gallery(int W, int H) {
         glUniform1i(glGetUniformLocation(gallery_snap_shader_, "tex"), 0);
         glUniform1f(glGetUniformLocation(gallery_snap_shader_, "alpha"), a);
         submit(v, glGetAttribLocation(gallery_snap_shader_, "pos"), glGetAttribLocation(gallery_snap_shader_, "uv"));
-        glUseProgram(shader_program);
-        glUniformMatrix4fv(u_mvp_, 1, GL_FALSE, mvp);
+        glUseProgram(gl2d_.program);
+        glUniformMatrix4fv(gl2d_.u_mvp, 1, GL_FALSE, mvp);
     };
     auto snap_quad = [&](const Gallery::Rect& r, float a) { pm_quad(gallery_snap_tex_, r, a); };
     // align: 0 left, 1 centre, 2 right of x. `baseline` is where the letters sit.
@@ -601,23 +601,22 @@ bool OSD::render_gallery(int W, int H) {
                     const float* c, float a) {
         if (str.empty() || a <= 0.003f) return;
         gflush();
-        ensure_text_texture(str.c_str());
-        auto it = text_cache.find(str.c_str());
-        if (it == text_cache.end()) return;
+        const render::TextCache::Entry* it = text_cache_.get(str.c_str());
+        if (!it) return;
         const float scale = font_px * 1.6f;                 // the texture is drawn at 40 px in 64
-        const float tw = it->second.text_w / 64.0f * scale;
+        const float tw = it->text_w / 64.0f * scale;
         const float tx = align == 1 ? x - tw * 0.5f : align == 2 ? x - tw : x;
-        const float qw = scale * (float)it->second.w / (float)it->second.h;
+        const float qw = scale * (float)it->w / (float)it->h;
         const float gy = H - (baseline + 0.25f * scale);
         const float v[] = { tx, gy, 0, 0, 1,  tx + qw, gy, 0, 1, 1,  tx, gy + scale, 0, 0, 0,  tx + qw, gy + scale, 0, 1, 0 };
         glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, it->second.tex);
-        glUniform1i(u_tex_, 0);
-        glUniform1i(u_is_text_, 1);
-        glUniform1i(u_use_shading_, 0);
-        glUniform4f(u_color_, c[0], c[1], c[2], 1.0f);
-        glUniform1f(u_alpha_, a);
-        submit(v, a_pos_, a_uv_);
+        glBindTexture(GL_TEXTURE_2D, it->tex);
+        glUniform1i(gl2d_.u_tex, 0);
+        glUniform1i(gl2d_.u_is_text, 1);
+        glUniform1i(gl2d_.u_use_shading, 0);
+        glUniform4f(gl2d_.u_color, c[0], c[1], c[2], 1.0f);
+        glUniform1f(gl2d_.u_alpha, a);
+        submit(v, gl2d_.a_pos, gl2d_.a_uv);
     };
     auto text_width = [&](const std::string& str, float font_px) {
         return canvas_->text_width(str.c_str(), font_px * 1.6f);
@@ -1351,7 +1350,7 @@ bool OSD::render_gallery(int W, int H) {
                 }
                 glBindFramebuffer(GL_FRAMEBUFFER, 0);
                 glViewport(0, 0, W, H);
-                glUseProgram(shader_program);
+                glUseProgram(gl2d_.program);
             }
             cached = stats_layer_valid_;
         }
@@ -1649,8 +1648,8 @@ bool OSD::render_gallery(int W, int H) {
              W * 0.5f, by - 56 * u, 24 * u, 1, quiet, a);
     }
 
-    glUseProgram(shader_program);
-    if (a_alpha_factor_ != -1) glVertexAttrib1f(a_alpha_factor_, 1.0f);
+    glUseProgram(gl2d_.program);
+    if (gl2d_.a_alpha_factor != -1) glVertexAttrib1f(gl2d_.a_alpha_factor, 1.0f);
 
     // Another frame at once while anything moves; a thumbnail or the card read
     // still coming is picked up on the next ordinary refresh.

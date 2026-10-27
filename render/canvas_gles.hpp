@@ -1,18 +1,19 @@
 #pragma once
-// The Canvas on the GPU: the OSD's own GLES drawing, unchanged. For now it
-// calls the OSD's GL functions, which hold the shaders, buffers and glyph
-// cache they share with the rest of the OSD's GL; the screens no longer call
-// those directly, so they can move in here without touching a screen.
+// The Canvas on the GPU: the OSD's own GLES drawing, moved here from the OSD
+// unchanged. It draws with the OSD's 2D program (render/gles_2d) and its text
+// cache, which the OSD's other GL drawing shares.
 
 #include "render/canvas.hpp"
-
-class OSD;
+#include "render/gles_2d.hpp"
+#include "render/text_cache.hpp"
 
 namespace render {
 
 class CanvasGles : public Canvas {
 public:
-    explicit CanvasGles(OSD *osd) : osd_(osd) {}
+    CanvasGles(Gles2d &gl, TextCache &text) : gl_(gl), text_(text) {}
+
+    void set_feather(float width) override { feather_ = width; }
 
     void panel(float x, float y, float w, float h, float alpha, float r, float g, float b) override;
     void trapezoid(float x, float y, float w, float h, float top_scale, float slant,
@@ -47,7 +48,9 @@ public:
     void rail_glow(float fw, float fh, float depth, float alpha, float r, float g, float b) override;
 
 private:
-    OSD *osd_;
+    Gles2d &gl_;
+    TextCache &text_;
+    float feather_ = 0.0f;
 };
 
 }  // namespace render

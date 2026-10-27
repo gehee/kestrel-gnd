@@ -26,6 +26,10 @@ public:
     virtual void trapezoid(float x, float y, float w, float h, float top_scale, float slant,
                            float alpha, float r, float g, float b) = 0;
     virtual void poly(const std::vector<math::Vec2> &points, float alpha, float r, float g, float b) = 0;
+    // uniform_x: drop the left-to-right fade and use the mid-width value
+    // across the whole panel. The wing panels want the gradient (it points
+    // at the screen edge); the centre menu does not - it made one side of
+    // the menu wash out over video.
     virtual void hex_panel(float x, float y, float w, float h, float alpha, float r, float g, float b,
                            bool outline, int num_h = 8, int num_v = 10, float grid_y = -1.0f,
                            float grid_h = -1.0f, bool uniform_x = false) = 0;
@@ -68,6 +72,10 @@ public:
                            float a0, float r, float g, float b, float a1 = 0.0f) = 0;
     // Glowing rails along the picture's top and bottom edges.
     virtual void rail_glow(float fw, float fh, float depth, float alpha, float r, float g, float b) = 0;
+
+    // Edge feathering for seg_track, fade_wedge and fade_rule: a border this
+    // wide (frustum units, 0 = off) fading to nothing around each shape.
+    virtual void set_feather(float width) = 0;
 };
 
 }  // namespace render

@@ -54,6 +54,7 @@ struct Recorder : render::Canvas {
         last = "fade_rule"; f[0] = a1;
     }
     void rail_glow(float, float, float, float, float, float, float) override {}
+    void set_feather(float) override {}
 };
 
 int main() {

@@ -36,13 +36,13 @@ void OSD::px_begin(int W, int H, float cx, float cy, float sc, float alpha) {
     std::copy(m, m + 16, px_mvp_);
     glEnable(GL_BLEND);
     glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-    glUseProgram(shader_program);
-    glUniformMatrix4fv(u_mvp_, 1, GL_FALSE, px_mvp_);
-    if (a_alpha_factor_ != -1) glVertexAttrib1f(a_alpha_factor_, 1.0f);
+    glUseProgram(gl2d_.program);
+    glUniformMatrix4fv(gl2d_.u_mvp, 1, GL_FALSE, px_mvp_);
+    if (gl2d_.a_alpha_factor != -1) glVertexAttrib1f(gl2d_.a_alpha_factor, 1.0f);
 }
 
 void OSD::px_submit(const float* v, int n, GLint pos, GLint uv) {
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, gl2d_.vbo);
     glBufferData(GL_ARRAY_BUFFER, n * 5 * sizeof(float), v, GL_DYNAMIC_DRAW);
     glEnableVertexAttribArray(pos);
     glVertexAttribPointer(pos, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)0);
@@ -67,8 +67,8 @@ void OSD::px_flush() {
     glDrawArrays(GL_TRIANGLES, 0, (GLsizei)(px_batch_.size() / 6));
     glDisableVertexAttribArray(flat_pos_);
     glDisableVertexAttribArray(flat_col_);
-    glUseProgram(shader_program);
-    glUniformMatrix4fv(u_mvp_, 1, GL_FALSE, px_mvp_);
+    glUseProgram(gl2d_.program);
+    glUniformMatrix4fv(gl2d_.u_mvp, 1, GL_FALSE, px_mvp_);
     px_batch_.clear();
 }
 
@@ -152,23 +152,22 @@ float OSD::px_text(const char* s, float x, float baseline, float font_px, int al
     a *= px_a_;
     if (!s || !s[0] || a <= 0.003f) return 0.0f;
     px_flush();                         // what was gathered goes under the text
-    ensure_text_texture(s);
-    auto it = text_cache.find(s);
-    if (it == text_cache.end()) return 0.0f;
+    const render::TextCache::Entry* it = text_cache_.get(s);
+    if (!it) return 0.0f;
     const float scale = font_px * 1.6f;
-    const float tw = it->second.text_w / 64.0f * scale;
+    const float tw = it->text_w / 64.0f * scale;
     const float tx = align == 1 ? x - tw * 0.5f : align == 2 ? x - tw : x;
-    const float qw = scale * (float)it->second.w / (float)it->second.h;
+    const float qw = scale * (float)it->w / (float)it->h;
     const float gy = px_H_ - (baseline + 0.25f * scale);
     const float v[] = { tx, gy, 0, 0, 1,  tx + qw, gy, 0, 1, 1,  tx, gy + scale, 0, 0, 0,  tx + qw, gy + scale, 0, 1, 0 };
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, it->second.tex);
-    glUniform1i(u_tex_, 0);
-    glUniform1i(u_is_text_, 1);
-    glUniform1i(u_use_shading_, 0);
-    glUniform4f(u_color_, c[0], c[1], c[2], 1.0f);
-    glUniform1f(u_alpha_, a);
-    px_submit(v, 4, a_pos_, a_uv_);
+    glBindTexture(GL_TEXTURE_2D, it->tex);
+    glUniform1i(gl2d_.u_tex, 0);
+    glUniform1i(gl2d_.u_is_text, 1);
+    glUniform1i(gl2d_.u_use_shading, 0);
+    glUniform4f(gl2d_.u_color, c[0], c[1], c[2], 1.0f);
+    glUniform1f(gl2d_.u_alpha, a);
+    px_submit(v, 4, gl2d_.a_pos, gl2d_.a_uv);
     return tw;
 }
 
@@ -196,7 +195,7 @@ bool OSD::px_live(float x, float y, float w, float h) {
     glUniformMatrix4fv(glGetUniformLocation(bg_ext_shader_, "mvp"), 1, GL_FALSE, px_mvp_);
     glUniform1i(glGetUniformLocation(bg_ext_shader_, "tex"), 0);
     px_submit(v, 4, glGetAttribLocation(bg_ext_shader_, "pos"), glGetAttribLocation(bg_ext_shader_, "uv"));
-    glUseProgram(shader_program);
-    glUniformMatrix4fv(u_mvp_, 1, GL_FALSE, px_mvp_);
+    glUseProgram(gl2d_.program);
+    glUniformMatrix4fv(gl2d_.u_mvp, 1, GL_FALSE, px_mvp_);
     return true;
 }

@@ -202,194 +202,11 @@ void slant_mvp(const float* model, const float* vp, float pivot_x, float pivot_y
 
 }  // namespace
 
-// Edge feathering: a cheap stand-in for multisampling. The canopy's shapes
-// are drawn flat and then slanted and put in perspective by the panel
-// matrices, so their edges land on the screen as diagonals with a hard
-// staircase. Instead of 4x MSAA (four times the blending work on this
-// one-core GPU - see drm.cpp), each rail, block and wedge edge gets a border
-// about a pixel wide whose alpha runs from the shape's down to zero, and the
-// ordinary blend smooths the step. aa_feather_ is that width in canopy units
-// (0 = off; set per frame in draw_canopy_hud from hud_feather).
-namespace {
-// Quad a-b-c-d (in loop order) as two triangles, each corner with its alpha.
-void quad6(std::vector<float>& v, float ax, float ay, float aa, float bx, float by, float ba,
-           float cx, float cy, float ca, float dx, float dy, float da) {
-    v.insert(v.end(), {ax, ay, 0.0f, 0.5f, 0.5f, aa, bx, by, 0.0f, 0.5f, 0.5f, ba,
-                       cx, cy, 0.0f, 0.5f, 0.5f, ca, ax, ay, 0.0f, 0.5f, 0.5f, aa,
-                       cx, cy, 0.0f, 0.5f, 0.5f, ca, dx, dy, 0.0f, 0.5f, 0.5f, da});
-}
-// A feathered axis-aligned rectangle: the body at alpha a, then a ring f
-// wide fading to zero around it.
-void feathered_rect(std::vector<float>& v, float x0, float y0, float x1, float y1, float a, float f) {
-    quad6(v, x0, y0, a, x1, y0, a, x1, y1, a, x0, y1, a);
-    if (f <= 0.0f) return;
-    quad6(v, x0 - f, y0 - f, 0, x1 + f, y0 - f, 0, x1, y0, a, x0, y0, a);   // bottom
-    quad6(v, x0, y1, a, x1, y1, a, x1 + f, y1 + f, 0, x0 - f, y1 + f, 0);   // top
-    quad6(v, x0 - f, y0 - f, 0, x0, y0, a, x0, y1, a, x0 - f, y1 + f, 0);   // left
-    quad6(v, x1, y0, a, x1 + f, y0 - f, 0, x1 + f, y1 + f, 0, x1, y1, a);   // right
-}
-}  // namespace
-
-// A run of tapering blocks. The tall, opaque end sits at the screen edge and
-// the run shrinks and fades inward, which is what gives the panel its depth
-// without dimming anything (dimming reads as less important, never as further
-// away). Segments past `filled` stay drawn, very faint, so the track's length
-// is always legible and a falling gauge retreats towards the edge rather than
-// disappearing.
-void OSD::draw_seg_track(float x, float y, float w, float h, int segs,
-                         float filled, bool edge_left,
-                         float r, float g, float b, float a_lo, float a_hi,
-                         float reveal) {
-    if (segs <= 0 || w <= 0.0f || reveal <= 0.0f) return;
-    int shown = (int)(reveal * segs + 0.5f);
-    if (shown < 1)     shown = 1;
-    if (shown > segs)  shown = segs;
-    const float taper = 0.32f;
-    // Keep the 10:3 block-to-gap ratio whatever the segment count, and solve
-    // the pitch so the tapered run ends up exactly `w` wide.
-    const float pitch = w / (segs * (1.0f - taper / 2.0f));
-    const float seg_w = pitch * 10.0f / 13.0f;
-    const float gap_w = pitch *  3.0f / 13.0f;
-
-    int lit = (int)(filled * segs + 0.5f);
-    if (lit < 0) lit = 0;
-    if (lit > segs) lit = segs;
-
-    std::vector<float> v;
-    v.reserve(segs * 6 * 6);
-    float cx = edge_left ? x : x + w;
-    for (int i = 0; i < shown; i++) {
-        float t  = (segs > 1) ? (float)i / (float)(segs - 1) : 0.0f;
-        float sc = 1.0f - taper * t;
-        float sw = seg_w * sc, sh = h * sc, sg = gap_w * sc;
-        float x0 = edge_left ? cx : cx - sw;
-        float x1 = x0 + sw;
-        float y0 = y + (h - sh) * 0.5f;
-        float y1 = y0 + sh;
-        cx = edge_left ? (cx + sw + sg) : (cx - sw - sg);
-
-        float a = (i < lit) ? (a_hi - (a_hi - a_lo) * t) : 0.13f;
-        feathered_rect(v, x0, y0, x1, y1, a, aa_feather_);
-    }
-
-    glUniform1i(u_is_text_, 0);
-    glUniform1i(u_use_shading_, 0);
-    glUniform4f(u_color_, r, g, b, 1.0f);
-    glUniform1f(u_alpha_, 1.0f);
-
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER, v.size() * sizeof(float), v.data(), GL_DYNAMIC_DRAW);
-    glEnableVertexAttribArray(a_pos_);
-    glVertexAttribPointer(a_pos_, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), 0);
-    glEnableVertexAttribArray(a_uv_);
-    glVertexAttribPointer(a_uv_, 2, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)(3 * sizeof(float)));
-    if (a_alpha_factor_ != -1) {
-        glEnableVertexAttribArray(a_alpha_factor_);
-        glVertexAttribPointer(a_alpha_factor_, 1, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)(5 * sizeof(float)));
-    }
-    glDrawArrays(GL_TRIANGLES, 0, (GLsizei)(v.size() / 6));
-    if (a_alpha_factor_ != -1) {
-        glDisableVertexAttribArray(a_alpha_factor_);
-        glVertexAttrib1f(a_alpha_factor_, 1.0f);   // restore for every other draw
-    }
-}
-
-// The panel ground. The mockup's outline is a kite: tallest at the screen
-// edge, its top and bottom edges converging as it runs inboard, closing to a
-// point. Both edges have to slope - drawn with a constant half-height it comes
-// out as a translucent slab with two hard horizontal edges, which over a
-// textured video frame reads as a grey box laid on the picture rather than as
-// a shape belonging to the panel.
-//
-// Columns are passed in already mapped to frustum space so the mockup's own
-// coordinates stay legible at the call site.
-void OSD::draw_fade_wedge(const float* xs, const float* tops, const float* bots,
-                          const float* alphas, int n, float r, float g, float b) {
-    if (n < 2) return;
-    std::vector<float> v;
-    v.reserve(n * 2 * 6);
-    // As triangles now (was a strip), so the feathered edges can join it.
-    for (int i = 0; i + 1 < n; i++) {
-        quad6(v, xs[i], bots[i], alphas[i], xs[i + 1], bots[i + 1], alphas[i + 1],
-                 xs[i + 1], tops[i + 1], alphas[i + 1], xs[i], tops[i], alphas[i]);
-        if (aa_feather_ > 0.0f) {
-            const float f = aa_feather_;
-            quad6(v, xs[i], tops[i], alphas[i], xs[i + 1], tops[i + 1], alphas[i + 1],
-                     xs[i + 1], tops[i + 1] + f, 0, xs[i], tops[i] + f, 0);
-            quad6(v, xs[i], bots[i] - f, 0, xs[i + 1], bots[i + 1] - f, 0,
-                     xs[i + 1], bots[i + 1], alphas[i + 1], xs[i], bots[i], alphas[i]);
-        }
-    }
-
-    glUniform1i(u_is_text_, 0);
-    glUniform1i(u_use_shading_, 0);
-    glUniform4f(u_color_, r, g, b, 1.0f);
-    glUniform1f(u_alpha_, 1.0f);
-
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER, v.size() * sizeof(float), v.data(), GL_DYNAMIC_DRAW);
-    glEnableVertexAttribArray(a_pos_);
-    glVertexAttribPointer(a_pos_, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), 0);
-    glEnableVertexAttribArray(a_uv_);
-    glVertexAttribPointer(a_uv_, 2, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)(3 * sizeof(float)));
-    if (a_alpha_factor_ != -1) {
-        glEnableVertexAttribArray(a_alpha_factor_);
-        glVertexAttribPointer(a_alpha_factor_, 1, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)(5 * sizeof(float)));
-    }
-    glDrawArrays(GL_TRIANGLES, 0, (GLsizei)(v.size() / 6));
-    if (a_alpha_factor_ != -1) {
-        glDisableVertexAttribArray(a_alpha_factor_);
-        glVertexAttrib1f(a_alpha_factor_, 1.0f);
-    }
-}
-
-// A hairline that starts solid at (x0,y0) and fades to nothing at (x1,y1).
-void OSD::draw_fade_rule(float x0, float y0, float x1, float y1, float thick,
-                         float a0, float r, float g, float b, float a1) {
-    float dx = x1 - x0, dy = y1 - y0;
-    float len = sqrtf(dx * dx + dy * dy);
-    if (len <= 0.0f) return;
-    float ux = -dy / len, uy = dx / len;              // unit normal
-    float nx = ux * thick * 0.5f, ny = uy * thick * 0.5f;
-    float fx = ux * aa_feather_, fy = uy * aa_feather_;
-    // Body, plus a feather strip either side along the rule's length.
-    std::vector<float> v;
-    v.reserve(18 * 6);
-    quad6(v, x0 - nx, y0 - ny, a0, x1 - nx, y1 - ny, a1, x1 + nx, y1 + ny, a1, x0 + nx, y0 + ny, a0);
-    if (aa_feather_ > 0.0f) {
-        quad6(v, x0 - nx - fx, y0 - ny - fy, 0, x1 - nx - fx, y1 - ny - fy, 0,
-                 x1 - nx, y1 - ny, a1, x0 - nx, y0 - ny, a0);
-        quad6(v, x0 + nx, y0 + ny, a0, x1 + nx, y1 + ny, a1,
-                 x1 + nx + fx, y1 + ny + fy, 0, x0 + nx + fx, y0 + ny + fy, 0);
-    }
-
-    glUniform1i(u_is_text_, 0);
-    glUniform1i(u_use_shading_, 0);
-    glUniform4f(u_color_, r, g, b, 1.0f);
-    glUniform1f(u_alpha_, 1.0f);
-
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER, v.size() * sizeof(float), v.data(), GL_DYNAMIC_DRAW);
-    glEnableVertexAttribArray(a_pos_);
-    glVertexAttribPointer(a_pos_, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), 0);
-    glEnableVertexAttribArray(a_uv_);
-    glVertexAttribPointer(a_uv_, 2, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)(3 * sizeof(float)));
-    if (a_alpha_factor_ != -1) {
-        glEnableVertexAttribArray(a_alpha_factor_);
-        glVertexAttribPointer(a_alpha_factor_, 1, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)(5 * sizeof(float)));
-    }
-    glDrawArrays(GL_TRIANGLES, 0, (GLsizei)(v.size() / 6));
-    if (a_alpha_factor_ != -1) {
-        glDisableVertexAttribArray(a_alpha_factor_);
-        glVertexAttrib1f(a_alpha_factor_, 1.0f);
-    }
-}
-
 void OSD::draw_canopy_hud(const CanopyIn& in) {
     const HudTheme& TH = hud_theme_current();
     // About 1.2 px (half the frustum height is 540 px at 1080p).
     static const bool feather = Settings::getInstance().getBool("hud_feather", true);
-    aa_feather_ = feather ? in.frustum_h / 540.0f * 1.2f : 0.0f;
+    canvas_->set_feather(feather ? in.frustum_h / 540.0f * 1.2f : 0.0f);
     const float kWhiteR = TH.text[0],   kWhiteG = TH.text[1],   kWhiteB = TH.text[2];
     const float kCyanR  = TH.data[0],   kCyanG  = TH.data[1],   kCyanB  = TH.data[2];
     const float kLimeR  = TH.accent[0], kLimeG  = TH.accent[1], kLimeB  = TH.accent[2];
@@ -710,7 +527,7 @@ void OSD::draw_canopy_hud(const CanopyIn& in) {
     slant_mvp(in.model_r, in.vp, RXo(56.0f), MY(502.0f), -kSlantRad, mvp_rs);
 
     // ---------------- LEFT PANEL — the aircraft ----------------
-    glUniformMatrix4fv(u_mvp_, 1, GL_FALSE, mvp_ls);
+    glUniformMatrix4fv(gl2d_.u_mvp, 1, GL_FALSE, mvp_ls);
 
     // Mockup outline, both panels: M0 464 L252 456 L300 508 L252 572 L0 610 Z,
     // with the shLE gradient (.66 at the edge, .34 half way, 0 at the point)
@@ -992,7 +809,7 @@ void OSD::draw_canopy_hud(const CanopyIn& in) {
     }
 
     // ---------------- RIGHT PANEL — the links ----------------
-    glUniformMatrix4fv(u_mvp_, 1, GL_FALSE, mvp_rs);
+    glUniformMatrix4fv(gl2d_.u_mvp, 1, GL_FALSE, mvp_rs);
 
     // idle_dim already carries the link state, and it is the deeper of the
     // two - stacking the old 0.75 on top of it only made the right panel
@@ -1326,23 +1143,23 @@ void OSD::draw_canopy_pick(const CanopyIn& in, float pick) {
     // Above the top rail (456), and clear of the REC marker sitting on it (431-442).
     const float name_base = F.MY(407.0f), list_base = F.MY(427.0f);
     auto BL = [](float baseline, float size) { return baseline - 0.25f * size; };
-    glUseProgram(shader_program);
+    glUseProgram(gl2d_.program);
     for (int side = 0; side < 2; side++) {
         const bool left = (side == 0);
         math::Mat4 mvp;
         slant_mvp(left ? in.model_l : in.model_r, in.vp, left ? F.LXo(56.0f) : F.RXo(56.0f), F.MY(502.0f),
                   left ? kSlantRad : -kSlantRad, mvp);
-        glUniformMatrix4fv(u_mvp_, 1, GL_FALSE, mvp);
+        glUniformMatrix4fv(gl2d_.u_mvp, 1, GL_FALSE, mvp);
         const bool on = (ui_side_ == side);
         const float* nc = on ? TH.accent : TH.quiet;
         const float* lc = on ? TH.text : TH.quiet;
         const float x = left ? F.LXo(kEdge) : F.RXo(kEdge);
-        if (a_alpha_factor_ != -1) glVertexAttrib1f(a_alpha_factor_, pick);
+        if (gl2d_.a_alpha_factor != -1) glVertexAttrib1f(gl2d_.a_alpha_factor, pick);
         canvas_->text(left ? "<  GROUND UNIT" : "AIR UNIT  >", x, BL(name_base, T_NAME), T_NAME, !left,
                   nc[0], nc[1], nc[2]);
-        if (a_alpha_factor_ != -1) glVertexAttrib1f(a_alpha_factor_, pick * (on ? 0.85f : 0.6f));
+        if (gl2d_.a_alpha_factor != -1) glVertexAttrib1f(gl2d_.a_alpha_factor, pick * (on ? 0.85f : 0.6f));
         canvas_->text(left ? "HUD   DISPLAY   DVR   SYSTEM" : "VIDEO   RADIO   SERIAL   INFO", x, BL(list_base, T_LIST), T_LIST, !left,
                   lc[0], lc[1], lc[2]);
     }
-    if (a_alpha_factor_ != -1) glVertexAttrib1f(a_alpha_factor_, 1.0f);
+    if (gl2d_.a_alpha_factor != -1) glVertexAttrib1f(gl2d_.a_alpha_factor, 1.0f);
 }

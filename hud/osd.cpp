@@ -481,7 +481,7 @@ OSD::OSD(std::shared_ptr<DrmDevice> dev_, int refresh_frequency_ms_, volatile bo
     display = GlContext::instance().display();
     context = GlContext::instance().context();
     radio_ = std::make_shared<hud::RadioState>(hud::read_radio());
-    canvas_.reset(new render::CanvasGles(this));
+    canvas_.reset(new render::CanvasGles(gl2d_, text_cache_));
     
     pthread_mutex_init(&osd_mutex, NULL);
     // Monotonic: the render loop's deadlines come from get_time_us(), and a
@@ -651,8 +651,8 @@ void OSD::on_flip() {
 OSD::~OSD() {
     dev->flip_hook = nullptr;
     eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, context);
-    glDeleteProgram(shader_program);
-    glDeleteBuffers(1, &vbo);
+    glDeleteProgram(gl2d_.program);
+    glDeleteBuffers(1, &gl2d_.vbo);
     
     glDeleteTextures(1, &fps_tex);
     glDeleteTextures(1, &lat_tex);
@@ -901,33 +901,33 @@ void OSD::init_shaders() {
     GLuint vs = compile(GL_VERTEX_SHADER, v_shader_str);
     GLuint fs = compile(GL_FRAGMENT_SHADER, f_shader_str);
     
-    shader_program = glCreateProgram();
-    glAttachShader(shader_program, vs);
-    glAttachShader(shader_program, fs);
-    glLinkProgram(shader_program);
-    glUseProgram(shader_program);
+    gl2d_.program = glCreateProgram();
+    glAttachShader(gl2d_.program, vs);
+    glAttachShader(gl2d_.program, fs);
+    glLinkProgram(gl2d_.program);
+    glUseProgram(gl2d_.program);
 
     // Cache hot-path uniform/attribute locations once (see osd.hpp). A local
     // alias `sp` is used so the mechanical replacement of the
-    // glGet*Location(shader_program, ...) call sites elsewhere leaves these
+    // glGet*Location(gl2d_.program, ...) call sites elsewhere leaves these
     // one-time lookups intact.
     {
-        GLuint sp = shader_program;
-        u_mvp_         = glGetUniformLocation(sp, "mvp");
-        u_is_text_     = glGetUniformLocation(sp, "is_text");
-        u_use_shading_ = glGetUniformLocation(sp, "use_shading");
-        u_color_       = glGetUniformLocation(sp, "color");
-        u_alpha_       = glGetUniformLocation(sp, "alpha");
-        u_tex_         = glGetUniformLocation(sp, "tex");
-        a_pos_          = glGetAttribLocation(sp, "pos");
-        a_uv_           = glGetAttribLocation(sp, "uv");
-        a_alpha_factor_ = glGetAttribLocation(sp, "v_alpha_factor");
+        GLuint sp = gl2d_.program;
+        gl2d_.u_mvp         = glGetUniformLocation(sp, "mvp");
+        gl2d_.u_is_text     = glGetUniformLocation(sp, "is_text");
+        gl2d_.u_use_shading = glGetUniformLocation(sp, "use_shading");
+        gl2d_.u_color       = glGetUniformLocation(sp, "color");
+        gl2d_.u_alpha       = glGetUniformLocation(sp, "alpha");
+        gl2d_.u_tex         = glGetUniformLocation(sp, "tex");
+        gl2d_.a_pos          = glGetAttribLocation(sp, "pos");
+        gl2d_.a_uv           = glGetAttribLocation(sp, "uv");
+        gl2d_.a_alpha_factor = glGetAttribLocation(sp, "v_alpha_factor");
     }
 
-    glGenBuffers(1, &vbo);
+    glGenBuffers(1, &gl2d_.vbo);
     
     // Set default value for the new attribute so existing draw calls (which don't enable it) work fine
-    GLint alpha_loc = a_alpha_factor_;
+    GLint alpha_loc = gl2d_.a_alpha_factor;
     if (alpha_loc != -1) {
         glVertexAttrib1f(alpha_loc, 1.0f);
     }
@@ -1003,7 +1003,7 @@ void OSD::init_shaders() {
         glDeleteProgram(warp_shader_prog_);
         warp_shader_prog_ = 0;
     }
-    glUseProgram(shader_program); // restore main program
+    glUseProgram(gl2d_.program); // restore main program
 
     // ---- EGL external-texture shaders (NV12 zero-copy, DRM_PRIME path) ----
     // These use samplerExternalOES so the Mali GPU converts NV12→RGB in hardware.
@@ -1129,230 +1129,7 @@ void OSD::init_shaders() {
     else
         fprintf(stderr, "[OSD] EGL DMA-BUF import NOT available — CPU fallback\n");
 
-    glUseProgram(shader_program);
-}
-
-void OSD::draw_panel(float x, float y, float w, float h, float alpha, float r, float g, float b) {
-    float verts[] = {
-        x,   y,   0,   0, 0,
-        x+w, y,   0,   1, 0,
-        x,   y+h, 0,   0, 1,
-        x+w, y+h, 0,   1, 1
-    };
-    
-    glUniform1i(u_is_text_, 0);
-    glUniform1i(u_use_shading_, 0);
-    glUniform4f(u_color_, r, g, b, 0.85); 
-    glUniform1f(u_alpha_, alpha);
-    
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_DYNAMIC_DRAW);
-    
-    GLint pos_loc = a_pos_;
-    glEnableVertexAttribArray(pos_loc);
-    glVertexAttribPointer(pos_loc, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), 0);
-    
-    GLint uv_loc = a_uv_;
-    glEnableVertexAttribArray(uv_loc);
-    glVertexAttribPointer(uv_loc, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
-    
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-}
-
-void OSD::draw_icon(GLuint tex, float x, float y, float w, float h, float r, float g, float b, float alpha) {
-    if (tex == 0) return;
-    float verts[] = {
-        x,   y,   0,   0, 1,
-        x+w, y,   0,   1, 1,
-        x,   y+h, 0,   0, 0,
-        x+w, y+h, 0,   1, 0
-    };
-    
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, tex);
-    glUniform1i(u_tex_, 0);
-    glUniform1i(u_is_text_, 1);
-    glUniform1i(u_use_shading_, 0);
-    glUniform4f(u_color_, r, g, b, 1.0); 
-    glUniform1f(u_alpha_, alpha);
-    
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_DYNAMIC_DRAW);
-    
-    GLint pos_loc = a_pos_;
-    glEnableVertexAttribArray(pos_loc);
-    glVertexAttribPointer(pos_loc, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), 0);
-    
-    GLint uv_loc = a_uv_;
-    glEnableVertexAttribArray(uv_loc);
-    glVertexAttribPointer(uv_loc, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
-    
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-}
-
-// Draw a texture over an arbitrary quad (bl, br, tr, tl) rather than an
-// axis-aligned rect, so text can be warped by the menu's perspective: the
-// bottom edge of a line ends up wider than its top edge, matching the panel.
-void OSD::draw_icon_quad(GLuint tex, math::Vec2 bl, math::Vec2 br,
-                         math::Vec2 tr, math::Vec2 tl, float r, float g, float b) {
-    if (tex == 0) return;
-    float verts[] = {
-        bl.x, bl.y, 0,   0, 1,
-        br.x, br.y, 0,   1, 1,
-        tl.x, tl.y, 0,   0, 0,
-        tr.x, tr.y, 0,   1, 0
-    };
-
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, tex);
-    glUniform1i(u_tex_, 0);
-    glUniform1i(u_is_text_, 1);
-    glUniform1i(u_use_shading_, 0);
-    glUniform4f(u_color_, r, g, b, 1.0);
-    glUniform1f(u_alpha_, 1.0);
-
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_DYNAMIC_DRAW);
-
-    GLint pos_loc = a_pos_;
-    glEnableVertexAttribArray(pos_loc);
-    glVertexAttribPointer(pos_loc, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), 0);
-
-    GLint uv_loc = a_uv_;
-    glEnableVertexAttribArray(uv_loc);
-    glVertexAttribPointer(uv_loc, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
-
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-}
-
-void OSD::draw_trapezoid(float x, float y, float w, float h, float top_scale, float slant, float alpha, float r, float g, float b) {
-    float top_w = w * top_scale;
-    float inset = (w - top_w) / 2.0f;
-    
-    // Slant shifts the whole top row
-    float slant_x = h * slant;
-
-    float verts[] = {
-        x,           y,   0,   0, 0,
-        x+w,         y,   0,   1, 0,
-        x+inset+slant_x,       y+h, 0,   0, 1,
-        x+w-inset+slant_x,     y+h, 0,   1, 1
-    };
-    
-    glUniform1i(u_is_text_, 0);
-    glUniform1i(u_use_shading_, 0);
-    glUniform4f(u_color_, r, g, b, 0.85); 
-    glUniform1f(u_alpha_, alpha);
-    
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_DYNAMIC_DRAW);
-    
-    GLint pos_loc = a_pos_;
-    glEnableVertexAttribArray(pos_loc);
-    glVertexAttribPointer(pos_loc, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), 0);
-    
-    GLint uv_loc = a_uv_;
-    glEnableVertexAttribArray(uv_loc);
-    glVertexAttribPointer(uv_loc, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
-    
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-}
-
-void OSD::draw_poly(const std::vector<math::Vec2>& points, float alpha, float r, float g, float b) {
-    if (points.size() < 3) return;
-    
-    std::vector<float> verts;
-    verts.reserve(points.size() * 3 * 5); 
-    
-    math::Vec2 center = {0,0};
-    for(const auto& p : points) { center.x += p.x; center.y += p.y; }
-    center.x /= points.size(); center.y /= points.size();
-
-    for (size_t i = 0; i < points.size(); ++i) {
-        size_t next = (i + 1) % points.size();
-        verts.insert(verts.end(), {center.x, center.y, 0, 0.5f, 0.5f});
-        verts.insert(verts.end(), {points[i].x, points[i].y, 0, 0, 0});
-        verts.insert(verts.end(), {points[next].x, points[next].y, 0, 1, 1});
-    }
-
-    glUniform1i(u_is_text_, 0);
-    glUniform1i(u_use_shading_, 0);
-    glUniform4f(u_color_, r, g, b, 1.0f);
-    glUniform1f(u_alpha_, alpha);
-
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(float), verts.data(), GL_DYNAMIC_DRAW);
-
-    GLint pos_loc = a_pos_;
-    glEnableVertexAttribArray(pos_loc);
-    glVertexAttribPointer(pos_loc, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), 0);
-
-    GLint uv_loc = a_uv_;
-    glEnableVertexAttribArray(uv_loc);
-    glVertexAttribPointer(uv_loc, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
-
-    glDrawArrays(GL_TRIANGLES, 0, points.size() * 3);
-}
-
-// The video link warning's glow: a rail along the top of the picture and one
-// along the bottom, each a solid line at the frame edge whose light falls off
-// quickly and then trails away inboard. The sides are left alone - that is
-// where the canopy's wings sit - and each rail fades out before the corners
-// rather than stopping square, so it reads as light, not as a painted bar.
-void OSD::draw_rail_glow(float fw, float fh, float depth, float alpha,
-                         float r, float g, float b) {
-    if (depth <= 0.0f || alpha <= 0.0f) return;
-    // Down the rail, from the edge inboard: x depth, x alpha.
-    static const float kInset[] = { 0.0f, 0.04f, 0.12f, 0.45f, 1.0f };
-    static const float kAlpha[] = { 1.0f, 1.00f, 0.55f, 0.18f, 0.0f };
-    // Along it, as a fraction of fw: the rail spans 88% of the width and
-    // ramps up over its outer 14% at each end.
-    static const float kX[]  = { -0.88f, -0.6336f, 0.6336f, 0.88f };
-    static const float kXa[] = {  0.0f,   1.0f,    1.0f,    0.0f  };
-    const int nv = (int)(sizeof(kInset) / sizeof(kInset[0]));
-    const int nh = (int)(sizeof(kX) / sizeof(kX[0]));
-
-    std::vector<float> v;
-    v.reserve(2 * (nv - 1) * (nh - 1) * 6 * 6);
-    for (int side = 0; side < 2; side++) {
-        const float edge = side ? fh : -fh, dir = side ? -1.0f : 1.0f;
-        for (int k = 0; k + 1 < nv; k++) {
-            float y0 = edge + dir * kInset[k] * depth;
-            float y1 = edge + dir * kInset[k + 1] * depth;
-            for (int c = 0; c + 1 < nh; c++) {
-                float x0 = kX[c] * fw, x1 = kX[c + 1] * fw;
-                float a00 = alpha * kAlpha[k]     * kXa[c];
-                float a10 = alpha * kAlpha[k]     * kXa[c + 1];
-                float a01 = alpha * kAlpha[k + 1] * kXa[c];
-                float a11 = alpha * kAlpha[k + 1] * kXa[c + 1];
-                const float q[6][3] = {{x0, y0, a00}, {x1, y0, a10}, {x1, y1, a11},
-                                       {x0, y0, a00}, {x1, y1, a11}, {x0, y1, a01}};
-                for (int m = 0; m < 6; m++)
-                    v.insert(v.end(), {q[m][0], q[m][1], 0.0f, 0.5f, 0.5f, q[m][2]});
-            }
-        }
-    }
-
-    glUniform1i(u_is_text_, 0);
-    glUniform1i(u_use_shading_, 0);
-    glUniform4f(u_color_, r, g, b, 1.0f);
-    glUniform1f(u_alpha_, 1.0f);
-
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER, v.size() * sizeof(float), v.data(), GL_DYNAMIC_DRAW);
-    glEnableVertexAttribArray(a_pos_);
-    glVertexAttribPointer(a_pos_, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), 0);
-    glEnableVertexAttribArray(a_uv_);
-    glVertexAttribPointer(a_uv_, 2, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)(3 * sizeof(float)));
-    if (a_alpha_factor_ != -1) {
-        glEnableVertexAttribArray(a_alpha_factor_);
-        glVertexAttribPointer(a_alpha_factor_, 1, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)(5 * sizeof(float)));
-    }
-    glDrawArrays(GL_TRIANGLES, 0, (GLsizei)(v.size() / 6));
-    if (a_alpha_factor_ != -1) {
-        glDisableVertexAttribArray(a_alpha_factor_);
-        glVertexAttrib1f(a_alpha_factor_, 1.0f);
-    }
+    glUseProgram(gl2d_.program);
 }
 
 int OSD::link_warn_hold(int raw) {
@@ -1371,656 +1148,6 @@ int OSD::link_warn_hold(int raw) {
         link_warn_better_us_ = 0;
     }
     return link_warn_level_;
-}
-
-// Helper to draw a glowing line by stacking transparent lines
-void OSD::draw_glow_line(const std::vector<math::Vec2>& points, float width, float alpha, float r, float g, float b) {
-    if (points.size() < 2) return;
-    
-    // Disable shading logic for lines
-    glUniform1i(u_use_shading_, 0);
-
-    // Compute normals at each point
-    std::vector<math::Vec2> normals(points.size());
-    for (size_t i = 0; i < points.size(); i++) {
-        float dx, dy;
-        if (i == 0) {
-            dx = points[1].x - points[0].x;
-            dy = points[1].y - points[0].y;
-        } else if (i == points.size() - 1) {
-            dx = points[i].x - points[i-1].x;
-            dy = points[i].y - points[i-1].y;
-        } else {
-            float dx1 = points[i].x - points[i-1].x;
-            float dy1 = points[i].y - points[i-1].y;
-            float dx2 = points[i+1].x - points[i].x;
-            float dy2 = points[i+1].y - points[i].y;
-            float len1 = sqrtf(dx1*dx1 + dy1*dy1);
-            float len2 = sqrtf(dx2*dx2 + dy2*dy2);
-            if (len1 > 0) { dx1 /= len1; dy1 /= len1; }
-            if (len2 > 0) { dx2 /= len2; dy2 /= len2; }
-            dx = dx1 + dx2;
-            dy = dy1 + dy2;
-        }
-        float len = sqrtf(dx*dx + dy*dy);
-        if (len > 0) {
-            normals[i].x = -dy / len;
-            normals[i].y = dx / len;
-        } else {
-            normals[i].x = 0.0f;
-            normals[i].y = 1.0f;
-        }
-    }
-
-    // Render 3 passes for glow (each pass is a SINGLE draw call)
-    for (int j = 0; j < 3; j++) {
-        float w_scale = 1.0f + j * 2.0f;
-        float w = width * w_scale * 0.001f;
-        float a = alpha / (j * 2.0f + 1.0f);
-        if (j == 0) a = alpha;
-
-        std::vector<float> verts;
-        verts.reserve(points.size() * 2 * 5);
-
-        for (size_t i = 0; i < points.size(); i++) {
-            float nx = normals[i].x * w;
-            float ny = normals[i].y * w;
-            
-            verts.push_back(points[i].x + nx);
-            verts.push_back(points[i].y + ny);
-            verts.push_back(0.0f);
-            verts.push_back(0.0f);
-            verts.push_back(0.0f);
-            
-            verts.push_back(points[i].x - nx);
-            verts.push_back(points[i].y - ny);
-            verts.push_back(0.0f);
-            verts.push_back(0.0f);
-            verts.push_back(0.0f);
-        }
-
-        glUniform1i(u_is_text_, 0);
-        glUniform4f(u_color_, r, g, b, a);
-        glUniform1f(u_alpha_, a);
-        glBindBuffer(GL_ARRAY_BUFFER, vbo);
-        glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(float), verts.data(), GL_DYNAMIC_DRAW);
-        GLint pos_loc = a_pos_;
-        glEnableVertexAttribArray(pos_loc);
-        glVertexAttribPointer(pos_loc, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), 0);
-        GLint uv_loc = a_uv_;
-        glEnableVertexAttribArray(uv_loc);
-        glVertexAttribPointer(uv_loc, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
-        glDrawArrays(GL_TRIANGLE_STRIP, 0, (int)verts.size() / 5);
-    }
-}
-
-void OSD::draw_hex_panel(float x, float y, float w, float h, float alpha, float r, float g, float b, bool outline, int num_h, int num_v, float grid_y, float grid_h, bool uniform_x) {
-    if (!outline) return; // Background now handled inside the outline block for integration
-    
-    // side estimation: left wing x is negative, right wing x is positive
-    bool is_left = (x < 0);
-    
-    auto get_pos = [&](float tx, float ty) {
-        float ratio_y = (ty - y) / h;
-        float span_scale = 1.0f - (ratio_y * 0.3f);
-        float sw = w * span_scale;
-        float sx = x + (w - sw) / 2.0f;
-        float ratio_x = (tx - x) / w;
-        return math::Vec2{sx + ratio_x * sw, ty};
-    };
-
-    // 4. Smooth Gradient Background
-    // We draw a single quad (or two depending on wing shape) with vertex colors for smooth interpolation.
-    // Left Wing: Fades out towards Top-Right. Max alpha at Bottom-Left.
-    // Right Wing: Fades out towards Top-Left. Max alpha at Bottom-Right.
-    
-    // Coordinates
-    float x1 = x;
-    float x2 = x + w;
-    float y1 = y;
-    float y2 = y + h;
-    
-    // Get actual polygon corners based on trapezoid shape
-    math::Vec2 p_bl = get_pos(x1, y1);
-    math::Vec2 p_br = get_pos(x2, y1);
-    math::Vec2 p_tr = get_pos(x2, y2);
-    math::Vec2 p_tl = get_pos(x1, y2);
-
-    float max_a = alpha * 0.85f;
-
-    // Vertex Alphas based on Wing Side
-    float a_bl, a_br, a_tr, a_tl;
-    
-    if (is_left) {
-        // Max at Bottom-Left (p_bl)
-        a_bl = max_a;
-        a_br = max_a * 0.4f;
-        a_tr = 0.0f;          // Fade out top-right
-        a_tl = max_a * 0.4f;
-    } else {
-        // Max at Bottom-Right (p_br)
-        a_bl = max_a * 0.4f;
-        a_br = max_a;
-        a_tr = max_a * 0.4f;
-        a_tl = 0.0f;          // Fade out top-left
-    }
-    
-    // Draw directly using gl buffer to support per-vertex color/alpha if shader supports it.
-    // Our 'draw_poly' uses uniform alpha. We need a way to pass vertex attributes or just standard lerp.
-    // Since our simple shader uses uniform alpha, drawing a smooth gradient requires modifying the drawing logic 
-    // OR just drawing a bunch of overlapping quads which is what caused the blockiness.
-    // Wait, the shader 'f_shader_str' currently handles 'v_uv' but uses uniform color/alpha.
-    
-    // Hack: We can simulate a gradient by drawing many thin overlapping slices? No that's what we just removed.
-    // Better: Update the shader to support vertex colors or use UVs to create a gradient.
-    // The shader has v_uv. We can use UVs to generate the gradient in the Fragment Shader.
-    // UVs are (0,0) to (1,1).
-    
-    // Let's use 'draw_poly' but rely on a new shader uniform or just custom implementation here?
-    // 'draw_poly' sets UVs: (0,0) (0,1) (1,1)... wait, draw_poly sets UVs:
-    // center (0,0.5), p1(0,0), pnext(1,1)?? No draw_poly sets weird UVs.
-    
-    // Look at 'draw_trapezoid' or 'draw_panel' - they set specific UVs.
-    // Let's implement 'draw_gradient_quad' locally here or use a custom block.
-    
-    // Actually, 'draw_panel' sets UVs (0,0)..(1,1) correctly?
-    // In 'draw_hex_panel':
-    // We already calculated p_bl, p_br, p_tr, p_tl. 
-    // We can feed these into a VBO.
-    // NOTE: Our fragment shader "f_shader_str" lines 215-217 has some "use_shading" logic.
-    // If we enable 'use_shading', it creates a radial gradient from center 0.5. This isn't what we want.
-    
-    // Simplest fix without changing shader:
-    // Create a dense mesh (e.g. 10x10) for the background so vertex interpolation (if we had vertex colors) works? 
-    // No, we only have uniform color.
-    
-    // Real fix: Update Shader to support a 'gradient_mode'.
-    // BUT modifying shader might break other things or require recompile of everything.
-    
-    // Alternate: Use 100s of very small overlapping transparent layers? Expensive.
-    
-    auto smoothstep = [](float edge0, float edge1, float x) {
-        float t = std::clamp((x - edge0) / (edge1 - edge0), 0.0f, 1.0f);
-        return t * t * (3.0f - 2.0f * t);
-    };
-
-
-    // BATCHED SMOOTH BACKGROUND RENDER (Gouraud Shading)
-    // We generate a mesh where each vertex has its own calculated alpha factor.
-    // This removes the "squares" artifact by letting GL interpolate alpha.
-    
-    int bg_steps = 20; // Enough for smooth interpolation
-    std::vector<float> bg_verts;
-    bg_verts.reserve(bg_steps * bg_steps * 6 * 6); // x,y,z,u,v,a * 6 verts/quad
-    
-    glUniform1i(u_is_text_, 0);
-    glUniform1i(u_use_shading_, 0);
-    // Use the base color, alpha will be modulated by the attribute
-    glUniform4f(u_color_, r, g, b, 1.0f);
-    glUniform1f(u_alpha_, alpha); // Base alpha, attribute multiplies this
-
-    for (int j = 0; j < bg_steps; j++) {
-        for (int i = 0; i < bg_steps; i++) {
-            float rx1 = (float)i/bg_steps;
-            float rx2 = (float)(i+1)/bg_steps;
-            float ry1 = (float)j/bg_steps;
-            float ry2 = (float)(j+1)/bg_steps;
-
-            float x1_l = x + rx1 * w;
-            float x2_l = x + rx2 * w;
-            float y1_l = y + ry1 * h;
-            float y2_l = y + ry2 * h;
-
-            math::Vec2 p1 = get_pos(x1_l, y1_l); // BL
-            math::Vec2 p2 = get_pos(x2_l, y1_l); // BR
-            math::Vec2 p3 = get_pos(x2_l, y2_l); // TR
-            math::Vec2 p4 = get_pos(x1_l, y2_l); // TL
-
-            // Helper to calc alpha factor for a logical coordinate (0..1)
-            auto calc_a = [&](float rx, float ry) {
-                float fade_x = uniform_x ? 0.5f : (is_left ? (1.0f - rx) : rx);
-                float fade_top = 1.0f - ry;
-                return 1.25f * fade_x * fade_top;
-            };
-
-            float a1 = calc_a(rx1, ry1);
-            float a2 = calc_a(rx2, ry1);
-            float a3 = calc_a(rx2, ry2);
-            float a4 = calc_a(rx1, ry2);
-
-            // Quad as 2 triangles: p1-p2-p3, p1-p3-p4
-            auto push = [&](math::Vec2 p, float a) {
-                bg_verts.push_back(p.x); bg_verts.push_back(p.y); bg_verts.push_back(0); // pos
-                bg_verts.push_back(0.5f); bg_verts.push_back(0.5f); // dummy UV
-                bg_verts.push_back(a); // alpha factor
-            };
-
-            push(p1, a1); push(p2, a2); push(p3, a3);
-            push(p1, a1); push(p3, a3); push(p4, a4);
-        }
-    }
-
-    if (!bg_verts.empty()) {
-        glBindBuffer(GL_ARRAY_BUFFER, vbo);
-        glBufferData(GL_ARRAY_BUFFER, bg_verts.size() * sizeof(float), bg_verts.data(), GL_DYNAMIC_DRAW);
-
-        GLint pos_loc = a_pos_;
-        glEnableVertexAttribArray(pos_loc);
-        glVertexAttribPointer(pos_loc, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), 0);
-
-        GLint uv_loc = a_uv_;
-        glEnableVertexAttribArray(uv_loc);
-        glVertexAttribPointer(uv_loc, 2, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)(3 * sizeof(float)));
-
-        GLint alpha_loc = a_alpha_factor_;
-        if (alpha_loc != -1) {
-            glEnableVertexAttribArray(alpha_loc);
-            glVertexAttribPointer(alpha_loc, 1, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)(5 * sizeof(float)));
-        }
-
-        glDrawArrays(GL_TRIANGLES, 0, bg_verts.size() / 6);
-
-        if (alpha_loc != -1) {
-            glDisableVertexAttribArray(alpha_loc);
-            glVertexAttrib1f(alpha_loc, 1.0f); // Reset to default
-        }
-    }
-
-    // 2. Converging Grid
-    float grid_a_base = alpha * 0.40f; // Toned down grid (0.45 -> 0.40)
-    float gy = (grid_y >= 0.0f) ? grid_y : y;
-    float gh = (grid_h >= 0.0f) ? grid_h : h;
-
-    // Horizontal Grid Lines
-    for (int i = 0; i <= num_h; i++) {
-        float ry = (float)i / num_h;
-        float ly = gy + ry * gh;
-        
-        // Horizontal lines fade towards the far side and top
-        int h_steps = 10;
-        for (int k = 0; k < h_steps; k++) {
-            float rx1 = (float)k / h_steps;
-            float rx2 = (float)(k+1) / h_steps;
-            math::Vec2 p1 = get_pos(x + rx1 * w, ly);
-            math::Vec2 p2 = get_pos(x + rx2 * w, ly);
-            
-            float mid_rx = (rx1 + rx2) * 0.5f;
-            float fade_x = uniform_x ? 0.5f : (is_left ? (1.0f - mid_rx) : mid_rx);
-            
-            float fade_top = 1.0f - ry;
-            float a = grid_a_base * fade_x * fade_top;
-            
-            if (a > 0.01f) {
-                canvas_->poly({p1, {p1.x, p1.y + 0.003f}, {p2.x, p2.y + 0.003f}, p2}, a, 1.0f, 1.0f, 1.0f);
-            }
-        }
-    }
-
-    // Vertical Grid Lines
-    for (int i = 0; i <= num_v; i++) {
-        float rx = (float)i / num_v;
-        float lx = x + rx * w;
-        
-        int v_segments = 8;
-        for (int j = 0; j < v_segments; j++) {
-            float ry1 = (float)j / v_segments;
-            float ry2 = (float)(j+1) / v_segments;
-            math::Vec2 p1 = get_pos(lx, gy + ry1 * gh);
-            math::Vec2 p2 = get_pos(lx, gy + ry2 * gh);
-            float mid_ry = (ry1 + ry2) * 0.5f;
-
-            float fade_x = uniform_x ? 0.5f : (is_left ? (1.0f - rx) : rx);
-            
-            float fade_top = 1.0f - mid_ry;
-            float a = grid_a_base * fade_x * fade_top;
-            
-            if (a > 0.01f) {
-                canvas_->poly({p1, {p1.x + 0.002f, p1.y}, {p2.x + 0.002f, p2.y}, p2}, a, 1.0f, 1.0f, 1.0f);
-            }
-        }
-    }
-}
-
-void OSD::draw_arc(float cx, float cy, float r_in, float r_out, float start_angle, float end_angle, float alpha, float r, float g, float b) {
-    int segments = 24;
-    float step = (end_angle - start_angle) / segments;
-    
-    std::vector<float> verts;
-    verts.reserve(segments * 6 * 5);
-
-    for (int i = 0; i < segments; i++) {
-        float a1 = start_angle + i * step;
-        float a2 = start_angle + (i + 1) * step;
-        
-        float cos1 = cosf(a1), sin1 = sinf(a1);
-        float cos2 = cosf(a2), sin2 = sinf(a2);
-        
-        float x1_in = cx + r_in * cos1, y1_in = cy + r_in * sin1;
-        float x1_out = cx + r_out * cos1, y1_out = cy + r_out * sin1;
-        float x2_in = cx + r_in * cos2, y2_in = cy + r_in * sin2;
-        float x2_out = cx + r_out * cos2, y2_out = cy + r_out * sin2;
-        
-        verts.insert(verts.end(), {x1_in, y1_in, 0, 0, 0});
-        verts.insert(verts.end(), {x1_out, y1_out, 0, 1, 0});
-        verts.insert(verts.end(), {x2_in, y2_in, 0, 0, 1});
-        
-        verts.insert(verts.end(), {x1_out, y1_out, 0, 1, 0});
-        verts.insert(verts.end(), {x2_out, y2_out, 0, 1, 1});
-        verts.insert(verts.end(), {x2_in, y2_in, 0, 0, 1});
-    }
-
-    glUniform1i(u_is_text_, 0);
-    glUniform1i(u_use_shading_, 0);
-    glUniform4f(u_color_, r, g, b, 0.85);
-    glUniform1f(u_alpha_, alpha);
-
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(float), verts.data(), GL_DYNAMIC_DRAW);
-
-    GLint pos_loc = a_pos_;
-    glEnableVertexAttribArray(pos_loc);
-    glVertexAttribPointer(pos_loc, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), 0);
-
-    GLint uv_loc = a_uv_;
-    glEnableVertexAttribArray(uv_loc);
-    glVertexAttribPointer(uv_loc, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
-
-    glDrawArrays(GL_TRIANGLES, 0, segments * 6);
-}
-
-void OSD::draw_grid_arc(float cx, float cy, float r_inner, float r_outer, float start_angle, float end_angle, float alpha) {
-    int num_h = 10;
-    int num_v = 24;
-    
-    // 1. Concentric Arcs (Continuous Flow)
-    for (int i = 0; i <= num_h; i++) {
-        float ratio = (float)i / num_h;
-        float r = r_inner + (r_outer - r_inner) * ratio;
-        // Exponential fade top-wards
-        float a = alpha * 0.25f * (1.0f - ratio * ratio);
-        canvas_->arc(cx, cy, r, r + 0.004f, start_angle, end_angle, a, 1.0f, 1.0f, 1.0f);
-    }
-    
-    // 2. Radial Spokes (Perspective Convergence)
-    for (int i = 0; i <= num_v; i++) {
-        float ratio = (float)i / num_v;
-        float angle = start_angle + (end_angle - start_angle) * ratio;
-        float c = cosf(angle), s = sinf(angle);
-        
-        float rx1 = cx + r_inner * c, ry1 = cy + r_inner * s;
-        float rx2 = cx + r_outer * c, ry2 = cy + r_outer * s;
-        
-        // Slightly fade outer edges and top
-        float v_alpha = alpha * 0.12f * (1.0f - (fabsf(ratio - 0.5f) * 1.5f));
-        if (v_alpha < 0.01f) continue;
-
-        std::vector<math::Vec2> line = {
-            {rx1, ry1}, {rx1 + 0.003f, ry1},
-            {rx2 + 0.003f, ry2}, {rx2, ry2}
-        };
-        glUniform1i(u_use_shading_, 0);
-        canvas_->poly(line, v_alpha, 1.0f, 1.0f, 1.0f);
-    }
-}
-
-// A cairo context set up exactly as ensure_text_texture renders, for
-// measuring strings without rasterising them.
-static cairo_t* text_measure_context() {
-    static cairo_surface_t* surf = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1);
-    static cairo_t* m = nullptr;
-    // A cairo_t's error state is permanent (an invalid UTF-8 string sets it),
-    // and a broken one measures everything as zero: start a fresh one.
-    if (m && cairo_status(m) != CAIRO_STATUS_SUCCESS) { cairo_destroy(m); m = nullptr; }
-    if (!m) {
-        m = cairo_create(surf);
-        cairo_select_font_face(m, "Chakra Petch SemiBold",
-                               CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
-        cairo_matrix_t fm;
-        cairo_matrix_init_scale(&fm, 40.0, 40.0);
-        cairo_set_font_matrix(m, &fm);
-    }
-    return m;
-}
-
-void OSD::ensure_text_texture(const char* text) {
-    // One lookup, not two: this used to count() here and operator[] again at the
-    // end. On a hit, just stamp the entry so eviction knows it is warm.
-    auto hit = text_cache.find(text);
-    if (hit != text_cache.end()) {
-        hit->second.last_used = ++text_cache_clock;
-        return;
-    }
-    prof::count(prof::kCountTextMiss);
-    {
-        // Sized to the text. Every string used to get a 2048x64 texture and be
-        // drawn as a quad of that shape - 32 times wider than tall, for "5" as
-        // much as for a sentence - so the GPU blended, and the upload moved,
-        // mostly transparent pixels: 512 KB per string. Measure first, then
-        // make the surface just wide enough (the glyphs start at x = 2).
-        cairo_t* measure = text_measure_context();
-        cairo_text_extents_t ext;
-        cairo_text_extents(measure, text, &ext);
-        double right = std::max(ext.x_advance, ext.x_bearing + ext.width);
-        int w = ((int)std::ceil(2.0 + right) + 4 + 15) & ~15;   // 2 px lead-in, 4 px margin, 16-aligned
-        if (w < 16)   w = 16;
-        if (w > 2048) w = 2048;
-        int h = 64;
-        cairo_surface_t *surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
-        cairo_t *cr = cairo_create(surface);
-        
-        // Chakra Petch, shipped in the rootfs overlay. The HUD and the menu were
-        // designed in it; the goggle previously had only DejaVu Sans, so every
-        // mockup was drawn in one face and rendered in another - which is most
-        // of why the built menu never looked like the picture of it.
-        //
-        // "Rajdhani" here before it was a font that was never installed, so it
-        // silently fell back to DejaVu and nobody noticed for a long time. The
-        // family name below is the one fontconfig reports, so a missing font
-        // shows up as a visibly wrong face rather than an invisible fallback.
-        cairo_select_font_face(cr, "Chakra Petch SemiBold",
-                               CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
-
-        // Use shared OSD font configuration
-        cairo_matrix_t font_matrix;
-        // 0.75 was condensing DejaVu, which is a wide face. Chakra Petch is
-        // already narrow by design; condensing it again closes the counters and
-        // is exactly what made the menu look cramped next to the mockup.
-        cairo_matrix_init_scale(&font_matrix, 1.0, 1.0);
-        cairo_matrix_scale(&font_matrix, 40.0, 40.0);    
-        cairo_set_font_matrix(cr, &font_matrix);
-        
-        cairo_text_extents_t extents;
-        cairo_text_extents(cr, text, &extents);
-
-        cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 1.0);
-        cairo_move_to(cr, 2, 48); 
-        cairo_show_text(cr, text);
-        
-        cairo_destroy(cr);
-        unsigned char* data = cairo_image_surface_get_data(surface);
-        
-        GLuint tex;
-        glGenTextures(1, &tex);
-        glBindTexture(GL_TEXTURE_2D, tex);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        // Clamp: with the texture now ending just past the last glyph, the
-        // default REPEAT would filter the left edge into the right one.
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
-        
-        // Evict BEFORE inserting so the new entry is never the eviction victim.
-        // Pick the least-recently-used entry. The previous version took
-        // text_cache.begin() - the lexicographically smallest key - so it
-        // preferentially discarded the shortest, hottest strings and paid a full
-        // cairo render plus glTexImage2D to rebuild them almost immediately. It
-        // also built a std::string per comparison while scanning; comparing the
-        // key against the char* directly needs no allocation.
-        // We are on the miss path here, so the O(n) scan runs rarely.
-        if (text_cache.size() >= 500) {
-            auto victim = text_cache.end();
-            for (auto it = text_cache.begin(); it != text_cache.end(); ++it) {
-                if (it->first == text) continue;   // never evict what we are adding
-                if (victim == text_cache.end() ||
-                    it->second.last_used < victim->second.last_used)
-                    victim = it;
-            }
-            if (victim != text_cache.end()) {
-                glDeleteTextures(1, &victim->second.tex);
-                text_cache.erase(victim);
-            }
-        }
-
-        text_cache[text] = {tex, w, h, (float)extents.x_advance, std::string(text),
-                            ++text_cache_clock};
-        cairo_surface_destroy(surface);
-    }
-}
-
-float OSD::text_width(const char* text, float scale) {
-    if (!text || !text[0]) return 0.0f;
-    // A cached string knows its width; anything else is measured, not
-    // rendered - the menu's word wrap tries many strings it never draws.
-    auto it = text_cache.find(text);
-    if (it != text_cache.end()) return (it->second.text_w / 64.0f) * scale;
-    cairo_text_extents_t ext;
-    cairo_text_extents(text_measure_context(), text, &ext);
-    return ((float)ext.x_advance / 64.0f) * scale;
-}
-
-void OSD::draw_text(const char* text, float x, float y, float scale, bool right_align, float r, float g, float b) {
-    if (!text || !text[0]) return;
-    ensure_text_texture(text);
-
-    auto cit = text_cache.find(text);
-    if (cit == text_cache.end()) return;
-    auto& cached = cit->second;
-    float aspect = (float)cached.w / cached.h;
-    
-    float tx = x;
-    if (right_align) {
-        float text_width_units = (cached.text_w / 64.0f) * scale;
-        tx = x - text_width_units;
-    }
-    
-    canvas_->icon(cached.tex, tx, y, scale * aspect, scale, r, g, b);
-}
-
-// Same as draw_text, but only the left `reveal` fraction (0..1) of the
-// rendered string is drawn - a texture crop, not an alpha fade, so a state
-// label sweeps into view left-to-right instead of fading or popping in
-// whole. draw_text caches each string as one texture (ensure_text_texture),
-// so "revealing" it is just drawing a narrower sub-rect of that same quad
-// rather than re-rendering glyph-by-glyph.
-void OSD::draw_text_wipe(const char* text, float x, float y, float scale,
-                         bool right_align, float r, float g, float b,
-                         float reveal) {
-    if (!text || !text[0]) return;
-    reveal = fmaxf(0.0f, fminf(1.0f, reveal));
-    if (reveal <= 0.0f) return;
-    ensure_text_texture(text);
-
-    auto cit = text_cache.find(text);
-    if (cit == text_cache.end()) return;
-    auto& cached = cit->second;
-
-    // ensure_text_texture renders each string with the glyphs starting at
-    // x=2 and a few pixels of margin after them, so the texture (w) is a
-    // little wider than the word (text_w). Both numbers matter here and they
-    // are NOT interchangeable - right-alignment is measured on the glyph
-    // advance (as draw_text does), and the quad spans the whole texture.
-    const float px_to_units = scale / (float)cached.h;   // 64 texture px == scale
-    float tx = x;
-    if (right_align) tx = x - cached.text_w * px_to_units;
-
-    if (reveal >= 1.0f) {
-        canvas_->icon(cached.tex, tx, y, (float)cached.w * px_to_units, scale, r, g, b);
-        return;
-    }
-
-    // Crop to the revealed part of the GLYPHS, not of the texture, so the
-    // sweep ends exactly at the last letter.
-    const float cut_px = 2.0f + cached.text_w * reveal;  // 2 = cairo's left margin
-    const float w  = cut_px * px_to_units;
-    const float u1 = cut_px / (float)cached.w;
-
-    // Same vertex/uniform setup as draw_icon, just a narrower quad and a
-    // matching narrower U range instead of the full 0..1 texture.
-    float verts[] = {
-        tx,     y,       0,  0.0f, 1,
-        tx + w, y,       0,  u1,   1,
-        tx,     y+scale, 0,  0.0f, 0,
-        tx + w, y+scale, 0,  u1,   0
-    };
-
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, cached.tex);
-    glUniform1i(u_tex_, 0);
-    glUniform1i(u_is_text_, 1);
-    glUniform1i(u_use_shading_, 0);
-    glUniform4f(u_color_, r, g, b, 1.0);
-    glUniform1f(u_alpha_, 1.0);
-
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_DYNAMIC_DRAW);
-
-    glEnableVertexAttribArray(a_pos_);
-    glVertexAttribPointer(a_pos_, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), 0);
-    glEnableVertexAttribArray(a_uv_);
-    glVertexAttribPointer(a_uv_, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
-
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-}
-
-
-void OSD::draw_stacked_bar(float x, float y, float w, float h, float slant, bool reverse, float val1, float r1, float g1, float b1, float val2, float r2, float g2, float b2, float val3, float r3, float g3, float b3, float val4, float r4, float g4, float b4, float val5, float r5, float g5, float b5, float val6, float r6, float g6, float b6) {
-    float seg_w = 0.02f;
-    float spacing = 0.005f;
-    
-    int total_segments = (int)(w / (seg_w + spacing));
-    int c1 = (int)(val1 * total_segments);
-    int c2 = (int)(val2 * total_segments);
-    int c3 = (int)(val3 * total_segments);
-    int c4 = (int)(val4 * total_segments);
-    int c5 = (int)(val5 * total_segments);
-    int c6 = (int)(val6 * total_segments);
-    
-    if (c1 + c2 + c3 + c4 + c5 + c6 > total_segments) {
-        float scale = (float)total_segments / (c1 + c2 + c3 + c4 + c5 + c6);
-        c1 *= scale; c2 *= scale; c3 *= scale; c4 *= scale; c5 *= scale; c6 *= scale;
-    }
-
-    float cx = reverse ? (x + w - seg_w) : x;
-    float step = reverse ? -(seg_w + spacing) : (seg_w + spacing);
-
-    auto draw_seg = [&](int count, float r, float g, float b, float a = 0.9f) {
-        if (count <= 0) return;
-        for(int i=0; i<count; i++) {
-             canvas_->trapezoid(cx, y, seg_w, h, 1.0f, 0.0f, a, r, g, b);
-             cx += step;
-        }
-    };
-    
-    draw_seg(c1, r1, g1, b1);
-    draw_seg(c2, r2, g2, b2);
-    draw_seg(c3, r3, g3, b3);
-    draw_seg(c4, r4, g4, b4);
-    draw_seg(c5, r5, g5, b5);
-    draw_seg(c6, r6, g6, b6);
-}
-
-void OSD::draw_signal_bar(float x, float y, float w, float h, float value, float min_val, float max_val) {
-    float norm = (value - min_val) / (max_val - min_val);
-    if (norm < 0) norm = 0;
-    if (norm > 1) norm = 1;
-
-    // Color based on strength
-    float r = 1.0f - norm;
-    float g = norm;
-    float b = 0.2f;
-    
-    canvas_->panel(x, y, w * norm, h, 0.9f, r, g, b);
 }
 
 // Hand buffers back to GBM - so the GPU may draw into them again - once the
@@ -2438,7 +1565,7 @@ void OSD::render_gl() {
     }
 
     // Draw background or transition
-    glUniformMatrix4fv(u_mvp_, 1, GL_FALSE, mvp_c);
+    glUniformMatrix4fv(gl2d_.u_mvp, 1, GL_FALSE, mvp_c);
     // Acquiring: there is an aircraft, and no picture from it yet. Deliberately
     // not gated on VideoState - that is one-way (BACKGROUND -> TRANSITION ->
     // LIVE) and never returns, so keying off it meant the lock played on the
@@ -2589,15 +1716,15 @@ void OSD::render_gl() {
         float cy = -base_h * 0.5f + frustum_h * 0.08f; // slightly above centre
 
         if (vs == VideoState::BACKGROUND) {
-            glUseProgram(shader_program);
-            glUniformMatrix4fv(u_mvp_, 1, GL_FALSE, mvp_c);
-            glUniform1i(u_is_text_, 1);
-            glUniform1i(u_use_shading_, 0);
+            glUseProgram(gl2d_.program);
+            glUniformMatrix4fv(gl2d_.u_mvp, 1, GL_FALSE, mvp_c);
+            glUniform1i(gl2d_.u_is_text, 1);
+            glUniform1i(gl2d_.u_use_shading, 0);
 
             // Softer than the old title's: the wordmark is set larger, so the
             // same fraction of its height threw a slab rather than a shadow.
             float sh = base_h * 0.018f;
-            GLint alpha_loc = a_alpha_factor_;
+            GLint alpha_loc = gl2d_.a_alpha_factor;
             struct { float dx, dy, r, g, b; } shadow_passes[] = {
                 { sh * 2.0f, -sh * 2.0f, 0.00f, 0.00f, 0.05f },
                 { sh,        -sh,        0.00f, 0.00f, 0.03f },
@@ -2647,7 +1774,7 @@ void OSD::render_gl() {
                 if (alpha_loc != -1) glVertexAttrib1f(alpha_loc, 1.0f);
             }
 
-            glUseProgram(shader_program);
+            glUseProgram(gl2d_.program);
 
         } else if (vs == VideoState::TRANSITION) {
             // "Stretched from sides" effect:
@@ -2685,19 +1812,19 @@ void OSD::render_gl() {
                 qx + tw, qy + th, 0.0f,  u1, 0.0f,
             };
 
-            glUseProgram(shader_program);
-            glUniformMatrix4fv(u_mvp_, 1, GL_FALSE, mvp_hud_c);
-            glUniform1i(u_is_text_,    1);
-            glUniform1i(u_use_shading_, 0);
-            glUniform1f(u_alpha_, 1.0f);
+            glUseProgram(gl2d_.program);
+            glUniformMatrix4fv(gl2d_.u_mvp, 1, GL_FALSE, mvp_hud_c);
+            glUniform1i(gl2d_.u_is_text,    1);
+            glUniform1i(gl2d_.u_use_shading, 0);
+            glUniform1f(gl2d_.u_alpha, 1.0f);
 
-            GLint alpha_loc = a_alpha_factor_;
+            GLint alpha_loc = gl2d_.a_alpha_factor;
             if (alpha_loc != -1) glVertexAttrib1f(alpha_loc, title_alpha);
 
-            glBindBuffer(GL_ARRAY_BUFFER, vbo);
+            glBindBuffer(GL_ARRAY_BUFFER, gl2d_.vbo);
             glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_DYNAMIC_DRAW);
-            GLint pos_loc = a_pos_;
-            GLint uv_loc  = a_uv_;
+            GLint pos_loc = gl2d_.a_pos;
+            GLint uv_loc  = gl2d_.a_uv;
             glEnableVertexAttribArray(pos_loc);
             glEnableVertexAttribArray(uv_loc);
             glVertexAttribPointer(pos_loc, 3, GL_FLOAT, GL_FALSE, 5*sizeof(float), (void*)0);
@@ -2709,22 +1836,22 @@ void OSD::render_gl() {
             const float* cols[2]  = { TT.text, TT.accent };
             for (int k = 0; k < 2; k++) {
                 if (!parts[k]) continue;
-                glUniform4f(u_color_, cols[k][0], cols[k][1], cols[k][2], 1.0f);
+                glUniform4f(gl2d_.u_color, cols[k][0], cols[k][1], cols[k][2], 1.0f);
                 glActiveTexture(GL_TEXTURE0);
                 glBindTexture(GL_TEXTURE_2D, parts[k]);
-                glUniform1i(u_tex_, 0);
+                glUniform1i(gl2d_.u_tex, 0);
                 glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
             }
-            glUniform4f(u_color_, 1.0f, 1.0f, 1.0f, 1.0f);
+            glUniform4f(gl2d_.u_color, 1.0f, 1.0f, 1.0f, 1.0f);
 
             if (alpha_loc != -1) glVertexAttrib1f(alpha_loc, 1.0f);
-            glUseProgram(shader_program);
+            glUseProgram(gl2d_.program);
         }
     }
 
     // --- GLOBAL BACKGROUND SHADE ---
     // A large, extremely subtle hexagonal shade behind everything
-    glUniformMatrix4fv(u_mvp_, 1, GL_FALSE, mvp_hud_c);
+    glUniformMatrix4fv(gl2d_.u_mvp, 1, GL_FALSE, mvp_hud_c);
     canvas_->hex_panel(-frustum_w, -frustum_h, frustum_w * 2.0f, frustum_h * 2.0f, 0.5f, bg_r, bg_g, bg_b, false);
     
     // 2/3. Left and Right Matrices (panel yaw +/-0.26 rad / ~15 deg), each with
@@ -3072,7 +2199,7 @@ void OSD::render_gl() {
             if (rec_now) total += dot_w + icon_gap + rec_w;
 
             float x = -total * 0.5f;
-            glUniformMatrix4fv(u_mvp_, 1, GL_FALSE, mvp_top);
+            glUniformMatrix4fv(gl2d_.u_mvp, 1, GL_FALSE, mvp_top);
             if (want_clock) {
                 canvas_->icon(clock_tex, x, clk_y, icon_sz, icon_sz, 1.0f, 1.0f, 1.0f);
                 x += icon_sz + icon_gap;
@@ -3171,7 +2298,7 @@ void OSD::render_gl() {
     float current_ly = -frustum_h + content_margin + slant_offset_y + bar_h_offset;
 
     // --- BOTTOM LEFT: Health-Bar Latency & Stats ---
-    glUniformMatrix4fv(u_mvp_, 1, GL_FALSE, mvp_l);
+    glUniformMatrix4fv(gl2d_.u_mvp, 1, GL_FALSE, mvp_l);
     // 0.95, not 0.8: over a bright FPV feed the wing panels washed out. Their
     // gradient still fades towards the screen edge, so this raises the strong
     // end rather than flattening the look.
@@ -3315,7 +2442,7 @@ void OSD::render_gl() {
     m_slant = 0.0f;
 
     // --- BOTTOM RIGHT: AR803x RF Link Stats ---
-    glUniformMatrix4fv(u_mvp_, 1, GL_FALSE, mvp_r);
+    glUniformMatrix4fv(gl2d_.u_mvp, 1, GL_FALSE, mvp_r);
     if (legacy_panels)
         canvas_->hex_panel(bg_rx, panel_bottom_y, panel_width, panel_height, 0.95f, bg_r, bg_g, bg_b, true);
 
@@ -3670,7 +2797,7 @@ void OSD::render_gl() {
     // just looked like noise laid across it. The FC's own OSD is still
     // running underneath; it comes back the moment the menu closes.
     if (bf_osd && !is_menu_open) {
-        glUniformMatrix4fv(u_mvp_, 1, GL_FALSE, mvp_hud_c);
+        glUniformMatrix4fv(gl2d_.u_mvp, 1, GL_FALSE, mvp_hud_c);
 
         const float avail_w = 2.0f * frustum_w;
         const float avail_h = 2.0f * frustum_h;
@@ -3742,7 +2869,7 @@ void OSD::render_gl() {
             } else {
                 r = 1.0f; g = 0.72f; b = 0.15f;
             }
-            glUniformMatrix4fv(u_mvp_, 1, GL_FALSE, mvp_c);
+            glUniformMatrix4fv(gl2d_.u_mvp, 1, GL_FALSE, mvp_c);
             // 15% of the picture's height deep, at 75% strength.
             canvas_->rail_glow(frustum_w, frustum_h, 0.30f * frustum_h, 0.75f * a, r, g, b);
         }
@@ -3765,8 +2892,8 @@ void OSD::render_gl() {
         geo.model_r   = model_r;
         geo.vp        = tmp;
         draw_canopy_ui(screen_w, screen_h, geo);
-        glUseProgram(shader_program);
-        if (a_alpha_factor_ != -1) glVertexAttrib1f(a_alpha_factor_, 1.0f);
+        glUseProgram(gl2d_.program);
+        if (gl2d_.a_alpha_factor != -1) glVertexAttrib1f(gl2d_.a_alpha_factor, 1.0f);
     }
 
     if (gallery_capture_) gallery_capture_frame(screen_w, screen_h);   // before the swap
@@ -6527,23 +5654,23 @@ void OSD::draw_bg_png(float fw, float fh, const float* mvp, float warp_t) {
 
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, bg_tex);
-    glUseProgram(shader_program);
-    glUniformMatrix4fv(u_mvp_, 1, GL_FALSE, mvp);
-    glUniform1i(u_tex_, 0);
-    glUniform1i(u_is_text_,    1);
-    glUniform1i(u_use_shading_, 0);
-    glUniform4f(u_color_, 1.0f, 1.0f, 1.0f, 1.0f);
-    glUniform1f(u_alpha_, 1.0f);
+    glUseProgram(gl2d_.program);
+    glUniformMatrix4fv(gl2d_.u_mvp, 1, GL_FALSE, mvp);
+    glUniform1i(gl2d_.u_tex, 0);
+    glUniform1i(gl2d_.u_is_text,    1);
+    glUniform1i(gl2d_.u_use_shading, 0);
+    glUniform4f(gl2d_.u_color, 1.0f, 1.0f, 1.0f, 1.0f);
+    glUniform1f(gl2d_.u_alpha, 1.0f);
 
     // Set fade via the v_alpha_factor constant vertex attribute BEFORE drawing.
-    GLint alpha_loc = a_alpha_factor_;
+    GLint alpha_loc = gl2d_.a_alpha_factor;
     if (alpha_loc != -1) glVertexAttrib1f(alpha_loc, alpha);
 
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, gl2d_.vbo);
     glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_DYNAMIC_DRAW);
 
-    GLint pos_loc = a_pos_;
-    GLint uv_loc  = a_uv_;
+    GLint pos_loc = gl2d_.a_pos;
+    GLint uv_loc  = gl2d_.a_uv;
     glEnableVertexAttribArray(pos_loc);
     glEnableVertexAttribArray(uv_loc);
     glVertexAttribPointer(pos_loc, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)0);
@@ -6641,21 +5768,21 @@ void OSD::draw_bg_video(float fw, float fh, const float* mvp, float warp_t) {
     } else {
         // CPU/BGRA path — existing shader flow
         glBindTexture(GL_TEXTURE_2D, bg_video_tex_);
-        prog = (warp_t > 0.0f && warp_shader_prog_) ? warp_shader_prog_ : shader_program;
+        prog = (warp_t > 0.0f && warp_shader_prog_) ? warp_shader_prog_ : gl2d_.program;
         glUseProgram(prog);
         glUniformMatrix4fv(glGetUniformLocation(prog, "mvp"), 1, GL_FALSE, mvp);
         glUniform1i(glGetUniformLocation(prog, "tex"), 0);
         if (warp_t > 0.0f && warp_shader_prog_) {
             glUniform1f(glGetUniformLocation(warp_shader_prog_, "warp_t"), warp_t);
         } else {
-            glUniform1i(u_is_text_,    1);
-            glUniform1i(u_use_shading_, 0);
-            glUniform4f(u_color_, 1.0f, 1.0f, 1.0f, 1.0f);
-            glUniform1f(u_alpha_, 1.0f);
+            glUniform1i(gl2d_.u_is_text,    1);
+            glUniform1i(gl2d_.u_use_shading, 0);
+            glUniform4f(gl2d_.u_color, 1.0f, 1.0f, 1.0f, 1.0f);
+            glUniform1f(gl2d_.u_alpha, 1.0f);
         }
     }
 
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, gl2d_.vbo);
     glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_DYNAMIC_DRAW);
 
     GLint pos_loc = glGetAttribLocation(prog, "pos");
@@ -6669,8 +5796,8 @@ void OSD::draw_bg_video(float fw, float fh, const float* mvp, float warp_t) {
 
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 
-    glUseProgram(shader_program);
-    GLint alpha_loc = a_alpha_factor_;
+    glUseProgram(gl2d_.program);
+    GLint alpha_loc = gl2d_.a_alpha_factor;
     if (alpha_loc != -1) glVertexAttrib1f(alpha_loc, 1.0f);
 }
 

@@ -24,6 +24,8 @@
 #include "hud/gallery_stats.hpp"
 #include "hud/actions.hpp"
 #include "render/canvas.hpp"
+#include "render/gles_2d.hpp"
+#include "render/text_cache.hpp"
 
 namespace render { class CanvasGles; }
 
@@ -179,35 +181,18 @@ class OSD {
         std::vector<GlBuffer> gl_buffers;
         int current_gl_buffer = 0;
 
-        GLuint shader_program;
-        GLuint vbo;
-
-        // Cached uniform/attribute locations for shader_program. Looked up once
-        // in init_shaders() instead of via glGet*Location() on every draw call —
-        // the OSD recomposites the whole HUD per frame, so those per-draw string
-        // lookups were a measurable chunk of the render hot path.
-        GLint u_mvp_ = -1, u_is_text_ = -1, u_use_shading_ = -1,
-              u_color_ = -1, u_alpha_ = -1, u_tex_ = -1;
-        GLint a_pos_ = -1, a_uv_ = -1, a_alpha_factor_ = -1;
+        // The main 2D program and the shared vertex buffer (render/gles_2d),
+        // made in init_shaders(); CanvasGles draws with them.
+        render::Gles2d gl2d_;
         
         // Textures
         GLuint fps_tex, lat_tex, net_tex, logo_tex, bg_tex;
         std::map<int, GLuint> rssi_texs;
         std::map<int, GLuint> link_texs;
         
-        struct CachedText {
-            GLuint tex;
-            int w, h;
-            float text_w;
-            std::string text;
-            // Touched on every hit so eviction can pick the genuinely coldest
-            // entry. The old code evicted text_cache.begin() - the alphabetically
-            // first key - which threw away hot short strings ("0", "1", ...) and
-            // re-rendered them through cairo on the very next frame.
-            uint64_t last_used = 0;
-        };
-        std::map<std::string, CachedText> text_cache;
-        uint64_t text_cache_clock = 0;
+        // Strings rendered to textures (render/text_cache), shared by the
+        // canvas and the gallery's and screen view's own text.
+        render::TextCache text_cache_;
         MspOsd msp_osd;
         GLuint char_tex_cache[1024] = {0};
         int char_tex_w_ = 0, char_tex_h_ = 0;   // the pixel size char_tex_cache was rendered at
@@ -865,32 +850,6 @@ class OSD {
         GLuint load_texture_from_png(const unsigned char* png, unsigned int length);
         GLuint load_texture_from_file(const char* filename);
         void draw_debug_chart();
-        void draw_panel(float x, float y, float w, float h, float alpha, float r = 0.1f, float g = 0.1f, float b = 0.15f);
-        void draw_trapezoid(float x, float y, float w, float h, float top_scale, float slant, float alpha, float r, float g, float b);
-        void draw_icon(GLuint tex, float x, float y, float w, float h, float r = 1.0f, float g = 1.0f, float b = 1.0f, float alpha = 1.0f);
-        void ensure_text_texture(const char* text);
-        // Rendered width of `text` at `scale`, in the same units draw_text uses
-        // for right-alignment. Lets a right-aligned line be built from several
-        // differently-coloured segments.
-        float text_width(const char* text, float scale);
-        void draw_text(const char* text, float x, float y, float scale, bool right_align = false, float r = 1.0f, float g = 1.0f, float b = 1.0f);
-        // Wipe-reveal variant: only the left `reveal` fraction (0..1) of the
-        // string is drawn, as a texture crop rather than a fade - see the
-        // .cpp for why this can reuse draw_text's own cached texture.
-        void draw_text_wipe(const char* text, float x, float y, float scale, bool right_align, float r, float g, float b, float reveal);
-        void draw_icon_quad(GLuint tex, math::Vec2 bl, math::Vec2 br, math::Vec2 tr, math::Vec2 tl, float r = 1.0f, float g = 1.0f, float b = 1.0f);
-        
-        // Visual Telemetry Helpers
-        void draw_stacked_bar(float x, float y, float w, float h, float slant, bool reverse, float val1, float r1, float g1, float b1, float val2 = 0, float r2 = 0, float g2 = 0, float b2 = 0, float val3 = 0, float r3 = 0, float g3 = 0, float b3 = 0, float val4 = 0, float r4 = 0, float g4 = 0, float b4 = 0, float val5 = 0, float r5 = 0, float g5 = 0, float b5 = 0, float val6 = 0, float r6 = 0, float g6 = 0, float b6 = 0);
-        void draw_signal_bar(float x, float y, float w, float h, float value, float min_val, float max_val);
-        
-        void draw_poly(const std::vector<math::Vec2>& points, float alpha, float r, float g, float b);
-        // uniform_x: drop the left-to-right fade and use the mid-width value
-        // across the whole panel. The wing panels want the gradient (it points
-        // at the screen edge); the centre menu does not - it made one side of
-        // the menu wash out over video.
-        void draw_hex_panel(float x, float y, float w, float h, float alpha, float r, float g, float b, bool outline, int num_h = 8, int num_v = 10, float grid_y = -1.0f, float grid_h = -1.0f, bool uniform_x = false);
-        void draw_arc(float cx, float cy, float r_in, float r_out, float start_angle, float end_angle, float alpha, float r, float g, float b);
         // --- SIGNAL LOCK (hud_lock.cpp) ---
         // The screen between "something is out there" and "there is a picture".
         // The acquiring-video lock. Binding reuses it whole rather than
@@ -918,8 +877,6 @@ class OSD {
         uint64_t lock_since_us_     = 0;   // when this pass of the lock began
         uint64_t handshake_sent_us_ = 0;   // set by the source, read by lock_stage
 
-        void draw_grid_arc(float cx, float cy, float r_inner, float r_outer, float start_angle, float end_angle, float alpha);
-        void draw_glow_line(const std::vector<math::Vec2>& points, float width, float alpha, float r, float g, float b);
 
         // --- CANOPY HUD (hud_canopy.cpp) ---
         // Everything the canopy layout draws, gathered at the one point in
@@ -983,32 +940,6 @@ class OSD {
         // Only the frame and the panel matrices of `geo` are read.
         void draw_canopy_ui(int W, int H, const CanopyIn& geo);
         void draw_canopy_pick(const CanopyIn& in, float pick);
-        // A run of tapering blocks, the canopy's only gauge form. `edge_left`
-        // puts the tall end at the left (screen) edge and fills rightwards;
-        // false mirrors it. `filled` is 0..1 of the run.
-        // `reveal` limits how much of the run is emitted at all, measured from
-        // the outboard end - the link-acquired sweep, as distinct from
-        // `filled`, which is the reading.
-        void draw_seg_track(float x, float y, float w, float h, int segs,
-                            float filled, bool edge_left,
-                            float r, float g, float b, float a_lo, float a_hi,
-                            float reveal = 1.0f);
-        // The panel ground: a wedge that fades out towards the screen centre.
-        // Columns of a fading shape, already in frustum space: xs[i] with its
-        // top and bottom edge and the alpha at that column.
-        float aa_feather_ = 0.0f;   // edge feather width, canopy units (hud_canopy.cpp)
-        void draw_fade_wedge(const float* xs, const float* tops, const float* bots,
-                             const float* alphas, int n, float r, float g, float b);
-        // A hairline that ramps from a0 at one end to a1 at the other, used
-        // for the panel rules. Two alphas rather than one so a rule can be cut
-        // in half mid-fade without the join showing.
-        void draw_fade_rule(float x0, float y0, float x1, float y1, float thick,
-                            float a0, float r, float g, float b, float a1 = 0.0f);
-        // Glowing rails along the picture's top and bottom edges: `alpha` at
-        // the frame edge, fading to nothing `depth` inboard. The video link
-        // warning.
-        void draw_rail_glow(float fw, float fh, float depth, float alpha,
-                            float r, float g, float b);
         // Video link warning level for this frame: 0 fine, 1 amber, 2 red.
         // Worse levels land at once; a better one has to hold before the
         // warning steps down, so a link hovering on a threshold does not

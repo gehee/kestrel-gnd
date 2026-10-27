@@ -131,8 +131,8 @@ void OSD::draw_signal_lock(float frustum_w, float frustum_h, const float* mvp,
     // This animates on its own clock, so it has to ask for its own frames.
     signal_render(prof::kWakeAnim);
 
-    glUseProgram(shader_program);
-    glUniformMatrix4fv(u_mvp_, 1, GL_FALSE, mvp);
+    glUseProgram(gl2d_.program);
+    glUniformMatrix4fv(gl2d_.u_mvp, 1, GL_FALSE, mvp);
 
     // Everything is sized off the frame height and sits in the centre third,
     // which is the band the canopy panels deliberately leave empty.
@@ -265,7 +265,7 @@ void OSD::draw_signal_lock(float frustum_w, float frustum_h, const float* mvp,
 
     // --- captions ----------------------------------------------------------
     {
-        glUniformMatrix4fv(u_mvp_, 1, GL_FALSE, mvp);
+        glUniformMatrix4fv(gl2d_.u_mvp, 1, GL_FALSE, mvp);
         const float s = osd_vars.ui_scale;
         const float title = 0.088f * s * text_scale, sub = 0.050f * s * text_scale;
         const char* head = head_override ? head_override : "ACQUIRING VIDEO";
