@@ -9,7 +9,5 @@
 
 #cmakedefine01 KESTREL_GLES
 #cmakedefine01 KESTREL_STREAM_DECODE
-#cmakedefine01 KESTREL_STAB
-#cmakedefine01 KESTREL_CANOPY
 #cmakedefine01 KESTREL_SCREEN_ENC
 #cmakedefine01 KESTREL_WIFI

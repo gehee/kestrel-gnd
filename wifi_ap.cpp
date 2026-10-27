@@ -1,4 +1,5 @@
 #include "wifi_ap.hpp"
+#include "kestrel_gnd_features.h"
 #include "settings.hpp"
 
 #include <unistd.h>
@@ -18,7 +19,8 @@ static std::mutex s_run;                 // one start/stop at a time, in order
 static std::atomic<int> s_busy{0};       // starts/stops not yet finished
 static std::atomic<bool> s_want{false};  // what the menu last asked for
 
-bool wifi_ap_available() { return access(kScript, X_OK) == 0; }
+// A build without KESTREL_WIFI has none, whatever the system has.
+bool wifi_ap_available() { return KESTREL_WIFI && access(kScript, X_OK) == 0; }
 
 bool wifi_ap_on() {
     if (s_busy.load() > 0) return s_want;

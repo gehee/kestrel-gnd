@@ -11,8 +11,6 @@ static int fails;
 #define CHECK(c) do { if (!(c)) { fails++; std::printf("FAIL line %d: %s\n", __LINE__, #c); } } while (0)
 
 // The build options' own rules, as the features header states them.
-static_assert(!KESTREL_STAB || KESTREL_GLES, "stabilisation needs GLES");
-static_assert(!KESTREL_CANOPY || KESTREL_GLES, "the canopy effect needs GLES");
 static_assert(KESTREL_HAL_ROCKCHIP + KESTREL_HAL_AR9311 + KESTREL_HAL_PC == 1,
               "exactly one HAL backend set");
 static_assert(!KESTREL_STREAM_DECODE || KESTREL_HAL_ROCKCHIP, "stream decode is Rockchip's");

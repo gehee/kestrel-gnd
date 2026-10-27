@@ -42,18 +42,16 @@ endif()
 
 option(KESTREL_GLES          "Draw the HUD, menu and gallery with GLES" ON)
 option(KESTREL_STREAM_DECODE "Per-slice stream decode and the per-half presenter (fpvOS MPP + kernel)" ${_kestrel_rk_only})
-option(KESTREL_STAB          "Picture stabilisation from the air unit's gyro (GPU warp)" ON)
-option(KESTREL_CANOPY        "Canopy push-in UI effect" ON)
 option(KESTREL_SCREEN_ENC    "Screen recording and the phone view (encoder + compositor)" ${_kestrel_rk_only})
 option(KESTREL_WIFI          "WiFi access point for the phone view" ON)
 
+# Without GLES nothing draws the HUD yet: the CPU canvas is still to come.
+if(NOT KESTREL_GLES)
+    message(FATAL_ERROR "KESTREL_GLES=OFF: there is no CPU canvas yet to draw the HUD with")
+endif()
+
 # The same rules fpvOS's Kconfig states with "depends on", checked here too
 # so a hand-made build can't ask for a combination that can't work.
-foreach(_feat KESTREL_STAB KESTREL_CANOPY)
-    if(${_feat} AND NOT KESTREL_GLES)
-        message(FATAL_ERROR "${_feat} needs KESTREL_GLES")
-    endif()
-endforeach()
 foreach(_feat KESTREL_STREAM_DECODE KESTREL_SCREEN_ENC)
     if(${_feat} AND NOT KESTREL_HAL STREQUAL "rockchip")
         message(FATAL_ERROR "${_feat} needs KESTREL_HAL=rockchip (no other backend has it yet)")
@@ -70,6 +68,6 @@ foreach(_hal ROCKCHIP AR9311 PC)
 endforeach()
 
 message(STATUS "kestrel-gnd HAL: ${KESTREL_HAL}")
-foreach(_feat GLES STREAM_DECODE STAB CANOPY SCREEN_ENC WIFI)
+foreach(_feat GLES STREAM_DECODE SCREEN_ENC WIFI)
     message(STATUS "  KESTREL_${_feat}: ${KESTREL_${_feat}}")
 endforeach()

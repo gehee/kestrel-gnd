@@ -29,6 +29,7 @@ extern "C" {
 #include "drm.hpp"
 #include "osd.hpp"
 #include "hal/decoder.hpp"
+#include "kestrel_gnd_features.h"
 #include "hud/actions.hpp"
 #include "render/gl_context.hpp"
 #include "renderer.hpp"
@@ -500,12 +501,15 @@ int main(int argc, char **argv)
 		//   stream_decode: 0   pictures go to the decoder whole
 		//   early_present: 0   no picture goes up before it is all decoded
 		//   video_halves: 0    no picture in halves on two planes
-		if (Settings::getInstance().getInt("stream_decode", 1) == 0) {
+		// A build without KESTREL_STREAM_DECODE has all three off.
+		if (!KESTREL_STREAM_DECODE || Settings::getInstance().getInt("stream_decode", 1) == 0) {
 			setenv("KESTREL_STREAM_DECODE", "0", 1);
 			Ar8030Source::stream_decode = false;
 		}
-		if (Settings::getInstance().getInt("early_present", 1) == 0) setenv("KESTREL_EARLY_PRESENT", "0", 1);
-		if (Settings::getInstance().getInt("video_halves", 1) == 0) setenv("KESTREL_SPLIT", "0", 1);
+		if (!KESTREL_STREAM_DECODE || Settings::getInstance().getInt("early_present", 1) == 0)
+			setenv("KESTREL_EARLY_PRESENT", "0", 1);
+		if (!KESTREL_STREAM_DECODE || Settings::getInstance().getInt("video_halves", 1) == 0)
+			setenv("KESTREL_SPLIT", "0", 1);
 	}
 
 	uint16_t mode_width = 0;

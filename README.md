@@ -112,12 +112,10 @@ carry its code. fpvOS sets them from its Kconfig options, one set per board:
 
 | Option | Default | What it adds |
 |---|---|---|
-| `KESTREL_GLES` | on | draws the HUD, menu and gallery with GLES |
-| `KESTREL_STREAM_DECODE` | on with `rockchip` | per-slice decode and the per-half presenter |
-| `KESTREL_STAB` | on | picture stabilisation from the air unit's gyro; needs GLES |
-| `KESTREL_CANOPY` | on | the canopy push-in effect; needs GLES |
-| `KESTREL_SCREEN_ENC` | on with `rockchip` | screen recording and the phone view |
-| `KESTREL_WIFI` | on | the WiFi access point |
+| `KESTREL_GLES` | on | draws the HUD, menu and gallery with GLES; required until there is a CPU canvas |
+| `KESTREL_STREAM_DECODE` | on with `rockchip` | per-slice decode, early presentation and the per-half presenter |
+| `KESTREL_SCREEN_ENC` | on with `rockchip` | screen recording and the phone view's encoder |
+| `KESTREL_WIFI` | on | the WiFi access point (off: the menu says the system has none) |
 
 The choices are in the generated `kestrel_gnd_features.h`, every one defined
 to 0 or 1.
