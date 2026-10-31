@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Summarise a kestrel latency trace (/tmp/ltrace.bin, see utils/ltrace.hpp).
+"""Summarise a kestrel latency trace (/tmp/ltrace.bin, see base/ltrace.hpp).
 
     ssh root@192.168.3.1 'echo 20 > /tmp/ltrace.req'   # record 20 s
     ssh root@192.168.3.1 'cat /tmp/ltrace.bin' > lt.bin

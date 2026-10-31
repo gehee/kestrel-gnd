@@ -1,0 +1,95 @@
+#ifndef SCREEN_TAP_HPP
+#define SCREEN_TAP_HPP
+
+#include <atomic>
+#include <condition_variable>
+#include <cstdint>
+#include <memory>
+#include <mutex>
+#include <vector>
+
+#include "hal/screen_out.hpp"
+
+// What the display showed, vblank by vblank, for the screen recorder.
+//
+// A screen recording used to have the display controller composite the
+// screen into a buffer (DRM writeback). On the goggle's kernel that costs the
+// live picture: each capture is a commit of its own that holds the CRTC until
+// the next frame starts, and the video's flips are refused (EBUSY) meanwhile;
+// a capture carried on a video flip instead is held to the next frame
+// whenever it is committed in the last eighth of one, which the renderer's
+// commit just before the vblank always is. Recording dropped 8-18% of the
+// pictures that should have reached the screen at 60 fps, 37% at 100 fps.
+//
+// So the recorder rebuilds each frame itself from the two buffers the display
+// scanned out - the decoded picture and the OSD - with RGA, and never touches
+// the display. This keeps track of which pair was on screen from which
+// vblank: page_flip says what it is committing, its flip event on which
+// vblank it landed. Only while recording; otherwise every call returns at
+// once and nothing is held.
+class ScreenTap {
+public:
+    ScreenTap() { graveyard_.reserve(16); }
+
+    // Starting, seed is what the screen shows at that moment, if anything is
+    // known about it: until the next flip lands, that is what gets recorded.
+    void set_recording(bool on, const ScreenPair* seed = nullptr);
+    bool recording() const { return on_.load(std::memory_order_relaxed); }
+
+    // page_flip, just before its commit: the pair that commit carries. A
+    // commit that fails takes it back.
+    void submitted(std::shared_ptr<DecodedUnit> video, uint32_t osd_fb, uint64_t osd_gen,
+                   int vx, int vy, int vw, int vh, uint64_t now_us);
+    void submit_failed();
+    // The flip event: the pair submitted last landed on vblank seq.
+    void landed(uint32_t seq);
+    // A commit of the OSD plane alone (no video flowing) landed on seq.
+    void osd_landed(uint32_t osd_fb, uint64_t osd_gen, uint32_t seq);
+    // The frozen picture's rectangle changed (Picture Size with no video
+    // flowing), from vblank seq on.
+    void moved(int vx, int vy, int vw, int vh, uint32_t seq);
+    // Let go of every picture held, now, on the calling thread - waiting for
+    // a composite in progress to finish with its own. The decoder calls this
+    // before it puts its buffers back on a resolution change: MPP 1.0.3 never
+    // frees a buffer group put back while a buffer in it is still referenced
+    // (the buffer goes to the orphaned group's unused list instead).
+    void drop_pictures();
+
+    // The pair on screen during vblank seq (at time vblank_us), copied into
+    // out, which then holds the picture. A flip submitted before that vblank
+    // may have landed on it with its event still on the way: wait up to
+    // wait_us for it. False if nothing landed by then, or if something newer
+    // already has - the caller was too late to know what seq showed.
+    bool sample(uint32_t seq, uint64_t vblank_us, ScreenPair& out, int wait_us);
+    // The sampler is done with the sampled pair - it has let go of the
+    // picture (out.video) and the OSD fb may be drawn into again.
+    void sample_done();
+    // Whether the recorder is reading this OSD fb right now.
+    bool holds_osd(uint32_t fb);
+
+    // The vblank parity (seq % div) most recent flips landed on, or -1.
+    int dominant_parity(int div);
+
+    // Pictures dropped from the tap are released here, by the recorder,
+    // rather than in the flip handler: releasing one goes into MPP.
+    void drain_graveyard();
+
+private:
+    std::atomic<bool> on_{false};
+    std::mutex m_;
+    std::condition_variable cv_;
+    ScreenPair pending_;
+    bool has_pending_ = false;
+    uint64_t pending_us_ = 0;
+    ScreenPair cur_;
+    bool has_cur_ = false;
+    uint32_t sampling_osd_ = 0;
+    bool sampling_ = false;               // a sampled pair is in the sampler's hands
+    std::vector<std::shared_ptr<DecodedUnit>> graveyard_;
+    static constexpr int kParityRing = 64;
+    uint32_t land_seq_[kParityRing] = {0};
+    int land_n_ = 0;
+    void bury(std::shared_ptr<DecodedUnit>& du);
+};
+
+#endif

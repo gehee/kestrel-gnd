@@ -176,7 +176,7 @@ def main():
     w("// Each country's ITU region: ITU Radio Regulations No. 5.2-5.9 (lines A, B and C, and the")
     w("// countries No. 5.3 names), applied to the coordinates of the country's first zone in zone.tab.")
     w("")
-    w('#include "zones.hpp"')
+    w('#include "region/zones.hpp"')
     w("")
     w("namespace zones {")
     w("namespace data {")
