@@ -372,6 +372,7 @@ void Ar8030Link::stats_run() {
         // Once a second. It was on the video thread, which then waited for the
         // radio's answer - a lost one held the next picture for a second.
         poll_ap_time();
+        poll_resends();
         lk.lock();
         stats_cv.wait_for(lk, std::chrono::milliseconds(35), [this] { return stats_stop; });
     }
@@ -407,10 +408,19 @@ void Ar8030Link::update_stats(size_t frame_size) {
             // only way to tell a link limit from an encoder limit, and every
             // bandwidth theory so far has been argued without it.
             // Cached by publish_link_stats(), on the stats thread.
+            // The air radio's resends since the last line (Open8030 at both
+            // ends): blocks sent again / radio frames its map covered, and
+            // frames it stalled in; -1 without the map.
+            static uint32_t rs_b0 = 0, rs_k0 = 0, rs_s0 = 0;
+            const uint32_t rs_b = rs_blocks_.load(), rs_k = rs_known_.load(), rs_s = rs_stalls_.load();
+            const bool rs_ok = resend_known_.load() && rs_k >= rs_k0;
+            const long rs_db = rs_ok ? (long)(rs_b - rs_b0) : -1, rs_dk = rs_ok ? (long)(rs_k - rs_k0) : -1;
+            const long rs_ds = rs_ok ? (long)(rs_s - rs_s0) : -1;
+            rs_b0 = rs_b; rs_k0 = rs_k; rs_s0 = rs_s;
             printf("ar8030: rx=%llu bytes nals=%llu frames=%llu lost=%llu telemetry_drained=%llu"
                    " msp=%llu mcs=%d bw=%s MHz link=%.2f Mbps video=%.2f Mbps dist=%d"
                    " air=%.1fms stale=%llu foreign=%llu snr=%.1fdB freq=%d gains=%d/%d"
-                   " damaged=%llu/%llu\n",
+                   " damaged=%llu/%llu resent=%ld/%ld stalled=%ld\n",
                    total_bytes, nal_count, (unsigned long long)video_.frames_seen(), frames_lost,
                    ctrl_bytes,
                    msp_bytes, mcs >= 0 ? ar_mcs_label(mcs) : -99, gnd::bw_step_label(last_bw_idx.load()), last_link_kbps.load() / 1000.0,
@@ -418,7 +428,7 @@ void Ar8030Link::update_stats(size_t frame_size) {
                    air_delay_ms < 0.0f ? 0.0f : air_delay_ms, stale_pics, video_.foreign_slices(),
                    stat_snr_x10_.load() / 10.0, link_freq_mhz,
                    stat_gains_.load() & 255, stat_gains_.load() >> 8,
-                   (unsigned long long)xor_bad_, (unsigned long long)xor_checked_);
+                   (unsigned long long)xor_bad_, (unsigned long long)xor_checked_, rs_db, rs_dk, rs_ds);
         }
         bytes_received = 0;
     }

@@ -30,6 +30,11 @@ struct ar_pwr_level { int mw; int dbm; bool automode; const char* label; };
 // stock caught 101 on the wire for its "100mW Auto" entry, so 501 here means
 // "auto, capped at 500 mW". This table holds every level of both lists; what a
 // menu offers is kArPwrOffer*.
+// dbm is the VRX's own radio level for it (stock's table: 3 dB under the
+// label, kept - the board's gain after the chip is not known). Nothing above
+// 500 mW: the 630 / 790 mW TEST levels (27 / 28 dBm) are gone - at 27 dBm the
+// Lite+'s SNR was 1.5-4.7 dB under 200 mW's at every distance with a stronger
+// signal (flight 2026-10-30): its amplifier distorts past ~26.
 static const ar_pwr_level kArPwrLevels[] = {
     {   25, 11, false, "25mW"      }, {  100, 17, false, "100mW"     },
     {  101, 17, true,  "100mW AUTO"},
@@ -121,6 +126,16 @@ static inline int ar_pwr_mw_from_dbm(int dbm) {
             return kArPwrLevels[i].mw;
     if (dbm <= 0) return 0;
     return (int)(25.0 * pow(10.0, (dbm - 11) / 10.0) + 0.5);
+}
+
+// The same for the air unit, on its stock scale: its radio level is 1 dB
+// under the label (kestrel-air: 25/100/150/200/500 mW = 13/19/21/22/26), so a
+// level reads as the menu's figure for it.
+static inline int ar_air_mw_from_dbm(int dbm) {
+    static const int lv[][2] = { {13, 25}, {19, 100}, {21, 150}, {22, 200}, {26, 500} };
+    for (const auto &l : lv) if (l[0] == dbm) return l[1];
+    if (dbm <= 0) return 0;
+    return (int)(pow(10.0, (dbm + 1) / 10.0) + 0.5);
 }
 
 // bb_phy_mcs_e -> the MCS number Artosyn names it by. The radio reports the

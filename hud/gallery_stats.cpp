@@ -37,13 +37,16 @@ float total_of(const StatsFrame& f) {
 // because a spike averaged over a column all but disappears). The last column is
 // the one still filling.
 void build_stats(const StatsFrame* frames, size_t n_frames, const StatsFlip* flips, size_t n_flips,
-                 uint64_t now_us, int window_s, bool pacing_valid, StatsView& out, double period_us) {
+                 uint64_t now_us, int window_s, bool pacing_valid, StatsView& out, double period_us,
+                 const StatsResend* resends, size_t n_resends) {
     (void)flips; (void)n_flips;
     out = StatsView();
     out.window_s = window_s;
     out.pacing = pacing_valid;
     out.refresh_ms = period_us > 1000 ? (float)(period_us / 1000.0) : 0.0f;
     std::memset(out.skip, 0, sizeof(out.skip));
+    std::memset(out.resent, 0, sizeof(out.resent));
+    std::memset(out.stall, 0, sizeof(out.stall));
 
     const uint64_t win_us = (uint64_t)window_s * 1000000ULL;
     const uint64_t col_us = win_us / StatsView::kCols;
@@ -57,6 +60,20 @@ void build_stats(const StatsFrame* frames, size_t n_frames, const StatsFlip* fli
         const uint64_t c = t / col_us - g0;
         return c >= (uint64_t)StatsView::kCols ? StatsView::kCols - 1 : (int)c;
     };
+
+    // ---- the air radio's resends, by the frame they happened in ----
+    for (size_t i = 0; i < n_resends; i++) {
+        const int c = col_of(resends[i].t_us);
+        if (c < 0 || resends[i].t_us > now_us) continue;
+        if (resends[i].v >= 3) {
+            if (out.stall[c] < 255) out.stall[c]++;
+            out.stall_frames++;
+        } else {
+            out.resent[c] = (uint8_t)std::min(255, out.resent[c] + resends[i].v);
+            out.resent_blocks += resends[i].v;
+            out.resent_frames++;
+        }
+    }
 
     // ---- pictures ----
     constexpr int S = StatsFrame::kStages;
@@ -126,6 +143,13 @@ void build_stats(const StatsFrame* frames, size_t n_frames, const StatsFlip* fli
             out.bw_mhz[c] = kMhz[f.bw];
             out.bw_mhz_max = std::max(out.bw_mhz_max, kMhz[f.bw]);
         }
+        // The air unit's TX power, the newest in the column, as the bandwidth.
+        if (f.air_dbm) { out.air_dbm[c] = f.air_dbm; out.air_dbm_any = true; }
+        if (f.freq_mhz) out.freq[c] = f.freq_mhz;   // the newest in the column, a hop a step
+        if (f.dist_m >= 0) {                        // the newest in the column too
+            out.dist[c] = f.dist_m; out.dist_have[c] = 1;
+            out.dist_max = std::max(out.dist_max, (float)f.dist_m);
+        }
         n_pics++;
         if (f.t_us + 2000000 > now_us) { n_recent++; skipped_recent += f.skipped; }
         tot_hist[std::min(kTotBins - 1, (int)(tot * 10.0f))]++;
@@ -153,6 +177,8 @@ void build_stats(const StatsFrame* frames, size_t n_frames, const StatsFlip* fli
         out.link_now = f.link_mbps;
         out.snr_now = f.snr;
         out.mcs_now = f.mcs;
+        out.air_dbm_now = f.air_dbm;
+        out.dist_now = f.dist_m;
     }
     for (int c = 0; c < StatsView::kCols; c++) {
         if (!n[c]) continue;

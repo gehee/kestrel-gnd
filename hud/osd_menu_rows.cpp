@@ -22,13 +22,16 @@ std::vector<std::pair<const char*, int>> OSD::ar_rf_items() const {
     // row index, so this order is free to change.
     if (rf_caps & 16) v.push_back({"Channel",   5});  // RF_CHAN, RF_HOP
     if (rf_caps & 1)  v.push_back({"TX Power",  1});  // RF_TX_POWER
-    // Max Bandwidth (11), Radio Frame (12) and Steady Latency (15) are
-    // hidden: their settings (ar8030_max_bw_mhz, ar8030_frame_mode,
-    // ar8030_steady) still apply from the yaml, and their handlers stay, so
-    // listing them again is one line each here. Steady Latency needs an
-    // Open8030 with steady mode (request 0x0c5a0037), which its main lacks.
+    // Radio Frame (12) and Steady Latency (15) are hidden: their settings
+    // (ar8030_frame_mode, ar8030_steady) still apply from the yaml, and their
+    // handlers stay, so listing them again is one line each here. Steady
+    // Latency needs an Open8030 with steady mode (request 0x0c5a0037), which
+    // its main lacks.
     // Open8030 on the goggle: the MCS its receive policy may go up to.
     if (link_->radio_fw == 1) v.push_back({"Max MCS", 14});
+    // The widest the link may go (Open8030: live, the width policy decides
+    // below it; stock: 20 or 40, the radio restarts).
+    v.push_back({"Max Bandwidth", 11});
     v.push_back({"VRX Radio Firmware", 13});
     // MCS, Bandwidth and LNA Mode were removed rather than left visible.
     // BB_SET_MCS has no direction field, so it can only set our own transmit -
@@ -464,10 +467,13 @@ std::vector<OSD::MenuItem> OSD::menu_items(int tab) const {
                     "Radio output. More reaches further and runs hotter."}); break;
                 case 8: items.push_back({it.first, 1,
                     "Force the air unit's low-power standby on or off for now."}); break;
-                case 11: items.push_back({it.first, 1,
-                    "How wide the video link may go. 40 widens it on a strong link: more "
-                    "bitrate, a shorter radio frame, less range. 20 reaches further. "
-                    "Enter applies it: the radio restarts, the picture is back in ~10 s."}); break;
+                case 11: items.push_back({it.first, 1, link_->radio_fw == 1
+                    ? "How wide the video link may go; below it the link picks its width from "
+                      "the signal. 40 on a strong link: more bitrate, a shorter radio frame, "
+                      "less range. Narrower reaches further. Enter applies it, no restart."
+                    : "How wide the video link may go. 40 widens it on a strong link: more "
+                      "bitrate, a shorter radio frame, less range. 20 reaches further. "
+                      "Enter applies it: the radio restarts, the picture is back in ~10 s."}); break;
                 case 12: items.push_back({it.first, 1,
                     "How long the radio's frame is. SHORT gets each slice out sooner; "
                     "STANDARD is stock's, with a longer, sturdier uplink, and what a stock "
@@ -490,8 +496,6 @@ std::vector<OSD::MenuItem> OSD::menu_items(int tab) const {
             {"HUD Style", 1, "Which overlay is drawn over the video."},
             {"Betaflight OSD", 1, "Draw Betaflight's own OSD across the screen."},
             {"Canopy Voltage", 1, "The canopy's headline voltage: per cell reads the same on any pack size."},
-            {"Calib Distance", 3, "Zero the range reading where you are standing. "
-                                  "The arrows trim the offset by hand.", "ENTER: ZERO HERE"},
             {"Clock", 1, "When the time is shown at the top of the screen, and how it is written."},
             {"Dynamic HUD", 1, "Let the panels move with the aircraft."},
             {"Debug Info", 1, "A line of radio details under the right panel, for field "
@@ -610,16 +614,14 @@ std::vector<OSD::MenuItem> OSD::menu_items(int tab) const {
 // See the header. Steps the row's own handler to find its values, then puts it
 // back exactly where it was.
 //
-// Three rows are excluded because there is nothing to enumerate: Brightness
-// and UI Scaling are ranges far longer than the cap, and Calib Distance is a
-// capture rather than a choice. Walking them would spend a dozen steps to
+// Two rows are excluded because there is nothing to enumerate: Brightness
+// and UI Scaling are ranges far longer than the cap. Walking them would spend a dozen steps to
 // find that out. The walk itself is harmless now - menu_stepping_ keeps the
 // steps off the HUD and out of the settings file.
 int OSD::menu_options(int tab, int index, char out[kMenuOptMax][kMenuOptLen], int* cur) {
     if (cur) *cur = 0;
     const bool self_saving = (tab == 3 && index == kDispBrightness) ||
-                             (tab == 3 && index == kDispUiScale) ||
-                             (tab == 2 && hud_row(index) == kHudRowCalib);
+                             (tab == 3 && index == kDispUiScale);
     if (self_saving) return 0;
 
     if (tab == menu_opt_tab_ && index == menu_opt_idx_) {
@@ -720,8 +722,6 @@ int OSD::menu_range_ladder(int tab, int index, int span,
             t[len - 4] = '\0';
         }
     };
-
-    if (tab == 2 && hud_row(index) == kHudRowCalib) return 0;   // an action
 
     if (tab == 3 && index == kDispBrightness) {   // 0..100 in fives
         for (int k = -span; k <= span; k++) {
@@ -859,8 +859,7 @@ static int clock_choice(int show, int mode) {
 // is a capture the row makes at the moment you press it.
 bool OSD::menu_row_applies_live(int tab, int index) {
     if (tab == 2) {
-        // Every HUD row writes as it goes, Calib Distance's arrows included;
-        // its Enter is a capture, not an apply.
+        // Every HUD row writes as it goes.
         // (The headers cannot be selected, so which row `index` is makes no difference.)
         return true;
     }
@@ -966,12 +965,6 @@ void OSD::menu_apply_change(int tab, int index, int dir) {
             if (!menu_stepping_) {
                 volt_mode = menu_volt_mode;
                 settings_.set(hud::setting::volt_mode, volt_mode);
-            }
-        } else if (hud_row(menu_index) == kHudRowCalib) {
-            // left/right nudges the calibration by 1
-            if (!menu_stepping_) {
-                dist_offset_ = std::max(0, dist_offset_ + dir);
-                parts_.radio.set_dist_offset(dist_offset_);
             }
         } else if (hud_row(menu_index) == kHudRowClock) {
             const int c = menu_step(clock_choice(menu_clock_show, menu_clock_mode), dir, kClockChoices);
@@ -1252,11 +1245,6 @@ void OSD::menu_value_text(int tab, int i, char* val_buf, size_t cap) {
                 sprintf(val_buf, "< %s >", menu_bf_osd ? "ON" : "OFF");
             } else if (hud_row(i) == kHudRowVoltage) {
                 sprintf(val_buf, "< %s >", menu_volt_mode == 1 ? "PACK" : "PER CELL");
-            } else if (hud_row(i) == kHudRowCalib) {
-                // Enter zeroes the reading; show what is being subtracted.
-                const int raw = link_distance_raw.load();
-                if (raw < 0) sprintf(val_buf, "ofs %d", dist_offset_);
-                else sprintf(val_buf, "raw %d  ofs %d", raw, dist_offset_);
             } else if (hud_row(i) == kHudRowClock) {
                 const int show = (menu_clock_show >= 0 && menu_clock_show < 3) ? menu_clock_show : 1;
                 sprintf(val_buf, "< %s >", kClockLabels[clock_choice(show, menu_clock_mode)]);

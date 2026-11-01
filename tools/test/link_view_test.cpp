@@ -25,11 +25,12 @@ int main() {
     r.bind_secs_left = 12;
     a.tx_power_mw = 501;
     a.tx_power_want_mw = 200;
+    a.resend_known = true;
     e.max_kbps = 8000;
     hud::LinkView v = hud::link_view(r, a, e, asked);
     CHECK(v.radio_fw == 1 && v.max_mcs == 9 && v.chan_hop == 1 && v.chan_auto);
     CHECK(v.bind_state == gnd::BIND_RUNNING && v.bind_secs_left == 12);
-    CHECK(v.tx_power_mw == 501 && v.tx_power_want_mw == 200 && v.max_kbps == 8000);
+    CHECK(v.tx_power_mw == 501 && v.tx_power_want_mw == 200 && v.resend_known && v.max_kbps == 8000);
 
     // Asked, not carried out yet: the asked values.
     r.taken = 4;

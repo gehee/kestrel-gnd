@@ -189,7 +189,7 @@ void OSD::handle_key(int key) {
     // The canopy (osd.hpp, ui_*). Picking: Left and Right are the two blades,
     // OK unfolds one. Unfolded: Left and Right walk its sections; Up and Down
     // its rows; OK on a setting starts changing it (Up/Down) and OK again
-    // applies it; OK on an action (Bind, Calib Distance, Channel) does it.
+    // applies it; OK on an action (Bind, Channel) does it.
     {
         const bool up    = (key == 'w' || key == 'W' || key == KEY_UP    || key == 0x101);
         const bool down  = (key == 's' || key == 'S' || key == KEY_DOWN  || key == 0x102);
@@ -433,21 +433,6 @@ void OSD::handle_key(int key) {
                             parts_.radio.bind();
                             break;
                         default: break;
-                    }
-                }
-            } else if (menu_tab == 2) { // HUD - see menu_items() and hud_row()
-                // Only Calib Distance has anything for Enter to do. Every
-                // other row applies and saves as the arrows move it.
-                if (hud_row(menu_index) == kHudRowCalib) {
-                    // Zero the ranging: with the units side by side, Enter
-                    // captures the current reading as the new base value. The
-                    // arrows nudge the same offset by hand.
-                    const int raw = link_distance_raw.load();
-                    if (raw >= 0) {
-                        dist_offset_ = raw;
-                        parts_.radio.set_dist_offset(raw);
-                        printf("[OSD] distance calibrated for air unit %s: offset = %d\n",
-                               osd_vars.radio_link.peer_mac[0] ? osd_vars.radio_link.peer_mac : "?", dist_offset_);
                     }
                 }
             } else if (menu_tab == 3) { // DISPLAY

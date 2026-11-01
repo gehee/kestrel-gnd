@@ -67,6 +67,11 @@ class AirRadioPart final : public detail::Held<air::Radio> {
 public:
     using Held::Held;
     Ticket set_tx_power(int mw) override;
+    bool take_resend(air::Resend& r) override { return resends_.pop(r); }
+    uint64_t resends_dropped() const override { return resends_.drops(); }
+    void resend(const air::Resend& r) { resends_.push(r); }   // under the model's lock
+private:
+    bus::Ring<air::Resend, 4096> resends_;   // the stats screen's history: no wake
 };
 
 class UnitPart final : public detail::Held<air::Unit> {
@@ -94,7 +99,6 @@ public:
     void search_channels() override;
     void scan_screen(bool open) override;
     void bind() override;
-    void set_dist_offset(int raw) override;
     void region_changed() override;
     bool take_scan(gnd::ScanSample& s) override { return scans_.pop(s); }
     bool take_rate(float& mbps) override { return rates_.pop(mbps); }
@@ -138,7 +142,8 @@ public:
     void link_state(int state);                // the chip's event, or the poll: the state alone
     void rx_mcs(int mcs);                      // the chip's MCS event
     void distance(int raw);                    // the ranging reading, metres (-1 none)
-    void low_power(bool on);                   // standby power or radiating
+    void low_power(bool on);                   // standby power or radiating: an arming zeroes the distance
+    void air_boot(const std::string& id);      // kestrel-air's power-up id ("" stock)
     void video_bandwidth(float mbps);          // each second (the radio thread): the link's figure and the rate
     // What a part's state holds, changed by f and published.
     template <class F> void update_camera(F&& f) { update(camera_, cam_, f); }
@@ -154,7 +159,7 @@ public:
     void clear_air_delay() { tim_.air_delay_valid = false; timing_.publish(tim_); }
     void reassembly(float ms) { tim_.rsm_ms = ms; timing_.publish(tim_); }
     void scan(const gnd::ScanSample& sc);
-    void set_dist_offset(int raw);             // HUD > Calib Distance (gnd::Radio::set_dist_offset)
+    void resend(const air::Resend& r);
 
     // The radio thread, between its steps: the changes asked since, each
     // carried out by the radio (link.apply), then what it holds (link.held).
@@ -173,8 +178,12 @@ private:
         part.publish(s);
     }
     // ---- the model's own (mu_: the radio's threads; no reader takes it) ----
+    void low_power_quiet(bool on);
+    void air_boot_quiet(const std::string& id);
     void publish_radio();                      // under mu_
-    MadeSetting<int> dist_offset(int def) const;   // dist_offset_<the air unit's radio MAC>
+    MadeSetting<std::string> dist_zero() const;   // dist_zero_<the air unit's radio MAC>
+    void dist_load_zero();                     // the saved zero, if it is this power-up's
+    void dist_take_zero();                     // at the arming: from the readings just before
     void flush_log();
 
     Settings& settings_;
@@ -197,7 +206,22 @@ private:
     gnd::TimingState tim_;               // the radio thread's alone
     State held_;                         // as last published
 
-    char peer_mac_[20] = {0};            // the air unit linked: whose Calib Distance offset is in use
+    // The distance's zero: the raw reading at the air unit's first arming
+    // after it powered up (dist_take_zero), -1 until then. Kept per power-up
+    // - its boot id, from kestrel-air's info, saved with the zero - so a
+    // disarm and re-arm in the field, or a restart of this app, keeps it. A
+    // stock air unit says no boot id: its zero is taken at the first arming
+    // since this app started.
+    char peer_mac_[20] = {0};            // the air unit the zero belongs to
+    std::string air_boot_;
+    int  dist_zero_ = -1;
+    bool dist_zero_unkeyed_ = false;     // taken before the boot id was heard
+    bool lp_known_ = false;              // a standby/armed state seen yet
+    bool low_power_ = false;
+    uint64_t standby_since_us_ = 0;      // in standby since (0: not in standby)
+    int  dist_pre_[8] = {};              // raw readings while disarmed, the last 8 s
+    uint64_t dist_pre_us_[8] = {};
+    int  dist_pre_head_ = 0;
 
     // ---- the changes asked, for the radio: in order, numbered as they are
     // queued (post_mu_ among the askers), taken by the radio thread alone.

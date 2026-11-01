@@ -52,6 +52,10 @@ const float kDanger[3] = { 0.93f, 0.33f, 0.28f };
 // Busy-ness from the radio's averaged scan energy: free, some traffic, busy.
 int busy_level(float dbm) { return dbm <= -88.0f ? 0 : (dbm <= -80.0f ? 1 : 2); }
 
+// A channel the radio has not measured reads 0 (Open8030 measures only its
+// work list's channels): not the busiest level there is, but unknown.
+static bool unmeasured(int dbm) { return dbm == 0; }
+
 const char* kBusyName[3] = { "QUIET", "SOME TRAFFIC", "BUSY" };
 
 void cap_text(int mw, char* out, size_t n) {
@@ -119,6 +123,7 @@ int OSD::chan_quietest() const {
             const int ci = chan_order_[r];
             if (pass == 0 && known &&
                 zones::judge(cc, sc.freq_mhz[ci], bw, lic).state != zones::kAllowed) continue;
+            if (unmeasured(scan_peak_dbm[ci])) continue;
             if (best < 0 || scan_peak_dbm[ci] < scan_peak_dbm[chan_order_[best]]) best = r;
         }
     return best;
@@ -132,7 +137,8 @@ void OSD::apply_chan_scan(const gnd::ScanSample& sc) {
     // busier, held for 30 s, then let down to the current level.
     const uint64_t now = get_time_us();
     for (int i = 0; i < n; i++) {
-        if (scan_peak_ts[i] == 0 || sc.power_dbm[i] >= scan_peak_dbm[i] ||
+        if (unmeasured(sc.power_dbm[i])) { scan_peak_dbm[i] = 0; scan_peak_ts[i] = 0; continue; }
+        if (scan_peak_ts[i] == 0 || unmeasured(scan_peak_dbm[i]) || sc.power_dbm[i] >= scan_peak_dbm[i] ||
             (now - scan_peak_ts[i]) > 30ULL * 1000000ULL) {
             scan_peak_dbm[i] = sc.power_dbm[i];
             scan_peak_ts[i]  = now;
@@ -212,11 +218,13 @@ void OSD::chan_key(int key) {
     if (ci == sc.work_chan && !sc.auto_mode) return;   // already fixed there
     // Both ends move: the air unit is told over the sky link and the ground
     // retunes to match (Ar8030Link::set_rf_channel). A channel picked here
-    // is manual mode for this session; the next start searches again.
+    // is FIXED, saved: after a start or a lost link the ground searches, then
+    // moves the link back here (Ar8030Link::chan_fixed_mhz).
     const int mhz = sc.freq_mhz[ci];
     if (mhz > 0) {
         printf("channel page: moving the link to %d MHz\n", mhz);
-        parts_.radio.set_channel(mhz);
+        const Ticket t = parts_.radio.set_channel(mhz);   // AUTO HOP off with it
+        if (t.seq) asked_.hop = t;
         menu_ar_hop = false;
     }
 }
@@ -261,9 +269,12 @@ bool OSD::draw_channel_band(int W, int H, float band_x, float band_y, float band
     }
     for (int r = 0; r < n; r++) {
         const int ci = order[r];
-        if (!chan_bars_set_) { chan_bar_[ci] = (float)sc.power_dbm[ci]; chan_peak_[ci] = (float)peak[ci]; continue; }
-        moving |= glide(chan_bar_[ci], (float)sc.power_dbm[ci], dt, 0.07f);
-        moving |= glide(chan_peak_[ci], (float)peak[ci], dt, 0.07f);
+        // An unmeasured channel's bar sinks to the floor (drawn as unknown below).
+        const float lv_to = unmeasured(sc.power_dbm[ci]) ? -100.0f : (float)sc.power_dbm[ci];
+        const float pk_to = unmeasured(peak[ci]) ? -100.0f : (float)peak[ci];
+        if (!chan_bars_set_) { chan_bar_[ci] = lv_to; chan_peak_[ci] = pk_to; continue; }
+        moving |= glide(chan_bar_[ci], lv_to, dt, 0.07f);
+        moving |= glide(chan_peak_[ci], pk_to, dt, 0.07f);
     }
     chan_bars_set_ = n > 0;
     // The printed numbers, twice a second.
@@ -318,9 +329,13 @@ bool OSD::draw_channel_band(int W, int H, float band_x, float band_y, float band
         float x = 2.2f;
         snprintf(b, sizeof(b), "%d MHz", sc.freq_mhz[ci]);
         x += txt(b, x, 1.3f, 1.5f, T.text) + 1.4f;
-        const int lv = busy_level((float)chan_shown_peak_[ci]);
-        snprintf(b, sizeof(b), "%s   %d dBm, 30 s peak %d", kBusyName[lv], chan_shown_now_[ci], chan_shown_peak_[ci]);
-        x += txt(b, x, 1.55f, 1.15f, busy_col[lv]) + 1.4f;
+        if (unmeasured(chan_shown_now_[ci])) {
+            x += txt("NOT MEASURED", x, 1.55f, 1.15f, T.quiet) + 1.4f;
+        } else {
+            const int lv = busy_level((float)chan_shown_peak_[ci]);
+            snprintf(b, sizeof(b), "%s   %d dBm, 30 s peak %d", kBusyName[lv], chan_shown_now_[ci], chan_shown_peak_[ci]);
+            x += txt(b, x, 1.55f, 1.15f, busy_col[lv]) + 1.4f;
+        }
         const float* lc = !rules ? T.quiet : v.state == zones::kNotAllowed ? kDanger : v.state == zones::kIndoor ? kAmber :
                           v.state == zones::kLicence ? T.data : T.text;
         if (!rules) snprintf(b, sizeof(b), cc < 0 ? "time zone not set" : "no rules known for %s", cname);
@@ -426,6 +441,10 @@ bool OSD::draw_channel_band(int W, int H, float band_x, float band_y, float band
         const float y = Yd(lvl), py_ = Yd(pk);
         const bool banned = rules && vd[r].state == zones::kNotAllowed;
         if (banned) px_hatch(X(x - sw * 0.5f), Y(yT), sw * c, (yB - yT) * c, kDanger, 0.16f, 0.55f * c, 0.2f * c);
+        if (unmeasured(sc.power_dbm[ci])) {   // unknown: an outline, no level
+            px_frame(X(x - bwid * 0.5f), Y(yB - 2.0f), bwid * c, 2.0f * c, 0.1f * c, T.quiet, 0.5f);
+            continue;
+        }
         px_fill(X(x - bwid * 0.5f), Y(y), bwid * c, std::max(0.25f, yB - y) * c,
                 banned ? T.quiet : busy_col[busy_level(lvl)], banned ? 0.4f : 0.92f);
         if (pk > lvl + 1.0f)

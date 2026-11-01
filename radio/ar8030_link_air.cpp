@@ -624,16 +624,30 @@ void Ar8030Link::apply_pending_settings() {
         settings_q_.clear();
         region_q_lists_.clear();
         sky_ack_ = SkyAckWait();
+        sky_resend_sends_ = 0;
         return;
     }
     if (sky_ack_.field >= 0) {
         if (now_ms() < sky_ack_.until_ms) return;
-        printf("ar8030: no ack for cmd 0x%02X within %d ms\n", sky_ack_.cmd, kSkyAckMs);
+        if (sky_ack_.sends < kSkySends) {
+            // Again, at the front, a fresh sequence number (the air app takes
+            // a repeated one for the same frame again and ignores it).
+            printf("ar8030: no ack for cmd 0x%02X within %d ms - sending it again (%d/%d)\n",
+                   sky_ack_.cmd, kSkyAckMs, sky_ack_.sends + 1, kSkySends);
+            settings_q_.push_front({sky_ack_.field, sky_ack_.value});
+            if (sky_ack_.field == CAM_WORK_LIST) region_q_lists_.push_front(sky_ack_.list);
+            sky_resend_sends_ = sky_ack_.sends;
+        } else {
+            printf("ar8030: no ack for cmd 0x%02X after %d sends - given up\n", sky_ack_.cmd, kSkySends);
+        }
         sky_ack_ = SkyAckWait();
     }
     while (!settings_q_.empty()) {
         const std::pair<int,int> item = settings_q_.front();
         settings_q_.pop_front();
+        const int sent_before = sky_resend_sends_;
+        sky_resend_sends_ = 0;
+        std::vector<uint32_t> list;   // CAM_WORK_LIST's, kept for a resend
         uint8_t cmd; const char* name;
         switch (item.first) {
             case CAM_EV:        cmd = sky::CMD_SET_EV;           name = "EV";           break;
@@ -671,9 +685,9 @@ void Ar8030Link::apply_pending_settings() {
         std::vector<uint8_t> f;
         if (item.first == CAM_WORK_LIST) {
             if (region_q_lists_.empty()) continue;
-            const std::vector<uint32_t> l = region_q_lists_.front();
+            list = region_q_lists_.front();
             region_q_lists_.pop_front();
-            f = sky_proto.set_work_chan_list(l.data(), l.size());
+            f = sky_proto.set_work_chan_list(list.data(), list.size());
         } else if (item.first == CAM_HOP_ON || item.first == CAM_HOP_OFF) {
             f = sky_proto.set_bb_freq(item.first == CAM_HOP_ON, (uint8_t)slot, (uint32_t)item.second);
         } else if (item.first == CAM_PWR) {
@@ -699,6 +713,8 @@ void Ar8030Link::apply_pending_settings() {
             sky_ack_.value = item.second;
             sky_ack_.cmd = cmd;
             sky_ack_.until_ms = now_ms() + kSkyAckMs;
+            sky_ack_.sends = sent_before + 1;
+            sky_ack_.list = std::move(list);
             return;                      // the next once this one's ack is in
         }
     }
@@ -787,7 +803,10 @@ void Ar8030Link::note_air_info(const uint8_t *pl, size_t n) {
         for (char &c : v) if ((unsigned char)c < 0x20 || (unsigned char)c > 0x7e) c = '?';
         kv.emplace_back(line.substr(0, eq), v);
     }
-    // Its board type (stock's: 482 Lite, 472 Lite+) says what it is too.
+    // Its power-up (the distance's zero is kept per power-up), and its board
+    // type (stock's: 482 Lite, 472 Lite+), which says what it is too.
+    for (const auto &e : kv)
+        if (e.first == "boot") model_.air_boot(e.second);
     for (const auto &e : kv)
         if (e.first == "board") {
             const long b = strtol(e.second.c_str(), nullptr, 10);
@@ -938,9 +957,9 @@ void Ar8030Link::send_caps() {
     // (request 0x0c5a0036). Our radio keeps both until changed; sent again at
     // every link-up all the same. Every 2 s until all are taken (SET 22 waits
     // for the link); -95 (a radio without the request) counts as taken.
-    // AUTO / off: nothing sent at link-up, the radio runs on its own config;
-    // chosen from the menu, sent once (40 MHz, MCS none, steady off) to lift
-    // what was set before.
+    // Bandwidth AUTO / steady off: nothing sent at link-up, the radio runs on
+    // its own config; chosen from the menu, sent once (40 MHz, steady off) to
+    // lift what was set before. The MCS cap goes at every link-up, AUTO too.
     bb_dev_handle_t *dev = (bb_dev_handle_t *)bb_dev;
     const uint64_t t = now_ms();
     if (dev && radio_fw == 1 && caps_due.load() && link_state_.load() == 2 && arlink_request) {
@@ -960,7 +979,10 @@ void Ar8030Link::send_caps() {
                 rc_bw = ar_ioctl(dev, BB_SET_BANDWIDTH, &p, NULL);
             }
             uint32_t got = 0;
-            if (max_mcs >= 0 || live) {
+            {
+                // AUTO goes too (0xff, no cap): the radio keeps a cap until
+                // told otherwise, so one chosen before (a goggle restart, or a
+                // radio not restarted since) would hold under AUTO.
                 const uint8_t cap = max_mcs < 0 ? 0xff : (uint8_t)(int8_t)max_mcs;
                 rc_mcs = arlink_request(0x0c5a0036, &cap, 1, nullptr, 0, &got, 500);
             }

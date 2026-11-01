@@ -570,28 +570,74 @@ void OSD::measure_link(Frame& f) {
                                                  : 0.9f * quality_ewma + 0.1f * quality;
             quality = quality_ewma;
         }
+        // Range left: what the link can still give up to hold on as the
+        // signal fades, in dB of SNR, summed over its three levers (the user,
+        // 2026-10-29: the gauge and its warning are about what is left to gain
+        // range, not the MCS):
+        //   MCS   - the current rung's down threshold over the lowest's
+        //           (the radio's own rows, SET 36: down at -0.9 2.6 5.2 8.3
+        //           11.2 14.2 16.1 dB for MCS -1 0 3 5 6 8 10)
+        //   width - 3 dB a halving left, down to 5 MHz (the narrowest used)
+        //   power - the air's cap over its power now (AUTO; a fixed power
+        //           has none to give)
+        // Full is 40 MHz MCS 8 with the AUTO cap's dB over 22 (where the model
+        // sits close by) - 28 dB on 500 mW AUTO. The VIDEO track shows it in
+        // twelve blocks (~2.3 dB each): amber at 5-7, red at 4 or fewer -
+        // 20 MHz MCS 6 at full power is 18 dB, 8 blocks, still fine; 20 MHz
+        // MCS 5 and 10 MHz MCS 5 (5.9 Mbit/s) are amber; 10 MHz MCS 3 (3.9
+        // Mbit/s, 9 dB, the user: should be red) and 5 MHz under MCS 6 are red.
+        float range_norm = 0.0f;
+        int range_blocks = -1;   // -1: no MCS reading, no verdict
+        {
+            static const struct { int mcs; float down_db; } kRows[] = {
+                { -1, -0.9f }, { 0, 2.6f }, { 3, 5.2f }, { 5, 8.3f },
+                { 6, 11.2f }, { 8, 14.2f }, { 10, 16.1f } };
+            const int mcs = ar_mcs_label(link_copy.rx_mcs_val);
+            float mcs_db = -1.0f;
+            for (const auto &r : kRows) if (mcs >= r.mcs) mcs_db = r.down_db - kRows[0].down_db;
+            const int gear = link_copy.bw_step;   // 2 = 5 MHz .. 5 = 40 MHz
+            const float width_db = gear > 2 && gear < 6 ? 3.0f * (gear - 2) : 0.0f;
+            float power_db = 0.0f, power_full_db = 0.0f;
+            if (link_copy.air_pwr_mw > 0) {
+                const ar_pwr_level &lv = kArPwrLevels[ar_pwr_index(link_copy.air_pwr_mw)];
+                if (lv.automode) {
+                    int cap_dbm = 0;   // the air's dBm for the AUTO cap, on its own scale
+                    for (int d = 9; d <= 28; d++) if (ar_air_mw_from_dbm(d) <= lv.mw - 1) cap_dbm = d;
+                    const int live = air_live_dbm();
+                    power_db = live > 0 && cap_dbm > live ? (float)(cap_dbm - live) : 0.0f;
+                    power_full_db = cap_dbm > 22 ? (float)(cap_dbm - 22) : 0.0f;
+                }
+            }
+            if (connected && mcs_db >= 0.0f) {
+                const float full = (14.2f - kRows[0].down_db) + 9.0f + power_full_db;
+                range_norm = std::max(0.0f, std::min(1.0f, (mcs_db + width_db + power_db) / full));
+                range_blocks = (int)(range_norm * 12.0f + 0.5f);
+            }
+        }
         // Video link warning, for the screen-edge glow and the canopy's VIDEO
-        // track. Same rung thresholds as the arena gauge's colours above, so
-        // every layout calls the same link amber at the same moment:
-        //   amber - MCS 5-7: the bitrate is being squeezed
-        //   red   - MCS 1-2: a trickle, the picture breaks up; or no frame
-        //           for 400 ms on a link that was delivering them - frozen
-        // No MCS reading at all gives no verdict rather than a red one.
+        // track, off the range left above (the track's own blocks, so the two
+        // never disagree): amber at 5-7 of 12, red at 4 or fewer; or no
+        // frame for 400 ms on a link that was delivering them - frozen.
         int warn = 0;
         if (connected) {
-            if (rung >= 0 && rung <= 1)      warn = 2;
-            else if (rung >= 2 && rung <= 3) warn = 1;
+            if (range_blocks >= 0 && range_blocks <= 4)      warn = 2;
+            else if (range_blocks >= 0 && range_blocks <= 7) warn = 1;
             if (seen_this_link && get_time_us() - last_fpv_frame_us_ > 400000ULL)
                 warn = 2;
         }
-
         // The canopy reads the same measurements the arena panels draw rather
         // than re-deriving them, so the two layouts can never disagree.
-        canopy.link_warn = link_warn_hold(warn);
+        canopy.link_warn = warn;   // no hold: the blocks and their colour follow the link as it is
         canopy.link_up  = connected;
-        canopy.mcs_norm = snr_norm;
+        canopy.range_norm = range_norm;
         canopy.quality  = quality;
         pwr_text(canopy.vtx_pwr, sizeof(canopy.vtx_pwr));
+        canopy.vrx_pwr[0] = '\0';
+        if (const int dbm = gnd_live_dbm(); dbm > 0) {
+            const int mw = ar_pwr_mw_from_dbm(dbm);   // the VRX's own stock scale
+            if (mw >= 1000) snprintf(canopy.vrx_pwr, sizeof(canopy.vrx_pwr), "%.1fW", mw / 1000.0f);
+            else            snprintf(canopy.vrx_pwr, sizeof(canopy.vrx_pwr), "%dmW", mw);
+        }
         // tx_freq, not rx_freq: rx_status reports a fixed 2100 MHz gear value
         // on this radio rather than the actual channel (see the RF tab's own
         // frequency row for the same substitution).
@@ -636,25 +682,10 @@ void OSD::air_pwr_text(const gnd::LinkStats& link_copy, char* out, size_t n) con
         if (cmd_mw <= 0) { snprintf(out, n, "--"); return; }
         const ar_pwr_level &lv = kArPwrLevels[ar_pwr_index(cmd_mw)];
         int mw = lv.automode ? lv.mw - 1 : lv.mw;   // 501 (auto cap 500) -> 500
+        // What the air unit says it transmits at (an Open8030 air radio),
+        // rather than what it was set to: AUTO moves it.
+        if (const int dbm = air_live_dbm(); dbm > 0) mw = ar_air_mw_from_dbm(dbm);
         const char *aflag = lv.automode ? " (A)" : "";
         if (mw >= 1000) snprintf(out, n, "%.1fW%s", mw / 1000.0f, aflag);
         else            snprintf(out, n, "%dmW%s", mw, aflag);
-}
-
-int OSD::link_warn_hold(int raw) {
-    // Two seconds: longer than the radio takes to try the next rung up and
-    // fall back, so a link bouncing between two rungs holds the worse colour
-    // instead of flashing between them.
-    constexpr uint64_t kStepDownUs = 2000000ULL;
-    uint64_t now = get_time_us();
-    if (raw >= link_warn_level_) {
-        link_warn_level_ = raw;
-        link_warn_better_us_ = 0;
-    } else if (!link_warn_better_us_) {
-        link_warn_better_us_ = now;
-    } else if (now - link_warn_better_us_ >= kStepDownUs) {
-        link_warn_level_ = raw;
-        link_warn_better_us_ = 0;
-    }
-    return link_warn_level_;
 }

@@ -102,14 +102,15 @@ void OSD::sync_radio() {
     const gnd::RadioState rs = parts_.radio.state();
     osd_vars.radio_link = rs.link;
     link_distance_raw = rs.dist_raw;
-    dist_offset_ = rs.dist_offset;
     dist_m_ = rs.dist_m;
     rf_caps = rs.rf_caps;
+    gnd_live_dbm_.store(rs.live_dbm, std::memory_order_relaxed);
     // Link dropped: re-arm the re-asserts so the next settings broadcast
     // (requested on reconnect) re-applies the AIR-owned values.
     if (rs.link.state != 2) { rf_bw_applied = -1; rf_chan_asserted = false; }
 
     air_radio_ = parts_.air_radio.state();
+    air_live_dbm_.store(air_radio_.live_dbm, std::memory_order_relaxed);
     air_unit_ = parts_.air_unit.state();
     const air::UnitState& as = air_unit_;
     air_feat_ = as.features;
@@ -135,9 +136,14 @@ void OSD::sync_radio() {
     }
     gnd::ScanSample sc;
     while (parts_.radio.take_scan(sc)) apply_chan_scan(sc);
-    const uint64_t drops = parts_.radio.dropped();
+    air::Resend r;
+    while (parts_.air_radio.take_resend(r)) {
+        resend_hist_.push_back(r);
+        if (resend_hist_.size() > 16384) resend_hist_.pop_front();
+    }
+    const uint64_t drops = parts_.radio.dropped() + parts_.air_radio.resends_dropped();
     if (drops != radio_drops_seen_) {
-        printf("[OSD] the radio's rates or scans came faster than the HUD took them: %llu dropped\n",
+        printf("[OSD] the radio's rates, scans or resends came faster than the HUD took them: %llu dropped\n",
                (unsigned long long)drops);
         radio_drops_seen_ = drops;
     }

@@ -17,6 +17,7 @@
 #include <algorithm>
 #include "base/sd_log.hpp"
 #include "radio/settings.hpp"
+#include "base/frame_log.hpp"
 #include "base/video_pool.hpp"
 #include "base/prof.hpp"
 #include "base/frame_mode.hpp"

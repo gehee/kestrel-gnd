@@ -1610,6 +1610,11 @@ void Renderer::update_stats(DecodedUnit *du, uint64_t display_start_ts) {
         printf("renderer: latency samples in 5 s: %u timed slice by slice, %u as whole pictures, "
                "%u pictures up again not counted again, %u taken at 100 ms with a slice missing\n",
                samples_sliced_, samples_whole_, samples_again_, slice_timeouts_);
+        // The stats screen's SHOWN/DECODED, here too: a screen recording
+        // (REC) loads the display enough to change it.
+        printf("renderer: %u pictures shown in 5 s, %u never shown (overtaken before their refresh)\n",
+               samples_sliced_ + samples_whole_, skipped_5s_);
+        skipped_5s_ = 0;
         samples_sliced_ = samples_whole_ = samples_again_ = slice_timeouts_ = 0;
         slice_log_.slowest[0] = slice_log_.slowest[1] = slice_log_.slowest[2] = 0;
         slice_log_.since = now;
@@ -1639,6 +1644,7 @@ void Renderer::add_latency_sample(uint64_t tx_enc, uint64_t tx_proc, uint64_t de
                                   uint64_t disp_lat, uint64_t total_lat, bool key, unsigned skipped,
                                   const float* slice_ms, int nslices, const SliceLatency* waits,
                                   const SliceStages* sl, uint64_t shown_us, uint64_t cap_us, bool air) {
+    skipped_5s_ += skipped;
     if (stats_.frame_counter >= Stats::kMaxFrames) return;
     const uint64_t now = get_time_us();
     uint64_t pace_lat = (stats_.last_frame_ts > 0 && now > stats_.last_frame_ts) ? now - stats_.last_frame_ts : 0;

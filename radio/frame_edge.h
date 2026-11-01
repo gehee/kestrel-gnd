@@ -106,7 +106,7 @@ static int fe_measure(const fe_read *r, int n, double E, double T, double *s, do
 }
 
 // The periods searched, us: every frame above, with room.
-#define FE_T_MIN 3000.0
+#define FE_T_MIN 2000.0   /* Open8030: mode 3 at 40 MHz 2959.36, mode 5 2499.84 */
 #define FE_T_MAX 8500.0
 
 // The period within 1.5 us of c that sorts the reads best (the middle of the

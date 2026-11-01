@@ -106,7 +106,7 @@ constexpr float kLinkAllUs   = 420000.0f;   // ...then the blocks sweep in
 
 // Segment counts: the coarse "state" track and the fine "stress" one.
 constexpr int kSegsMain = 20;
-constexpr int kSegsThin = 7;      // the MCS ladder's seven rungs
+constexpr int kSegsThin = 12;     // the VIDEO track: range left, twelfths (osd.cpp)
 
 // Mockup y (from the top of its 620px frame) -> frustum y.
 // The panels sat 24 design px clear of the bottom edge. Half that reads
@@ -758,14 +758,15 @@ void OSD::draw_canopy_hud(const CanopyIn& in) {
             canvas_->text(in.bf.mode, x, BL(base, T_ROW), T_ROW, false, tr, tg, tb);
             x += canvas_->text_width(in.bf.mode, T_ROW) + igap;
         }
-        if (in.dist_m >= 0) {
+        if (in.dist_m >= 0 || in.dist_m == -2) {   // -2: not zeroed yet (the first arming does)
             canvas_->text("\xE2\x80\xA2", x, BL(base, T_ROW), T_ROW, false,
                       tr * 0.68f, tg * 0.68f, tb * 0.68f);
             x += canvas_->text_width("\xE2\x80\xA2", T_ROW) + igap;
             icon(VecIcon::Distance, x, base, ir, ig, ib);
             x += iw + igap;
-            if (in.dist_m >= 1000) snprintf(buf, sizeof(buf), "%.2fkm", in.dist_m / 1000.0f);
-            else                   snprintf(buf, sizeof(buf), "%dm", in.dist_m);
+            if (in.dist_m < 0)          snprintf(buf, sizeof(buf), "--");
+            else if (in.dist_m >= 1000) snprintf(buf, sizeof(buf), "%.2fkm", in.dist_m / 1000.0f);
+            else                        snprintf(buf, sizeof(buf), "%dm", in.dist_m);
             canvas_->text(buf, x, BL(base, T_ROW), T_ROW, false, tr, tg, tb);
         }
     }
@@ -784,6 +785,13 @@ void OSD::draw_canopy_hud(const CanopyIn& in) {
         temp_rgb(in.vrx_temp_c, tr, tg, tb, vr, vg, vb);
         canvas_->text(buf, x, BL(base, T_ROW), T_ROW, false, vr, vg, vb);
         x += canvas_->text_width(buf, T_ROW);              // the end of what is drawn so far
+
+        // Its own TX power (the uplink), as the radio pushes it.
+        if (in.vrx_pwr[0]) {
+            snprintf(buf, sizeof(buf), " \xE2\x80\xA2 %s", in.vrx_pwr);
+            canvas_->text(buf, x, BL(base, T_ROW), T_ROW, false, tr, tg, tb);
+            x += canvas_->text_width(buf, T_ROW);
+        }
 
         // The goggle's own supply, beside its temperature - the two readings
         // that are about this unit rather than the aircraft. Drawn only when
@@ -980,13 +988,27 @@ void OSD::draw_canopy_hud(const CanopyIn& in) {
             canvas_->text("--", x, BL(base, T_BIG), T_BIG, true, 0.45f, 0.45f, 0.45f);
             x -= canvas_->text_width("--", T_BIG) + 10.0f * U;
         }
-        if (in.dist_m >= 0) {
+        if (in.dist_m >= 0 || in.dist_m == -2) {   // -2: not zeroed yet (the first arming does)
             canvas_->text("\xE2\x80\xA2", x, BL(base, T_UNIT), T_UNIT, true,
                       ldim * 0.42f, ldim * 0.42f, ldim * 0.42f);
             x -= canvas_->text_width("\xE2\x80\xA2", T_UNIT) + 10.0f * U;
             canvas_->text("m", x, BL(base, T_SMALL), T_SMALL, true, lur, lug, lub);
             x -= canvas_->text_width("m", T_SMALL);
-            snprintf(buf, sizeof(buf), "%d", in.dist_m);
+            if (in.dist_m < 0) snprintf(buf, sizeof(buf), "--");
+            else               snprintf(buf, sizeof(buf), "%d", in.dist_m);
+            canvas_->text(buf, x, BL(base, T_UNIT), T_UNIT, true,
+                      ldim * 0.82f, ldim * 0.82f, ldim * 0.82f);
+            x -= canvas_->text_width(buf, T_UNIT) + 10.0f * U;
+        }
+        // The video link's SNR beside the distance: how far, and how well it
+        // hears at that distance.
+        if (in.snr_db >= 0.0f) {
+            canvas_->text("\xE2\x80\xA2", x, BL(base, T_UNIT), T_UNIT, true,
+                      ldim * 0.42f, ldim * 0.42f, ldim * 0.42f);
+            x -= canvas_->text_width("\xE2\x80\xA2", T_UNIT) + 10.0f * U;
+            canvas_->text("dB", x, BL(base, T_SMALL), T_SMALL, true, lur, lug, lub);
+            x -= canvas_->text_width("dB", T_SMALL);
+            snprintf(buf, sizeof(buf), "%.0f", in.snr_db);
             canvas_->text(buf, x, BL(base, T_UNIT), T_UNIT, true,
                       ldim * 0.82f, ldim * 0.82f, ldim * 0.82f);
         }
@@ -1011,7 +1033,7 @@ void OSD::draw_canopy_hud(const CanopyIn& in) {
         canvas_->seg_track(rx0, MY(525.0f), rtw, 9.0f * U, kSegsMain,
                        have_rc ? rc : 0.0f, false, kCyanR, kCyanG, kCyanB,
                        0.70f * ldim, 1.00f * ldim, f_block);
-        // Amber, then red, with the screen-edge warning (see link_warn_hold):
+        // Amber, then red, with the screen-edge warning (osd.cpp, off these blocks):
         // the track that explains the glow wears its colour.
         float vr = kLimeR, vg = kLimeG, vb = kLimeB;
         if (in.link_warn >= 2)      { vr = 1.0f; vg = 0.30f; vb = 0.25f; }
@@ -1019,7 +1041,7 @@ void OSD::draw_canopy_hud(const CanopyIn& in) {
         canvas_->text("VIDEO", RXo(kEdge), MY(537.0f), T_LABEL, true,
                   vr * ldim, vg * ldim, vb * ldim);
         canvas_->seg_track(rx0, MY(534.0f), rtw, 4.0f * U, kSegsThin,
-                       in.mcs_norm, false, vr, vg, vb,
+                       in.range_norm, false, vr, vg, vb,
                        0.55f * ldim, 0.85f * ldim, f_block);
     }
 
@@ -1203,6 +1225,7 @@ void OSD::draw_canopy(Frame& f) {
         }
         canopy.bf             = msp_osd.get_telem();
         canopy.dist_m = dist_shown();
+        canopy.snr_db = osd_vars.radio_link.state == 2 ? std::max(0.0f, osd_vars.radio_link.snr) : -1.0f;
         canopy.v_w  = (int)v_width;
         canopy.v_h  = (int)v_height;
         canopy.fps  = cur_fps;

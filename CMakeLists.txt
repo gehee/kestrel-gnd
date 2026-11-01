@@ -150,7 +150,7 @@ kestrel_module(third_party FOLDERS third_party include
 kestrel_module(utils FOLDERS utils DEPS third_party
     SOURCES utils/Queue.cpp utils/Msg.cpp)
 kestrel_module(base FOLDERS base DEPS utils
-    SOURCES base/scheduling_helper.cpp base/prof.cpp base/sd_log.cpp
+    SOURCES base/scheduling_helper.cpp base/prof.cpp base/sd_log.cpp base/frame_log.cpp
             base/ltrace.cpp base/video_pool.cpp base/restart.cpp base/settings.cpp
             base/frame_mode.cpp
     LIBS pthread m)
@@ -305,6 +305,7 @@ if(KESTREL_TESTS)
     kestrel_test(canvas_test render)
     kestrel_test(platform_test platform)
     kestrel_test(air_clock_test radio)
+    kestrel_test(gallery_stats_test hud)
     kestrel_test(link_view_test hud)
     kestrel_test(bus_test base)
     kestrel_test(settings_test base)

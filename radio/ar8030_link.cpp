@@ -16,7 +16,7 @@ Ar8030Link::Ar8030Link(radio::Model& model, const Ar8030Config& cfg,
       host(std::move(host_)), host_port(host_port_), slot(slot_), video_port(video_port_),
       freq_khz(cfg.freq_khz), bandwidth(cfg.bandwidth), do_pair(cfg.do_pair),
       ap_index(cfg.ap_index), chan_auto(cfg.chan_auto), chan_manual_cli(cfg.chan_manual_cli),
-      chan_hop(cfg.chan_hop), tx_power_dbm(cfg.tx_power_dbm),
+      chan_hop(cfg.chan_hop), chan_fixed_mhz(cfg.chan_fixed_mhz), tx_power_dbm(cfg.tx_power_dbm),
       tx_power_mw(cfg.tx_power_mw), tx_power_want_mw(cfg.tx_power_want_mw),
       air_floor_us(cfg.air_floor_us), skip_handshake(cfg.skip_handshake),
       standby_mode(cfg.standby_mode), prj_rf_bw(cfg.prj_rf_bw), prj_rf_pwr_mw(cfg.prj_rf_pwr_mw),
@@ -52,6 +52,12 @@ void Ar8030Link::apply(const radio::Command& c) {
     } else if (const auto* a = std::get_if<cmd::CameraSetting>(&c)) {
         request_setting(a->field, a->value);
     } else if (const auto* a = std::get_if<cmd::RfControl>(&c)) {
+        // A channel picked on the channel page is FIXED from here on
+        // (chan_fixed_mhz); AUTO HOP is off with it.
+        if (a->fixed_mhz >= 0) {
+            chan_fixed_mhz = a->fixed_mhz;
+            if (a->fixed_mhz) chan_hop = 0;
+        }
         request_rf(a->field, a->value);
     } else if (const auto* a = std::get_if<cmd::MaxBitrate>(&c)) {
         max_kbps = a->kbps;
@@ -88,7 +94,8 @@ void Ar8030Link::apply(const radio::Command& c) {
         steady = a->on;
         caps_now();
     } else if (const auto* a = std::get_if<cmd::ChannelHop>(&c)) {
-        // AUTO's pick is made now.
+        // No longer FIXED; AUTO's pick is made now.
+        chan_fixed_mhz = 0;
         chan_hop = a->hop;
         region_pick = true;
         region_changed();
@@ -120,6 +127,7 @@ radio::State Ar8030Link::held() const {
     s.bind_state = bind_state.load();
     s.bind_secs_left = bind_secs_left.load();
     s.bind_peer = bind_peer.load();
+    s.resend_known = resend_known_.load();
     return s;
 }
 
@@ -232,6 +240,7 @@ void Ar8030Link::run() {
         }
         apply_pending_settings();
         apply_pending_rf();
+        chan_follow_poll();
         if (region_due.load() && now_ms() >= region_retry_ms_ && region_due.exchange(false)) region_auto_apply();
         // Binding, if the menu or the front-panel button asked for it. One
         // non-blocking step per pass; it owns the baseband only in short
@@ -281,6 +290,8 @@ void Ar8030Link::run() {
                     // the idle reconnect below happened to reset the mode. So a
                     // lost link puts the ground back to searching, as at start.
                     // --ar8030-chan-manual asked to stay fixed, and does.
+                    if (last_link_state == 2 && ls != 2 && !retune_down_ms_ && !lost_reopened_) link_lost_ms_ = tl;
+                    if (ls == 2) { link_lost_ms_ = 0; lost_reopened_ = false; }
                     if (last_link_state == 2 && ls != 2 && !retune_down_ms_ && !chan_auto && !chan_manual_cli && bb_dev) {
                         printf("ar8030: link lost on a pinned channel - searching again\n");
                         search_all_channels();
@@ -499,8 +510,20 @@ void Ar8030Link::run() {
             // this timer was being killed from inside. Seen on hardware as
             // repeated "shutdown:" and "bring-ups failed - restarting the
             // daemon" in the middle of an open window.
-            if (read_timeouts >= 200 && !bind_busy()) {
-                printf("ar8030: link idle too long, reopening socket\n");
+            // A link that was up and went down is searched for by the radio,
+            // and that search does not always find the air unit again: drive
+            // 2026-10-29 (Open8030 both ends), the link dropped on a clean
+            // signal (SNR 23, MCS 8) and stayed down until the 200-read rule
+            // below, ~105 s of no picture; the reopen then linked in ~3 s.
+            // When the search works it relinks within ~10 s (9.2 and 2.7 s at
+            // the edge of range the same evening), so 12 s without the link
+            // back reopens - once per loss, the 200-read rule after that.
+            const bool lost_long = link_lost_ms_ && now_ms() - link_lost_ms_ >= 12000;
+            if ((read_timeouts >= 200 || lost_long) && !bind_busy()) {
+                if (lost_long) printf("ar8030: link lost 12 s ago and not back - reopening socket\n");
+                else printf("ar8030: link idle too long, reopening socket\n");
+                if (lost_long) lost_reopened_ = true;
+                link_lost_ms_ = 0;
                 disconnect_bb();
                 accum.clear();
                 read_timeouts = 0;

@@ -120,8 +120,21 @@ class Ar8030Link : public radio::Link, private radio::VideoOut::Source {
         // connects; AUTO HOP only has the air unit hop by itself on them,
         // wherever it steers (the ground moves nothing).
         std::atomic<int> chan_hop;
+        // FIXED: the channel picked on the channel page (MHz, 0: AUTO / AUTO
+        // HOP), saved as ar8030_chan_mhz. At every link-up the link moves back
+        // there (region_auto_apply): after a start or a lost link the ground
+        // searched, and the air unit may have come up anywhere.
+        std::atomic<int> chan_fixed_mhz;
         // How many channels the air unit was given to hop on; 0: it does not hop.
         std::atomic<int> region_hop_n{0};
+        // TX power as the radios push it (Open8030 event 14), dBm; 0 = not
+        // known: the air unit's as it announced it, and our radio's own.
+        std::atomic<int> air_live_dbm_{0}, gnd_live_dbm_{0};
+        // Open8030 at both ends: the air radio's resend map (poll_resends, from
+        // the stats thread every 100 ms), the frames with blocks sent again
+        // published as they are learnt (the resends channel). resend_known_:
+        // our radio gives it.
+        std::atomic<bool> resend_known_{false};
         // AUTO's pick is due: at link-up, or AUTO / AUTO HOP just chosen.
         std::atomic<bool> region_pick{false};
         // Something AUTO's list depends on changed (time zone, licence, Max
@@ -313,6 +326,8 @@ class Ar8030Link : public radio::Link, private radio::VideoOut::Source {
         // radios have associated it goes into the air and nothing answers.
         int      last_link_state = -1;
         uint64_t retune_down_ms_ = 0;          // the link dropped right after a bandwidth change (0: no)
+        uint64_t link_lost_ms_ = 0;            // a link went down and has not come back (0: none)
+        bool     lost_reopened_ = false;       // reopened for that loss: not again until a link
         uint64_t last_scan_ms = 0;
         int      link_freq_mhz = 0;   // real link frequency, from BB_GET_STATUS
         bool     scan_logged = false;
@@ -499,6 +514,14 @@ class Ar8030Link : public radio::Link, private radio::VideoOut::Source {
         std::vector<uint32_t> ap_enc_last_;      // capture -> the picture's last slice out of the encoder
         uint64_t ap_log_ms_ = 0;
         void poll_ap_time();
+        void poll_resends();             // Open8030: the air radio's resend map, from the stats thread
+        uint64_t resend_poll_ms_ = 0;
+        uint32_t resend_done_frame_ = 0;     // our radio's frame of the newest taken
+        bool     resend_done_valid_ = false;
+        uint32_t frames_done_ = 0;           // the per-frame log: the newest frame written
+        bool     frames_done_valid_ = false;
+        // Its totals since our radio started: blocks sent again, frames known, frames stalled.
+        std::atomic<uint32_t> rs_blocks_{0}, rs_known_{0}, rs_stalls_{0};
         void bw_poll();                  // /tmp/bw.req: the video link's bandwidth, an experiment
         void send_caps();                // Open8030: the menu's caps, from the stats thread
         void note_ap_delay(const uint8_t *hdr, size_t len, bool new_pic);
@@ -581,8 +604,14 @@ class Ar8030Link : public radio::Link, private radio::VideoOut::Source {
             int value = 0;
             uint8_t cmd = 0;
             uint64_t until_ms = 0;
+            int sends = 0;               // how many times it has gone out
+            std::vector<uint32_t> list;  // a work channel list's payload, for sending it again
         };
         static constexpr int kSkyAckMs = 1000;
+        // A setting not acknowledged goes again, up to this many sends in
+        // all: one lost on the link (a 500mW AUTO, seen) was otherwise gone.
+        static constexpr int kSkySends = 3;
+        int sky_resend_sends_ = 0;       // the queue's front is a resend, sent this many times (0: not)
         SkyAckWait sky_ack_;
         std::deque<std::pair<int,int>> settings_q_;   // parked settings not sent yet, in order
         void sky_ack_done(int status);
@@ -618,6 +647,11 @@ class Ar8030Link : public radio::Link, private radio::VideoOut::Source {
         // Undo a pin: every channel back on the ground's work list, then
         // channel adaptation on - the ground searches, as at start.
         int  search_all_channels();
+        int  work_list_all();       // the radio's work list (its scan list too, on Open8030) = every channel
+        void chan_follow_poll();    // a manual move under way: ours followed? (read loop, every 100 ms)
+        uint32_t chan_follow_khz_ = 0;        // its target, 0: none
+        int      chan_follow_stage_ = 0;      // 0 the air unit leads, 1 ours moved itself
+        uint64_t chan_follow_start_ms_ = 0, chan_follow_until_ms_ = 0, chan_follow_next_ms_ = 0;
         uint32_t link_freq_khz();   // ground's own TX freq, 0 if unknown
 
         // Index of freq_khz in the radio's channel table, or -1. Also yields

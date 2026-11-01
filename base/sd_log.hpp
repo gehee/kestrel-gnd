@@ -19,6 +19,9 @@ void init(const std::string& dir);
 // On: a new log, if dir is a mounted partition (not the plain mount point;
 // says why not otherwise). Off: what is pending written, the log closed.
 void set_enabled(bool on);
+// The log being written now (empty while off): others name their files after
+// it (the radio's per-frame log, <log without .log>.frames.csv).
+std::string current_path();
 // stdout and stderr back to where they went before the first log: for a re-exec,
 // whose new process has none of these threads (async-signal-safe).
 void restore_output();

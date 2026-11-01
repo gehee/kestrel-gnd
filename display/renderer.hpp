@@ -242,6 +242,7 @@ class Renderer : public display::Presenter {
         unsigned skipped_pending_ = 0;     // pictures never shown, for the next sample
         unsigned slice_fail_[6] = {0, 0, 0, 0, 0, 0};   // why a shown picture had no latency (5 s)
         unsigned samples_sliced_ = 0, samples_whole_ = 0, samples_again_ = 0, slice_timeouts_ = 0;   // 5 s
+        unsigned skipped_5s_ = 0;   // pictures never shown (overtaken before their refresh), 5 s
         int64_t last_whole_sample_pts_ = -1;
 
         Renderer(RenderMode rmode,  std::shared_ptr<DrmDevice> dev_, Settings& settings,

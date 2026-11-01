@@ -234,9 +234,10 @@ int read_start_options(int argc, char** argv, Settings& settings, StartOptions& 
 	if (dvr_format_str == "mp4") dvr_format = DvrFormat::MP4;
 	else if (dvr_format_str == "raw") dvr_format = DvrFormat::RAW;
 	
-	// The channel is the air unit's to decide: the goggle always starts by
-	// searching for it (chan_auto), and a channel picked in the menu lasts
-	// for the session. Only --ar8030-chan-manual starts it pinned.
+	// The goggle always starts by searching for the air unit (chan_auto); a
+	// channel picked on the channel page is saved (ar8030_chan_mhz) and the
+	// link moves back there at every link-up. Only --ar8030-chan-manual starts
+	// it pinned.
 	// Decode was flag-gated because it was being isolated while chasing the
 	// decode freeze; for normal use it belongs on. Settings-backed so a bare
 	// "kestrel-gnd" works on hardware where the config says ar8030: 1.
@@ -285,6 +286,8 @@ int read_start_options(int argc, char** argv, Settings& settings, StartOptions& 
 		ar_cfg.max_mcs = mcs >= 0 && mcs <= 11 ? mcs : -1;   // the menu's range, AUTO + MCS 0..11
 		ar_cfg.steady = settings.get(radio::setting::ar8030_steady) == 1 ? 1 : 0;
 		ar_cfg.chan_hop = settings.get(radio::setting::ar8030_chan_hop) == 1 ? 1 : 0;
+		const int fixed = settings.get(radio::setting::ar8030_chan_mhz);
+		ar_cfg.chan_fixed_mhz = fixed >= 2000 && fixed <= 7000 ? fixed : 0;
 	}
 	// RADIO > VRX Radio Firmware: Open8030 when its image is on the unit, unless
 	// the menu said STOCK (0) - as bb_only.sh decides what it uploads.

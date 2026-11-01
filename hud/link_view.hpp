@@ -29,6 +29,7 @@ struct LinkView {
     int bind_state = 0;            // gnd::BindState
     int bind_secs_left = 0;
     unsigned bind_peer = 0;        // peer MAC, packed big-endian
+    bool resend_known = false;     // the air radio's resends are known
 };
 
 LinkView link_view(const gnd::RadioState& radio, const air::RadioState& air_radio,

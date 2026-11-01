@@ -119,6 +119,14 @@ void Ar8030Link::on_mcs_event(const uint8_t* p) {
 // change to 40 MHz, and that brief drop is not a new link (see the video loop).
 void Ar8030Link::on_logged_event(int ev, const uint8_t* p) {
     printf("ar8030: event %d: %02X %02X %02X %02X\n", ev, p[0], p[1], p[2], p[3]);
+    // TX power (Open8030, event 14): {slot, 0 the air unit's / 1 ours, dBm
+    // now, dBm before}, 0 = not known. Shown at once.
+    if (ev == 14) {
+        if (p[1] == 0) air_live_dbm_ = p[2]; else gnd_live_dbm_ = p[2];
+        model_.update_air_radio([&](air::RadioState& r) { r.live_dbm = air_live_dbm_; });
+        model_.update_ground([&](gnd::RadioState& r) { r.live_dbm = gnd_live_dbm_; });
+        return;
+    }
     if (ev == 12) {
         bw_change_ms_.store(now_ms());
         if (p[2] <= 5) video_bw_idx_.store(p[2]);
@@ -155,6 +163,16 @@ void Ar8030Link::subscribe_events() {
         }
         printf("ar8030: subscribe event %d -> %d\n", evts[i],
                ar_ioctl(dev, BB_SET_EVENT_SUBSCRIBE, &ev, NULL));
+    }
+    // Open8030's own: TX power changes (event 14). Only there - a stock
+    // radio has no such event.
+    if (on_ar_libre() && radio_fw == 1) {
+        bb_set_event_callback_t ev;
+        memset(&ev, 0, sizeof(ev));
+        ev.event = (bb_event_e)14;
+        ev.callback = ar_event_log_cb<14>;
+        ev.user = this;
+        printf("ar8030: subscribe event 14 (TX power) -> %d\n", ar_ioctl(dev, BB_SET_EVENT_SUBSCRIBE, &ev, NULL));
     }
 }
 
@@ -267,6 +285,11 @@ void Ar8030Link::configure_link() {
     int rc_cm = ar_ioctl(dev, BB_SET_CHAN_MODE, &cm, NULL);
     printf("ar8030: BB_SET_CHAN_MODE(auto=%d) -> %d\n", cm.auto_mode, rc_cm);
     if (rc_cm == 0) rf_caps |= gnd::RF_CAP_CHAN;
+    // Open8030 measures only the work list's channels (the rest read 0, which
+    // the channel page drew as the busiest there is), and keeps it across a
+    // kestrel-gnd restart: an earlier manual pick could have left it at one.
+    if (radio_fw == 1)
+        printf("ar8030: work list = every channel (the scan's list) -> %d\n", work_list_all());
 
     enable_ranging();
 

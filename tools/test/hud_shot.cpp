@@ -106,6 +106,8 @@ struct FakeEncoder : Fake<air::Encoder> {
 };
 struct FakeAirRadio : Fake<air::Radio> {
     Ticket set_tx_power(int mw) override { return ask(mw); }
+    bool take_resend(air::Resend&) override { return false; }
+    uint64_t resends_dropped() const override { return 0; }
 };
 struct FakeUnit : Fake<air::Unit> {
     Ticket set_standby(bool on) override { return ask(on); }
@@ -142,7 +144,6 @@ struct FakeRadio : Fake<gnd::Radio> {
     void search_channels() override {}
     void scan_screen(bool) override {}
     void bind() override {}
-    void set_dist_offset(int) override {}
     void region_changed() override {}
     bool take_scan(gnd::ScanSample& sc) override { return take(scans, sc); }
     bool take_rate(float& mbps) override { return take(rates, mbps); }

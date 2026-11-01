@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "display/video_listener.hpp"   // kLatSlices, SliceStages
+#include "system/air/radio.hpp"
 
 // What the stats screen draws, worked out from raw samples. Pure data in, pure
 // data out: nothing here touches GL or the OSD, so it can be tested off the
@@ -24,6 +25,9 @@ struct StatsFrame {
     int8_t   snr = 0;
     uint8_t  mcs = 0;
     int8_t   bw = -1;                         // the link's bandwidth gear (0..5 = 1.25 .. 40 MHz), -1: not known
+    uint8_t  air_dbm = 0;                     // the air unit's TX power (its radio's announcement), dBm, 0: not known
+    uint16_t freq_mhz = 0;                    // the link's channel, MHz, 0: not known
+    int16_t  dist_m = -1;                     // the HUD's distance, metres, -1: not known
     uint8_t  air = 1;                         // its air part known (0: the radio clock not checked - counted with its air part at 0)
     uint8_t  key = 0;                         // the picture was a keyframe
     uint16_t skipped = 0;                     // pictures before it never shown
@@ -35,6 +39,11 @@ struct StatsFrame {
 
 // One display flip: when it completed, and the time since the one before.
 struct StatsFlip { uint64_t t_us; uint32_t gap_us; };
+// A radio frame in which the air radio sent blocks again (Open8030's resend
+// map): when it ended (CLOCK_MONOTONIC) and v, the blocks (1..2), or 3: none
+// confirmed (the broadcast stalled). A block sent again costs its slice a
+// frame or more - the radio part's latency tail.
+using StatsResend = air::Resend;
 
 struct StatsView {
     static constexpr int kCols = 240;
@@ -62,9 +71,14 @@ struct StatsView {
     float    video[kCols], link[kCols];       // Mbps
     float    snr[kCols];
     float    bw_mhz[kCols];                   // the link's bandwidth, MHz (0: not known)
+    float    air_dbm[kCols];                  // the air unit's TX power, dBm (0: not known)
+    uint16_t freq[kCols];                     // the link's channel, MHz (0: not known)
+    float    dist[kCols];                     // the HUD's distance, metres (dist_have)
+    uint8_t  dist_have[kCols];
     uint8_t  mcs[kCols], key[kCols], have[kCols];
     uint16_t skip[kCols];                     // pictures in the column never shown
     uint16_t lost[kCols];                     // packets lost in the column
+    uint8_t  resent[kCols], stall[kCols];     // blocks the air radio sent again / frames it stalled, in the column
     uint32_t hist[kBins];                     // pictures by total latency
 
     // Summary of the window.
@@ -84,10 +98,17 @@ struct StatsView {
     float video_now = 0, link_now = 0, snr_now = 0, link_use = 0;
     int   mcs_now = 0;
     int   freq_mhz = 0, bw_idx = -1;          // the link's channel and bandwidth gear now (0 / -1: no link)
+    float frame_us = 0;                       // the radio's TDD frame now, us (0: not known)
     float bw_mhz_max = 0;                     // the widest in the window, MHz (0: none known)
+    int   air_dbm_now = 0;                    // the air unit's TX power now, dBm (0: not known)
+    bool  air_dbm_any = false;                // known somewhere in the window
+    int   dist_now = -1;                      // the distance now, metres (-1: not known)
+    float dist_max = 0;                       // the farthest in the window, metres
     float vtx_temp_c = -1;                    // the air unit's SoC temperature now (cmd 0x05), -1: not known
     float vrx_temp_c = -1;                    // this goggle's SoC temperature now, -1: not known
     uint32_t lost_total = 0;
+    uint32_t resent_blocks = 0, resent_frames = 0, stall_frames = 0;   // in the window
+    bool     resend_known = false;            // the radio gives its resend map (Open8030 at both ends)
     // Frame spacing: pictures shown by range (kSpBins), how many, the source's
     // spacing S (ms; 0: not known) and the share on target, percent.
     uint32_t sp[kSpBins] = {0, 0, 0, 0, 0, 0, 0, 0};
@@ -101,8 +122,10 @@ struct StatsView {
 // are skipped). Work is one pass over each - no copies, no sorting - because this runs on
 // the OSD thread while the video is playing.
 // period_us: the screen's refresh, for the pacing (0: taken as 1/60 s).
+// resends: oldest first too (may be none).
 void build_stats(const StatsFrame* frames, size_t n_frames, const StatsFlip* flips, size_t n_flips,
-                 uint64_t now_us, int window_s, bool pacing_valid, StatsView& out, double period_us = 0);
+                 uint64_t now_us, int window_s, bool pacing_valid, StatsView& out, double period_us = 0,
+                 const StatsResend* resends = nullptr, size_t n_resends = 0);
 inline void build_stats(const std::vector<StatsFrame>& frames, const std::vector<StatsFlip>& flips,
                         uint64_t now_us, int window_s, bool pacing_valid, StatsView& out, double period_us = 0) {
     build_stats(frames.data(), frames.size(), flips.data(), flips.size(), now_us, window_s, pacing_valid, out, period_us);

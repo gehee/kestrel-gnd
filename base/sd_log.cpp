@@ -33,6 +33,7 @@ struct State {
     std::mutex m;        // the three below
     std::condition_variable cv;
     int file_fd = -1;    // the log on the card, -1 while off
+    std::string path;    // ... and its name
     std::string pending;
     size_t dropped = 0;
     std::mutex write_m;  // one writer on the card at a time (the thread, or turning off)
@@ -45,6 +46,7 @@ std::mutex& m = state.m;
 std::condition_variable& cv = state.cv;
 int& file_fd = state.file_fd;
 std::string& pending = state.pending;
+std::string& path_now = state.path;
 size_t& dropped = state.dropped;
 std::mutex& write_m = state.write_m;
 
@@ -61,7 +63,11 @@ void prune(const std::string& dir) {
     }
     closedir(d);
     std::sort(logs.begin(), logs.end());
-    for (size_t i = 0; i + (kKeep - 1) < logs.size(); i++) unlink((dir + "/" + logs[i]).c_str());
+    for (size_t i = 0; i + (kKeep - 1) < logs.size(); i++) {
+        unlink((dir + "/" + logs[i]).c_str());
+        // its per-frame radio log with it
+        unlink((dir + "/" + logs[i].substr(0, logs[i].size() - 4) + ".frames.csv").c_str());
+    }
 }
 
 void write_out(int fd, const std::string& chunk, size_t lost) {
@@ -188,8 +194,14 @@ void set_enabled(bool on) {
     {
         std::lock_guard<std::mutex> lk(m);
         file_fd = fd;
+        path_now = path;
     }
     printf("sd-log: this log is also in %s (HUD > Debug Info is on)\n", path.c_str());
+}
+
+std::string current_path() {
+    std::lock_guard<std::mutex> lk(m);
+    return file_fd >= 0 ? path_now : std::string();
 }
 
 void restore_output() {

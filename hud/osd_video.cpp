@@ -347,6 +347,10 @@ void OSD::add_latency_frame(LatencyFrame frame) {
     frame.snr = (int8_t)std::max(-127.0f, std::min(127.0f, a.snr));
     frame.mcs = (uint8_t)std::max(0, std::min(255, a.rx_mcs_val));
     frame.bw_idx = linked && a.bw_step >= 0 && a.bw_step < 6 ? (int8_t)a.bw_step : (int8_t)-1;
+    frame.air_dbm = linked ? (uint8_t)std::max(0, std::min(39, air_live_dbm())) : 0;
+    frame.freq_mhz = linked ? (uint16_t)std::max(0, a.tx_freq) : 0;
+    frame.dist_m = linked ? (int16_t)std::max(-1, std::min(32767, ls.dist_m)) : (int16_t)-1;
+    if (frame.dist_m < 0) frame.dist_m = -1;
 
     latency_in_.push(frame);    // full (the HUD's loop stuck for 8 s at 120 fps; it wakes at least each second): dropped, counted
     if (!is_dummy) latency_frames_total_.fetch_add(1, std::memory_order_relaxed);

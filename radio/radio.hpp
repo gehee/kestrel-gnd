@@ -100,6 +100,7 @@ struct State {
     // The last command the radio has carried out (CommandMsg::seq): the menu
     // shows what it asked for until then.
     uint32_t commands_taken = 0;
+    bool resend_known = false;     // the air radio's resends are known (air::Radio::take_resend)
 };
 inline bool operator==(const State& a, const State& b) {
     return a.radio_fw == b.radio_fw && a.tx_power_mw == b.tx_power_mw &&
@@ -107,7 +108,7 @@ inline bool operator==(const State& a, const State& b) {
            a.frame_mode == b.frame_mode && a.max_kbps == b.max_kbps && a.max_bw_mhz == b.max_bw_mhz &&
            a.steady == b.steady && a.chan_auto == b.chan_auto && a.chan_hop == b.chan_hop &&
            a.bind_state == b.bind_state && a.bind_secs_left == b.bind_secs_left && a.bind_peer == b.bind_peer &&
-           a.commands_taken == b.commands_taken;
+           a.commands_taken == b.commands_taken && a.resend_known == b.resend_known;
 }
 inline bool operator!=(const State& a, const State& b) { return !(a == b); }
 
@@ -118,7 +119,7 @@ inline bool operator!=(const State& a, const State& b) { return !(a == b); }
 namespace cmd {
 struct AirLogs { bool on; };
 struct CameraSetting { int field; int value; };           // CamField
-struct RfControl { int field; int value; };   // RfField
+struct RfControl { int field; int value; int fixed_mhz; };   // RfField; fixed_mhz: RF_CHAN's, else -1
 struct MaxBitrate { int kbps; };
 struct MaxBandwidth { int mhz; };      // 0: no cap
 struct Firmware { int firmware; };
@@ -144,10 +145,13 @@ struct CommandMsg {
 };
 
 // Each value in the range the radio and the settings file take, whatever
-// was asked: Max Bandwidth 0 (no cap), 5, 10, 20 or 40 (a stock radio takes 20 or 40),
+// was asked: a channel picked is FIXED from then on (fixed_mhz),
+// Max Bandwidth 0 (no cap), 5, 10, 20 or 40 (a stock radio takes 20 or 40),
 // the frame 0 or 2, Max MCS 0..13 or -1, the rest on or off.
 inline void normalize(Command& c) {
-    if (auto* a = std::get_if<cmd::MaxBandwidth>(&c)) {
+    if (auto* a = std::get_if<cmd::RfControl>(&c)) {
+        a->fixed_mhz = a->field == RF_CHAN ? (a->value > 0 ? a->value / 1000 : 0) : -1;
+    } else if (auto* a = std::get_if<cmd::MaxBandwidth>(&c)) {
         const int m = a->mhz;
         a->mhz = m == 0 || m == 5 || m == 10 || m == 20 ? m : 40;
     } else if (auto* a = std::get_if<cmd::Firmware>(&c)) {
