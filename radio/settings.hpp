@@ -10,8 +10,9 @@
 
 namespace radio::setting {
 
-// RADIO: the caps on the video's bitrate (kbps, 0 none), bandwidth (MHz) and
-// MCS (-1 AUTO); Steady.
+// RADIO: AUTO HOP; the caps on the video's bitrate (kbps, 0 none), bandwidth
+// (MHz) and MCS (-1 AUTO); Steady.
+inline constexpr Setting<int> ar8030_chan_hop{"ar8030_chan_hop", 0};
 inline constexpr Setting<int> ar8030_max_kbps{"ar8030_max_kbps", 0};
 inline constexpr Setting<int> ar8030_max_bw_mhz{"ar8030_max_bw_mhz", 40};
 inline constexpr Setting<int> ar8030_max_mcs{"ar8030_max_mcs", -1};
@@ -51,6 +52,7 @@ inline MadeSetting<int> air_camera(const std::string& air, const char* what, int
 inline MadeSetting<int> air_tx_power_mw(const std::string& air, int def) {
     return {air + "_tx_power_mw", def};
 }
+inline MadeSetting<int> air_features(const std::string& air) { return {air + "_air", 0}; }
 // HUD > Calib Distance: the ranging reading subtracted from it. Stock
 // subtracts a per-index calibration from the raw ranging result and clamps at
 // zero (ar_ldy_gnd 0x9be20). Its table, built in that function's prologue, is

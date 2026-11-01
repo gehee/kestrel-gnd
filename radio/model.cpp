@@ -77,10 +77,15 @@ Ticket GroundRadioPart::set_channel(int mhz) {
     m_.post(cmd::RfControl{RF_CHAN, mhz * 1000});
     return Ticket();
 }
+Ticket GroundRadioPart::set_channel_auto(bool hop) {
+    const CommandMsg m = m_.post(cmd::ChannelHop{hop ? 1 : 0});
+    return ticket(m, std::get<cmd::ChannelHop>(m.c).hop);
+}
 void GroundRadioPart::search_channels() { m_.post(cmd::RfControl{RF_HOP, 1}); }
 void GroundRadioPart::scan_screen(bool open) { m_.post(cmd::ScanScreen{open}); }
 void GroundRadioPart::bind() { m_.post(cmd::Bind{}); }
 void GroundRadioPart::set_dist_offset(int raw) { m_.set_dist_offset(raw); }
+void GroundRadioPart::region_changed() { m_.post(cmd::RegionChanged{}); }
 
 CommandMsg Model::post(Command c) {
     normalize(c);
@@ -111,6 +116,8 @@ void Model::save(Settings& s, const Command& c) {
         s.set(setting::ar8030_max_mcs, a->mcs);
     } else if (const auto* a = std::get_if<cmd::Steady>(&c)) {
         s.set(setting::ar8030_steady, a->on);
+    } else if (const auto* a = std::get_if<cmd::ChannelHop>(&c)) {
+        s.set(setting::ar8030_chan_hop, a->hop);
     }
 }
 
@@ -175,6 +182,7 @@ void Model::held(const State& h) {
     radio_s_.max_bw_mhz = h.max_bw_mhz;
     radio_s_.steady = h.steady;
     radio_s_.chan_auto = h.chan_auto;
+    radio_s_.chan_hop = h.chan_hop;
     radio_s_.bind_state = h.bind_state;
     radio_s_.bind_secs_left = h.bind_secs_left;
     radio_s_.bind_peer = h.bind_peer;

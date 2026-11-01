@@ -191,7 +191,7 @@ std::vector<uint8_t> Ar8030Link::build_config_frame(const uint8_t *tmpl, size_t 
 // port-2 (telemetry) socket - captured from a clean boot of the stock app.
 // Opening the video socket alone yields at most a short burst of whatever was
 // already buffered.
-void Ar8030Link::send_air_handshake() {
+void Ar8030Link::send_air_handshake(bool link_up) {
     // The acquiring screen distinguishes "link up, nothing asked for yet"
     // from "asked, nothing came back", which is the difference between
     // waiting and being ignored.
@@ -212,6 +212,29 @@ void Ar8030Link::send_air_handshake() {
 
     identify_peer();
     load_sky_config();
+    // AUTO HOP rides the handshake: stock's frames 1 and 2 are an empty work
+    // channel list (0x29), the second a resend (same sequence number: the air
+    // app acks it and does nothing). With AUTO HOP both carry its list, and
+    // one frame more at the end turns the air unit's own hopping on (0x21,
+    // naming the channel it is on). Otherwise they go as stock's.
+    // AUTO's pick rides it too, at a link-up: the move (0x29 with the one
+    // channel, 0x21 hop off to it, as a pin sends them) goes after every other
+    // frame, so the air unit has all its settings before the link moves. The
+    // VRX's radio stays searching and follows it.
+    std::vector<uint32_t> hop_list;
+    uint32_t hop_from = 0, move_to = 0;
+    if (chan_auto && !chan_manual_cli && (chan_hop.load() || link_up)) {
+        uint32_t freqs[128];
+        int32_t power[128];
+        int n = 0;
+        chan_index_for_freq(0, freqs, &n, power);
+        const std::vector<uint32_t> want = region_list(freqs, n);
+        const uint32_t cur = link_freq_khz();
+        if (cur && !want.empty()) {
+            if (chan_hop.load()) { hop_list = want; hop_from = cur; }
+            else move_to = region_auto_target(cur, freqs, power, n, want, true);
+        }
+    }
     for (size_t i = 0; i < ar_handshake_n; i++) {
         const uint8_t *data = ar_handshake[i].data;
         size_t         len  = ar_handshake[i].len;
@@ -234,6 +257,11 @@ void Ar8030Link::send_air_handshake() {
             rebuilt = sky_proto.build(data[6], v, sizeof(v));
             data = rebuilt.data(); len = rebuilt.size();
             from = "   (air power, from stored settings)";
+        } else if (data[6] == sky::CMD_SET_WORK_CHAN_LIST && !hop_list.empty()) {
+            sky_proto.set_seq(data[3]);
+            rebuilt = sky_proto.set_work_chan_list(hop_list.data(), hop_list.size());
+            data = rebuilt.data(); len = rebuilt.size();
+            from = "   (AUTO HOP: the allowed channels)";
         }
         int w = bb_socket_write(ctrl_sockfd, data, (uint32_t)len, 500);
         printf("ar8030: handshake[%zu] seq=0x%02X len=%zu -> %d%s\n",
@@ -245,6 +273,49 @@ void Ar8030Link::send_air_handshake() {
     // The replayed frames end at seq 0x09; anything we synthesise from here on
     // has to carry on from there or the air unit drops it as out of order.
     sky_proto.set_seq(ar_handshake[ar_handshake_n - 1].data[3] + 1);
+    if (!hop_list.empty()) {
+        const std::vector<uint8_t> f = sky_proto.set_bb_freq(true, (uint8_t)slot, hop_from);
+        const int w = bb_socket_write(ctrl_sockfd, f.data(), (uint32_t)f.size(), 500);
+        printf("ar8030: handshake[+] seq=0x%02X len=%zu -> %d   (AUTO HOP: the air unit's own hopping on)\n",
+               f[3], f.size(), w);
+        region_hs_list_ = hop_list;   // region_auto_apply does not send it again
+        region_hop_told_ = true;
+        region_hop_n = (int)hop_list.size();
+        printf("ar8030: AUTO HOP: %zu channels and hopping on, in the handshake\n", hop_list.size());
+    }
+    // kestrel-air's own settings, after stock's frames, only to an air unit
+    // this VRX has seen announce kestrel-air (its key's _air record: 0x100 |
+    // its feature bits; a stock announcement clears it). A stock air app
+    // would log and ignore them anyway. note_air_announce does not send them
+    // again on this link if the features match.
+    ka_hs_feat_ = -1;
+    const int air_rec = sky_cfg_key.empty() ? 0 : settings_.get(radio::setting::air_features(sky_cfg_key));
+    if (air_rec & 0x100) {
+        const uint8_t feat = (uint8_t)air_rec;
+        std::vector<std::vector<uint8_t>> ka;
+        if (max_kbps > 0) ka.push_back(sky_proto.build_u32(sky::CMD_KA_MAX_BITRATE, (uint32_t)max_kbps));
+        if (feat & kAirFeatMaxBw)
+            ka.push_back(sky_proto.build_u8(sky::CMD_KA_MAX_BW, (uint8_t)(max_bw_mhz.load() == 0 ? 40 : max_bw_mhz.load())));
+        ka.push_back(sky_proto.build_u8(sky::CMD_KA_LOGS, air_logs ? 1 : 0));
+        for (const auto& f : ka) {
+            const int w = bb_socket_write(ctrl_sockfd, f.data(), (uint32_t)f.size(), 500);
+            printf("ar8030: handshake[+] seq=0x%02X cmd 0x%02X len=%zu -> %d   (kestrel-air setting, %s)\n",
+                   f[3], f[6], f.size(), w, sky_cfg_key.c_str());
+        }
+        ka_hs_feat_ = feat;
+    }
+    if (move_to) {
+        const std::vector<uint8_t> l = sky_proto.set_work_chan_list(&move_to, 1);
+        const std::vector<uint8_t> f = sky_proto.set_bb_freq(false, (uint8_t)slot, move_to);
+        const int wl = bb_socket_write(ctrl_sockfd, l.data(), (uint32_t)l.size(), 500);
+        const int wf = bb_socket_write(ctrl_sockfd, f.data(), (uint32_t)f.size(), 500);
+        printf("ar8030: handshake[+] seq=0x%02X/0x%02X -> %d/%d   (AUTO: the link to %u kHz)\n",
+               l[3], f[3], wl, wf, move_to);
+        region_move_ms_ = now_ms();
+        chan_settle_ms_ = now_ms() + 6000;
+        region_hop_told_ = false;   // 0x21 hop off
+        region_hop_n = 0;
+    }
     if (probe_rf) probe_rf_ioctls();
     if (probe_modes) probe_video_modes();
     // The resolution is the handshake's (this air unit's stored mode): no
@@ -551,6 +622,7 @@ void Ar8030Link::apply_pending_settings() {
     }
     if (ctrl_sockfd < 0) {               // no link: dropped, as they always were
         settings_q_.clear();
+        region_q_lists_.clear();
         sky_ack_ = SkyAckWait();
         return;
     }
@@ -577,6 +649,9 @@ void Ar8030Link::apply_pending_settings() {
             case CAM_MAX_KBPS:  cmd = sky::CMD_KA_MAX_BITRATE; name = "video bitrate cap"; break;
             case CAM_MAX_BW:    cmd = sky::CMD_KA_MAX_BW;      name = "video link bandwidth cap MHz"; break;
             case CAM_AIR_LOGS:  cmd = sky::CMD_KA_LOGS;        name = "air flight logs"; break;
+            case CAM_WORK_LIST: cmd = sky::CMD_SET_WORK_CHAN_LIST; name = "work channels"; break;
+            case CAM_HOP_ON:    cmd = sky::CMD_SET_BB_FREQ;    name = "own hopping on, from kHz"; break;
+            case CAM_HOP_OFF:   cmd = sky::CMD_SET_BB_FREQ;    name = "own hopping off, at kHz"; break;
             case CAM_PWR:       cmd = sky::CMD_SET_BB_PWR;      name = "air power mW"; break;
             case CAM_FOCUS:     cmd = sky::CMD_SET_CHN_FOCUS;   name = "focus mode";   break;
             default: continue;
@@ -594,7 +669,14 @@ void Ar8030Link::apply_pending_settings() {
         // as two little-endian bytes (len 2), 0x89060 writes standby as one,
         // and most camera settings are u32.
         std::vector<uint8_t> f;
-        if (item.first == CAM_PWR) {
+        if (item.first == CAM_WORK_LIST) {
+            if (region_q_lists_.empty()) continue;
+            const std::vector<uint32_t> l = region_q_lists_.front();
+            region_q_lists_.pop_front();
+            f = sky_proto.set_work_chan_list(l.data(), l.size());
+        } else if (item.first == CAM_HOP_ON || item.first == CAM_HOP_OFF) {
+            f = sky_proto.set_bb_freq(item.first == CAM_HOP_ON, (uint8_t)slot, (uint32_t)item.second);
+        } else if (item.first == CAM_PWR) {
             uint8_t v[2] = { (uint8_t)(item.second & 0xFF),
                              (uint8_t)((item.second >> 8) & 0xFF) };
             f = sky_proto.build(cmd, v, sizeof(v));
@@ -800,6 +882,11 @@ void Ar8030Link::note_air_announce(bool ka, uint8_t proto, uint8_t feat) {
     air_kestrel_ = ka;
     air_proto_ = proto;
     air_feat_ = feat;
+    region_due = true;   // a new link: AUTO's list again (its pick was the handshake's)
+    // What this air unit runs, for the next handshake (send_air_handshake).
+    if (!sky_cfg_key.empty()) settings_.set(radio::setting::air_features(sky_cfg_key), ka ? 0x100 | feat : 0);
+    const bool in_handshake = ka && ka_hs_feat_ == (int)feat;
+    ka_hs_feat_ = -1;
     model_.update_unit([&](air::UnitState &a) {
         a.max_bw = ka && (feat & kAirFeatMaxBw);
         a.features = ka ? (uint16_t)(feat | air_info_feat_) : 0;
@@ -824,10 +911,15 @@ void Ar8030Link::note_air_announce(bool ka, uint8_t proto, uint8_t feat) {
         // whichever of the two units was powered first. The bandwidth cap
         // too when 40: an air unit that kept a 20 must hear it is lifted -
         // but only to one that widens the link at all (the feature).
-        if (max_kbps > 0) request_setting(CAM_MAX_KBPS, max_kbps);
-        if (feat & kAirFeatMaxBw) request_setting(CAM_MAX_BW, max_bw_mhz.load() == 0 ? 40 : max_bw_mhz.load());
-        // Off too: an air unit that kept running since an on is still logging.
-        request_setting(CAM_AIR_LOGS, air_logs ? 1 : 0);
+        // Already in this link's handshake (a known kestrel-air): not again.
+        if (in_handshake) {
+            printf("ar8030: its own settings went in the handshake\n");
+        } else {
+            if (max_kbps > 0) request_setting(CAM_MAX_KBPS, max_kbps);
+            if (feat & kAirFeatMaxBw) request_setting(CAM_MAX_BW, max_bw_mhz.load() == 0 ? 40 : max_bw_mhz.load());
+            // Off too: an air unit that kept running since an on is still logging.
+            request_setting(CAM_AIR_LOGS, air_logs ? 1 : 0);
+        }
     } else {
         printf("ar8030: the air unit is the stock air app (no kestrel-air announcement in its "
                "version message): latency timed from its packet stamps (whole ms), the "

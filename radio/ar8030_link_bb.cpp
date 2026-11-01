@@ -75,6 +75,7 @@ void Ar8030Link::on_link_event(const uint8_t* p) {
     if (p[1] == 2 && video_bw_idx_.load() < 0) video_bw_idx_.store(2);
     else if (p[1] == 0 && now_ms() - bw_change_ms_.load() > 2000) {
         video_bw_idx_.store(-1);
+        link_bw_mhz = 20;          // the next link starts narrow
         air_prj.store(0);          // the next air unit says what it is
         model_.update_air_radio([](air::RadioState& r) { r.prj = 0; });
         clear_air_info();
@@ -121,6 +122,11 @@ void Ar8030Link::on_logged_event(int ev, const uint8_t* p) {
     if (ev == 12) {
         bw_change_ms_.store(now_ms());
         if (p[2] <= 5) video_bw_idx_.store(p[2]);
+        // AUTO's channels are judged at the link's width: a step to or from
+        // 40 MHz changes which are allowed.
+        const int was = link_bw_mhz.load();
+        link_bw_mhz = p[2] == 5 ? 40 : 20;
+        if (link_bw_mhz.load() != was) region_changed();
         // Only a step to or from 40 MHz (gear 5) changes the radio's frame: 5,
         // 10 and 20 MHz share theirs, and a search across a step only fails.
         if (p[2] == 5 || p[3] == 5) frame_clock_.reframe();
@@ -614,7 +620,7 @@ bool Ar8030Link::connect_bb() {
     // itself (note_air_announce): the stock air app does not know them.
 
     if (skip_handshake) printf("ar8030: handshake SKIPPED (--debug-no-handshake)\n");
-    else send_air_handshake();
+    else send_air_handshake(true);
 
     // Bandwidth, again. The call in configure_link() answers -7 because the
     // link is not up yet; post-handshake every gear 0-5 is accepted (verified

@@ -310,6 +310,11 @@ if(KESTREL_TESTS)
     kestrel_test(settings_test base)
     kestrel_test(hevc_repair_test dvr)
     kestrel_test(model_test radio)
+    # base/sd_log.cpp first: the order in which the old exit crash showed
+    # every time (see the test's header).
+    add_executable(sd_log_test base/sd_log.cpp tools/test/sd_log_test.cpp)
+    target_link_libraries(sd_log_test pthread)
+    add_test(NAME sd_log_test COMMAND sd_log_test)
     kestrel_test(imu_stream_test motion radio)
     kestrel_test(msp_telem_test msp)
     kestrel_test(msp_osd_hide_test msp)

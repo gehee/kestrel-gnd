@@ -138,10 +138,12 @@ struct FakeRadio : Fake<gnd::Radio> {
     Ticket set_max_bandwidth(int mhz) override { return ask(mhz); }
     Ticket set_steady(bool on) override { return ask(on); }
     Ticket set_channel(int) override { return ask(0); }
+    Ticket set_channel_auto(bool hop) override { return ask(hop); }
     void search_channels() override {}
     void scan_screen(bool) override {}
     void bind() override {}
     void set_dist_offset(int) override {}
+    void region_changed() override {}
     bool take_scan(gnd::ScanSample& sc) override { return take(scans, sc); }
     bool take_rate(float& mbps) override { return take(rates, mbps); }
     uint64_t dropped() const override { return 0; }
@@ -368,6 +370,7 @@ int main(int argc, char** argv) {
         for (int i = 0; i < sc.chan_num; i++) {
             sc.freq_mhz[i] = 5740 + 20 * i;
             sc.power_dbm[i] = -95 + 7 * (i % 4);
+            sc.usable[i] = 1;
         }
         sc.last_update_ms = 1;
         r.radio.scan(sc);

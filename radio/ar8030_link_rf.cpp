@@ -1,8 +1,18 @@
-// The AR8030 link's RF: the channel, TX power, bandwidth and frame, ranging,
-// the 20/40 MHz switch.
+// The AR8030 link's RF: the channel (AUTO, AUTO HOP, the region's rules), TX
+// power, bandwidth and frame, ranging, the 20/40 MHz switch.
 #include "radio/ar8030_link_detail.hpp"
 
 using namespace radio;
+
+
+bool Ar8030Link::region_usable(int mhz) {
+    const int cc = zones::selected_country();
+    if (cc < 0) return false;
+    const int max_bw = max_bw_mhz.load();
+    const int cap = max_bw == 0 || max_bw >= 40 ? 40 : max_bw;
+    const int bw = std::min(cap, std::max(20, link_bw_mhz.load()));
+    return zones::usable(cc, mhz, bw, zones::licensed());
+}
 
 // Flight-controller MSP passthrough. Stock never reads this off a BB socket -
 // its ar_ldy_gnd takes the FC OSD as UDP datagrams on :55068 and nothing in the
@@ -358,7 +368,7 @@ uint32_t Ar8030Link::link_freq_khz() {
 }
 
 
-int Ar8030Link::chan_index_for_freq(uint32_t freq_khz, uint32_t *freqs, int *n_out) {
+int Ar8030Link::chan_index_for_freq(uint32_t freq_khz, uint32_t *freqs, int *n_out, int32_t *power) {
     bb_dev_handle_t *dev = (bb_dev_handle_t *)bb_dev;
     if (!dev) return -1;
     // Oversized for the same reason as publish_chan_scan(): the daemon writes
@@ -378,6 +388,7 @@ int Ar8030Link::chan_index_for_freq(uint32_t freq_khz, uint32_t *freqs, int *n_o
     int idx = -1;
     for (int i = 0; i < n; i++) {
         if (freqs) freqs[i] = ci.freq[i];
+        if (power) power[i] = ci.power[i];
         if (ci.freq[i] == freq_khz) idx = i;
     }
     if (n_out) *n_out = n;
@@ -400,6 +411,7 @@ int Ar8030Link::set_rf_channel(uint32_t freq_khz, bool hop_en) {
                freq_khz);
         return -1;
     }
+    chan_settle_ms_ = now_ms() + 6000;   // the scan's levels are the move's for a while
     printf("ar8030: set_rf_channel freq=%u kHz idx=%d hop_en=%d (of %d channels)\n",
            freq_khz, idx, (int)hop_en, n);
 
@@ -431,6 +443,9 @@ int Ar8030Link::set_rf_channel(uint32_t freq_khz, bool hop_en) {
         int rc = ar_ioctl(dev, BB_SET_CHAN_MODE, &cm, NULL);
         printf("ar8030:   BB_SET_CHAN_MODE(auto=0) -> %d\n", rc);
         chan_auto = false;
+        // The air unit's own hopping went off with the 0x21 above.
+        region_hop_told_ = false;
+        region_hop_n = 0;
 
         usleep(150000);
 
@@ -509,7 +524,128 @@ int Ar8030Link::search_all_channels() {
     printf("ar8030:   searching all %d channels: BB_SET_WORK_CHAN_LIST -> %d, "
            "BB_SET_CHAN_MODE(auto=1) -> %d\n", n, rc_wl, rc);
     if (rc == 0) chan_auto = true;
+    region_due = true;   // AUTO: the air unit hops too, where a country is known
     return rc;
+}
+
+// AUTO's choice for a link on cur: the quietest allowed channel by our radio's
+// scan when cur is not allowed (any time: the list changed), and - only at a
+// pick (link-up, AUTO chosen) - when that one is at least kQuieterDb quieter
+// than cur was while the link was elsewhere (free_level_; not known, no such
+// move). Not twice within 30 s: a move re-forms the link. 0: stay.
+uint32_t Ar8030Link::region_auto_target(uint32_t cur, const uint32_t *freqs, const int32_t *power, int n,
+                                          const std::vector<uint32_t> &want, bool pick) {
+    static constexpr int kQuieterDb = 6;
+    uint32_t target = 0;
+    int32_t level = 0, own = 0;
+    for (int i = 0; i < n; i++) {
+        if (freqs[i] == cur) { own = i < 128 ? free_level_[i].load() : 0; continue; }
+        if (std::find(want.begin(), want.end(), freqs[i]) != want.end() && (!target || power[i] < level)) {
+            target = freqs[i];
+            level = power[i];
+        }
+    }
+    if (!target) return 0;   // cur is the only allowed channel
+    const int cc = zones::selected_country();
+    const char *code = cc >= 0 ? zones::country(cc).code : "--";
+    if (std::find(want.begin(), want.end(), cur) == want.end()) {
+        printf("ar8030: AUTO: %u kHz is not allowed (%s) - moving the link to %u kHz\n", cur, code, target);
+        return target;
+    }
+    const uint64_t now = now_ms();
+    if (pick && own != 0 && own - level >= kQuieterDb && (!region_move_ms_ || now - region_move_ms_ >= 30000)) {
+        printf("ar8030: AUTO: %u kHz is the quietest allowed (%d dBm, here %d without our link) - moving the link there\n",
+               target, (int)level, (int)own);
+        return target;
+    }
+    return 0;
+}
+
+std::vector<uint32_t> Ar8030Link::region_list(const uint32_t *freqs, int n) {
+    std::vector<uint32_t> v;
+    for (int i = 0; i < n && v.size() < 64; i++)   // kestrel-air takes 64
+        if (region_usable((int)(freqs[i] / 1000))) v.push_back(freqs[i]);
+    return v;
+}
+
+void Ar8030Link::region_auto_apply() {
+    if (!bb_dev || ctrl_sockfd < 0 || chan_manual_cli) return;
+    // Sent at every link-up (note_air_announce): an air unit that restarted
+    // forgot it. Not before it has said what it is, so it does not crowd the
+    // handshake; without a link the next link-up brings it.
+    if (link_state_.load() != 2 || !air_ver_seen_) return;
+    uint32_t freqs[128];
+    int32_t power[128];
+    int n = 0;
+    chan_index_for_freq(0, freqs, &n, power);
+    if (n <= 0) return;
+    std::vector<uint32_t> want;
+    if (chan_auto) want = region_list(freqs, n);
+    const int cc = zones::selected_country();
+    const char* code = cc >= 0 ? zones::country(cc).code : "--";
+    if (want.empty()) {
+        // No country, or nothing allowed: AUTO is not offered and the air unit
+        // stays where it is. One we had hopping stops there, back on every
+        // channel. (A pinned channel already stopped it: chan_auto is off then.)
+        region_pick = false;
+        if (region_hop_told_ && chan_auto) {
+            const uint32_t cur = link_freq_khz();
+            if (!cur) return;
+            printf("ar8030: AUTO HOP: no channel allowed (%s) - the air unit stops hopping, on %u kHz\n", code, cur);
+            region_q_lists_.emplace_back(freqs, freqs + std::min(n, 64));
+            request_setting(CAM_WORK_LIST, std::min(n, 64));
+            request_setting(CAM_HOP_OFF, (int)cur);
+        }
+        region_hop_told_ = false;
+        region_hop_n = 0;
+        return;
+    }
+    uint32_t cur = link_freq_khz();
+    if (!cur) return;
+    // AUTO HOP moves nothing itself: the air unit steers, from wherever it is.
+    // Nor right after a move (the handshake's): the link may still be on its way.
+    const bool pick = region_pick.exchange(false);
+    const uint64_t now = now_ms();
+    const uint32_t target = chan_hop.load() || (region_move_ms_ && now - region_move_ms_ < 10000) ? 0 :
+                            region_auto_target(cur, freqs, power, n, want, pick);
+    if (target) {
+        region_move_ms_ = now;
+        if (set_rf_channel(target, false) != 0) {
+            region_retry_ms_ = now_ms() + 10000;   // it searches all again by itself; another go later
+            region_due = true;
+            return;
+        }
+        search_all_channels();   // the ground follows the air unit again (the move pinned it)
+        region_due = false;      // which noted a change: this is it
+        cur = target;
+    }
+    if (!chan_hop.load()) {
+        // AUTO: the air unit stays put. One we had hopping stops where it is.
+        if (region_hop_told_) {
+            printf("ar8030: AUTO: the air unit stops hopping, on %u kHz\n", cur);
+            region_q_lists_.push_back(want);
+            request_setting(CAM_WORK_LIST, (int)want.size());
+            request_setting(CAM_HOP_OFF, (int)cur);
+        }
+        region_hop_told_ = false;
+        region_hop_n = 0;
+        return;
+    }
+    // AUTO HOP: the air unit hops by itself on the list, from where it is
+    // (0x21 names that channel; kestrel-air does not move for it). Already
+    // in this link's handshake: not again.
+    const bool in_handshake = want == region_hs_list_;
+    region_hs_list_.clear();
+    if (in_handshake) return;
+    std::string list;
+    for (uint32_t f : want) list += " " + std::to_string(f / 1000);
+    printf("ar8030: AUTO HOP in %s: the air unit hops by itself on %zu channels (%s ), from %u kHz\n",
+           code, want.size(), list.c_str(), cur);
+    region_q_lists_.push_back(want);
+    request_setting(CAM_WORK_LIST, (int)want.size());
+    request_setting(CAM_HOP_ON, (int)cur);
+    region_hop_told_ = true;
+    region_hop_n = (int)want.size();
 }
 
 // Experiment: `echo G > /tmp/bw.req` puts the video link on bandwidth gear G

@@ -222,6 +222,7 @@ int main(int argc, char **argv)
     dvr_lib::set_dir(g_settings.get(dvr::setting::dvr_dir));
 
     // Live video in a browser: http://<goggle>/ on the USB link or WiFi.
+    WebStream::instance().set_radio(&radio_model.radio());
     wifi_ap_set_page_port(g_settings.get(web::setting::web_port));
     if (g_settings.get(web::setting::web_stream))
         WebStream::instance().start(g_settings.get(web::setting::web_port));

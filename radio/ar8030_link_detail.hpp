@@ -24,6 +24,7 @@
 #include "radio/bb_watchdog.hpp"
 #include "radio/ar8030_handshake.h"
 #include "base/settings.hpp"
+#include "region/zones.hpp"
 #include <cmath>
 
 #include <cstdio>

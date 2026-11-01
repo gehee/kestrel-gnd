@@ -11,6 +11,7 @@ LinkView link_view(const gnd::RadioState& r, const air::RadioState& a, const air
     v.max_bw_mhz = shown(asked.bw, r.max_bw_mhz, r.taken);
     v.steady = shown(asked.steady, r.steady, r.taken);
     v.chan_auto = r.chan_auto;
+    v.chan_hop = shown(asked.hop, r.chan_hop, r.taken);
     v.bind_state = r.bind_state;
     v.bind_secs_left = r.bind_secs_left;
     v.bind_peer = r.bind_peer;

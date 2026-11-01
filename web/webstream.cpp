@@ -22,6 +22,7 @@
 #include "dvr/dvr.hpp"         // also brings third_party/minimp4.h, which must be included once
 #include "dvr/dvr_library.hpp"
 #include "region/zones.hpp"
+#include "system/gnd/radio.hpp"
 #include "hud/hud_theme.hpp"
 
 #include <dirent.h>
@@ -989,6 +990,7 @@ void WebStream::Impl::on_request(Client* c, const std::string& method, const std
                 return;
             }
             zones::select(z);
+            if (gnd::Radio* r = WebStream::instance().radio_) r->region_changed();   // AUTO's channels
             printf("webstream: time zone set to %s from the web page\n", zones::zone(z).name);
         }
         const int z = zones::selected();

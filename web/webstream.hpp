@@ -23,11 +23,15 @@
 #include <string>
 #include <vector>
 
+namespace gnd { class Radio; }
 
 class WebStream {
     public:
         static WebStream& instance();
 
+        // Our radio, which the page's controls tell (its time zone: AUTO's
+        // channels). Before start().
+        void set_radio(gnd::Radio* r) { radio_ = r; }
         // Start serving on `port`. Returns false if the port cannot be bound.
         bool start(int port);
         void stop();
@@ -51,6 +55,7 @@ class WebStream {
         WebStream() {}
         struct Impl;
         Impl* impl_ = nullptr;
+        gnd::Radio* radio_ = nullptr;
 };
 
 #endif

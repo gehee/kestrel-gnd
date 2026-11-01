@@ -12,7 +12,7 @@ namespace hud {
 
 // What the menu asked, each with its ticket (Ticket::seq 0: nothing asked).
 struct Asked {
-    Ticket kbps, bw, frame, mcs, steady, fw;
+    Ticket kbps, bw, frame, mcs, steady, fw, hop;
 };
 
 struct LinkView {
@@ -25,6 +25,7 @@ struct LinkView {
     int max_bw_mhz = 0;
     int steady = 0;
     bool chan_auto = false;        // channel adaptation on
+    int chan_hop = 0;              // AUTO HOP (1) or AUTO (0)
     int bind_state = 0;            // gnd::BindState
     int bind_secs_left = 0;
     unsigned bind_peer = 0;        // peer MAC, packed big-endian

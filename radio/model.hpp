@@ -90,10 +90,12 @@ public:
     Ticket set_max_bandwidth(int mhz) override;
     Ticket set_steady(bool on) override;
     Ticket set_channel(int mhz) override;
+    Ticket set_channel_auto(bool hop) override;
     void search_channels() override;
     void scan_screen(bool open) override;
     void bind() override;
     void set_dist_offset(int raw) override;
+    void region_changed() override;
     bool take_scan(gnd::ScanSample& s) override { return scans_.pop(s); }
     bool take_rate(float& mbps) override { return rates_.pop(mbps); }
     uint64_t dropped() const override { return scans_.drops() + rates_.drops(); }

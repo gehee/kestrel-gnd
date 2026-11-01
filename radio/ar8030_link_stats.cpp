@@ -45,6 +45,7 @@ void Ar8030Link::publish_chan_scan() {
     for (int i = 0; i < n; i++) {
         sc.freq_mhz[i]  = (int)(ci.freq[i] / 1000);
         sc.power_dbm[i] = (int)ci.power[i];
+        sc.usable[i]    = region_usable(sc.freq_mhz[i]) ? 1 : 0;
     }
     // BB_GET_CHAN_INFO's work_chan is NOT an index into this freq[] table: with
     // the link demonstrably on 5839 MHz (BB_GET_STATUS tx_freq) it pointed at
@@ -56,6 +57,9 @@ void Ar8030Link::publish_chan_scan() {
         }
     }
     sc.last_update_ms = now;
+    if (link_state_.load() == 2 && link_freq_mhz > 0 && now >= chan_settle_ms_.load())
+        for (int i = 0; i < n; i++)
+            if (sc.freq_mhz[i] != link_freq_mhz) free_level_[i] = sc.power_dbm[i] ? sc.power_dbm[i] : -1;
     // Tests: while /tmp/kestrel-scandump exists, each scan read is printed
     // (MHz:dBm per channel), to compare radio firmwares.
     if (access("/tmp/kestrel-scandump", F_OK) == 0) {

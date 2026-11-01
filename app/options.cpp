@@ -284,6 +284,7 @@ int read_start_options(int argc, char** argv, Settings& settings, StartOptions& 
 		const int mcs = settings.get(radio::setting::ar8030_max_mcs);
 		ar_cfg.max_mcs = mcs >= 0 && mcs <= 11 ? mcs : -1;   // the menu's range, AUTO + MCS 0..11
 		ar_cfg.steady = settings.get(radio::setting::ar8030_steady) == 1 ? 1 : 0;
+		ar_cfg.chan_hop = settings.get(radio::setting::ar8030_chan_hop) == 1 ? 1 : 0;
 	}
 	// RADIO > VRX Radio Firmware: Open8030 when its image is on the unit, unless
 	// the menu said STOCK (0) - as bb_only.sh decides what it uploads.

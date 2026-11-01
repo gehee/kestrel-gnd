@@ -68,7 +68,13 @@ enum CamField { CAM_EV = 1, CAM_SAT, CAM_CONTRAST, CAM_SHARPNESS,
                 // Ours: the air unit's flight logs on or off (HUD >
                 // Debug Info), sky cmd 0x42 - kestrel-air only. Not a
                 // menu command id (0x310 up are the RF controls).
-                CAM_AIR_LOGS };
+                CAM_AIR_LOGS,
+                // Ours, not menu ids either: AUTO in a known country
+                // (region_auto_apply). The air unit's work channel
+                // list, sky cmd 0x29 (region_q_lists_, the value its
+                // length), then its own hopping on or off, sky cmd
+                // 0x21 (the value the link's channel, kHz).
+                CAM_WORK_LIST, CAM_HOP_ON, CAM_HOP_OFF };
 
 // RF controls on our own radio: rf_control(field, value).
 enum RfField { RF_TX_POWER = 1, RF_MCS, RF_LNA, RF_BW, RF_CHAN, RF_HOP,
@@ -87,6 +93,7 @@ struct State {
     int max_bw_mhz = 0;
     int steady = 0;
     bool chan_auto = false;        // channel adaptation on
+    int chan_hop = 0;              // AUTO HOP (1) or AUTO (0)
     int bind_state = 0;            // gnd::BindState
     int bind_secs_left = 0;
     unsigned bind_peer = 0;        // peer MAC, packed big-endian
@@ -98,7 +105,7 @@ inline bool operator==(const State& a, const State& b) {
     return a.radio_fw == b.radio_fw && a.tx_power_mw == b.tx_power_mw &&
            a.tx_power_want_mw == b.tx_power_want_mw && a.max_mcs == b.max_mcs &&
            a.frame_mode == b.frame_mode && a.max_kbps == b.max_kbps && a.max_bw_mhz == b.max_bw_mhz &&
-           a.steady == b.steady && a.chan_auto == b.chan_auto &&
+           a.steady == b.steady && a.chan_auto == b.chan_auto && a.chan_hop == b.chan_hop &&
            a.bind_state == b.bind_state && a.bind_secs_left == b.bind_secs_left && a.bind_peer == b.bind_peer &&
            a.commands_taken == b.commands_taken;
 }
@@ -118,14 +125,16 @@ struct Firmware { int firmware; };
 struct FrameMode { int mode; };
 struct MaxMcs { int mcs; };
 struct Steady { int on; };
+struct ChannelHop { int hop; };
 struct VideoMode { int index; };
 struct Bind {};
+struct RegionChanged {};
 struct ScanScreen { bool open; };     // the channel-scan screen: scan fast while open
 }  // namespace cmd
 using Command = std::variant<cmd::AirLogs, cmd::CameraSetting, cmd::RfControl,
                              cmd::MaxBitrate, cmd::MaxBandwidth, cmd::Firmware, cmd::FrameMode,
-                             cmd::MaxMcs, cmd::Steady, cmd::VideoMode, cmd::Bind,
-                             cmd::ScanScreen>;
+                             cmd::MaxMcs, cmd::Steady, cmd::ChannelHop, cmd::VideoMode, cmd::Bind,
+                             cmd::RegionChanged, cmd::ScanScreen>;
 
 // A command as the radio's queue holds it: numbered in the order it was
 // asked (from 1; 0 is no command).
@@ -149,6 +158,8 @@ inline void normalize(Command& c) {
         a->mcs = a->mcs >= 0 && a->mcs <= 13 ? a->mcs : -1;
     } else if (auto* a = std::get_if<cmd::Steady>(&c)) {
         a->on = a->on ? 1 : 0;
+    } else if (auto* a = std::get_if<cmd::ChannelHop>(&c)) {
+        a->hop = a->hop ? 1 : 0;
     }
 }
 

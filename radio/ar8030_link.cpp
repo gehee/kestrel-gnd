@@ -16,7 +16,7 @@ Ar8030Link::Ar8030Link(radio::Model& model, const Ar8030Config& cfg,
       host(std::move(host_)), host_port(host_port_), slot(slot_), video_port(video_port_),
       freq_khz(cfg.freq_khz), bandwidth(cfg.bandwidth), do_pair(cfg.do_pair),
       ap_index(cfg.ap_index), chan_auto(cfg.chan_auto), chan_manual_cli(cfg.chan_manual_cli),
-      tx_power_dbm(cfg.tx_power_dbm),
+      chan_hop(cfg.chan_hop), tx_power_dbm(cfg.tx_power_dbm),
       tx_power_mw(cfg.tx_power_mw), tx_power_want_mw(cfg.tx_power_want_mw),
       air_floor_us(cfg.air_floor_us), skip_handshake(cfg.skip_handshake),
       standby_mode(cfg.standby_mode), prj_rf_bw(cfg.prj_rf_bw), prj_rf_pwr_mw(cfg.prj_rf_pwr_mw),
@@ -41,7 +41,7 @@ Ar8030Link::~Ar8030Link() { disconnect_bb(); }
 // loads with restarts it here.
 void Ar8030Link::apply(const radio::Command& c) {
     using namespace radio;
-    static_assert(std::variant_size_v<Command> == 12, "a new command: carry it out here (and save it in Model::save if it is a setting)");
+    static_assert(std::variant_size_v<Command> == 14, "a new command: carry it out here (and save it in Model::save if it is a setting)");
     auto caps_now = [this] {
         caps_live.store(true);
         caps_due.store(true);
@@ -64,6 +64,7 @@ void Ar8030Link::apply(const radio::Command& c) {
             max_bw_mhz = a->mhz;
             request_setting(CAM_MAX_BW, a->mhz == 0 || a->mhz >= 40 ? 40 : 20);
             caps_now();
+            region_changed();   // AUTO's channels are judged within this cap
         } else {
             const int bw = a->mhz == 20 ? 20 : 40;
             const int was = max_bw_mhz;
@@ -86,12 +87,19 @@ void Ar8030Link::apply(const radio::Command& c) {
     } else if (const auto* a = std::get_if<cmd::Steady>(&c)) {
         steady = a->on;
         caps_now();
+    } else if (const auto* a = std::get_if<cmd::ChannelHop>(&c)) {
+        // AUTO's pick is made now.
+        chan_hop = a->hop;
+        region_pick = true;
+        region_changed();
     } else if (const auto* a = std::get_if<cmd::VideoMode>(&c)) {
         // The camera is reached over the baseband's port-2 control socket
         // (SET_CHN_RES), and it has its own list of modes.
         request_mode_index(a->index);
     } else if (std::holds_alternative<cmd::Bind>(c)) {
         request_bind();
+    } else if (std::holds_alternative<cmd::RegionChanged>(c)) {
+        region_changed();
     } else if (const auto* a = std::get_if<cmd::ScanScreen>(&c)) {
         scan_active = a->open;   // the stats thread polls the scan fast while it is open
     }
@@ -108,6 +116,7 @@ radio::State Ar8030Link::held() const {
     s.max_bw_mhz = max_bw_mhz;
     s.steady = steady;
     s.chan_auto = chan_auto;
+    s.chan_hop = chan_hop;
     s.bind_state = bind_state.load();
     s.bind_secs_left = bind_secs_left.load();
     s.bind_peer = bind_peer.load();
@@ -223,6 +232,7 @@ void Ar8030Link::run() {
         }
         apply_pending_settings();
         apply_pending_rf();
+        if (region_due.load() && now_ms() >= region_retry_ms_ && region_due.exchange(false)) region_auto_apply();
         // Binding, if the menu or the front-panel button asked for it. One
         // non-blocking step per pass; it owns the baseband only in short
         // bursts, so video and telemetry keep flowing while it runs.
@@ -245,6 +255,7 @@ void Ar8030Link::run() {
                 int ls = link_state_.load();
                 // (The HUD is told by the stats thread and the event handler.)
                 if (ls >= 0 && ls != last_link_state) {
+                    chan_settle_ms_ = tl + 6000;
                     printf("ar8030: link state %d -> %d (%s)\n", last_link_state, ls,
                            ls == 2 ? "linked" : ls == 1 ? "connecting" : "not linked");
                     // The step to 40 MHz (kestrel-air's, after link-up) makes the
@@ -304,7 +315,7 @@ void Ar8030Link::run() {
                                "at the rate it was captured\n");
                         printf("ar8030: link up - sending the air handshake now that "
                                "there is a link to carry it\n");
-                        send_air_handshake();
+                        send_air_handshake(true);
                         last_rehandshake_ms = tl;
                         rehandshakes = 0;
                     }

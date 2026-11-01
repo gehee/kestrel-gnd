@@ -46,6 +46,7 @@ struct FakeLink : radio::Link {
         if (const auto* m = std::get_if<radio::cmd::MaxBitrate>(&c)) h.max_kbps = m->kbps;
         if (const auto* m = std::get_if<radio::cmd::MaxBandwidth>(&c)) h.max_bw_mhz = m->mhz;
         if (const auto* m = std::get_if<radio::cmd::Firmware>(&c)) h.radio_fw = m->firmware;
+        if (const auto* m = std::get_if<radio::cmd::ChannelHop>(&c)) h.chan_hop = m->hop;
         if (const auto* m = std::get_if<radio::cmd::ScanScreen>(&c)) scan = m->open;
     }
     radio::State held() const override { return h; }
@@ -117,10 +118,10 @@ static void state_test(Rig& b, HudLike& h) {
     radio::State st;
     st.max_kbps = 5;
     st.tx_power_want_mw = 200;
-    st.steady = 1;
+    st.chan_hop = 1;
     b.model.held(st);
     CHECK(h.take_changed() && b.model.encoder().state().max_kbps == 5 &&
-          b.model.air_radio().state().tx_power_want_mw == 200 && radio_of(b).steady == 1);
+          b.model.air_radio().state().tx_power_want_mw == 200 && radio_of(b).chan_hop == 1);
     b.model.held(st);
     CHECK(!h.take_changed());
     // The link's state, as the poll repeats it: published when it changes.
@@ -132,11 +133,11 @@ static void state_test(Rig& b, HudLike& h) {
     while (h.w.wait(1000)) {}
     gnd::ScanSample sc{};
     sc.chan_num = 3;
-    sc.power_dbm[1] = -80;
+    sc.usable[1] = 1;
     b.model.scan(sc);
     CHECK(h.w.wait(1000));                      // each scan wakes it
     gnd::ScanSample got{};
-    CHECK(b.model.radio().take_scan(got) && got.chan_num == 3 && got.power_dbm[1] == -80 && !got.power_dbm[0]);
+    CHECK(b.model.radio().take_scan(got) && got.chan_num == 3 && got.usable[1] && !got.usable[0]);
     // The video rate: every second's, in order, and the radio's figure.
     b.model.video_bandwidth(12.5f);
     b.model.video_bandwidth(13.0f);
@@ -317,7 +318,10 @@ static void commands_test(Rig& b, HudLike& h) {
     Settings& st = b.settings;
     namespace rs = radio::setting;
     b.model.radio().set_max_mcs(7);
-    CHECK(st.get(rs::ar8030_max_mcs) == 7);
+    b.model.radio().set_channel_auto(true);
+    CHECK(st.get(rs::ar8030_max_mcs) == 7 && st.get(rs::ar8030_chan_hop) == 1);
+    b.model.radio().set_channel(5865);
+    CHECK(st.get(rs::ar8030_chan_hop) == 1);          // a channel picked saves nothing
     b.model.encoder().set_max_bitrate(4321);
     b.model.radio().set_firmware(1);
     CHECK(st.get(rs::ar8030_max_kbps) == 4321 && st.text(rs::ar8030_firmware) == "1");
