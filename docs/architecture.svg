@@ -1,0 +1,153 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 640" width="960" height="640" role="img" aria-label="kestrel-gnd architecture. Left, the UI, each on its own thread: buttons, web view, IMU reader, HUD and menu. Middle, the parts (system/), one interface each: the air unit's camera, encoder, radio, unit, FC and IMU, and the ground's radio and timing. The UI calls the parts directly. Right, the radio: radio::Model implements every part and saves the settings; the changes wait in a queue for Ar8030Link, which runs the AR8030 on its own thread and reports back to the model. Below, the video, a direct pipeline: Ar8030Link's slices go to VideoOut, the decoder and the screen; the DVR records the camera's pictures or the screen. Bottom, the box: platform/ makes the display, presenter, HUD layer, canvas, decoders and screen encoder.">
+<title>kestrel-gnd architecture</title>
+<defs>
+<marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah" d="M0,0 L10,5 L0,10 z"/></marker>
+<marker id="d" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ahd" d="M0,0 L10,5 L0,10 z"/></marker>
+<style>
+text{font-family:system-ui,-apple-system,&quot;Segoe UI&quot;,Helvetica,Arial,sans-serif}
+.bx{fill:#ffffff;stroke:#8c959f;stroke-width:1.2}
+.pool{fill:#fff8e1;stroke:#bf8700;stroke-width:1.4}
+.grp{fill:none;stroke:#8c959f;stroke-width:1;stroke-dasharray:4 4}
+.t{font-size:14px;font-weight:600;fill:#1f2328}
+.s{font-size:11.5px;fill:#59636e}
+.c{font-size:12px;fill:#1f2328}
+.l{font-size:11.5px;fill:#59636e}
+.lb{font-size:11.5px;fill:#0969da}
+.g{font-size:11px;font-weight:600;letter-spacing:.08em;fill:#8c959f}
+.tg{font-size:10.5px;font-weight:700;letter-spacing:.08em;fill:#59636e}
+.ln{fill:none;stroke:#59636e;stroke-width:1.4}
+.dl{fill:none;stroke:#0969da;stroke-width:1.4;stroke-dasharray:5 4}
+.ah{fill:#59636e}
+.ahd{fill:#0969da}
+@media (prefers-color-scheme: dark) {
+.bx{fill:#151b23;stroke:#656c76}
+.pool{fill:#2e2410;stroke:#d29922}
+.grp{stroke:#656c76}
+.t,.c{fill:#f0f6fc}
+.s,.l{fill:#9198a1}
+.lb{fill:#4493f8}
+.g{fill:#656c76}
+.tg{fill:#9198a1}
+.ln{stroke:#9198a1}
+.dl{stroke:#4493f8}
+.ah{fill:#9198a1}
+.ahd{fill:#4493f8}
+}
+</style>
+</defs>
+
+<text class="g" x="40" y="28">UI · OWN THREADS</text>
+<text class="g" x="270" y="28">THE PARTS · SYSTEM/</text>
+<text class="g" x="700" y="28">RADIO · ITS THREAD</text>
+
+<!-- the UI -->
+<rect class="bx" x="40" y="40" width="200" height="50" rx="6"/>
+<text class="t" x="52" y="61">Buttons</text>
+<text class="s" x="52" y="79">bind, REC</text>
+<rect class="bx" x="40" y="100" width="200" height="50" rx="6"/>
+<text class="t" x="52" y="121">Web view</text>
+<text class="s" x="52" y="139">the phone</text>
+<rect class="bx" x="40" y="160" width="200" height="50" rx="6"/>
+<text class="t" x="52" y="181">IMU reader</text>
+<text class="s" x="52" y="199">gyro, accelerometer</text>
+<rect class="bx" x="40" y="220" width="200" height="50" rx="6"/>
+<text class="t" x="52" y="241">HUD and menu</text>
+<text class="s" x="52" y="259">draws through the canvas</text>
+
+<path class="ln" d="M240,65 H268" marker-end="url(#a)"/>
+<path class="ln" d="M240,125 H268" marker-end="url(#a)"/>
+<path class="dl" d="M268,185 H242" marker-end="url(#d)"/>
+<path class="ln" d="M240,236 H268" marker-end="url(#a)"/>
+<path class="dl" d="M268,254 H242" marker-end="url(#d)"/>
+
+<!-- the parts -->
+<rect class="grp" x="270" y="40" width="360" height="230" rx="8"/>
+<text class="tg" x="284" y="64">AIR UNIT · AIR::</text>
+<rect class="bx" x="284" y="74" width="104" height="26" rx="5"/>
+<text class="c" x="336" y="91" text-anchor="middle">Camera</text>
+<rect class="bx" x="400" y="74" width="104" height="26" rx="5"/>
+<text class="c" x="452" y="91" text-anchor="middle">Encoder</text>
+<rect class="bx" x="516" y="74" width="104" height="26" rx="5"/>
+<text class="c" x="568" y="91" text-anchor="middle">Radio</text>
+<rect class="bx" x="284" y="108" width="104" height="26" rx="5"/>
+<text class="c" x="336" y="125" text-anchor="middle">Unit</text>
+<rect class="bx" x="400" y="108" width="104" height="26" rx="5"/>
+<text class="c" x="452" y="125" text-anchor="middle">Fc</text>
+<rect class="bx" x="516" y="108" width="104" height="26" rx="5"/>
+<text class="c" x="568" y="125" text-anchor="middle">Imu</text>
+<text class="tg" x="284" y="166">GROUND · GND::</text>
+<rect class="bx" x="284" y="176" width="104" height="26" rx="5"/>
+<text class="c" x="336" y="193" text-anchor="middle">Radio</text>
+<rect class="bx" x="400" y="176" width="104" height="26" rx="5"/>
+<text class="c" x="452" y="193" text-anchor="middle">Timing</text>
+
+<!-- the radio -->
+<path class="ln" d="M700,70 H632" marker-end="url(#a)"/>
+<text class="l" x="666" y="62" text-anchor="middle">implements</text>
+<rect class="pool" x="700" y="40" width="220" height="60" rx="6"/>
+<text class="t" x="712" y="63">radio::Model</text>
+<text class="s" x="712" y="81">every part; saves the settings</text>
+<path class="dl" d="M760,100 V158" marker-end="url(#d)"/>
+<text class="lb" x="752" y="134" text-anchor="end">changes</text>
+<path class="ln" d="M860,160 V102" marker-end="url(#a)"/>
+<text class="l" x="868" y="134">reports</text>
+<rect class="bx" x="700" y="160" width="220" height="50" rx="6"/>
+<text class="t" x="712" y="181">Ar8030Link</text>
+<text class="s" x="712" y="199">runs the AR8030</text>
+
+<!-- the video -->
+<text class="g" x="450" y="318">VIDEO · DIRECT PIPELINE</text>
+<path class="ln" d="M140,270 V328" marker-end="url(#a)"/>
+<text class="l" x="148" y="303">draws</text>
+<path class="ln" d="M920,185 H940 V355 H922" marker-end="url(#a)"/>
+<text class="l" x="934" y="290" text-anchor="end">video</text>
+<rect class="bx" x="40" y="330" width="200" height="50" rx="6"/>
+<text class="t" x="52" y="351">Screen</text>
+<text class="s" x="52" y="369">video and HUD</text>
+<rect class="bx" x="270" y="330" width="160" height="50" rx="6"/>
+<text class="t" x="282" y="351">Decoder</text>
+<text class="s" x="282" y="369">MPP or ffmpeg</text>
+<rect class="bx" x="700" y="330" width="220" height="50" rx="6"/>
+<text class="t" x="712" y="351">VideoOut</text>
+<text class="s" x="712" y="369">slices into pictures</text>
+<path class="ln" d="M700,355 H432" marker-end="url(#a)"/>
+<text class="l" x="566" y="349" text-anchor="middle">each slice</text>
+<path class="ln" d="M270,355 H242" marker-end="url(#a)"/>
+
+<path class="ln" d="M200,380 V435 H268" marker-end="url(#a)"/>
+<text class="l" x="208" y="410">screen</text>
+<path class="dl" d="M810,380 V435 H632" marker-end="url(#d)"/>
+<text class="lb" x="818" y="410">pictures</text>
+<rect class="bx" x="270" y="410" width="360" height="50" rx="6"/>
+<text class="t" x="282" y="431">DVR</text>
+<text class="s" x="282" y="449">the camera or the screen, to the SD card</text>
+
+<!-- the box -->
+<text class="g" x="40" y="500">THE BOX · PLATFORM/, ONE FILE PER BOX</text>
+<rect class="grp" x="40" y="510" width="880" height="76" rx="8"/>
+<rect class="bx" x="52" y="524" width="136" height="48" rx="5"/>
+<text class="t" x="62" y="544">display</text>
+<text class="s" x="62" y="561">KMS</text>
+<rect class="bx" x="196" y="524" width="136" height="48" rx="5"/>
+<text class="t" x="206" y="544">presenter</text>
+<text class="s" x="206" y="561">the renderer</text>
+<rect class="bx" x="340" y="524" width="136" height="48" rx="5"/>
+<text class="t" x="350" y="544">HUD layer</text>
+<text class="s" x="350" y="561">GBM surface</text>
+<rect class="bx" x="484" y="524" width="136" height="48" rx="5"/>
+<text class="t" x="494" y="544">canvas</text>
+<text class="s" x="494" y="561">GLES</text>
+<rect class="bx" x="628" y="524" width="136" height="48" rx="5"/>
+<text class="t" x="638" y="544">decoders</text>
+<text class="s" x="638" y="561">MPP, ffmpeg</text>
+<rect class="bx" x="772" y="524" width="136" height="48" rx="5"/>
+<text class="t" x="782" y="544">screen encoder</text>
+<text class="s" x="782" y="561">MPP + RGA, or none</text>
+
+<path class="ln" d="M40,616 H80" marker-end="url(#a)"/>
+<text class="l" x="88" y="620">a call</text>
+<path class="dl" d="M230,616 H270" marker-end="url(#d)"/>
+<text class="lb" x="278" y="620">handed to another thread</text>
+<rect class="pool" x="560" y="608" width="40" height="16" rx="4"/>
+<text class="l" x="608" y="620">logic, no thread of its own</text>
+</svg>

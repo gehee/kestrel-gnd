@@ -1,11 +1,11 @@
 // Host test of the Link Quality element as Betaflight 4.2-4.5 draws it
 // (osd_elements.c osdElementLinkQuality), scraped off the DisplayPort grid.
-//   g++ -std=c++17 -I. -o msp_osd_lq_test tools/test/msp_osd_lq_test.cpp msp_osd.cpp msp_telem.cpp stab/imu_stream.cpp -lpthread && ./msp_osd_lq_test
+//   g++ -std=c++17 -I. -o msp_osd_lq_test tools/test/msp_osd_lq_test.cpp msp_osd.cpp msp_telem.cpp motion/imu_stream.cpp -lpthread && ./msp_osd_lq_test
 #include <cstdio>
 #include <cstring>
 #include <string>
 #include <vector>
-#include "msp_osd.hpp"
+#include "msp/msp_osd.hpp"
 
 static int fails;
 #define CHECK(c) do { if (!(c)) { fails++; std::printf("FAIL line %d: %s\n", __LINE__, #c); } } while (0)

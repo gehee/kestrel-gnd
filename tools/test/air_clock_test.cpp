@@ -1,8 +1,8 @@
-// Host test of utils/frame_clock.hpp's AirClock: the air radio's 32-bit us
+// Host test of radio/frame_clock.hpp's AirClock: the air radio's 32-bit us
 // frame stamps across 0xFFFFFFFF -> 0, against our radio's coarse copy.
 //   g++ -std=c++17 -I. -pthread -o air_clock_test tools/test/air_clock_test.cpp && ./air_clock_test
 #include <cstdio>
-#include "utils/frame_clock.hpp"
+#include "radio/frame_clock.hpp"
 
 static int fails;
 #define CHECK(c) do { if (!(c)) { fails++; std::printf("FAIL line %d: %s\n", __LINE__, #c); } } while (0)

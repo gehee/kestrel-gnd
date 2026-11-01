@@ -1,11 +1,11 @@
 // Host test of the elements left out of the Betaflight canvas under the
 // canopy (BfTelem::Elem, draw_region's hide), as Betaflight draws them.
-//   g++ -std=c++17 -I. -o msp_osd_hide_test tools/test/msp_osd_hide_test.cpp msp_osd.cpp msp_telem.cpp stab/imu_stream.cpp -lpthread && ./msp_osd_hide_test
+//   g++ -std=c++17 -I. -o msp_osd_hide_test tools/test/msp_osd_hide_test.cpp msp_osd.cpp msp_telem.cpp motion/imu_stream.cpp -lpthread && ./msp_osd_hide_test
 #include <cstdio>
 #include <cstring>
 #include <string>
 #include <vector>
-#include "msp_osd.hpp"
+#include "msp/msp_osd.hpp"
 
 static int fails;
 #define CHECK(c) do { if (!(c)) { fails++; std::printf("FAIL line %d: %s\n", __LINE__, #c); } } while (0)
