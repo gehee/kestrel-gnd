@@ -492,7 +492,7 @@ void Ar8030Link::scan_air_status(const uint8_t *buf, int n) {
             // reading above misread it. A camera mode change stops its
             // encoder, standby's 0x03xx became 0x01xx, under the threshold,
             // and an air unit still in standby read as armed (bench
-            // 2026-11-01: 864p144 asked, the distance's zero taken again).
+            // 2026-11-01: 864p144 asked).
             // Its bit 0 is exact.
             static constexpr uint16_t kVtxStandbyThresh = 780;
             uint16_t b2930 = ((uint16_t)pl[29] << 8) | pl[30];
@@ -830,10 +830,7 @@ void Ar8030Link::note_air_info(const uint8_t *pl, size_t n) {
         for (char &c : v) if ((unsigned char)c < 0x20 || (unsigned char)c > 0x7e) c = '?';
         kv.emplace_back(line.substr(0, eq), v);
     }
-    // Its power-up (the distance's zero is kept per power-up), and its board
-    // type (stock's: 482 Lite, 472 Lite+), which says what it is too.
-    for (const auto &e : kv)
-        if (e.first == "boot") model_.air_boot(e.second);
+    // Its board type (stock's: 482 Lite, 472 Lite+), which says what it is too.
     for (const auto &e : kv)
         if (e.first == "board") {
             const long b = strtol(e.second.c_str(), nullptr, 10);

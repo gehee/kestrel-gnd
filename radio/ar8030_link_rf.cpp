@@ -344,7 +344,11 @@ void Ar8030Link::enable_ranging() {
            rc ? "  (already set from bb_config dist_calc; reading anyway)" : "");
 }
 
-// -1 while the baseband has no fix.
+// Metres, -1 while the baseband has no fix. Open8030 answers the distance
+// itself. Stock answers (count - 20) x 1.5 m, the count still carrying both
+// radios' delay - the filters' 185/MHz counts and the chains' 37, the same
+// figures Open8030 takes off (its rf_device.c) - which reads ~70 m with the
+// units side by side: taken off here, at the width the link runs.
 int Ar8030Link::current_distance() {
     bb_dev_handle_t *dev = (bb_dev_handle_t *)bb_dev;
     if (!dev) return -1;
@@ -354,7 +358,11 @@ int Ar8030Link::current_distance() {
     bb_get_distc_result_out_t out;
     memset(&out, 0, sizeof(out));
     if (ar_ioctl(dev, BB_GET_DISTC_RESULT, &in, &out) != 0) return -1;
-    return out.distance[slot];
+    const int m = out.distance[slot];
+    if (m < 0 || radio_fw == 1) return m;
+    const int mhz = link_bw_mhz.load() >= 40 ? 40 : 20;
+    const int counts = 37 + (185 + mhz / 2) / mhz;
+    return std::max(0, m - (counts * 3) / 2);
 }
 
 
@@ -852,6 +860,21 @@ void Ar8030Link::poll_resends() {
         }
     }
     for (const auto &e : add) model_.resend(e);   // the stats screen keeps the history
+    // The HUD's SNR: the frames' quality words (0.25 dB) gathered here every
+    // 100 ms, shown by the stats pass every 500 ms as their mean - faster
+    // made the figure too busy to read. Once a full pass has filled the snapshot.
+    if (quality && si.q_frame && link_st_last_.active) {
+        int sum = 0, n = 0;
+        for (int k = 63; k >= 0; k--) {
+            const uint32_t f = si.q_frame - (uint32_t)k;
+            if (snr_done_valid_ && (int32_t)(f - snr_done_) <= 0) continue;
+            const uint32_t w = si.q_word[k];
+            if (!(w >> 30 & 1)) continue;
+            sum += (int)(w & 255); n++;
+        }
+        snr_done_ = si.q_frame; snr_done_valid_ = true;
+        snr_sum_ += sum; snr_n_ += n;
+    }
 }
 
 // Experiment: `echo G > /tmp/bw.req` puts the video link on bandwidth gear G

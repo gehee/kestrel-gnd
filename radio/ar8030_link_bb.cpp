@@ -130,6 +130,15 @@ void Ar8030Link::on_mcs_event(const uint8_t* p) {
 // logged. A bandwidth change is also timed - the radio re-forms the link to
 // change to 40 MHz, and that brief drop is not a new link (see the video loop).
 void Ar8030Link::on_logged_event(int ev, const uint8_t* p) {
+    // The distance (Open8030, event 15): {slot, 1 known / 0 not, metres low,
+    // high}, pushed as it changes - up to ten a second, so not logged; the
+    // stats thread shows the latest every pass and stops asking for it.
+    if (ev == 15) {
+        const int m = p[1] ? (int)(p[2] | p[3] << 8) : -1;
+        stat_dist_.store(m);
+        dist_pushed_ms_.store(now_ms());
+        return;
+    }
     printf("ar8030: event %d: %02X %02X %02X %02X\n", ev, p[0], p[1], p[2], p[3]);
     // TX power (Open8030, event 14): {slot, 0 the air unit's / 1 ours, dBm
     // now, dBm before}, 0 = not known. Shown at once.
@@ -185,6 +194,10 @@ void Ar8030Link::subscribe_events() {
         ev.callback = ar_event_log_cb<14>;
         ev.user = this;
         printf("ar8030: subscribe event 14 (TX power) -> %d\n", ar_ioctl(dev, BB_SET_EVENT_SUBSCRIBE, &ev, NULL));
+        // And the distance, pushed (event 15; an Open8030 without it refuses).
+        ev.event = (bb_event_e)15;
+        ev.callback = ar_event_log_cb<15>;
+        printf("ar8030: subscribe event 15 (distance) -> %d\n", ar_ioctl(dev, BB_SET_EVENT_SUBSCRIBE, &ev, NULL));
     }
 }
 

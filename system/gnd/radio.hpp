@@ -89,8 +89,8 @@ struct RadioState {
     float video_mbps = 0;      // received video, the last second (0 while none comes)
     uint32_t frames_lost = 0;  // pictures the air unit sent that never came (gaps in its counter), since start
     int dist_raw = -1;         // its ranging reading, metres (-1: none)
-    // The distance shown: metres from the zero taken at the air unit's first
-    // arming after it powered up; -2 not zeroed yet, -1 no reading.
+    // The distance shown, metres (-1: no reading): the reading itself, the
+    // radio's delays already off (Ar8030Link::current_distance).
     int dist_m = -1;
     // Its settings as it holds them.
     int radio_fw = 0;          // its firmware: 0 stock, 1 Open8030

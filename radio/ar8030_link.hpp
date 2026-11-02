@@ -406,6 +406,12 @@ class Ar8030Link : public radio::Link, private radio::VideoOut::Source {
         // The link figures as last published (publish_link_stats): what a
         // call that fails keeps, for a few passes of failing in a row.
         gnd::LinkStats link_st_last_;
+        // The distance as last pushed (event 15), and the frames whose SNR
+        // the HUD has had (poll_resends).
+        std::atomic<uint64_t> dist_pushed_ms_{0};
+        uint32_t snr_done_ = 0;
+        bool snr_done_valid_ = false;
+        int snr_sum_ = 0, snr_n_ = 0;  // the frames' SNR since the last pass (0.25 dB)
         int link_st_fails_[3] = {};                // BB_GET_1V1_INFO, BB_GET_STATUS, BB_GET_MCS
     public:
         // ar_libre's event callbacks (on its reader thread): raw payloads.

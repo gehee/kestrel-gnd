@@ -56,6 +56,5 @@ inline MadeSetting<int> air_tx_power_mw(const std::string& air, int def) {
 inline MadeSetting<int> air_features(const std::string& air) { return {air + "_air", 0}; }
 // The distance's zero for an air unit (by its radio MAC, no colons), as
 // "<power-up id>:<raw>".
-inline MadeSetting<std::string> dist_zero(const std::string& mac) { return {"dist_zero_" + mac, ""}; }
 
 }  // namespace radio::setting

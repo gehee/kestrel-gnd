@@ -355,8 +355,7 @@ class OSD : public display::VideoListener {
         // taken from the reading where the aircraft is armed instead.
         uint64_t rec_started_us = 0;   // for the REC elapsed timer
         std::atomic<int> link_distance_raw{-1};
-        // The distance shown (gnd::RadioState::dist_m, its zero taken by
-        // the radio at the air unit's first arming): -2 not zeroed, -1 none.
+        // The distance shown (gnd::RadioState::dist_m), metres: -1 none.
         int  dist_m_ = -1;
         // Wall-clock readout, top centre. The time itself comes from the
         // pcf8563 at boot (see /etc/init.d/S36rtc); this only displays
@@ -480,7 +479,7 @@ class OSD : public display::VideoListener {
         static constexpr unsigned kFramesForVideo = 10;
         uint64_t hud_connected_since_us_ = 0;
         std::atomic<unsigned> frames_since_connect_{0};   // the renderer counts, the HUD resets
-        int  dist_shown() const { return dist_m_; }   // metres from the zero, -2 not zeroed, -1 no ranging
+        int  dist_shown() const { return dist_m_; }   // metres, -1 no ranging
         // The acquiring screen runs for at least this long from the link edge,
         // the same edge the canopy's rebuild sweep fires on. Without it the
         // screen is hostage to how fast the air unit dumps its startup buffer:
@@ -862,7 +861,7 @@ class OSD : public display::VideoListener {
             float range_norm = 0.0f;     // range left to fade, 0..1 (the VIDEO track, twelve blocks)
             float quality   = 0.0f;      // composite link health, 0..1
             int   link_warn = 0;         // 0 fine, 1 amber, 2 red (off the VIDEO track's blocks)
-            int   dist_m    = -1;        // -1 = no ranging, -2 = ranging, not zeroed yet ("--")
+            int   dist_m    = -1;        // -1 = no ranging
             float snr_db    = -1.0f;     // the video link's SNR, dB (-1: no link)
             char  vtx_pwr[24] = {0};
             char  vrx_pwr[24] = {0};     // our radio's TX power as it pushes it, "" = not known

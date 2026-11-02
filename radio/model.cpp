@@ -129,26 +129,14 @@ void Model::save(Settings& s, const Command& c) {
 // ---- the radio: what its threads learn -------------------------------------------
 
 void Model::publish_radio() {
-    const int d = radio_s_.dist_raw;
-    radio_s_.dist_m = d < 0 ? -1 : dist_zero_ < 0 ? -2 : std::max(0, d - dist_zero_);
+    // The radio answers the distance itself (see Ar8030Link::current_distance).
+    radio_s_.dist_m = radio_s_.dist_raw < 0 ? -1 : radio_s_.dist_raw;
     radio_.publish(radio_s_);
 }
 
 void Model::link_stats(const gnd::LinkStats& v) {
     std::lock_guard<bus::PiMutex> lk(mu_);
     radio_s_.link = v;
-    // Another air unit: its own distance zero, if it is still the power-up
-    // the saved one was taken in.
-    if (v.state == gnd::kLinkUp && v.peer_mac[0] && strncmp(v.peer_mac, peer_mac_, sizeof(peer_mac_)) != 0) {
-        snprintf(peer_mac_, sizeof(peer_mac_), "%s", v.peer_mac);
-        air_boot_.clear();
-        dist_zero_ = -1;
-        dist_zero_unkeyed_ = false;
-        standby_since_us_ = 0;
-        lp_known_ = false;
-        dist_pre_head_ = 0;
-        memset(dist_pre_us_, 0, sizeof(dist_pre_us_));
-    }
     publish_radio();
 }
 
@@ -218,116 +206,13 @@ void Model::rx_mcs(int mcs) {
 void Model::distance(int raw) {
     std::lock_guard<bus::PiMutex> lk(mu_);
     radio_s_.dist_raw = raw;
-    // Disarmed: kept, for the zero the arming takes.
-    if (raw >= 0 && lp_known_ && low_power_) {
-        dist_pre_[dist_pre_head_] = raw;
-        dist_pre_us_[dist_pre_head_] = now_us();
-        dist_pre_head_ = (dist_pre_head_ + 1) % 8;
-    }
     publish_radio();
-}
-
-void Model::flush_log() {
-    std::string out;
-    {
-        std::lock_guard<bus::PiMutex> lk(mu_);
-        out.swap(log_);
-    }
-    if (!out.empty()) fputs(out.c_str(), stdout);
 }
 
 void Model::low_power(bool on) {
-    low_power_quiet(on);
-    flush_log();
-}
-
-void Model::low_power_quiet(bool on) {
     std::lock_guard<bus::PiMutex> lk(mu_);
-    // Standby -> radiating, after 3 s of standby seen (a link coming up can
-    // read standby for a moment with the aircraft armed - a goggle restarted
-    // in flight would zero where it flies), for a known air unit, no zero yet.
-    const uint64_t now = now_us();
-    if (lp_known_ && low_power_ && !on && dist_zero_ < 0 && peer_mac_[0] &&
-        standby_since_us_ && now - standby_since_us_ >= 3000000ULL)
-        dist_take_zero();
-    if (on && !(lp_known_ && low_power_)) standby_since_us_ = now;
-    if (!on) standby_since_us_ = 0;
-    low_power_ = on;
-    lp_known_ = true;
     unit_s_.low_power = on;
     unit_.publish(unit_s_);
-    publish_radio();   // a zero taken at the arming
-}
-
-void Model::air_boot(const std::string& id) {
-    air_boot_quiet(id);
-    flush_log();
-}
-
-void Model::air_boot_quiet(const std::string& id) {
-    std::lock_guard<bus::PiMutex> lk(mu_);
-    if (id != air_boot_) {
-        // A new power-up of the same air unit (it restarted while linked): zero again.
-        if (!air_boot_.empty()) { dist_zero_ = -1; dist_pre_head_ = 0; memset(dist_pre_us_, 0, sizeof(dist_pre_us_)); }
-        air_boot_ = id;
-        // A zero taken before the id came (it is said every 2 s): this
-        // power-up's saved one wins if there is one, else it is saved under it.
-        if (dist_zero_unkeyed_ && !id.empty()) {
-            const int taken = dist_zero_;
-            dist_zero_ = -1;
-            dist_load_zero();
-            if (dist_zero_ < 0) {
-                dist_zero_ = taken;
-                settings_.set(dist_zero(), id + ":" + std::to_string(taken));
-            }
-            dist_zero_unkeyed_ = false;
-        }
-        dist_load_zero();
-    }
-    publish_radio();
-}
-
-// The distance's zero (see dist_zero_ above), saved as "<boot id>:<raw>"
-// under dist_zero_<the air unit's radio MAC>.
-MadeSetting<std::string> Model::dist_zero() const {
-    std::string mac;
-    for (const char *c = peer_mac_; *c; c++) if (*c != ':') mac += *c;
-    return setting::dist_zero(mac);
-}
-
-void Model::dist_load_zero() {
-    if (!peer_mac_[0] || air_boot_.empty() || dist_zero_ >= 0) return;
-    const std::string v = settings_.get(dist_zero());
-    const size_t colon = v.find(':');
-    if (colon == std::string::npos || v.substr(0, colon) != air_boot_) return;
-    dist_zero_ = atoi(v.c_str() + colon + 1);
-    char line[160];
-    snprintf(line, sizeof(line), "[OSD] air unit %s, power-up %s: distance zero %d (taken at its first arming)\n",
-             peer_mac_, air_boot_.c_str(), dist_zero_);
-    log_ += line;
-}
-
-// The zero: the median of the readings of the last 4 s before the arming
-// (the aircraft still where it was armed - the reading after can already be
-// a takeoff), the latest reading if there are none.
-void Model::dist_take_zero() {
-    const uint64_t now = now_us();
-    int v[8], n = 0;
-    for (int i = 0; i < 8; i++)
-        if (dist_pre_us_[i] && now - dist_pre_us_[i] <= 4000000ULL) v[n++] = dist_pre_[i];
-    if (!n && radio_s_.dist_raw >= 0) v[n++] = radio_s_.dist_raw;
-    if (!n) return;
-    std::sort(v, v + n);
-    dist_zero_ = v[n / 2];
-    dist_zero_unkeyed_ = air_boot_.empty();
-    if (peer_mac_[0])
-        settings_.set(dist_zero(), (air_boot_.empty() ? std::string("-") : air_boot_) + ":" +
-                                                     std::to_string(dist_zero_));
-    char line[200];
-    snprintf(line, sizeof(line), "[OSD] air unit %s armed: distance zero %d (median of %d reading%s before; power-up %s)\n",
-             peer_mac_[0] ? peer_mac_ : "?", dist_zero_, n, n == 1 ? "" : "s",
-             air_boot_.empty() ? "unknown" : air_boot_.c_str());
-    log_ += line;
 }
 
 

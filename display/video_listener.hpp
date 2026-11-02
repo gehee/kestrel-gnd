@@ -61,7 +61,7 @@ typedef struct {
     int8_t   bw_idx = -1;   // the video link's bandwidth gear (gnd::bw_step_label), -1: no link
     uint8_t  air_dbm = 0;   // the air unit's TX power as its radio announced it, dBm (0: not known)
     uint16_t freq_mhz = 0;  // the link's channel, MHz (0: no link)
-    int16_t  dist_m = -1;   // the HUD's distance, metres (-1: no ranging or not zeroed yet)
+    int16_t  dist_m = -1;   // the HUD's distance, metres (-1: no ranging)
     uint8_t  air = 1;    // the air part is known (0: the radio clock not checked yet - no latency)
     uint8_t  key = 0;    // this picture was a keyframe
     uint16_t skipped = 0;   // pictures before this one that were never shown

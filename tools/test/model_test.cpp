@@ -6,7 +6,7 @@
 // every one in order and waking, the resends every one without a wake, the FC
 // serial bridge's bytes with the screen's restart in order between them, the
 // air unit's IMU samples with the camera angle in order - the distance is
-// zeroed at the first arming after 3 s of standby, the changes asked of the
+// the radio's reading, armed or not, the changes asked of the
 // parts reach the radio numbered and normalized, in order, their tickets
 // carrying the value as it will be held, and the settings among them are
 // saved as they are asked; the radio's threads and a reader can run at once
@@ -213,20 +213,17 @@ static void distance_test(Rig& b) {
     b.model.link_stats(linked("AA:BB:CC:01"));
     drain(b);
     b.model.distance(100);
-    CHECK(radio_of(b).dist_raw == 100 && radio_of(b).dist_m == -2);    // not zeroed yet
+    CHECK(radio_of(b).dist_raw == 100 && radio_of(b).dist_m == 100);   // the reading itself
     b.model.low_power(true);                          // standby
-    b.model.distance(110);                            // kept for the zero
-    std::this_thread::sleep_for(std::chrono::milliseconds(3100));
-    b.model.low_power(false);                         // armed after 3 s of standby: zeroed
+    CHECK(unit_of(b).low_power && radio_of(b).dist_m == 100);
+    b.model.low_power(false);                         // an arming changes nothing
     b.model.distance(150);
-    CHECK(radio_of(b).dist_m == 40);
-    CHECK(!unit_of(b).low_power);
-    b.model.low_power(true);
-    b.model.low_power(false);                         // a re-arm keeps the zero
-    CHECK(radio_of(b).dist_m == 40);
-    // Another aircraft: its distance unzeroed.
-    b.model.link_stats(linked("AA:BB:CC:02"));
-    CHECK(radio_of(b).dist_m == -2);
+    CHECK(!unit_of(b).low_power && radio_of(b).dist_m == 150);
+    b.model.distance(-1);                             // no reading
+    CHECK(radio_of(b).dist_m == -1);
+    b.model.link_stats(linked("AA:BB:CC:02"));        // another aircraft: the same
+    b.model.distance(7);
+    CHECK(radio_of(b).dist_m == 7);
 }
 
 // An SEI with one kestrel-air IMU message: n samples 1 ms apart from t0.
@@ -382,7 +379,7 @@ static void threads_test(Rig& b, HudLike& h) {
     const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(300);
     while (std::chrono::steady_clock::now() < end) {
         const gnd::RadioState rs = b.model.radio().state();
-        CHECK(rs.dist_m >= -2);
+        CHECK(rs.dist_m >= -1);
         (void)b.model.air_unit().state();
         (void)b.model.timing().state();
         float m;

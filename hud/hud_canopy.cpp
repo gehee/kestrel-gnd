@@ -765,14 +765,13 @@ void OSD::draw_canopy_hud(const CanopyIn& in) {
             canvas_->text(in.bf.mode, x, BL(base, T_ROW), T_ROW, false, tr, tg, tb);
             x += canvas_->text_width(in.bf.mode, T_ROW) + igap;
         }
-        if (in.dist_m >= 0 || in.dist_m == -2) {   // -2: not zeroed yet (the first arming does)
+        if (in.dist_m >= 0) {
             canvas_->text("\xE2\x80\xA2", x, BL(base, T_ROW), T_ROW, false,
                       tr * 0.68f, tg * 0.68f, tb * 0.68f);
             x += canvas_->text_width("\xE2\x80\xA2", T_ROW) + igap;
             icon(VecIcon::Distance, x, base, ir, ig, ib);
             x += iw + igap;
-            if (in.dist_m < 0)          snprintf(buf, sizeof(buf), "--");
-            else if (in.dist_m >= 1000) snprintf(buf, sizeof(buf), "%.2fkm", in.dist_m / 1000.0f);
+            if (in.dist_m >= 1000) snprintf(buf, sizeof(buf), "%.2fkm", in.dist_m / 1000.0f);
             else                        snprintf(buf, sizeof(buf), "%dm", in.dist_m);
             canvas_->text(buf, x, BL(base, T_ROW), T_ROW, false, tr, tg, tb);
         }
@@ -995,14 +994,13 @@ void OSD::draw_canopy_hud(const CanopyIn& in) {
             canvas_->text("--", x, BL(base, T_BIG), T_BIG, true, 0.45f, 0.45f, 0.45f);
             x -= canvas_->text_width("--", T_BIG) + 10.0f * U;
         }
-        if (in.dist_m >= 0 || in.dist_m == -2) {   // -2: not zeroed yet (the first arming does)
+        if (in.dist_m >= 0) {
             canvas_->text("\xE2\x80\xA2", x, BL(base, T_UNIT), T_UNIT, true,
                       ldim * 0.42f, ldim * 0.42f, ldim * 0.42f);
             x -= canvas_->text_width("\xE2\x80\xA2", T_UNIT) + 10.0f * U;
             canvas_->text("m", x, BL(base, T_SMALL), T_SMALL, true, lur, lug, lub);
             x -= canvas_->text_width("m", T_SMALL);
-            if (in.dist_m < 0) snprintf(buf, sizeof(buf), "--");
-            else               snprintf(buf, sizeof(buf), "%d", in.dist_m);
+            snprintf(buf, sizeof(buf), "%d", in.dist_m);
             canvas_->text(buf, x, BL(base, T_UNIT), T_UNIT, true,
                       ldim * 0.82f, ldim * 0.82f, ldim * 0.82f);
             x -= canvas_->text_width(buf, T_UNIT) + 10.0f * U;

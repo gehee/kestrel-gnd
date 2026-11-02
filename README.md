@@ -72,9 +72,7 @@ around them, for latency.
   the hand-offs are in `base/bus.hpp` - a seqlock slot for a state, a ring
   for a stream, a futex waker - and no caller sees them.
 - **`radio::Model`** (`radio/model.hpp`) implements the parts the radio
-  carries: each part's state from what the radio reports, the logic that is
-  the link's rather than the chip's (the distance's zero, taken at the air
-  unit's first arming), and the changes asked - normalized, the settings
+  carries: each part's state from what the radio reports, and the changes asked - normalized, the settings
   among them saved as they are asked, numbered and queued for the radio. No
   thread of its own: the radio's threads and the askers run it.
 - **`radio::Link`** (`radio/link.hpp`) is what any radio is: `run()`,
@@ -151,8 +149,8 @@ screen recording and the web view's live feed; the web view's gallery
 serves the recordings.
 
 The radio thread does none of its readers' work, and nothing calls into
-the radio. It still takes the settings file's lock on rare events (a
-distance zero at arming, a newly paired air unit, a restart).
+the radio. It still takes the settings file's lock on rare events (a newly
+paired air unit, a restart).
 
 **Checking the video path.** `video_replay_check FILE` (a PC build with
 `-DKESTREL_TESTS=ON`) runs a recorded stream - what `--debug-replay` plays -

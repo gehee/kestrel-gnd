@@ -123,6 +123,10 @@ void Ar8030Link::publish_link_stats() {
     if (ar_ioctl(dev, BB_GET_1V1_INFO, &info_in, &info_buf) == 0) {
         link_st_fails_[0] = 0;
         st.snr        = to_db(info.self.snr);
+        // The frames' SNR, when poll_resends has some since the last pass, is
+        // the one shown (their mean): two sources in turn made the figure flick.
+        if (snr_n_) st.snr = (float)snr_sum_ / (float)snr_n_ / 4.0f;
+        snr_sum_ = 0; snr_n_ = 0;
         stat_snr_x10_.store((int)(st.snr * 10.0f + 0.5f));
         stat_gains_.store(info.self.gain_a | info.self.gain_b << 8);
         st.snr_raw    = info.self.snr;
@@ -368,7 +372,11 @@ void Ar8030Link::stats_run() {
     // only a safety net against a missed one; on Artosyn's library it is the
     // only source.
     const uint64_t link_period = on_ar_libre() ? 5000 : 400;
-    uint64_t next_link = 0, next_stats = now_ms() + 3000, last_stats = 0;
+    // SNR, distance, MCS and the data rate for the HUD: every 500 ms (was 3 s,
+    // which the pilot read as the figures lagging the flight). About five
+    // small radio requests a pass, next to the resend map's one per 100 ms.
+    const uint64_t stats_period = 500;
+    uint64_t next_link = 0, next_stats = now_ms() + stats_period, last_stats = 0;
     std::unique_lock<std::mutex> lk(stats_mu);
     while (!stats_stop) {
         lk.unlock();
@@ -392,17 +400,24 @@ void Ar8030Link::stats_run() {
                 report_link_state(ls);
             }
         }
-        // Every 3 s, or sooner - at most once a second - after an MCS change.
-        if (t >= next_stats || (stats_soon_.load() && t - last_stats >= 1000)) {
+        // Every stats_period, or sooner - at most every 250 ms - after an MCS change.
+        if (t >= next_stats || (stats_soon_.load() && t - last_stats >= 250)) {
             stats_soon_.store(false);
             last_stats = t;
-            next_stats = t + 3000;
+            next_stats = t + stats_period;
             stat_mcs_.store(current_rx_mcs());
             // BB_CFG_DISTC is refused before the link is up (-2), exactly as
             // BB_SET_BANDWIDTH is (-7). Retry a few times once we are linked.
-            int dist_m = current_distance();
-            stat_dist_.store(dist_m);
-            model_.distance(dist_m);
+            // Asked for only when the radio does not push it (event 15: an
+            // Open8030 that has it sends one a second at the least); a pushed
+            // one is shown here too, so the HUD changes at most every pass.
+            if (t - dist_pushed_ms_.load() > 2000) {
+                int dist_m = current_distance();
+                stat_dist_.store(dist_m);
+                model_.distance(dist_m);
+            } else {
+                model_.distance(stat_dist_.load());
+            }
             publish_link_stats();
         }
         publish_chan_scan();             // its own pace: 2 s, 70 ms while the scan screen is up
