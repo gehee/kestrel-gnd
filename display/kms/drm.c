@@ -54,12 +54,14 @@ int modeset_open(int *out, const char *node)
 	ret = drmSetClientCap(fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1);
 	if (ret) {
 		fprintf(stderr, "failed to set universal planes cap, %d\n", ret);
+		close(fd);   // init tries card0..9: each node without KMS left one open
 		return ret;
 	}
 
 	ret = drmSetClientCap(fd, DRM_CLIENT_CAP_ATOMIC, 1);
 	if (ret) {
 		fprintf(stderr, "failed to set atomic cap, %d", ret);
+		close(fd);
 		return ret;
 	}
 
@@ -142,7 +144,13 @@ void modeset_get_object_properties(int fd, struct drm_object *obj,
 		return;
 	}
 
-	obj->props_info = calloc(obj->props->count_props, sizeof(obj->props_info));
+	obj->props_info = calloc(obj->props->count_props, sizeof(*obj->props_info));
+	if (!obj->props_info && obj->props->count_props) {
+		fprintf(stderr, "cannot get %d properties: out of memory\n", obj->id);
+		drmModeFreeObjectProperties(obj->props);
+		obj->props = NULL;   /* as if the properties could not be read: the callers check */
+		return;
+	}
 	for (i = 0; i < obj->props->count_props; i++)
 		obj->props_info[i] = drmModeGetProperty(fd, obj->props->props[i]);
 }
@@ -608,14 +616,9 @@ int modeset_create_video_fb(int fd, uint32_t width, uint32_t height, uint32_t fo
 
 int modeset_setup_framebuffers(int fd, drmModeConnector *conn, struct modeset_output *out)
 {
-	for (int i=0; i<OSD_BUF_COUNT; i++) {
-		out->osd_bufs[i].width = out->mode.hdisplay;
-		out->osd_bufs[i].height = out->mode.vdisplay;
-		int ret = modeset_create_fb(fd, &out->osd_bufs[i]);
-		if (ret) {
-			return ret;
-		}
-	}
+	/* No OSD buffer here: the HUD draws into GBM buffers of its own. The one
+	 * restore_planes_zpos commits at exit is made there - made here, two
+	 * screen-size ARGB buffers (16.6 MB at 1080p) sat unused all the run. */
 	out->video_crtc_width = out->mode.hdisplay;
 	out->video_crtc_height = out->mode.vdisplay;
 
@@ -632,7 +635,8 @@ void modeset_output_destroy(int fd, struct modeset_output *out)
 	modeset_destroy_objects(fd, out);
 
 	for (int i=0; i<OSD_BUF_COUNT; i++) { 
-		modeset_destroy_fb(fd, &out->osd_bufs[i]);
+		if (out->osd_bufs[i].fb)   /* made at exit only (restore_planes_zpos) */
+			modeset_destroy_fb(fd, &out->osd_bufs[i]);
 	}
 	drmModeDestroyPropertyBlob(fd, out->mode_blob_id);
 	free(out);
@@ -880,6 +884,7 @@ int modeset_prepare(int fd, struct modeset_output *output_list, uint16_t mode_wi
 		if (!out)
 			continue;
 		*output_list = *out;
+		free(out);   /* copied: what it points to is output_list's now */
 		found = true;
 	}
 	if (!found) {
@@ -1038,6 +1043,18 @@ void restore_planes_zpos(int fd, struct modeset_output *output_list) {
 	// restore osd zpos
 	int ret, flags;
 	struct modeset_buf *buf = &output_list->osd_bufs[0];
+
+	// A blank (transparent) screen-size buffer for both planes, made now:
+	// nothing else uses one.
+	if (!buf->fb) {
+		buf->width = output_list->mode.hdisplay;
+		buf->height = output_list->mode.vdisplay;
+		if (modeset_create_fb(fd, buf)) {
+			memset(buf, 0, sizeof(*buf));
+			fprintf(stderr, "cannot restore the planes' zpos: no buffer for them\n");
+			return;
+		}
+	}
 
 	// TODO(geehe) Find a more elegant way to do this.
 	int64_t zpos = get_property_value(fd, output_list->osd_plane.props, "zpos");

@@ -23,7 +23,7 @@ void osd_set_menu_start_tab(int t) { s_menu_start_tab = t; }
 
 OSD::OSD(const hud::Parts& parts, Settings& settings, std::shared_ptr<display::Display> dev_,
          std::unique_ptr<render::Canvas> canvas, std::unique_ptr<display::HudLayer> layer,
-         int refresh_frequency_ms_, volatile bool* signal_stop, bool console_stats_) :
+         int refresh_frequency_ms_, std::atomic<bool>* signal_stop, bool console_stats_) :
     settings_(settings),
     dev(dev_), 
     layer_(std::move(layer)),
@@ -50,8 +50,6 @@ OSD::OSD(const hud::Parts& parts, Settings& settings, std::shared_ptr<display::D
     dev->set_flip_hook([](void* c) { static_cast<OSD*>(c)->on_flip(); }, this);
 
     osd_vars.ui_scale = 1.0f;
-    osd_vars.sky_exposure_us = 5000;
-    osd_vars.sky_framerate = 120;
     osd_vars.slices_received = false;
     menu_ui_scale = 1.0f;
     applied_ui_scale = 1.0f;

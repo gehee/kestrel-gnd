@@ -7,6 +7,8 @@
 #include <ucontext.h>
 #include <unistd.h>
 
+#include <cerrno>
+#include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -14,7 +16,7 @@
 #include "base/restart.hpp"
 #include "base/sd_log.hpp"
 
-volatile bool signal_stop = false;
+std::atomic<bool> signal_stop{false};
 
 // The settings file, written before a restart.
 static Settings* g_settings = nullptr;
@@ -58,8 +60,8 @@ static volatile sig_atomic_t g_restart = 0;
 static char** g_main_argv = nullptr;
 static void reexec_now(int)
 {
-	sd_log::restore_output();   // the new process starts its own
-	for (int fd = 3; fd < 1024; fd++) close(fd);
+	sd_log::flush(false);       // what is not on the card yet; the new process starts its own log
+	restart_prepare_exec();     // and nothing it must not inherit (base/restart.hpp)
 	execv("/proc/self/exe", g_main_argv);
 	_exit(91);
 }
@@ -89,16 +91,41 @@ static void sig_handler(int signum)
 }
 
 
+// The crash report goes straight to the service's log and the card's
+// (sd_log::crash_fds), not through stderr: that is the SD log's pipe, and the
+// process dies before its reader passes the report on. Formatted on the
+// stack and written with write(): no stdio lock, which the crashed thread
+// may hold.
+static int g_crash_fds[2] = {STDERR_FILENO, -1};
+static void crash_printf(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+static void crash_printf(const char* fmt, ...) {
+    char line[512];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(line, sizeof line, fmt, ap);
+    va_end(ap);
+    if (n <= 0) return;
+    if (n >= (int)sizeof line) n = (int)sizeof line - 1;
+    for (int fd : g_crash_fds) {
+        if (fd < 0) continue;
+        for (int w = 0; w < n;) {
+            const ssize_t r = write(fd, line + w, (size_t)(n - w));
+            if (r <= 0) { if (r < 0 && errno == EINTR) continue; break; }
+            w += (int)r;
+        }
+    }
+}
+
 // A code address as library+offset, which addr2line takes; or that it is in
 // no library at all.
 static void crash_addr(const char* what, void* a) {
     Dl_info di;
     if (a && dladdr(a, &di) && di.dli_fname)
-        fprintf(stderr, "  %s %p = %s+0x%lx (%s)\n", what, a, di.dli_fname,
-                (unsigned long)((uintptr_t)a - (uintptr_t)di.dli_fbase),
-                di.dli_sname ? di.dli_sname : "?");
+        crash_printf("  %s %p = %s+0x%lx (%s)\n", what, a, di.dli_fname,
+                     (unsigned long)((uintptr_t)a - (uintptr_t)di.dli_fbase),
+                     di.dli_sname ? di.dli_sname : "?");
     else
-        fprintf(stderr, "  %s %p (in no library)\n", what, a);
+        crash_printf("  %s %p (in no library)\n", what, a);
 }
 
 // The registers come first. A call through a corrupted pointer - heap
@@ -107,21 +134,25 @@ static void crash_addr(const char* what, void* a) {
 // link register still says who made the call, and the thread's name whose
 // thread it was.
 static void segv_bt(int sig, siginfo_t* si, void* ucv){
+    sd_log::flush(false);   // what was printed before it, onto the card first
+    sd_log::crash_fds(&g_crash_fds[0], &g_crash_fds[1]);
     char name[17] = {0};
     prctl(PR_GET_NAME, name);
-    fprintf(stderr, "\n### %s in thread %s, fault address %p ###\n",
-            sig == SIGSEGV ? "SIGSEGV" : sig == SIGBUS ? "SIGBUS" : "SIGABRT", name, si->si_addr);
+    crash_printf("\n### %s in thread %s, fault address %p ###\n",
+                 sig == SIGSEGV ? "SIGSEGV" : sig == SIGBUS ? "SIGBUS" : "SIGABRT", name, si->si_addr);
 #if defined(__aarch64__)
     const mcontext_t& mc = ((ucontext_t*)ucv)->uc_mcontext;
     crash_addr("pc", (void*)mc.pc);
     crash_addr("lr", (void*)mc.regs[30]);
-    fprintf(stderr, "  sp %p\n", (void*)mc.sp);
+    crash_printf("  sp %p\n", (void*)mc.sp);
 #else
     (void)ucv;
 #endif
     void* bt[48]; int n=backtrace(bt,48);
-    fprintf(stderr,"### backtrace (%d frames) ###\n", n);
-    backtrace_symbols_fd(bt,n,2);
+    crash_printf("### backtrace (%d frames) ###\n", n);
+    for (int fd : g_crash_fds)
+        if (fd >= 0) backtrace_symbols_fd(bt, n, fd);
+    if (g_crash_fds[1] >= 0) fsync(g_crash_fds[1]);   // on the card before the process goes
     signal(sig,SIG_DFL); raise(sig);
 }
 
@@ -141,6 +172,10 @@ void signals_install() {
 	signal(SIGUSR1, rec_toggle_handler);
 	signal(SIGTERM, sig_handler);   // systemctl stop / killall, same watchdog
 	{
+		// backtrace() loads the unwinder at its first call, which allocates:
+		// done here, not first inside a crash with the heap maybe corrupt.
+		void* warm[1];
+		backtrace(warm, 1);
 		struct sigaction sa = {};
 		sa.sa_sigaction = segv_bt;
 		sa.sa_flags = SA_SIGINFO;

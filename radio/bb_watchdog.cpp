@@ -46,14 +46,18 @@
 #include <cstdlib>
 #include <cerrno>
 #include <cstring>
-#include <dirent.h>
 #include <pthread.h>
 #include <ctime>
 #include <unistd.h>
+#include <vector>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+
+#include "base/restart.hpp"
+#include "base/shell.hpp"
+#include "base/sd_log.hpp"
 
 namespace {
 
@@ -148,26 +152,19 @@ constexpr int kMaxAttempts   = 4;
 
 // Attempts are counted across the life of the process and reset by a
 // successful open, so a wedge an hour into a flight gets its own budget.
-std::atomic<int> g_attempts{0};
-
-// Every descriptor above stderr has to go before exec. The DRM fd carries
-// master, and exec does not close it - the new image would open the card,
-// fail to become master, and come up with no display at all, which looks
-// nothing like the baseband problem we were recovering from.
-void close_inherited_fds() {
-    DIR *d = opendir("/proc/self/fd");
-    if (!d) {
-        for (int fd = 3; fd < 1024; fd++) close(fd);
-        return;
-    }
-    int dfd = dirfd(d);
-    struct dirent *e;
-    while ((e = readdir(d))) {
-        int fd = atoi(e->d_name);
-        if (fd > 2 && fd != dfd) close(fd);
-    }
-    closedir(d);
+//
+// A re-exec hands its count to the new process as KESTREL_BB_ATTEMPT, which
+// is read and taken out of the environment here, before main(), while there
+// is one thread: changing the environment later would race getenv on the
+// others, and a restart's own exec would carry a spent count on.
+int take_attempt_env() {
+    const char *s = getenv("KESTREL_BB_ATTEMPT");
+    if (!s) return 0;
+    const int n = atoi(s);
+    unsetenv("KESTREL_BB_ATTEMPT");
+    return n;
 }
+std::atomic<int> g_attempts{take_attempt_env()};
 
 // --- Rung 0: force-close every daemon socket, without touching the SDK ----
 //
@@ -293,7 +290,6 @@ bool wedged() {
 }
 
 void *watchdog_main(void *) {
-    if (const char *s = getenv("KESTREL_BB_ATTEMPT")) g_attempts.store(atoi(s));
     if (deadline_s() <= 0) {
         fprintf(stderr, "[bb-watchdog] disabled; arm with --bbwatchdog=1 "
                         "or bb_watchdog: 1 in kestrel-gnd.yaml\n");
@@ -352,7 +348,7 @@ void *watchdog_main(void *) {
         fprintf(stderr, "[bb-watchdog] re-exec did not clear it - restarting the daemon "
                         "and settling %ds\n", settle);
         g_settings->flush();   // bb_only.sh reads it
-        if (system("/etc/init.d/S60ar8030 restart >/dev/null 2>&1") != 0)
+        if (run_shell("/etc/init.d/S60ar8030 restart >/dev/null 2>&1") != 0)
             fprintf(stderr, "[bb-watchdog] S60ar8030 restart returned non-zero\n");
         for (int i = 0; i < settle && !g_stop.load(); i++) sleep(1);
         if (g_stop.load()) return nullptr;
@@ -374,19 +370,29 @@ void *watchdog_main(void *) {
         continue;
     }
 
-    char nbuf[16];
-    snprintf(nbuf, sizeof(nbuf), "%d", g_attempts.load());
-    setenv("KESTREL_BB_ATTEMPT", nbuf, 1);
+    // The count, in an environment made for the new process: this one's is
+    // left alone (see take_attempt_env).
+    char attempt_env[40];
+    snprintf(attempt_env, sizeof(attempt_env), "KESTREL_BB_ATTEMPT=%d", g_attempts.load());
+    std::vector<char *> env;
+    for (char **e = environ; *e; e++)
+        if (strncmp(*e, "KESTREL_BB_ATTEMPT=", 19) != 0) env.push_back(*e);
+    env.push_back(attempt_env);
+    env.push_back(nullptr);
 
     fprintf(stderr, "[bb-watchdog] re-exec\n");
     g_settings->flush();   // the exec drops the background writer
     fflush(nullptr);
-    close_inherited_fds();
-    execv("/proc/self/exe", g_argv);
+    sd_log::flush(false);    // the card's log, never waiting on the card: this is a recovery
+    // The output back from the SD log's pipe (whose reader dies with this
+    // image), every fd above stderr closed (the DRM fd carries master: the new
+    // image would come up with no display), signals and scheduling as at start.
+    restart_prepare_exec();
+    execve("/proc/self/exe", g_argv, env.data());
 
     // Only reached if exec itself failed, which means the image is gone or
     // unreadable - there is nothing left to try.
-    fprintf(stderr, "[bb-watchdog] execv failed: %s\n", strerror(errno));
+    fprintf(stderr, "[bb-watchdog] execve failed: %s\n", strerror(errno));
     _exit(90);
     }   // for (;;)
     return nullptr;
@@ -431,12 +437,10 @@ void bb_watchdog_open_end() {
 }
 
 void bb_watchdog_socket_open() {
+    // A successful bring-up clears the attempt count, so a wedge months of
+    // uptime later starts its own budget rather than inheriting a spent one.
     g_attempts.store(0);
-    if (!g_socket_open.exchange(true)) {
-        // A successful bring-up clears the attempt count, so a wedge months of
-        // uptime later starts its own budget rather than inheriting a spent one.
-        unsetenv("KESTREL_BB_ATTEMPT");
-    }
+    g_socket_open.store(true);
 }
 
 void bb_watchdog_stop() { g_stop.store(true); }

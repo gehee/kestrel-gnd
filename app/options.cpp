@@ -177,7 +177,10 @@ int read_start_options(int argc, char** argv, Settings& settings, StartOptions& 
 	{
 		const std::string t = settings.get(display::setting::screen_mode_try);
 		if (!t.empty()) {
+			// On disk before the display is brought up: a trial mode that
+			// crashes the app or blanks the screen must not come back.
 			settings.remove(display::setting::screen_mode_try);
+			settings.flush();
 			const size_t sp = t.find(' ');
 			const std::string id = sp == std::string::npos ? "" : t.substr(0, sp);
 			const std::string mode = sp == std::string::npos ? "" : t.substr(sp + 1);
@@ -313,7 +316,9 @@ int read_start_options(int argc, char** argv, Settings& settings, StartOptions& 
 
 	codec = VideoCodec::H265;
 
-	// Load console arguments
+	// Load console arguments. Each is for this run only and never saved:
+	// one run by hand with --no-osd or --no-display must not change every
+	// later start (the menu's choices are what the settings file keeps).
 	__BeginParseConsoleArguments__(printHelp) 
 
 	__OnArgument("--codec") {
@@ -323,13 +328,11 @@ int read_start_options(int argc, char** argv, Settings& settings, StartOptions& 
 			printf("unsupported video codec");
 			return -1;
 		}
-		settings.set(app::setting::codec, codec_str);
 		continue;
 	}
 
 	__OnArgument("--dvr-framerate") {
 		dvr_framerate = atoi(__ArgValue);
-		settings.set(dvr::setting::dvr_framerate, dvr_framerate);
 		continue;
 	}
 
@@ -340,34 +343,28 @@ int read_start_options(int argc, char** argv, Settings& settings, StartOptions& 
     	} else if (!strcmp(fmt, "raw")) {
          dvr_format = DvrFormat::RAW;
     	}
-    	settings.set(dvr::setting::dvr_format, fmt);
 		continue;
 	}
 
 	__OnArgument("--osd") {
 		enable_osd = 1;
 		osd_zpos = 2;
-		settings.set(hud::setting::enable_osd, 1);
-		settings.set(hud::setting::osd_zpos, 2);
 		continue;
 	}
 
 	__OnArgument("--decoder-name") {
 		char* name = const_cast<char*>(__ArgValue);
 		decoder_name = std::string(name);
-		settings.set(app::setting::decoder_name, decoder_name);
 		continue;
 	}
 
 	__OnArgument("--osd-refresh") {
 		osd_refresh_frequency_ms = atoi(__ArgValue);
-		settings.set(hud::setting::osd_refresh, osd_refresh_frequency_ms);
 		continue;
 	}
 	
 	__OnArgument("--screen-mode") {
 		char* mode = const_cast<char*>(__ArgValue);
-		std::string mode_copy = mode;
 		char* pt = strtok(mode, "x");
 		if (pt) mode_width = atoi(pt);
 		
@@ -376,22 +373,18 @@ int read_start_options(int argc, char** argv, Settings& settings, StartOptions& 
 		
 		pt = strtok(NULL, "@");
 		if (pt) mode_vrefresh = atoi(pt);
-
-		settings.set(display::setting::screen_mode(""), mode_copy);
 		continue;
 	}
 
 	__OnArgument("--vsync") {
 		vsync_flag = true;
 		render_mode = Atomic;
-		settings.set(display::setting::vsync, true);
 		continue;
 	}
 	
 	__OnArgument("--no-display") {
 		no_display_flag = true;
 		render_mode = Disable;
-		settings.set(display::setting::no_display, true);
 		continue;
 	}
 
@@ -428,7 +421,6 @@ int read_start_options(int argc, char** argv, Settings& settings, StartOptions& 
 			printf("--link: unknown source '%s' (only 'ar8030' is supported)\n", spec.c_str());
 			return 1;
 		}
-		settings.set(app::setting::link, spec);
 		continue;
 	}
 
@@ -438,19 +430,16 @@ int read_start_options(int argc, char** argv, Settings& settings, StartOptions& 
 
 	__OnArgument("--stats") {
 		console_stats = true;
-		settings.set(hud::setting::stats, true);
 		continue;
 	}
 	
 	__OnArgument("--disable-vrr") {
 		enable_vrr = false;
-		settings.set(display::setting::enable_vrr, false);
 		continue;
 	}
 
 	__OnArgument("--ui-scale") {
 		ui_scale = atof(__ArgValue);
-		settings.set(hud::setting::ui_scale, ui_scale);
 		continue;
 	}
 
@@ -558,7 +547,6 @@ int read_start_options(int argc, char** argv, Settings& settings, StartOptions& 
 	__OnArgument("--no-osd") {
 		enable_osd = 0;
 		g_disable_gl = true;   // skip EGL/GLES entirely - GPU stays idle
-		settings.set(hud::setting::enable_osd, 0);
 		continue;
 	}
 

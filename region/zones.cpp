@@ -15,7 +15,11 @@ std::atomic<int>      g_sel{-1};
 std::atomic<uint32_t> g_gen{0};
 std::atomic<bool>     g_tz_pending{false};
 std::string           g_tz_initial;        // the TZ the init script exported (time.conf)
-bool                  g_tz_had_initial = false;
+// What glibc does with no TZ at all, as a value: TZ is then always in the
+// environment, and a zone picked later replaces its value - which other
+// threads' getenv can race safely - rather than adding or removing the
+// variable, which moves the environment under them.
+constexpr const char* kNoTz = ":/etc/localtime";
 }
 
 int            zone_count()     { return data::kZoneCount; }
@@ -186,7 +190,9 @@ uint32_t generation() { return g_gen.load(); }
 void load(Settings& settings) {
     g_settings = &settings;
     g_licensed = settings.get(region::setting::amateur_licence);
-    if (const char* t = getenv("TZ")) { g_tz_initial = t; g_tz_had_initial = true; }
+    const char* t = getenv("TZ");
+    g_tz_initial = t ? t : kNoTz;
+    if (!t) setenv("TZ", kNoTz, 1);   // before any thread (see kNoTz)
     const int z = find(settings.get(region::setting::time_zone));
     g_sel = z;
     g_gen++;
@@ -216,8 +222,7 @@ bool apply_pending_tz() {
         printf("time zone: %s (%s)\n", data::kZones[z].name, data::kZones[z].posix);
     } else {
         // Not set again: back to what the init script exported.
-        if (g_tz_had_initial) setenv("TZ", g_tz_initial.c_str(), 1);
-        else unsetenv("TZ");
+        setenv("TZ", g_tz_initial.c_str(), 1);
         printf("time zone: not set (TZ from time.conf)\n");
     }
     tzset();

@@ -87,6 +87,7 @@ enum RfCap { RF_CAP_POWER = 1, RF_CAP_MCS = 2, RF_CAP_LNA = 4,
 struct RadioState {
     LinkStats link{};
     float video_mbps = 0;      // received video, the last second (0 while none comes)
+    uint32_t frames_lost = 0;  // pictures the air unit sent that never came (gaps in its counter), since start
     int dist_raw = -1;         // its ranging reading, metres (-1: none)
     // The distance shown: metres from the zero taken at the air unit's first
     // arming after it powered up; -2 not zeroed yet, -1 no reading.

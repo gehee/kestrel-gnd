@@ -151,7 +151,7 @@ kestrel_module(utils FOLDERS utils DEPS third_party
     SOURCES utils/Queue.cpp utils/Msg.cpp)
 kestrel_module(base FOLDERS base DEPS utils
     SOURCES base/scheduling_helper.cpp base/prof.cpp base/sd_log.cpp base/frame_log.cpp
-            base/ltrace.cpp base/video_pool.cpp base/restart.cpp base/settings.cpp
+            base/ltrace.cpp base/video_pool.cpp base/restart.cpp base/settings.cpp base/shell.cpp
             base/frame_mode.cpp
     LIBS pthread m)
 set(_hal_srcs hal/ffmpeg/vdec_ffmpeg.cpp hal/frame_length.cpp hal/plane_rules.cpp hal/wifi_ap.cpp

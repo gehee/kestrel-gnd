@@ -1,5 +1,6 @@
 // Test of base/sd_log.cpp: the log reaches the card and is closed when turned
-// off, and a process using it exits cleanly with its threads still running.
+// off, a process using it exits cleanly with its threads still running, and
+// the logs kept are the newest by their number, not by the clock.
 // Before sd_log's shared state was made never to be destroyed, exit() tore it
 // down under them: depending on the order static destructors ran in, the
 // writer swapped a freed string (heap corruption, SIGABRT in sd-log-write,
@@ -17,8 +18,11 @@
 #include <cstdlib>
 #include <cstring>
 #include <dirent.h>
+#include <fcntl.h>
 #include <set>
 #include <string>
+#include <vector>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -120,7 +124,49 @@ static void test_clean_exit_with_writer_running(const std::string &dir) {
     for (const std::string &n : logs_in(dir)) if (!before.count(n)) unlink((dir + "/" + n).c_str());
 }
 
+// Logs from a clock ahead of this one (as every log is once the goggle's
+// clock is back at 2017): the oldest by number go, and a new log - which
+// sorts first by name - stays at the next start.
+static void test_prune_by_number(const std::string &dir) {
+    const std::set<std::string> before = logs_in(dir);
+    std::vector<std::string> old;
+    for (int i = 1; i <= 30; i++) {
+        char name[64];
+        snprintf(name, sizeof name, "fpvOS_20991231_%06d.log", i);
+        old.push_back(name);
+        if (FILE *f = fopen((dir + "/" + name).c_str(), "w")) {
+            fprintf(f, "sd-log: log #%d on this card\nold log\n", i);
+            fclose(f);
+        }
+    }
+    auto start = [&] {
+        return in_child([&] {
+            sd_log::init(dir);
+            sd_log::set_enabled(true);
+            sd_log::set_enabled(false);
+            _exit(0);
+        });
+    };
+    CHECK(start() == 0);
+    std::set<std::string> first;
+    for (const std::string &n : logs_in(dir))
+        if (!before.count(n) && n.rfind("fpvOS_2099", 0) != 0) first.insert(n);
+    CHECK(first.size() == 1);
+    for (const std::string &n : first)
+        CHECK(read_file(dir + "/" + n).rfind("sd-log: log #31 on this card\n", 0) == 0);
+    CHECK(start() == 0);   // most likely the same second: the name gets _1
+    const std::set<std::string> now = logs_in(dir);
+    for (const std::string &n : first) CHECK(now.count(n) == 1);   // the newer one stayed
+    CHECK(!now.count(old[0]) && !now.count(old[1]));             // the two oldest went
+    CHECK(now.count(old[2]) == 1 && now.count(old[29]) == 1);
+    for (const std::string &n : now) if (!before.count(n)) unlink((dir + "/" + n).c_str());
+}
+
 int main() {
+    // One at a time on this machine: the logs of two runs (two build trees'
+    // ctest) in the same folder would be pruned and counted by each other.
+    const int lock = open("/tmp/kestrel_sd_log_test.lock", O_RDWR | O_CREAT | O_CLOEXEC, 0666);
+    if (lock >= 0) flock(lock, LOCK_EX);
     const std::string dir = mounted_dir();
     if (dir.empty()) {
         printf("sd_log_test: no tmpfs mount to stand in for the card - skipped\n");
@@ -128,6 +174,7 @@ int main() {
     }
     test_log_reaches_card(dir);
     test_clean_exit_with_writer_running(dir);
+    test_prune_by_number(dir);
     printf(fails ? "sd_log_test: %d FAILED\n" : "sd_log_test: all passed\n", fails);
     return fails ? 1 : 0;
 }

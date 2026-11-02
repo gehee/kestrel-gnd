@@ -578,6 +578,13 @@ void OSD::draw_canopy_hud(const CanopyIn& in) {
                   1.0f, 0.95f, 0.15f, 0.15f);
         snprintf(buf, sizeof(buf), "REC %u:%02u", in.rec_secs / 60, in.rec_secs % 60);
         canvas_->text(buf, x + d + 8.0f * U, MY(442.0f), T_ROW, false, 1.0f, 0.35f, 0.35f);
+    } else if (in.rec_failed[0]) {
+        // Why REC went off by itself, where it was.
+        float x = LXo(kEdge), y = MY(440.0f);
+        float d = 9.0f * U;
+        canvas_->poly({{x, y}, {x + d, y}, {x + d, y + d}, {x, y + d}},
+                  1.0f, 0.95f, 0.15f, 0.15f);
+        canvas_->text(in.rec_failed, x + d + 8.0f * U, MY(442.0f), T_ROW, false, 1.0f, 0.35f, 0.35f);
     }
 
     // Headline: voltage, then current in the small slot. Voltage is per cell by

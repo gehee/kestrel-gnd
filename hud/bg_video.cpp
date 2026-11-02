@@ -43,17 +43,25 @@ BgVideoPlayer::~BgVideoPlayer() {
 }
 
 void BgVideoPlayer::start() {
-    if (running_) return; // already running — don't spawn a second thread
+    std::lock_guard<std::mutex> lk(ctl_mu_);
+    if (started_) {
+        if (running_) return; // already running — don't spawn a second thread
+        pthread_join(thread_, nullptr);   // it ended on its own (no file, no decoder): reap it
+        started_ = false;
+    }
     vdec_stop_ = false;
     running_ = true;
-    pthread_create(&thread_, nullptr, thread_func, this);
+    if (pthread_create(&thread_, nullptr, thread_func, this) != 0) { running_ = false; return; }
+    started_ = true;
 }
 
 void BgVideoPlayer::stop() {
-    if (!running_) return;
+    std::lock_guard<std::mutex> lk(ctl_mu_);
+    if (!started_) return;              // joined whether or not the loop is still running
     running_   = false;                 // stops the feed loop
     vdec_stop_ = true;                  // stops VdecRK::run_frame
     pthread_join(thread_, nullptr);     // decode_loop joins the vdec thread + tears down
+    started_ = false;
 }
 
 // --- GL thread: zero-copy DRM path ---
@@ -182,19 +190,25 @@ void BgVideoPlayer::decode_loop() {
     // Lower priority so the GL/OSD thread isn't starved during VPU init.
     setpriority(PRIO_PROCESS, 0, 5);
 
-    // ---- Open the file (retry until success or stop) ----
+    // ---- Open the file, once ----
+    // A file that cannot be opened now is not coming (the idle clip is an asset,
+    // a recording was listed): the retry every 2 s held stop() - Back in the
+    // gallery, the reveal of the live picture - for up to 2 s. start() tries again.
     AVFormatContext* fmt = nullptr;
-    while (running_) {
+    {
         AVDictionary* fmt_opts = nullptr;
         av_dict_set_int(&fmt_opts, "probesize",       65536,  0);
         av_dict_set_int(&fmt_opts, "analyzeduration", 500000, 0);
         int open_ret = avformat_open_input(&fmt, path_.c_str(), nullptr, &fmt_opts);
         av_dict_free(&fmt_opts);
-        if (open_ret == 0) { avformat_find_stream_info(fmt, nullptr); break; }
-        fprintf(stderr, "[BgVideo] cannot open '%s', retrying in 2s\n", path_.c_str());
-        sleep(2);
+        if (open_ret != 0) {
+            fprintf(stderr, "[BgVideo] cannot open '%s'\n", path_.c_str());
+            running_ = false;
+            return;
+        }
+        avformat_find_stream_info(fmt, nullptr);
     }
-    if (!running_) { if (fmt) avformat_close_input(&fmt); return; }
+    if (!running_) { avformat_close_input(&fmt); return; }
 
     int vs = -1;
     for (unsigned i = 0; i < fmt->nb_streams; i++)

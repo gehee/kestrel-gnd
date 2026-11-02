@@ -282,7 +282,7 @@ int main(int argc, char** argv) {
 
     Rig r;
     r.out = argv[1];
-    volatile bool stop = false;
+    std::atomic<bool> stop{false};
     OSD osd(r.parts, settings, dev, platform::make_canvas(), platform::make_hud_layer(*dev), 1000, &stop, false);
     r.osd = &osd;
     osd.set_frame_hook([](int w, int h) {

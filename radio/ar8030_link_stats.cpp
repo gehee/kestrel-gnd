@@ -110,8 +110,18 @@ void Ar8030Link::publish_link_stats() {
         uint8_t raw[256];
     } info_buf;
     memset(&info_buf, 0, sizeof(info_buf));
+    // A call that fails (a 1 s timeout now and then) keeps its figures as last
+    // published: one failed BB_GET_STATUS read as the link down (state 0, no
+    // MACs), and the HUD re-armed its per-link state. For two passes in a row:
+    // a radio that stopped answering has no figures to show.
+    const gnd::LinkStats& last = link_st_last_;
+    auto keep = [this](int k) {
+        if (link_st_fails_[k] <= 2) link_st_fails_[k]++;
+        return link_st_fails_[k] <= 2;
+    };
     bb_get_1v1_info_out_t &info = info_buf.info;
     if (ar_ioctl(dev, BB_GET_1V1_INFO, &info_in, &info_buf) == 0) {
+        link_st_fails_[0] = 0;
         st.snr        = to_db(info.self.snr);
         stat_snr_x10_.store((int)(st.snr * 10.0f + 0.5f));
         stat_gains_.store(info.self.gain_a | info.self.gain_b << 8);
@@ -127,6 +137,12 @@ void Ar8030Link::publish_link_stats() {
         st.fec_error = info.self.ldpc_num_err_ratio / 10000.0f;
         st.fec_total = info.self.ldpc_tlv_err_ratio / 10000.0f;
         st.active     = true;
+    } else if (keep(0)) {
+        st.snr = last.snr; st.snr_raw = last.snr_raw; st.mcs = last.mcs; st.power = last.power;
+        st.air_pwr_mw = tx_power_mw;
+        st.gains_cur = last.gains_cur; st.gains_max = last.gains_max;
+        st.fec_error = last.fec_error; st.fec_total = last.fec_total;
+        st.active = last.active;
     }
 
     bb_get_status_in_t sin;
@@ -135,6 +151,7 @@ void Ar8030Link::publish_link_stats() {
     bb_get_status_out_t sout;
     memset(&sout, 0, sizeof(sout));
     if (ar_ioctl(dev, BB_GET_STATUS, &sin, &sout) == 0) {
+        link_st_fails_[1] = 0;
         st.state = sout.link_status[0].state;
         st.role  = sout.role;
         snprintf(st.mac, sizeof(st.mac), "%02X:%02X:%02X:%02X",
@@ -164,6 +181,18 @@ void Ar8030Link::publish_link_stats() {
                 break;
             }
         }
+    } else if (keep(1)) {
+        // The state the radio said last, by poll or event (the model's): the
+        // last publish here can be older.
+        const int ls = link_state_.load();
+        st.state = ls >= 0 ? ls : last.state;
+        st.role = last.role;
+        memcpy(st.mac, last.mac, sizeof(st.mac));
+        memcpy(st.peer_mac, last.peer_mac, sizeof(st.peer_mac));
+        st.tx_freq = last.tx_freq;
+        st.rx_freq = last.rx_freq;
+        st.bw_step = last.bw_step;
+        st.active = st.active || last.active;
     }
 
     bb_get_mcs_in_t mcs_in;
@@ -172,8 +201,12 @@ void Ar8030Link::publish_link_stats() {
     bb_get_mcs_out_t mcs_out;
     memset(&mcs_out, 0, sizeof(mcs_out));
     if (ar_ioctl(dev, BB_GET_MCS, &mcs_in, &mcs_out) == 0) {
+        link_st_fails_[2] = 0;
         st.rx_mcs_val        = mcs_out.mcs;
         st.rx_data_rate_kbps = mcs_out.throughput;
+    } else if (keep(2)) {
+        st.rx_mcs_val        = last.rx_mcs_val;
+        st.rx_data_rate_kbps = last.rx_data_rate_kbps;
     }
 
     st.pwr_auto = tx_power_auto;
@@ -225,6 +258,7 @@ void Ar8030Link::publish_link_stats() {
                st.rx_freq, st.tx_freq, gnd::bw_step_label(st.bw_step),
                gnd::bw_step_label(last_bw_rx_idx));
     }
+    link_st_last_ = st;
     model_.link_stats(st);
 }
 
@@ -302,7 +336,7 @@ void Ar8030Link::start_stats() {
         [this](uint8_t *b) {
             bb_dev_handle_t *dev = (bb_dev_handle_t *)bb_dev;
             uint8_t in[4] = {0x6e, 0x0e, 1, 0}, out[256] = {0};
-            const int rc = dev ? ar_ioctl(dev, 0x01000064, in, out) : -1;
+            const int rc = dev ? ar_ioctl_yield(dev, 0x01000064, in, out) : -1;
             if (rc == 0) *b = out[0];
             return rc;
         },
@@ -326,6 +360,10 @@ void Ar8030Link::stop_stats() {
 
 void Ar8030Link::stats_run() {
     pthread_setname_np(pthread_self(), "AR8030_STAT");
+    // Made by the radio thread, whose SCHED_FIFO it would inherit: none of
+    // this is real-time work (the settings saver's way).
+    struct sched_param sp = {};
+    pthread_setschedparam(pthread_self(), SCHED_OTHER, &sp);
     // On ar_libre the link state comes from the chip's event, so the poll is
     // only a safety net against a missed one; on Artosyn's library it is the
     // only source.
@@ -396,7 +434,7 @@ void Ar8030Link::update_stats(size_t frame_size) {
         // Over the time the period really took: a second, or a little more.
         double video_bw = (double)bytes_received * 1000.0 / (double)(t - period_start);   // bytes a second
         period_start = t;
-        model_.video_bandwidth((float)(video_bw / 125000.0));  // -> Mbit/s
+        model_.video_bandwidth((float)(video_bw / 125000.0), (uint32_t)frames_lost);  // -> Mbit/s
         if (t - last_stat_ms >= 3000) {
             last_stat_ms = t;
             // The radio's figures, as the stats thread last read them.
@@ -426,7 +464,7 @@ void Ar8030Link::update_stats(size_t frame_size) {
                    msp_bytes, mcs >= 0 ? ar_mcs_label(mcs) : -99, gnd::bw_step_label(last_bw_idx.load()), last_link_kbps.load() / 1000.0,
                    video_bw / 125000.0, dist_m,
                    air_delay_ms < 0.0f ? 0.0f : air_delay_ms, stale_pics, video_.foreign_slices(),
-                   stat_snr_x10_.load() / 10.0, link_freq_mhz,
+                   stat_snr_x10_.load() / 10.0, link_freq_mhz.load(),
                    stat_gains_.load() & 255, stat_gains_.load() >> 8,
                    (unsigned long long)xor_bad_, (unsigned long long)xor_checked_, rs_db, rs_dk, rs_ds);
         }
@@ -645,6 +683,15 @@ void Ar8030Link::note_ap_delay(const uint8_t *hdr, size_t len, bool new_pic) {
         return;
     }
     const int64_t queue = ka ? u16(37) : 0;
+    // Emptied with each 5 s window's line (picture_done), which comes only for
+    // a picture handed to a decoder: with decode off these grew for good. A
+    // window holds a few thousand slices.
+    static constexpr size_t kSlicesMax = 1 << 15;
+    if (ap_link_.size() >= kSlicesMax || ap_enc_last_.size() >= kSlicesMax) {
+        ap_link_.clear();
+        ap_enc_last_.clear();
+        for (auto &v : ap_link_pos_) v.clear();
+    }
     if (ka && (hdr[32] & 0x40)) ap_enc_last_.push_back((uint32_t)enc);
     // Not while a link-up's resync drops the pictures: those slices sat in
     // the air radio while the link formed and are never shown, and the

@@ -81,7 +81,15 @@ void DrmDevice::init(uint16_t mode_width, uint16_t mode_height, uint32_t mode_vr
 	assert(!ret);
     ret = pthread_mutex_init(&flip_mutex, NULL);
 	assert(!ret);
-    ret = pthread_cond_init(&flip_cond, NULL);
+    {
+        // Timed waits on it are on CLOCK_MONOTONIC (wait_for_flip_completion):
+        // a wall-clock step back would stall the renderer.
+        pthread_condattr_t ca;
+        pthread_condattr_init(&ca);
+        pthread_condattr_setclock(&ca, CLOCK_MONOTONIC);
+        ret = pthread_cond_init(&flip_cond, &ca);
+        pthread_condattr_destroy(&ca);
+    }
 	assert(!ret);
 
     display_connected = true;                    // init requires a connected display
@@ -210,11 +218,26 @@ void* DrmDevice::drm_event_thread_func(void* arg) {
 }
 
 void DrmDevice::handle_events() {
+    // The flip handler finds the device here: drmHandleEvent calls it on
+    // this thread, and its data is the flip's number (page_flip).
+    static thread_local DrmDevice* tl_self = nullptr;
+    tl_self = this;
     drmEventContext evctx = {};
     evctx.version = DRM_EVENT_CONTEXT_VERSION;
     evctx.page_flip_handler = [](int fd, unsigned int frame, unsigned int sec, unsigned int usec, void* data) {
-        if (data) {
-            DrmDevice* self = reinterpret_cast<DrmDevice*>(data);
+        DrmDevice* self = tl_self;
+        if (self) {
+            // Only the event of the flip waited for completes it. One taken
+            // as lost (expire_lost_flip) is done with: its event coming now
+            // would complete the flip after it - its OSD buffer marked on
+            // screen early (a torn HUD frame), the next picture let through
+            // while it is still pending.
+            uint64_t seq = (uint64_t)(uintptr_t)data;
+            if (!seq || !self->pending_flip_seq_.compare_exchange_strong(seq, 0)) {
+                fprintf(stderr, "[drm] the event of flip %llu came after it was given up as lost - ignored\n",
+                        (unsigned long long)(uintptr_t)data);
+                return;
+            }
             
             static uint64_t last_flip_complete = 0;
             static int complete_count = 0;
@@ -231,6 +254,7 @@ void DrmDevice::handle_events() {
             // `frame` is the vblank the flip landed on - the counter
             // drmWaitVBlank returns, which the screen recorder samples by.
             self->tap_.landed(frame);
+            self->note_refresh(frame, completion_ts);
             last_flip_complete = completion_ts;
             
             pthread_mutex_lock(&self->stats_mutex);
@@ -299,6 +323,10 @@ void DrmDevice::handle_events() {
                 // perror("drmHandleEvent");
             }
         }
+
+        // A flip whose event never came: nothing else may be waiting on it
+        // (FrontBuffer, no video), and the next one is held back meanwhile.
+        expire_lost_flip(get_time_us());
 
         // Low-frequency display hotplug probe (full connector probe costs ~ms,
         // so keep it well away from the 1ms flip-event cadence).
@@ -406,14 +434,18 @@ void DrmDevice::set_osd_fb(uint32_t fb_id) {
     // "Flowing" is a flip submitted within three frame periods (40 ms at
     // least). Past that the video is stalled or not started, and the OSD has
     // to commit itself or it would never update.
+    // A flip pending past kFlipLostUs is not video flowing: its event was
+    // lost, and with no video after it nothing else lets it go - the HUD and
+    // the menu stayed frozen until video came back (in FrontBuffer, for good).
     uint64_t now = get_time_us();
+    expire_lost_flip(now);
     uint64_t last = last_video_flip_us;
     pthread_mutex_lock(&stats_mutex);
     double gap = cadence_gap_ewma_us;
     pthread_mutex_unlock(&stats_mutex);
     uint64_t window = (uint64_t)(gap * 3.0);
     if (window < 40000) window = 40000;
-    bool flowing = video_frm_width != 0 && last && (flip_pending || now - last < window);
+    bool flowing = video_frm_width != 0 && last && (flip_in_flight(now) || now - last < window);
     if (flowing) {
         prof::count(prof::kCountOsdPending);
         return;
@@ -423,7 +455,7 @@ void DrmDevice::set_osd_fb(uint32_t fb_id) {
     // Video resuming: a flip may have been submitted since the check above.
     // It carries the previous fb; leave this one pending for the next flip
     // rather than racing it with a commit of our own.
-    if (flip_pending && get_time_us() - flip_submit_us < 250000) {
+    if (flip_in_flight(get_time_us())) {
         pthread_mutex_unlock(&osd_mutex);
         prof::count(prof::kCountOsdPending);
         return;
@@ -505,6 +537,28 @@ bool DrmDevice::wait_vblank(uint32_t* seq, uint64_t* ts_us) {
     *seq = vbl.reply.sequence;
     *ts_us = (uint64_t)vbl.reply.tval_sec * 1000000ULL + vbl.reply.tval_usec;
     return true;
+}
+
+// The vblanks counted from one flip to one at least a second later. A count
+// gone back, or flips 10 s apart (a modeset may lie between), start it again.
+void DrmDevice::note_refresh(uint32_t vbl, uint64_t t_us) {
+    if (refresh_t0_us_ && vbl > refresh_vbl0_ && t_us > refresh_t0_us_) {
+        const uint64_t dt = t_us - refresh_t0_us_;
+        if (dt < 1000000) return;
+        if (dt < 10000000) {
+            refresh_hz_.store((float)((double)(vbl - refresh_vbl0_) * 1e6 / (double)dt), std::memory_order_relaxed);
+            refresh_at_us_.store(t_us, std::memory_order_relaxed);
+        }
+    }
+    refresh_vbl0_ = vbl;
+    refresh_t0_us_ = t_us;
+}
+
+float DrmDevice::measured_refresh_hz() const {
+    const uint64_t at = refresh_at_us_.load(std::memory_order_relaxed);
+    const uint64_t now = get_time_us();
+    if (!at || (now > at && now - at > 3000000)) return 0;
+    return refresh_hz_.load(std::memory_order_relaxed);
 }
 
 int DrmDevice::refresh_hz() const {
@@ -594,7 +648,7 @@ void DrmDevice::sync_frozen_video_rect() {
         if (tap_.recording()) {
             uint64_t vb;
             uint32_t seq;
-            if (last_vblank(&vb, &seq)) tap_.moved(vx, vy, vw, vh, seq);
+            if (last_vblank(&vb, &seq)) tap_.moved(vx, vy, vw, vh, sx, sy, sw, sh, seq);
         }
     } else {
         static bool warned = false;
@@ -619,7 +673,7 @@ void DrmDevice::direct_shown() {
         if (last_vblank(&vb, &seq)) {
             // Copied in mid-scan: the next refresh is the first that shows
             // all of it.
-            tap_.submitted(pic, osd_fb, osd_gen, vx, vy, vw, vh, get_time_us());
+            tap_.submitted(pic, osd_fb, osd_gen, vx, vy, vw, vh, 0, 0, 0, 0, get_time_us());
             tap_.landed(seq + 1);
         }
     }
@@ -640,6 +694,7 @@ void DrmDevice::start_screen_tap() {
                 seed.video->frame_ref = seed.video->hold(seed.video->buf);
         }
         seed.vx = vrect_x_; seed.vy = vrect_y_; seed.vw = vrect_w_; seed.vh = vrect_h_;
+        seed.sx = vsrc_x_; seed.sy = vsrc_y_; seed.sw = vsrc_w_; seed.sh = vsrc_h_;
     }
     pthread_mutex_lock(&osd_mutex);
     seed.osd_fb = onscreen_osd_fb_id ? onscreen_osd_fb_id : current_osd_fb_id;
@@ -681,7 +736,7 @@ bool DrmDevice::wait_for_flip_completion(int timeout_ms) {
     if (!flip_pending) return true;
     
     struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
+    clock_gettime(CLOCK_MONOTONIC, &ts);   // flip_cond's clock (init)
     ts.tv_nsec += timeout_ms * 1000000L;
     if (ts.tv_nsec >= 1000000000L) {
         ts.tv_sec += 1;
@@ -695,20 +750,42 @@ bool DrmDevice::wait_for_flip_completion(int timeout_ms) {
     }
     pthread_mutex_unlock(&flip_mutex);
 
-    // Watchdog: a DRM flip event can be lost (display hiccup, modeset race).
-    // If flip_pending sticks, the renderer spins forever, decoded frames stop
-    // being consumed, the mpp buffer pool exhausts and the DECODER jams
-    // (decode_put_packet -1012 loop). Force-clear after 250ms — worst case we
-    // tear one frame instead of wedging the whole pipeline.
-    if (flip_pending && flip_submit_us > 0 &&
-        get_time_us() - flip_submit_us > 250000ULL) {
-        fprintf(stderr, "[drm] flip event lost (>250ms) — force-clearing flip_pending\n");
-        pthread_mutex_lock(&osd_mutex);
-        if (inflight_osd_fb_id) { onscreen_osd_fb_id = inflight_osd_fb_id; inflight_osd_fb_id = 0; }
-        pthread_mutex_unlock(&osd_mutex);
-        flip_pending = false;
-    }
+    expire_lost_flip(get_time_us());
     return !flip_pending;
+}
+
+// Watchdog: a DRM flip event can be lost (display hiccup, modeset race).
+// If flip_pending sticks, the renderer spins forever, decoded frames stop
+// being consumed, the mpp buffer pool exhausts and the DECODER jams
+// (decode_put_packet -1012 loop), and the OSD holds its frames for a flip
+// that never comes. Force-clear after 250ms — worst case we tear one frame
+// instead of wedging the whole pipeline. Its commit went in, so its picture
+// is taken as on screen from now. From the renderer while it waits, the OSD
+// thread and the event thread (FrontBuffer or no video: nothing waits then).
+void DrmDevice::expire_lost_flip(uint64_t now_us) {
+    if (!flip_pending) return;
+    // The flip's number first, then its time: page_flip sets them the other
+    // way round, so the time read is never older than that flip's own.
+    uint64_t seq = pending_flip_seq_.load();
+    if (!seq) return;
+    const uint64_t t = flip_submit_us.load();
+    if (!t || now_us < t || now_us - t <= kFlipLostUs) return;
+    // Its event may be completing it this very moment: whoever takes its
+    // number finishes it, and the other leaves it alone.
+    if (!pending_flip_seq_.compare_exchange_strong(seq, 0)) return;
+    fprintf(stderr, "[drm] flip event lost (>250ms) — force-clearing flip_pending\n");
+    pthread_mutex_lock(&osd_mutex);
+    if (inflight_osd_fb_id) { onscreen_osd_fb_id = inflight_osd_fb_id; inflight_osd_fb_id = 0; }
+    pthread_mutex_unlock(&osd_mutex);
+    if (tap_.recording()) {
+        uint64_t vb;
+        uint32_t vseq;
+        if (last_vblank(&vb, &vseq)) tap_.landed(vseq); else tap_.submit_failed();
+    }
+    flip_pending = false;
+    pthread_mutex_lock(&flip_mutex);
+    pthread_cond_broadcast(&flip_cond);
+    pthread_mutex_unlock(&flip_mutex);
 }
 
 void DrmDevice::record_direct_frame(uint64_t recv_ts, uint64_t dec_start_ts,
@@ -738,23 +815,11 @@ bool DrmDevice::page_flip(int fb_id, uint64_t recv_ts, uint64_t dec_start_ts, ui
     pending_stats = {recv_ts, dec_start_ts, dec_end_ts, sub_start_ts, tx_age_us, (uint32_t)fb_id, std::move(slices)};
     pthread_mutex_unlock(&stats_mutex);
 
-    // Two commit styles, selectable at runtime so they can be A/B'd against the
-    // OSD's "disp" figure.
-    //
-    // blocking_flip (what stock ar_ldy_gnd does - all four of its
-    // drmModeAtomicCommit sites pass flags 0x400, ALLOW_MODESET only, and the
-    // binary has no drmHandleEvent at all): the commit does not return until
-    // the flip has landed, so there is never a flip in flight when the next
-    // frame arrives. Latency is just "time to the next vblank", ~8ms at 60Hz.
-    //
-    // The non-blocking path asks for a completion event, which sets
-    // flip_pending, which then makes page_flip() reject the NEXT frame until
-    // the event arrives - costing an extra half-frame on average. That event
-    // exists only to timestamp display latency, so the measurement was paying
-    // for itself. With a blocking commit the return time IS the completion
-    // time, so the stat survives without the event.
-    int flags = blocking_flip ? DRM_MODE_ATOMIC_ALLOW_MODESET
-                              : (DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT);
+    // Non-blocking, with a completion event: flip_pending holds the next
+    // picture back until it lands (handle_events), which also times it. (A
+    // blocking commit, as stock ar_ldy_gnd makes, was here as blocking_flip,
+    // never switched on.)
+    const int flags = DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT;
 
     drmModeAtomicSetCursor(output_list->video_request, 0);
     
@@ -783,7 +848,7 @@ bool DrmDevice::page_flip(int fb_id, uint64_t recv_ts, uint64_t dec_start_ts, ui
     // handled on the event thread before this one runs again, and it must
     // find the fb there to move it on screen. Undone below if the commit fails.
     uint32_t prev_inflight = inflight_osd_fb_id;
-    if (!blocking_flip) inflight_osd_fb_id = osd_fb;
+    inflight_osd_fb_id = osd_fb;
     pthread_mutex_unlock(&osd_mutex);
 
     // Destination rectangle for the video plane, shrunk about the screen
@@ -884,15 +949,21 @@ bool DrmDevice::page_flip(int fb_id, uint64_t recv_ts, uint64_t dec_start_ts, ui
 
     // Pacing logic completely removed - frames submit immediately
 
+    // The submit time before flip_pending: whoever sees this flip pending
+    // sees its time (flip_in_flight, expire_lost_flip). Its number goes with
+    // its event (handle_events).
+    const uint64_t seq = ++flip_seq_;
+    const uint64_t submit_us = get_time_us();
+    flip_submit_us = submit_us;
+    pending_flip_seq_ = seq;
     flip_pending = true;
-    flip_submit_us = get_time_us();
     // The screen recorder: what this commit puts on screen. Told before the
     // commit, because its event can arrive before this thread runs again.
     std::shared_ptr<DecodedUnit> pic = std::move(flip_picture_);
     flip_picture_.reset();
     if (tap_.recording() && pic)
-        tap_.submitted(pic, osd_fb, osd_gen, vx, vy, vw, vh, flip_submit_us);
-    int ret = drmModeAtomicCommit(drm_fd, output_list->video_request, flags, this);
+        tap_.submitted(pic, osd_fb, osd_gen, vx, vy, vw, vh, sx, sy, sw, sh, submit_us);
+    int ret = drmModeAtomicCommit(drm_fd, output_list->video_request, flags, (void*)(uintptr_t)seq);
     if (ret != 0) tap_.submit_failed();
     if (ret == 0 && pic) {
         std::lock_guard<std::mutex> lk(shown_m_);
@@ -900,69 +971,15 @@ bool DrmDevice::page_flip(int fb_id, uint64_t recv_ts, uint64_t dec_start_ts, ui
     }
     if (ret == 0) {
         split_on_ = split;
-        last_video_flip_us = flip_submit_us;
-        if (blocking_flip) {
-            pthread_mutex_lock(&osd_mutex);
-            onscreen_osd_fb_id = osd_fb;
-            inflight_osd_fb_id = 0;
-            pthread_mutex_unlock(&osd_mutex);
-        }
+        last_video_flip_us = submit_us;
     } else {
         pthread_mutex_lock(&osd_mutex);
         inflight_osd_fb_id = prev_inflight;   // no flip, no event
         pthread_mutex_unlock(&osd_mutex);
     }
 
-    if (blocking_flip && ret == 0) {
-        // The commit returned, so the flip is done. Close out the stats here
-        // exactly as the event handler would, and leave nothing pending.
-        uint64_t completion_ts = get_time_us();
-        if (tap_.recording()) {
-            uint64_t vb;
-            uint32_t seq;
-            if (last_vblank(&vb, &seq)) tap_.landed(seq); else tap_.submit_failed();
-        }
-        if (ltrace::on()) ltrace::rec(ltrace::kFlipDone, completion_ts, (uint32_t)fb_id, completion_ts);
-        flip_pending = false;
-        pthread_mutex_lock(&stats_mutex);
-        if (pending_stats.recv_ts > 0) {
-            latest_stats.total_latency_us =
-                (completion_ts - pending_stats.recv_ts) + pending_stats.tx_age_us;
-            latest_stats.display_latency_us = completion_ts - pending_stats.dec_end_ts;
-            latest_stats.submission_latency_us = completion_ts - pending_stats.submission_start_ts;
-            latest_stats.completion_ts = completion_ts;
-            latest_stats.available = true;
-            pending_stats.recv_ts = 0;
-        }
-        if (pending_stats.slices || pending_stats.bottom_slices) {
-            // The commit returned after the vblank: take the vblank's own time.
-            uint64_t vb = 0;
-            if (!last_vblank(&vb) || vb > completion_ts) vb = completion_ts;
-            note_slice_flip(vb);
-        }
-        pthread_mutex_unlock(&stats_mutex);
-        // Same cadence bookkeeping the event handler does, so the stutter
-        // counter and the expected-period EWMA stay meaningful in this mode.
-        if (cadence_last_flip_us > 0 && completion_ts > cadence_last_flip_us) {
-            uint32_t gap = (uint32_t)(completion_ts - cadence_last_flip_us);
-            push_flip_log(completion_ts, gap);
-            cadence_gaps_us[cadence_idx] = gap;
-            cadence_idx = (cadence_idx + 1) % CADENCE_RING;
-            if (cadence_count < CADENCE_RING) cadence_count++;
-            double expect = cadence_gap_ewma_us;
-            double thresh = (expect > 0.0) ? expect * 3.5 : 0.0;
-            if (thresh < 45000.0) thresh = 45000.0;
-            if (expect > 0.0 && (double)gap > thresh) cadence_stutters++;
-            else cadence_gap_ewma_us = (expect <= 0.0)
-                     ? (double)gap : (0.95 * expect + 0.05 * (double)gap);
-        }
-        cadence_last_flip_us = completion_ts;
-        pthread_mutex_lock(&flip_mutex);
-        pthread_cond_broadcast(&flip_cond);
-        pthread_mutex_unlock(&flip_mutex);
-    }
     if (ret < 0) {
-        printf("drmModeAtomicCommit ret <0\n ");
+        const int err = -ret;   // drmModeAtomicCommit returns -errno; errno may be another call's by now
         if (tile.active) {
             // A tile the plane would not take: say which, and fall back to the
             // picture rectangle for the next flips - left as it was, every
@@ -976,10 +993,21 @@ bool DrmDevice::page_flip(int fb_id, uint64_t recv_ts, uint64_t dec_start_ts, ui
             current_tile_ = Tile();
             pthread_mutex_unlock(&osd_mutex);
         }
+        uint64_t mine = seq;
+        pending_flip_seq_.compare_exchange_strong(mine, 0);
         flip_pending = false; // Commit failed, no event will be sent
-        if (errno == EBUSY) prof::count(prof::kCountFlipBusy);
-        if (errno != EBUSY) {
-            perror("drmModeAtomicCommit (page_flip)");
+        if (err == EBUSY) prof::count(prof::kCountFlipBusy);
+        // Refused for good (a plane setup the driver will not take), every
+        // flip - 60 to 144 a second - was a line in the SD log: the first
+        // now, then one every 5 s with how many there were.
+        static uint64_t fail_log_us = 0;
+        static unsigned fails = 0;
+        fails++;
+        if (!fail_log_us || page_flip_start - fail_log_us >= 5000000) {
+            fprintf(stderr, "drmModeAtomicCommit (page_flip): %s (%u refused since the last report)\n",
+                    strerror(err), fails);
+            fail_log_us = page_flip_start;
+            fails = 0;
         }
         return false;
     }

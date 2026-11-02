@@ -123,6 +123,9 @@ static const int kFailsBeforeDaemonRestart = 2;
 // talk to the baseband. A bb_ioctl_ex with kIoctlTimeoutMs, logged when it
 // fails (ar8030_link_bb.cpp).
 int ar_ioctl(bb_dev_handle_t *dev, uint32_t request, const void *in, void *out);
+// The same for a caller that asks back to back (the frame clock): one waiting
+// for the lock goes first.
+int ar_ioctl_yield(bb_dev_handle_t *dev, uint32_t request, const void *in, void *out);
 
 // Parse the paired air-unit MACs out of /factory/user_cfg.json. The file is a
 // flat object holding "bb_mac_addr_N": [ "0xE5", "0xDA", "0x00", "0x08" ], the

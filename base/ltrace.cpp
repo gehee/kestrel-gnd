@@ -13,6 +13,9 @@ std::atomic<bool> g_on{false};
 
 static std::vector<Rec> g_buf;
 static std::atomic<size_t> g_idx{0};
+// Writers inside rec() past its first test: run() frees g_buf only once
+// none is left, as one that saw g_on may be preempted for any length of time.
+static std::atomic<int> g_writers{0};
 
 static void clock_pair() {
     struct timespec m, r;
@@ -29,14 +32,22 @@ uint64_t now_us() {
 }
 
 void rec(uint8_t ev, uint64_t t, uint32_t a, uint64_t b, const void* d, size_t n) {
-    if (!on()) return;
-    size_t i = g_idx.fetch_add(1, std::memory_order_relaxed);
-    if (i >= g_buf.size()) return;
-    Rec& r = g_buf[i];
-    r.t = t; r.ev = ev; r.a = a; r.b = b; r.pad = 0;
-    if (n > sizeof(r.d)) n = sizeof(r.d);
-    r.n = (uint8_t)n;
-    if (n) memcpy(r.d, d, n);
+    if (!on()) return;   // off: nothing more than this
+    // Counted in, then on looked at again: run() turns it off and then
+    // waits for the count, so either it sees this writer or this writer
+    // sees it off (both sequentially consistent).
+    g_writers.fetch_add(1);
+    if (g_on.load()) {
+        size_t i = g_idx.fetch_add(1, std::memory_order_relaxed);
+        if (i < g_buf.size()) {
+            Rec& r = g_buf[i];
+            r.t = t; r.ev = ev; r.a = a; r.b = b; r.pad = 0;
+            if (n > sizeof(r.d)) n = sizeof(r.d);
+            r.n = (uint8_t)n;
+            if (n) memcpy(r.d, d, n);
+        }
+    }
+    g_writers.fetch_sub(1);
 }
 
 static void run() {
@@ -60,7 +71,7 @@ static void run() {
         sleep(secs);
         clock_pair();
         g_on.store(false);
-        usleep(100000);   // let writers that saw g_on finish their copy
+        while (g_writers.load() != 0) usleep(1000);   // writers that saw g_on finish their copy
 
         size_t n = g_idx.load();
         if (n > g_buf.size()) n = g_buf.size();

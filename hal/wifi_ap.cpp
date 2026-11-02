@@ -1,5 +1,6 @@
 #include "hal/wifi_ap.hpp"
 #include "kestrel_gnd_features.h"
+#include "base/shell.hpp"
 
 #include <unistd.h>
 
@@ -41,7 +42,7 @@ void wifi_ap_set(bool on) {
             char cmd[128];
             snprintf(cmd, sizeof(cmd), "%s %s >>/var/log/fpvos-wifi.log 2>&1",
                      kScript, on ? "start" : "stop");
-            if (system(cmd) != 0)
+            if (run_shell(cmd) != 0)
                 printf("wifi-ap: '%s %s' failed, see /var/log/fpvos-wifi.log\n",
                        kScript, on ? "start" : "stop");
         }

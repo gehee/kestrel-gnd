@@ -605,7 +605,7 @@ int Ar8030Link::work_list_all() {
     return ar_ioctl(dev, BB_SET_WORK_CHAN_LIST, &wl, NULL);
 }
 
-int Ar8030Link::search_all_channels() {
+int Ar8030Link::search_all_channels(bool region) {
     bb_dev_handle_t *dev = (bb_dev_handle_t *)bb_dev;
     if (!dev) return -1;
     uint32_t freqs[128];
@@ -619,7 +619,7 @@ int Ar8030Link::search_all_channels() {
     printf("ar8030:   searching all %d channels: BB_SET_WORK_CHAN_LIST -> %d, "
            "BB_SET_CHAN_MODE(auto=1) -> %d\n", n, rc_wl, rc);
     if (rc == 0) chan_auto = true;
-    region_due = true;   // AUTO: the air unit hops too, where a country is known
+    if (region) region_due = true;   // AUTO: the air unit hops too, where a country is known
     return rc;
 }
 
@@ -732,8 +732,10 @@ void Ar8030Link::region_auto_apply() {
             region_due = true;
             return;
         }
-        search_all_channels();   // the ground follows the air unit again (the move pinned it)
-        region_due = false;      // which noted a change: this is it
+        // The ground follows the air unit again (the move pinned it). Not noted
+        // as a change, as AUTO's list is this one: a change noted meanwhile (a
+        // width step, on ar_libre's thread) was cleared with it.
+        search_all_channels(false);
         cur = target;
     }
     if (!chan_hop.load()) {

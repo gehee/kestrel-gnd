@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <fcntl.h>
 #include <mutex>
+#include <pthread.h>
 #include <thread>
 #include <unistd.h>
 
@@ -18,6 +19,10 @@ struct State {
 State& st = *new State();   // never deleted, on purpose (threads outlive main's statics)
 
 void run() {
+    // Started by whichever thread logs first (the radio's stats thread):
+    // not real-time, whatever that one is.
+    struct sched_param sp = {};
+    pthread_setschedparam(pthread_self(), SCHED_OTHER, &sp);
     std::string open_path;
     int fd = -1;
     for (;;) {

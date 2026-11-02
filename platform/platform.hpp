@@ -8,6 +8,7 @@
 // display::Presenter, Vdec, hal::ScreenEncoder...) and never names a backend.
 #include <cstdint>
 #include <functional>
+#include <atomic>
 #include <memory>
 #include <string>
 
@@ -66,13 +67,13 @@ std::shared_ptr<display::Presenter> make_presenter(std::shared_ptr<display::Disp
                                                    Settings& settings,
                                                    std::function<void(int, int)> on_frame_size,
                                                    std::shared_ptr<display::VideoListener> listener,
-                                                   volatile bool* stop, bool console_stats);
+                                                   std::atomic<bool>* stop, bool console_stats);
 
 // ---- the decoders ---------------------------------------------------------------
 // The live decoder: by --decoder-name / decoder_name, the box's hardware one
 // for its name (rkmpp on the VRX Pro) and ffmpeg's under any other.
 std::shared_ptr<Vdec> make_decoder(VideoCodec codec, const std::string& name, std::shared_ptr<hal::FrameSink> sink,
-                                   std::shared_ptr<display::Display> display, volatile bool* stop);
+                                   std::shared_ptr<display::Display> display, std::atomic<bool>* stop);
 // Whether the decoder is the box's hardware one for that name (the menu says so).
 bool hardware_decoder(const std::string& name);
 // The menu's background clip: hardware, no presenter, each picture to `sink`
@@ -80,7 +81,7 @@ bool hardware_decoder(const std::string& name);
 // its still background.
 bool has_background_decoder();
 std::unique_ptr<Vdec> make_background_decoder(VideoCodec codec, std::shared_ptr<hal::Scanout> scanout,
-                                              volatile bool* stop,
+                                              std::atomic<bool>* stop,
                                               std::function<void(std::shared_ptr<DecodedUnit>)> sink);
 
 // ---- the screen as a stream -----------------------------------------------------

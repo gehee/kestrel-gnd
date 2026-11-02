@@ -257,6 +257,11 @@ void OSD::stats_history_update(uint64_t now) {
         stats_resends_t_ = fresh_resends.back().t_us;
         stats_resends_.insert(stats_resends_.end(), fresh_resends.begin(), fresh_resends.end());
     }
+    // A first fill (an open, after gallery_release) takes minutes at once: that
+    // much scratch is not kept for the tenths of a second that follow.
+    if (fresh.capacity() > 4096) std::vector<StatsFrame>().swap(fresh);
+    if (fresh_flips.capacity() > 4096) std::vector<display::FlipSample>().swap(fresh_flips);
+    if (fresh_resends.capacity() > 4096) std::vector<StatsResend>().swap(fresh_resends);
     // Forget what is older than any window shows.
     while (stats_frames_head_ < stats_frames_.size() && stats_frames_[stats_frames_head_].t_us < cutoff) stats_frames_head_++;
     while (stats_flips_head_ < stats_flips_.size() && stats_flips_[stats_flips_head_].t_us < cutoff) stats_flips_head_++;
@@ -308,6 +313,18 @@ void OSD::stats_refresh(int window_idx, uint64_t now) {
     stats_view_.frame_us = osd_vars.radio_link.state == 2 ? osd_vars.radio_link.frame_us : 0;
     stats_view_.vtx_temp_c = vtx_temp_valid && osd_vars.radio_link.state == 2 ? vtx_cpu_c.load() : -1;
     stats_view_.vrx_temp_c = vrx_temp_cached_ > 0 ? vrx_temp_cached_ : -1;
+    {
+        // The screen: its mode with the mode's exact refresh, and the refresh
+        // it really runs at - measured from its flips, the frame period's (the
+        // mode's, or Refresh Sync's) without them.
+        const display::Mode md = dev->mode();
+        const double period = dev->frame_period_us();
+        const float hz = dev->measured_refresh_hz();
+        stats_view_.screen_w = md.w;
+        stats_view_.screen_h = md.h;
+        stats_view_.screen_mode_hz = (float)dev->mode_refresh_hz();
+        stats_view_.screen_hz = hz > 0 ? hz : period > 0 ? (float)(1e6 / period) : 0.0f;
+    }
     stats_view_window_ = ws;
     stats_view_us_ = now;
     if (stats_shown_us_ == 0 || now - stats_shown_us_ >= 500000 || stats_shown_.window_s != ws) {
@@ -400,6 +417,27 @@ void OSD::gallery_capture_frame(int W, int H) {
     signal_render(prof::kWakeAnim);
 }
 
+// The gallery has closed: what it holds goes - the thumbnails (up to 24 at
+// 640x360), the two screen-size textures (the copy of the screen it opened on,
+// the stats screen's slow layer) and the stats history, about 40 MB at 1080p
+// that stayed for the rest of the session. The next open makes them again.
+void OSD::gallery_release() {
+    for (auto& th : gallery_thumbs_) canvas_->free_image(th.second.tex);
+    gallery_thumbs_.clear();
+    canvas_->free_image(gallery_snap_tex_);
+    gallery_snap_tex_ = 0;
+    gallery_snap_valid_ = false;
+    canvas_->free_image(stats_layer_tex_);
+    stats_layer_tex_ = 0;
+    stats_layer_valid_ = false;
+    std::vector<StatsFrame>().swap(stats_frames_);
+    std::vector<StatsFlip>().swap(stats_flips_);
+    std::vector<StatsResend>().swap(stats_resends_);
+    stats_frames_head_ = stats_flips_head_ = stats_resends_head_ = 0;
+    stats_frames_t_ = stats_flips_t_ = stats_resends_t_ = 0;
+    stats_view_window_ = -1;   // rebuilt at once from what is topped up again
+}
+
 void OSD::gallery_prewarm() {
     static const char* const words[] = {
         "GALLERY", "LIVE", "LAST FRAME", "NO VIDEO", "NO PREVIEW YET", "READING THE CARD",
@@ -414,7 +452,7 @@ void OSD::gallery_prewarm() {
         "Exp", "Read", "Enc", "RF", "Dec", "Disp", "ms", "I", "Mb", "link", "p50", "p99", "now", "air power", "bandwidth", "channel", "frame spacing", "a frame late",
         "0", "20", "40", "60", "80", "100", "-10 s", "-1 min", "-3 min", "WAITING FOR VIDEO",
         "frame spacing", "n/a (needs vsync)", "skipped", "resent", "RESENT", "--", "slices timelines", "slice timeline",
-        "| vblank  : mid-screen",
+        "| vblank  : mid-screen", "SCREEN MODE", "CURRENT",
         "1080p", "720p",
     };
     for (const char* w : words) canvas_->cache_text(w);
@@ -453,7 +491,8 @@ bool OSD::render_gallery(int W, int H) {
     const bool animating = gallery_.update(now);
     const Gallery::Snapshot s = gallery_.snapshot();
     service_clip_player(s);
-    if (!gallery_.active() || !s.items) return false;
+    if (!gallery_.active()) { gallery_release(); return false; }
+    if (!s.items) return false;
 
     const auto& items = *s.items;
     const int n = (int)items.size();
@@ -488,7 +527,8 @@ bool OSD::render_gallery(int W, int H) {
     // the gallery was up stayed in TRANSITION, and the live tile stayed empty, until
     // Back. The HUD finishes the transition when it is drawn again.
     const bool live_pic = (vs == VideoState::LIVE || vs == VideoState::TRANSITION);
-    const bool live_fresh = live_pic && now - last_frame_us < 1500000ULL;
+    // A picture stamped after `now` was read is fresh (the age would wrap).
+    const bool live_fresh = live_pic && (now <= last_frame_us || now - last_frame_us < 1500000ULL);
 
     int px, py, pw, ph;
     dev->picture_rect(W, H, px, py, pw, ph);
@@ -826,7 +866,7 @@ bool OSD::render_gallery(int W, int H) {
             };
             key("video rate", data, 0);
             key("link capacity", white, 1);
-            key("lost packets", red, 2);
+            key("lost pictures", red, 2);
             key("distance", violet, 1);
         }
         {
@@ -863,6 +903,23 @@ bool OSD::render_gallery(int W, int H) {
 
         // right column, under the live picture: the latency's distribution
         // (its p50 and p99 are under the slices' table, per slice)
+        // The screen, under the live picture: its mode as it is named
+        // (1080p@120), then the refresh it runs at now.
+        if (sh.screen_w > 0) {
+            const float sf = 10 * fs, y = Yd(140.5f);
+            if (sh.screen_mode_hz > 0) snprintf(b, sizeof(b), "%dp@%ld", sh.screen_h, std::lround(sh.screen_mode_hz));
+            else snprintf(b, sizeof(b), "%dp", sh.screen_h);
+            float x = X(khx);
+            text("SCREEN MODE", x, y, sf, 0, quiet, A);
+            x += text_width("SCREEN MODE", sf) + 3 * m;
+            text(b, x, y, sf, 0, ink, A);
+            x += text_width(b, sf) + 10 * m;
+            if (sh.screen_hz > 0) {
+                snprintf(b, sizeof(b), "%.1f Hz", sh.screen_hz);
+                text("CURRENT", x, y, sf, 0, quiet, A);
+                text(b, x + text_width("CURRENT", sf) + 3 * m, y, sf, 0, ink, A);
+            }
+        }
         text("latency distribution", X(khx), Yd(khy - 4), 11 * fs, 0, quiet, A);
         {
             uint32_t hm = 1;
@@ -1624,7 +1681,10 @@ bool OSD::render_gallery(int W, int H) {
         }
         text(l1, W * 0.5f, 0.82f * H, 40 * u, 1, ink, words_a);
         text(l2, W * 0.5f, 0.82f * H + 40 * u, 28 * u, 1, quiet, words_a);
-        if (n == 1 && !s.loading)
+        // The strip always holds the live and stats tiles: none of the rest.
+        const bool none = std::none_of(items.begin(), items.end(),
+                                       [](const Gallery::Item& x) { return !x.live && !x.stats; });
+        if (none && !s.loading)
             text("NO RECORDINGS YET", W * 0.5f, 0.82f * H + 76 * u, 24 * u, 1, quiet, words_a);
 
         const float cy = 0.42f * H;

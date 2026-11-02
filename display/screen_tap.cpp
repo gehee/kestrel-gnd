@@ -31,7 +31,7 @@ void ScreenTap::set_recording(bool on, const ScreenPair* seed) {
 }
 
 void ScreenTap::submitted(std::shared_ptr<DecodedUnit> video, uint32_t osd_fb, uint64_t osd_gen,
-                          int vx, int vy, int vw, int vh, uint64_t now_us) {
+                          int vx, int vy, int vw, int vh, int sx, int sy, int sw, int sh, uint64_t now_us) {
     if (!recording()) return;
     std::lock_guard<std::mutex> lk(m_);
     // Checked again under the lock: a stop may have cleared the tap since.
@@ -41,6 +41,7 @@ void ScreenTap::submitted(std::shared_ptr<DecodedUnit> video, uint32_t osd_fb, u
     pending_.osd_fb = osd_fb;
     pending_.osd_gen = osd_gen;
     pending_.vx = vx; pending_.vy = vy; pending_.vw = vw; pending_.vh = vh;
+    pending_.sx = sx; pending_.sy = sy; pending_.sw = sw; pending_.sh = sh;
     pending_us_ = now_us;
     has_pending_ = true;
 }
@@ -83,12 +84,13 @@ void ScreenTap::osd_landed(uint32_t osd_fb, uint64_t osd_gen, uint32_t seq) {
     cv_.notify_all();
 }
 
-void ScreenTap::moved(int vx, int vy, int vw, int vh, uint32_t seq) {
+void ScreenTap::moved(int vx, int vy, int vw, int vh, int sx, int sy, int sw, int sh, uint32_t seq) {
     if (!recording()) return;
     {
         std::lock_guard<std::mutex> lk(m_);
         if (!on_ || !has_cur_) return;
         cur_.vx = vx; cur_.vy = vy; cur_.vw = vw; cur_.vh = vh;
+        cur_.sx = sx; cur_.sy = sy; cur_.sw = sw; cur_.sh = sh;
         cur_.seq = seq;
     }
     cv_.notify_all();

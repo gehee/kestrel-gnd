@@ -14,13 +14,13 @@ bool has_refresh_sync() { return false; }
 bool hardware_decoder(const std::string&) { return false; }
 
 std::shared_ptr<Vdec> make_decoder(VideoCodec codec, const std::string& name, std::shared_ptr<hal::FrameSink> sink,
-                                   std::shared_ptr<display::Display>, volatile bool* stop) {
+                                   std::shared_ptr<display::Display>, std::atomic<bool>* stop) {
     return std::make_shared<VdecFfmpeg>(codec, name, sink, stop);
 }
 
 bool has_background_decoder() { return false; }
 
-std::unique_ptr<Vdec> make_background_decoder(VideoCodec, std::shared_ptr<hal::Scanout>, volatile bool*,
+std::unique_ptr<Vdec> make_background_decoder(VideoCodec, std::shared_ptr<hal::Scanout>, std::atomic<bool>*,
                                               std::function<void(std::shared_ptr<DecodedUnit>)>) {
     return nullptr;
 }

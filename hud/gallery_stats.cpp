@@ -107,14 +107,15 @@ void build_stats(const StatsFrame* frames, size_t n_frames, const StatsFlip* fli
     uint64_t first_t = 0;
     for (size_t fi = 0; fi < n_frames; fi++) {
         const StatsFrame& f = frames[fi];
+        const float tot = total_of(f);
         // The packet-loss counter is cumulative; a column gets what it grew by.
-        const bool counted = have_prev && f.lost >= prev_lost;
+        // A gap filler carries no count (0): skipped, or the next picture's
+        // whole count would land as new losses.
+        const bool counted = have_prev && tot > 0.0f && f.lost >= prev_lost;
         const uint32_t grew = counted ? f.lost - prev_lost : 0;
-        prev_lost = f.lost;
-        have_prev = true;
+        if (tot > 0.0f) { prev_lost = f.lost; have_prev = true; }
         const int c = col_of(f.t_us);
         if (c < 0) continue;
-        const float tot = total_of(f);
         if (grew) {
             out.lost[c] = (uint16_t)std::min<uint32_t>(65535, out.lost[c] + grew);
             out.lost_total += grew;

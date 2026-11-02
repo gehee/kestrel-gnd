@@ -56,6 +56,20 @@ static volatile sig_atomic_t g_handoff = 0;
 static void on_signal(int s)  { (void)s; g_stop = 1; }
 static void on_handoff(int s) { (void)s; g_handoff = 1; }
 
+// S12splash writes it, S70kestrel and kestrel-gnd signal the pid in it. Gone
+// with us, however we end (an early error return too): a pid left in it is
+// some later process's, which S70kestrel's SIGUSR1 or kestrel-gnd's SIGTERM
+// would kill. Only if it is still ours - a restarted splash writes its own.
+#define PIDFILE "/var/run/kestrel-splash.pid"
+static void remove_pidfile(void) {
+    FILE* f = fopen(PIDFILE, "r");
+    if (!f) return;
+    int pid = 0;
+    const int ok = fscanf(f, "%d", &pid);
+    fclose(f);
+    if (ok == 1 && pid == (int)getpid()) unlink(PIDFILE);
+}
+
 typedef struct {
     uint32_t fb_id, handle;
     uint8_t* map;
@@ -291,6 +305,14 @@ int main(int argc, char** argv) {
     signal(SIGINT,  on_signal);
     signal(SIGUSR1, on_handoff);
     signal(SIGALRM, on_signal);   // safety net - see the header comment
+    atexit(remove_pidfile);
+    // Blocked while the stop flag is tested before waiting, and let in only by
+    // the wait itself (sigsuspend), so a SIGTERM between the two is not missed.
+    sigset_t stop_sigs, unblocked;
+    sigemptyset(&stop_sigs);
+    sigaddset(&stop_sigs, SIGTERM);
+    sigaddset(&stop_sigs, SIGINT);
+    sigaddset(&stop_sigs, SIGALRM);
 
     int fd = open(card, O_RDWR | O_CLOEXEC);
     if (fd < 0) { perror("kestrel-splash: open card"); return 1; }
@@ -387,7 +409,9 @@ int main(int argc, char** argv) {
             // rather than going black. See the header comment for the rest
             // of the handshake.
             if (!dropped_master) { drmDropMaster(fd); alarm(30); dropped_master = 1; }
-            pause();
+            sigprocmask(SIG_BLOCK, &stop_sigs, &unblocked);
+            if (!g_stop) sigsuspend(&unblocked);
+            sigprocmask(SIG_SETMASK, &unblocked, NULL);
             continue;
         }
 

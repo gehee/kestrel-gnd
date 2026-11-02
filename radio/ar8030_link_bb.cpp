@@ -9,11 +9,18 @@ using namespace radio;
 // baseband, and Artosyn's client library is not known to take concurrent
 // requests (ar_libre's does).
 static std::mutex g_bb_req_mu;
+// Requests waiting for it. A std::mutex hands over to no one: the frame
+// clock's search (1.5 s of reads back to back) took it again before a waiting
+// thread had woken, and the radio thread's requests and the stats' waited out
+// the search. Its reads (ar_ioctl_yield) let one waiting go first.
+static std::atomic<int> g_bb_req_waiting{0};
 
 int ar_ioctl(bb_dev_handle_t *dev, uint32_t request, const void *in, void *out) {
     int rc;
     {
+        g_bb_req_waiting.fetch_add(1);
         std::lock_guard<std::mutex> one_at_a_time(g_bb_req_mu);
+        g_bb_req_waiting.fetch_sub(1);
         rc = bb_ioctl_ex(dev, request, in, out, kIoctlTimeoutMs);
     }
     if (rc != 0) {
@@ -36,6 +43,11 @@ int ar_ioctl(bb_dev_handle_t *dev, uint32_t request, const void *in, void *out) 
         }
     }
     return rc;
+}
+
+int ar_ioctl_yield(bb_dev_handle_t *dev, uint32_t request, const void *in, void *out) {
+    for (int i = 0; i < 100 && g_bb_req_waiting.load() > 0; i++) usleep(50);   // a few ms at most
+    return ar_ioctl(dev, request, in, out);
 }
 
 // Events stock subscribes to before touching a socket (capture: class 03 01,
@@ -82,7 +94,7 @@ void Ar8030Link::on_link_event(const uint8_t* p) {
     }
     printf("ar8030: event: link state %u -> %u\n", p[2], p[1]);
     if (p[1] == 2) frame_clock_.reframe();   // a new link, its own frame
-    if (p[1] == 2) caps_due.store(true);     // the menu's caps again on it
+    if (p[1] == 2) caps_now(false);          // the menu's caps again on it
     report_link_state(p[1]);
 }
 
@@ -699,7 +711,14 @@ void Ar8030Link::disconnect_bb() {
     if (sockfd >= 0) { bb_socket_close(sockfd); sockfd = -1; }
     SHUT_STEP("closing control socket");
     if (ctrl_sockfd >= 0) { bb_socket_close(ctrl_sockfd); ctrl_sockfd = -1; }
+    // --debug-msp-bb-port's: opened again at the next bring-up (drain_msp_socket).
+    if (msp_sockfd >= 0) { SHUT_STEP("closing MSP socket"); bb_socket_close(msp_sockfd); msp_sockfd = -1; }
     sky_ack_ = SkyAckWait();             // its ack will not come on this socket
+    // The work channel lists queued with those settings go with them (in the
+    // same order); the ones of settings parked since stay. Kept, AUTO HOP's
+    // next list went out as one of the link that ended.
+    for (const auto& q : settings_q_)
+        if (q.first == CAM_WORK_LIST && !region_q_lists_.empty()) region_q_lists_.pop_front();
     settings_q_.clear();
     // Hand the device back before letting go of the handle.
     //

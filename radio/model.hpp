@@ -144,7 +144,7 @@ public:
     void distance(int raw);                    // the ranging reading, metres (-1 none)
     void low_power(bool on);                   // standby power or radiating: an arming zeroes the distance
     void air_boot(const std::string& id);      // kestrel-air's power-up id ("" stock)
-    void video_bandwidth(float mbps);          // each second (the radio thread): the link's figure and the rate
+    void video_bandwidth(float mbps, uint32_t frames_lost = 0);          // each second (the radio thread): the link's figure and the rate
     // What a part's state holds, changed by f and published.
     template <class F> void update_camera(F&& f) { update(camera_, cam_, f); }
     template <class F> void update_unit(F&& f) { update(unit_, unit_s_, f); }

@@ -32,7 +32,7 @@
 extern "C" {
 #endif
 
-#define OSD_BUF_COUNT	2
+#define OSD_BUF_COUNT	1	/* restore_planes_zpos's, made at exit */
 
 struct drm_object {
 	drmModeObjectProperties *props;

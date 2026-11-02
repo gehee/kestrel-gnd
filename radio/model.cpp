@@ -162,9 +162,10 @@ void Model::link_state(int state) {
     publish_radio();
 }
 
-void Model::video_bandwidth(float mbps) {
+void Model::video_bandwidth(float mbps, uint32_t frames_lost) {
     std::lock_guard<bus::PiMutex> lk(mu_);
     radio_s_.video_mbps = mbps;
+    radio_s_.frames_lost = frames_lost;
     publish_radio();
     radio_.rate(mbps);
 }

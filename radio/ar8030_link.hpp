@@ -48,7 +48,7 @@ class Ar8030Link : public radio::Link, private radio::VideoOut::Source {
         using AirInfo   = air::Info;
         Ar8030Link(radio::Model& model, const Ar8030Config& cfg,
                      Settings& settings, const VideoCodec& codec_, std::shared_ptr<Vdec> vdec_,
-                     volatile bool* stop_signal,
+                     std::atomic<bool>* stop_signal,
                      std::string host_ = "127.0.0.1", int host_port_ = 50000,
                      int slot_ = 0, int video_port_ = 3);
         ~Ar8030Link() override;
@@ -90,7 +90,7 @@ class Ar8030Link : public radio::Link, private radio::VideoOut::Source {
         void report_link_state(int ls);  // to the bus, a new FC session at a link-up (the event's, the poll's)
         const VideoCodec& codec;
         std::shared_ptr<Vdec> vdec;
-        volatile bool* should_stop;
+        std::atomic<bool>* should_stop;
 
         std::string host;
         int host_port;
@@ -168,7 +168,7 @@ class Ar8030Link : public radio::Link, private radio::VideoOut::Source {
         // What the air unit has on, by name: its feature bits and what it said.
         static std::vector<std::string> cap_names(const AirInfo &a);
         int air_floor_us;       // fastest capture -> first slice (air_floor_ms), see air_delay_for
-        bool tx_power_auto = false;
+        std::atomic<bool> tx_power_auto{false};   // the radio thread's, read by the stats thread
         void apply_tx_power(int mw); // PA output; stock uses 24
         bool skip_handshake;
         // Air-unit standby / low RF power: -1 leaves it alone, 0/1 is pushed
@@ -190,8 +190,17 @@ class Ar8030Link : public radio::Link, private radio::VideoOut::Source {
         std::atomic<int>  max_bw_mhz; // ar8030_max_bw_mhz: the video link bandwidth cap sent at link-up, 5/10/20/40, 0 AUTO (stock: 20 or 40)
         std::atomic<int>  max_mcs;    // ar8030_max_mcs: Open8030 here, the highest MCS its receive policy may use (-1: none)
         std::atomic<int>  steady;     // ar8030_steady: Open8030 here, a block sent again steps its MCS down (0/1)
-        std::atomic<bool> caps_due{true};   // Open8030 here: send the caps (at link-up, from the menu)
-        std::atomic<bool> caps_live{false};  // ... from the menu: AUTO / off sent too, to lift what was set
+        // Open8030 here: the caps are due (at link-up, from the menu) while the
+        // count in caps_req_'s bits 1.. is past caps_sent_, the one send_caps
+        // last had taken; bit 0: from the menu, AUTO / off sent too, to lift
+        // what was set. One word, so a change made while send_caps is at it (a
+        // try of up to 2 s) is not cleared with the one it sent.
+        std::atomic<unsigned> caps_req_{2};
+        unsigned caps_sent_ = 0;             // the stats thread's
+        void caps_now(bool live) {
+            unsigned v = caps_req_.load();
+            while (!caps_req_.compare_exchange_weak(v, (v + 2) | (live ? 1u : 0u))) {}
+        }
         std::atomic<int>  radio_fw;   // ar8030_firmware: 0 stock, 1 Open8030 (bb_only.sh loads it with the radio)
         // ar8030_frame_mode (RADIO > Radio Frame): the TDD frame mode asked of
         // the radio at start and after every link-up, 2 short or 0 standard
@@ -329,7 +338,7 @@ class Ar8030Link : public radio::Link, private radio::VideoOut::Source {
         uint64_t link_lost_ms_ = 0;            // a link went down and has not come back (0: none)
         bool     lost_reopened_ = false;       // reopened for that loss: not again until a link
         uint64_t last_scan_ms = 0;
-        int      link_freq_mhz = 0;   // real link frequency, from BB_GET_STATUS
+        std::atomic<int> link_freq_mhz{0};   // real link frequency, from BB_GET_STATUS (the stats thread)
         bool     scan_logged = false;
         uint64_t last_stat_ms = 0;
         int dumped_reads = 0;
@@ -394,6 +403,10 @@ class Ar8030Link : public radio::Link, private radio::VideoOut::Source {
         std::atomic<int> stat_snr_x10_{0};   // BB_GET_1V1_INFO self SNR, dB x 10 (stats thread)
         std::atomic<int> stat_gains_{0};     // BB_GET_1V1_INFO gain_a | gain_b << 8 (per-antenna AGC)
         std::atomic<bool> stats_soon_{false};      // refresh the link figures early
+        // The link figures as last published (publish_link_stats): what a
+        // call that fails keeps, for a few passes of failing in a row.
+        gnd::LinkStats link_st_last_;
+        int link_st_fails_[3] = {};                // BB_GET_1V1_INFO, BB_GET_STATUS, BB_GET_MCS
     public:
         // ar_libre's event callbacks (on its reader thread): raw payloads.
         void on_link_event(const uint8_t* p);
@@ -418,6 +431,7 @@ class Ar8030Link : public radio::Link, private radio::VideoOut::Source {
         uint64_t air_win_slot[kAirWinSlots] = {};
         uint64_t cap_us64 = 0;          // last header's stamp, unwrapped
         uint32_t cap_last32 = 0;
+        uint64_t cap_last_local_us = 0; // when it came, on this clock
         uint32_t cap_wraps = 0;
         bool     cap_valid = false;
         unsigned hdr_fps = 0;           // from the header, for the calibration
@@ -435,8 +449,9 @@ class Ar8030Link : public radio::Link, private radio::VideoOut::Source {
         static constexpr uint8_t kAirFeatLatInfo = 0x01;
         static constexpr uint8_t kAirFeatIntraRefresh = 0x02;
         static constexpr uint8_t kAirFeatCamImu = 0x04;
-        bool     air_ver_seen_ = false;
-        bool     air_kestrel_ = false;
+        // Atomic: the stats thread reads them too (the frame mode asked).
+        std::atomic<bool> air_ver_seen_{false};
+        std::atomic<bool> air_kestrel_{false};
         uint8_t  air_proto_ = 0;
         uint8_t  air_feat_ = 0;
         unsigned air_untagged_ = 0;      // sane headers in a row without the tag
@@ -473,8 +488,9 @@ class Ar8030Link : public radio::Link, private radio::VideoOut::Source {
         // (KA_MSG_FRAME) came, and its info says the sensor's readout.
         static constexpr uint16_t kAirSaidFrameClock = 0x200;
         static constexpr uint16_t kAirSaidSensorTiming = 0x400;
-        uint16_t air_info_feat_ = 0;   // those bits, from its info (reset with the info)
-        bool air_info_seen_ = false;   // its info has come since the link came up
+        // Atomic: reset with the info by the link-down event too (ar_libre's thread).
+        std::atomic<uint16_t> air_info_feat_{0};   // those bits, from its info (reset with the info)
+        std::atomic<bool> air_info_seen_{false};   // its info has come since the link came up
         // The mode stored for this air unit, if it lacks it: the default asked
         // for. Bits said in the info only once it has come.
         void check_air_modes();
@@ -565,7 +581,8 @@ class Ar8030Link : public radio::Link, private radio::VideoOut::Source {
         void probe_rf_ioctls();     // which BB_SET_* the local radio accepts
         void drain_video_socket();  // discard video while not in the RX loop
         int  wait_sky_status(uint8_t want_cmd, int timeout_ms);
-        bool read_sky_ack(uint8_t want_cmd, int timeout_ms);
+        // 1 accepted, 0 rejected, -1 no ack within timeout_ms.
+        int  read_sky_ack(uint8_t want_cmd, int timeout_ms);
         void drain_control_socket();  // keep the port-2 RX ring from overflowing
         void on_ctrl_bytes(const uint8_t *buf, int n);  // the air's reports, MSP, an awaited ack
         void drain_msp_socket();      // FC MSP passthrough -> OSD DisplayPort
@@ -613,6 +630,7 @@ class Ar8030Link : public radio::Link, private radio::VideoOut::Source {
         static constexpr int kSkySends = 3;
         int sky_resend_sends_ = 0;       // the queue's front is a resend, sent this many times (0: not)
         SkyAckWait sky_ack_;
+        bool remode_after_angle_ = false;   // the RX thread's: Rotate taken, the mode to send again
         std::deque<std::pair<int,int>> settings_q_;   // parked settings not sent yet, in order
         void sky_ack_done(int status);
         unsigned rf_caps = 0;
@@ -645,8 +663,9 @@ class Ar8030Link : public radio::Link, private radio::VideoOut::Source {
         // Returns 0 on success, negative on failure (frequency not in the radio's table, or an ioctl refused).
         int  set_rf_channel(uint32_t freq_khz, bool hop_en);
         // Undo a pin: every channel back on the ground's work list, then
-        // channel adaptation on - the ground searches, as at start.
-        int  search_all_channels();
+        // channel adaptation on - the ground searches, as at start. region:
+        // AUTO's list is due again (not after AUTO's own move).
+        int  search_all_channels(bool region = true);
         int  work_list_all();       // the radio's work list (its scan list too, on Open8030) = every channel
         void chan_follow_poll();    // a manual move under way: ours followed? (read loop, every 100 ms)
         uint32_t chan_follow_khz_ = 0;        // its target, 0: none

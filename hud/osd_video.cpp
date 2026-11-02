@@ -99,24 +99,25 @@ bool OSD::get_slices_received() {
 
 
 
-void OSD::update_adapt_stats(adapt_stats v) {
-    pthread_mutex_lock(&osd_mutex);
-    osd_vars.adapt = v;
-    pthread_mutex_unlock(&osd_mutex);
-}
-
-// Append one row correlating the RF link (RX MCS/throughput/SNR), the result
-// (received video Mbps, latency, loss) and the air's adaptation decisions
-// (tier, applied bitrate, water-level drops/latency). Pull /tmp/kestrel-adapt.csv
-// after a run to graph the adaptation — debuggable without a network to the air.
+// Append one row correlating the RF link (RX MCS/throughput/SNR) and the result
+// (received video Mbps, latency, loss, frame rate, display cadence). Pull
+// /tmp/kestrel-adapt.csv after a run to graph it — debuggable without a network
+// to the air. (The air's adaptation columns - tier, applied bitrate, water level -
+// went: nothing here receives them any more.)
 void OSD::log_csv_row() {
     FILE* fp = (FILE*)csv_fp;
+    // A row a second is ~400 KB an hour, and /tmp is RAM: past 2 MB it starts
+    // over, the 2 MB before kept as .1.
+    if (fp && ftell(fp) > 2L * 1024 * 1024) {
+        fclose(fp);
+        csv_fp = fp = nullptr;
+        rename("/tmp/kestrel-adapt.csv", "/tmp/kestrel-adapt.csv.1");
+    }
     if (!fp) {
         fp = fopen("/tmp/kestrel-adapt.csv", "w");
         csv_fp = fp;
         if (fp)
-            fprintf(fp, "t_ms,video_mbps,rx_mbps,rx_mcs,snr_db,lost,lat_avg_ms,lat_max_ms,"
-                        "tier,applied_kbps,thr_kbps,wl_drops,wl_lat_ms,fps,"
+            fprintf(fp, "t_ms,video_mbps,rx_mbps,rx_mcs,snr_db,lost,lat_avg_ms,lat_max_ms,fps,"
                         "gap_p99_ms,gap_max_ms,stutters,ldpc_err\n");
     }
     if (fp) {
@@ -124,21 +125,16 @@ void OSD::log_csv_row() {
         // viewer see a hiccup" measure. stutters is cumulative; p99/max cover the
         // rolling ~2s gap window.
         RenderCadence rc = dev ? dev->get_render_cadence() : RenderCadence{0, 0, 0};
-        fprintf(fp, "%llu,%.2f,%.2f,%d,%.1f,%u,%.1f,%.1f,%d,%u,%u,%u,%u,%u,%.1f,%.1f,%u,%.4f\n",
+        fprintf(fp, "%llu,%.2f,%.2f,%d,%.1f,%u,%.1f,%.1f,%d,%.1f,%.1f,%u,%.4f\n",
             (unsigned long long)get_time_ms(),
             osd_vars.video_bandwidth,
             osd_vars.radio_link.rx_data_rate_kbps / 1000.0f,
             ar_mcs_label(osd_vars.radio_link.rx_mcs_val),
             osd_vars.radio_link.snr,
-            osd_vars.link_stats.count_p_lost,
+            parts_.radio.state().frames_lost,
             osd_vars.total_latency_avg,
             osd_vars.total_latency_max,
-            osd_vars.adapt.tier,
-            osd_vars.adapt.applied_bitrate_kbps,
-            osd_vars.adapt.link_throughput_kbps,
-            osd_vars.adapt.wl_drops,
-            osd_vars.adapt.wl_latency_ms,
-            osd_vars.adapt.fps,
+            osd_vars.current_framerate,         // shown here (the renderer's count)
             rc.p99_ms,
             rc.max_ms,
             rc.stutters,
@@ -301,13 +297,6 @@ void OSD::update_stats(int current_framerate, latency_stats stats) {
     }
 }
 
-void OSD::update_link_stats(packets_stats v) {
-    pthread_mutex_lock(&osd_mutex);
-	osd_vars.link_stats = v;
-    link_lost_ = v.count_p_lost;
-    pthread_mutex_unlock(&osd_mutex);
-}
-
 // The renderer, every picture: into latency_in_, no lock (see drain_latency_frames).
 void OSD::add_latency_frame(LatencyFrame frame) {
     static uint64_t last_frame_time_us = 0;
@@ -343,7 +332,7 @@ void OSD::add_latency_frame(LatencyFrame frame) {
     frame.video_mbps = ls.video_mbps;
     frame.rf_mbps = (float)a.rx_data_rate_kbps / 1000.0f;
     frame.t_us = now_us;
-    frame.lost = link_lost_.load(std::memory_order_relaxed);
+    frame.lost = ls.frames_lost;
     frame.snr = (int8_t)std::max(-127.0f, std::min(127.0f, a.snr));
     frame.mcs = (uint8_t)std::max(0, std::min(255, a.rx_mcs_val));
     frame.bw_idx = linked && a.bw_step >= 0 && a.bw_step < 6 ? (int8_t)a.bw_step : (int8_t)-1;

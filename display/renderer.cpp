@@ -114,8 +114,13 @@ int Renderer::get_or_create_display_buffer(DecodedUnit* du, DisplayBufferInfo& o
     if (render_mode == FrontBuffer) {
         int slot_idx = 0;
         if(display_buffers[slot_idx].drm_fb_id != 0) {
-            out_info = display_buffers[slot_idx];
-            return slot_idx;
+            // A new picture size needs a buffer of its own: copied into the
+            // old one, a bigger picture ran past the end of its mapping.
+            if (display_buffers[slot_idx].width == du->width && display_buffers[slot_idx].height == du->height) {
+                out_info = display_buffers[slot_idx];
+                return slot_idx;
+            }
+            cleanup_display_buffer(display_buffers[slot_idx]);
         }
         // Fallthrough to create SW buffer at index 0
         // We trick the subsequent logic by temporarily clearing has_prime_fd if it's set
@@ -195,9 +200,14 @@ int Renderer::get_or_create_display_buffer(DecodedUnit* du, DisplayBufferInfo& o
     }
 
     if(display_buffers[slot_idx].drm_fb_id != 0) {
-        // buffer has already been created, reuse.
-        out_info = display_buffers[slot_idx];
-        return slot_idx;
+        // buffer has already been created, reuse - if it is this picture's size
+        // (a bigger one would be copied past the end of it).
+        if (display_buffers[slot_idx].width == du->width && display_buffers[slot_idx].height == du->height &&
+            display_buffers[slot_idx].sw_base) {
+            out_info = display_buffers[slot_idx];
+            return slot_idx;
+        }
+        cleanup_display_buffer(display_buffers[slot_idx]);
     }
 
     // Determine DRM format based on input frame pixel format
@@ -237,6 +247,7 @@ int Renderer::get_or_create_display_buffer(DecodedUnit* du, DisplayBufferInfo& o
     sw_buf.height = du->height;
     sw_buf.stride = out.stride; // driver-aligned dumb-buffer pitch (matches the FB)
     sw_buf.sw_base = base;
+    sw_buf.sw_size = out.size;
 
     // Calculate offsets based on format (in terms of the aligned pitch, so the
     // copy lands exactly where drmModeAddFB2 expects each plane).
@@ -400,6 +411,13 @@ void Renderer::cleanup_display_buffer(DisplayBufferInfo& buffer_info) {
     if (buffer_info.drm_fb_id != 0) {
         drmModeRmFB(dev->drm_fd, buffer_info.drm_fb_id);
         buffer_info.drm_fb_id = 0;
+    }
+    // A software buffer's mapping (get_or_create_display_buffer), which was
+    // left behind with every buffer let go.
+    if (buffer_info.sw_base) {
+        munmap(buffer_info.sw_base, buffer_info.sw_size);
+        buffer_info.sw_base = nullptr;
+        buffer_info.sw_size = 0;
     }
     if (buffer_info.gem_handle != 0) {
         // struct drm_gem_close args = { .handle = buffer_info.gem_handle };

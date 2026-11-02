@@ -21,7 +21,7 @@ struct StatsFrame {
     float    stage[kStages] = {0, 0, 0, 0};   // ms
     float    wait[kStages] = {0, 0, 0, 0};    // each stage's share spent waiting (ms, within stage)
     float    video_mbps = 0, link_mbps = 0;
-    uint32_t lost = 0;                        // link packets lost, cumulative
+    uint32_t lost = 0;                        // pictures lost on the link (the air unit's counter), cumulative
     int8_t   snr = 0;
     uint8_t  mcs = 0;
     int8_t   bw = -1;                         // the link's bandwidth gear (0..5 = 1.25 .. 40 MHz), -1: not known
@@ -77,7 +77,7 @@ struct StatsView {
     uint8_t  dist_have[kCols];
     uint8_t  mcs[kCols], key[kCols], have[kCols];
     uint16_t skip[kCols];                     // pictures in the column never shown
-    uint16_t lost[kCols];                     // packets lost in the column
+    uint16_t lost[kCols];                     // pictures lost in the column
     uint8_t  resent[kCols], stall[kCols];     // blocks the air radio sent again / frames it stalled, in the column
     uint32_t hist[kBins];                     // pictures by total latency
 
@@ -106,6 +106,9 @@ struct StatsView {
     float dist_max = 0;                       // the farthest in the window, metres
     float vtx_temp_c = -1;                    // the air unit's SoC temperature now (cmd 0x05), -1: not known
     float vrx_temp_c = -1;                    // this goggle's SoC temperature now, -1: not known
+    int   screen_w = 0, screen_h = 0;         // the screen's mode (0: no screen)
+    float screen_mode_hz = 0;                 // the mode's own refresh, exact, Hz (0: not known)
+    float screen_hz = 0;                      // its refresh as it runs, measured (else the frame period's), Hz
     uint32_t lost_total = 0;
     uint32_t resent_blocks = 0, resent_frames = 0, stall_frames = 0;   // in the window
     bool     resend_known = false;            // the radio gives its resend map (Open8030 at both ends)

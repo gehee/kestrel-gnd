@@ -4,9 +4,11 @@
 // prints where it was; and a restart asked for (base/restart.hpp), which is
 // the ordinary stop and then the same binary again.
 
+#include <atomic>
+
 #include "base/settings.hpp"
 
-extern volatile bool signal_stop;   // set when the app is to stop
+extern std::atomic<bool> signal_stop;   // set when the app is to stop
 
 // First thing in main(): its argv for the restart's exec, and the settings
 // file, written before it.

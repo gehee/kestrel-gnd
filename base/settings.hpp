@@ -44,6 +44,8 @@ public:
     // write, so anything about to restart the app, or hand over to a script
     // or process that reads the file, calls this first.
     void flush();
+    // Every setting as the file holds it, "key: value" a line, sorted.
+    std::string all_text();
 
     // Each takes a Setting or a MadeSetting.
     template <template <typename> class S, typename T>
@@ -85,6 +87,8 @@ private:
     void mark_dirty();      // with _mutex held
     void saver_run();
     void write_snapshot();  // takes _write_mutex
+    // The whole file, safely (a .tmp renamed over it); false and why on a failure.
+    static bool write_file(const std::string& filename, const std::string& text, std::string& err);
 
     // Helper to trim whitespace
     static std::string trim(const std::string& str);
@@ -96,8 +100,11 @@ private:
     // Background writer. _gen counts changes, _saved_gen is the last one on
     // disk; _due is when the pending write goes. _write_mutex keeps the saver
     // and flush() from writing at once, so an older snapshot can never land
-    // after a newer one. The thread starts with the first change.
-    uint64_t _gen = 0, _saved_gen = 0;
+    // after a newer one. The thread starts with the first change. A write
+    // that failed leaves _saved_gen behind and sets _failed_gen: the saver
+    // then waits for the next change rather than retrying the same one.
+    uint64_t _gen = 0, _saved_gen = 0, _failed_gen = 0;
+    bool _write_failed = false;   // said once, until a write works again
     std::chrono::steady_clock::time_point _due;
     bool _saver_stop = false;
     std::thread _saver;

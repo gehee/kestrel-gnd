@@ -43,7 +43,7 @@ std::unique_ptr<display::HudLayer> make_hud_layer(display::Display& d) {
 std::shared_ptr<display::Presenter> make_presenter(std::shared_ptr<display::Display> d, RenderMode mode,
                                                    Settings& settings, std::function<void(int, int)> on_frame_size,
                                                    std::shared_ptr<display::VideoListener> listener,
-                                                   volatile bool* stop, bool console_stats) {
+                                                   std::atomic<bool>* stop, bool console_stats) {
     auto dev = std::static_pointer_cast<DrmDevice>(d);
     auto r = std::make_shared<Renderer>(mode, dev, settings, std::move(on_frame_size), std::move(listener), stop,
                                         console_stats);

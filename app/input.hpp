@@ -2,7 +2,8 @@
 // The keys, into the OSD: the VRX Pro's front buttons and its BIND button
 // (ADC channels, polled), and keyboards (the terminal, evdev devices). Each
 // is a thread of its own (pthread entries, the OSD their argument), until
-// signal_stop.
+// signal_stop. The front buttons' runs without an OSD too (a null one): it
+// is also where a REC asked for by SIGUSR1 is done.
 
 class OSD;
 namespace gnd { class Radio; }

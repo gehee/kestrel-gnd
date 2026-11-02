@@ -464,6 +464,14 @@ constexpr int    kSndBuf      = 256 << 10;         // the viewer socket's kernel
 constexpr uint64_t kBehindUs  = 10000000;
 constexpr int    kMaxClients  = 16;               // Safari opens several per video
 constexpr size_t kFileChunk   = 256u << 10;        // file bytes read ahead per client
+// A client that has not sent its whole request this long after connecting,
+// or whose reply has not moved for kStallUs, is given up: sixteen silent
+// sockets took every slot for good. (A viewer of /stream.mp4 has
+// TCP_USER_TIMEOUT and kBehindUs instead.)
+constexpr uint64_t kRequestUs = 10000000;
+constexpr uint64_t kStallUs   = 60000000;
+// /api/plog lines into the log, at most, a second: the log is on the card.
+constexpr unsigned kPlogPerSec = 10;
 
 struct Item {
     std::shared_ptr<std::vector<uint8_t>> au;
@@ -476,6 +484,10 @@ constexpr uint64_t kScreenIdleUs = 10000000;
 
 struct Client {
     int fd = -1;
+    uint64_t id = 0;                // for the worker's reply to find it
+    bool waiting = false;           // its reply is the worker's to make
+    uint64_t since_us = 0;          // connected then
+    uint64_t moved_us = 0;          // its reply last moved then (or it connected)
     std::string in;                 // request, until the blank line
     std::vector<uint8_t> out;       // bytes not yet sent
     size_t out_off = 0;
@@ -516,6 +528,12 @@ using dvr_lib::thumb_dir;
 using dvr_lib::thumb_path;
 std::string dvr_dir() { return dvr_lib::dir(); }
 
+// A one-shot reply, whole.
+std::string http_reply(const char* status, const char* type, const std::string& body) {
+    return std::string("HTTP/1.1 ") + status + "\r\nContent-Type: " + type +
+           "\r\nContent-Length: " + std::to_string(body.size()) +
+           "\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n" + body;
+}
 
 std::string hex_colour(const float c[3]) {
     char b[8];
@@ -608,6 +626,25 @@ struct WebStream::Impl {
     unsigned q_dropped = 0;        // pictures dropped off q (the thread behind)
 
     std::vector<Client*> clients;  // server thread only
+    uint64_t next_id = 0;          // server thread: the last client's id
+    // Server thread: /api/plog lines in this second, and those let go.
+    uint64_t plog_second_us = 0;
+    unsigned plog_lines = 0, plog_dropped = 0;
+
+    // What touches the card - a recording deleted, the recordings listed
+    // with their lengths - is done on a thread of its own: on this one every
+    // viewer's picture stood still while the card was busy. Its replies come
+    // back to the server thread (done, then a wake), for their clients.
+    struct Job { uint64_t client; bool del; std::string name; };
+    struct Done { uint64_t client; std::string reply; };
+    std::mutex jm;                 // guards jobs, done, jstop
+    std::condition_variable jcv;
+    std::deque<Job> jobs;
+    std::deque<Done> done;
+    bool jstop = false;
+    std::thread worker;
+    void work();
+    void submit(Client* c, bool del, const std::string& name);
 
     void loop();
     void accept_one();
@@ -652,6 +689,7 @@ bool WebStream::start(int port) {
     d->wake_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     d->run = true;
     impl_ = d;
+    d->worker = std::thread([d] { d->work(); });
     pthread_create(&d->tid, nullptr, [](void* p) -> void* {
         pthread_setname_np(pthread_self(), "webstream");
         static_cast<Impl*>(p)->loop();
@@ -668,6 +706,12 @@ void WebStream::stop() {
     uint64_t one = 1;
     if (write(d->wake_fd, &one, sizeof(one)) < 0) {}
     pthread_join(d->tid, nullptr);
+    {
+        std::lock_guard<std::mutex> lk(d->jm);
+        d->jstop = true;
+    }
+    d->jcv.notify_one();
+    d->worker.join();
     for (Client* c : d->clients) d->drop(c);
     d->clients.clear();
     close(d->listen_fd);
@@ -755,6 +799,23 @@ void WebStream::Impl::loop() {
             if (read(wake_fd, &n, sizeof(n)) < 0) {}
         }
 
+        // The worker's replies, to their clients (one gone meanwhile: dropped).
+        {
+            std::deque<Done> ds;
+            {
+                std::lock_guard<std::mutex> lk(jm);
+                ds.swap(done);
+            }
+            for (const Done& r : ds)
+                for (Client* c : clients)
+                    if (c->id == r.client && c->fd >= 0) {
+                        c->out.insert(c->out.end(), r.reply.begin(), r.reply.end());
+                        c->waiting = false;
+                        c->close_after = true;
+                        c->moved_us = get_time_us();
+                    }
+        }
+
         // New pictures: mux each one into every streaming viewer's buffer.
         std::deque<Item> items;
         std::vector<std::vector<uint8_t>> ps_now;
@@ -811,6 +872,10 @@ void WebStream::Impl::loop() {
                 close(c->fd); c->fd = -1;
             } else if (c->close_after && !c->pending() && c->file_fd < 0) {
                 close(c->fd); c->fd = -1;
+            } else if (!c->streaming && !c->waiting &&
+                       (c->close_after ? get_time_us() - c->moved_us >= kStallUs
+                                       : get_time_us() - c->since_us >= kRequestUs)) {
+                close(c->fd); c->fd = -1;     // no request, or a reply nobody reads
             }
         }
         for (size_t i = 0; i < clients.size();) {
@@ -863,6 +928,8 @@ void WebStream::Impl::accept_one() {
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
     Client* c = new Client();
     c->fd = fd;
+    c->id = ++next_id;
+    c->since_us = c->moved_us = get_time_us();
     clients.push_back(c);
 }
 
@@ -873,7 +940,7 @@ void WebStream::Impl::on_readable(Client* c) {
         if (n == 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) { close(c->fd); c->fd = -1; }
         return;
     }
-    if (c->streaming || c->close_after) return;   // already answered; ignore
+    if (c->streaming || c->close_after || c->waiting) return;   // already answered (or being); ignore
     c->in.append(buf, (size_t)n);
     if (c->in.size() > 8192) { close(c->fd); c->fd = -1; return; }
     const size_t eoh = c->in.find("\r\n\r\n");
@@ -892,9 +959,7 @@ void WebStream::Impl::on_readable(Client* c) {
 void WebStream::Impl::on_request(Client* c, const std::string& method, const std::string& path,
                                  const std::string& query, const std::string& req) {
     auto reply = [c](const char* status, const char* type, const std::string& body) {
-        std::string r = std::string("HTTP/1.1 ") + status + "\r\nContent-Type: " + type +
-                        "\r\nContent-Length: " + std::to_string(body.size()) +
-                        "\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n" + body;
+        const std::string r = http_reply(status, type, body);
         c->out.insert(c->out.end(), r.begin(), r.end());
         c->close_after = true;
     };
@@ -938,14 +1003,27 @@ void WebStream::Impl::on_request(Client* c, const std::string& method, const std
     } else if (path == "/api/plog") {
         // ?debug=1 on the page: its player's state, a line at a time, into
         // this log (what a phone's browser does is otherwise out of sight).
-        std::string m;
-        for (size_t i = query.compare(0, 2, "m=") == 0 ? 2 : query.size(); i < query.size() && m.size() < 400; i++) {
-            char ch = query[i];
-            if (ch == '%' && i + 2 < query.size()) { ch = (char)strtol(query.substr(i + 1, 2).c_str(), nullptr, 16); i += 2; }
-            else if (ch == '+') ch = ' ';
-            m += (ch >= 32 && ch < 127) ? ch : '?';
+        // kPlogPerSec lines a second from all pages together, the rest only
+        // counted: the log is on the card, and any page could fill it.
+        const uint64_t now = get_time_us();
+        if (now - plog_second_us >= 1000000) { plog_second_us = now; plog_lines = 0; }
+        if (plog_lines < kPlogPerSec) {
+            plog_lines++;
+            if (plog_dropped) {
+                printf("webpage: %u lines left out (more than %u a second)\n", plog_dropped, kPlogPerSec);
+                plog_dropped = 0;
+            }
+            std::string m;
+            for (size_t i = query.compare(0, 2, "m=") == 0 ? 2 : query.size(); i < query.size() && m.size() < 400; i++) {
+                char ch = query[i];
+                if (ch == '%' && i + 2 < query.size()) { ch = (char)strtol(query.substr(i + 1, 2).c_str(), nullptr, 16); i += 2; }
+                else if (ch == '+') ch = ' ';
+                m += (ch >= 32 && ch < 127) ? ch : '?';
+            }
+            printf("webpage %d: %s\n", c->fd, m.c_str());
+        } else {
+            plog_dropped++;
         }
-        printf("webpage %d: %s\n", c->fd, m.c_str());
         reply("204 No Content", "text/plain", "");
     } else if (path == "/api/theme") {
         // The HUD's current theme, for the page to dress itself in.
@@ -1006,36 +1084,28 @@ void WebStream::Impl::on_request(Client* c, const std::string& method, const std
         j += "\",\"phone\":\"" + std::string(pz >= 0 ? zones::zone(pz).name : "") + "\"}";
         reply("200 OK", "application/json", j);
     } else if (path == "/api/recordings") {
-        reply("200 OK", "application/json", recordings_json());
+        submit(c, false, "");                  // the worker's: it reads every recording's length
     } else if (path.compare(0, 5, "/dvr/") == 0) {
         const std::string name = path.substr(5);
         const std::string dir = dvr_lib::dir();
-        // A recording still being written has no moov yet: not playable, and
-        // not something to hand out half-done.
-        if (!safe_name(name)) {
+        // Recordings only, the names the gallery lists - all the page asks
+        // /dvr/ for (PLAY, SAVE, DELETE; thumbnails are /thumb/). The folder
+        // also holds the SD logs and the radio's frame logs.
+        if (!safe_name(name) || !(ends_with(name, ".mp4") || ends_with(name, ".h265"))) {
             reply("404 Not Found", "text/plain", "not found\n");
             return;
         }
+        // A recording still being written has no moov yet: not playable, and
+        // not something to hand out half-done.
         if (name == DvrRecorder::instance().current_file()) {
             reply("409 Conflict", "text/plain", "still recording\n");
             return;
         }
         if (method == "DELETE") {
-            // Recordings only, in the DVR folder - the same names the gallery
-            // lists. The one being written was refused just above.
-            const std::string path = dir + "/" + name;
-            struct stat st;
-            if (!(ends_with(name, ".mp4") || ends_with(name, ".h265")) ||
-                stat(path.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) {
-                reply("404 Not Found", "text/plain", "not found\n");
-            } else if (unlink(path.c_str()) != 0) {
-                reply("500 Internal Server Error", "text/plain", std::string(strerror(errno)) + "\n");
-            } else {
-                unlink(thumb_path(name).c_str());
-                sync();
-                printf("webstream: deleted recording %s\n", name.c_str());
-                reply("200 OK", "application/json", "{\"deleted\":\"" + name + "\"}");
-            }
+            // In the DVR folder, as the goggle's gallery deletes - on the
+            // worker: the card is synced after it. The one being written was
+            // refused just above, and is again on the worker.
+            submit(c, true, name);
             return;
         }
         std::string extra;
@@ -1131,7 +1201,58 @@ void WebStream::Impl::serve_file(Client* c, const std::string& method, const std
     c->file_left = len;
 }
 
-// The DVR folder, newest first. Only names the server would also serve.
+void WebStream::Impl::submit(Client* c, bool del, const std::string& name) {
+    c->waiting = true;
+    {
+        std::lock_guard<std::mutex> lk(jm);
+        jobs.push_back({c->id, del, name});
+    }
+    jcv.notify_one();
+}
+
+// The worker: one job at a time (a client has one at most), its reply handed
+// back with a wake.
+void WebStream::Impl::work() {
+    pthread_setname_np(pthread_self(), "webstream-io");
+    for (;;) {
+        Job j;
+        {
+            std::unique_lock<std::mutex> lk(jm);
+            jcv.wait(lk, [this] { return jstop || !jobs.empty(); });
+            if (jstop) return;
+            j = std::move(jobs.front());
+            jobs.pop_front();
+        }
+        std::string r;
+        if (!j.del) {
+            r = http_reply("200 OK", "application/json", recordings_json());
+        } else {
+            // dvr_lib's delete, the goggle gallery's: the recording and its
+            // thumbnail, then the recordings' partition synced - not the
+            // whole system (sync(), the live recording's backlog with it).
+            const int e = dvr_lib::delete_recording(j.name, DvrRecorder::instance().current_file());
+            if (e == 0) {
+                printf("webstream: deleted recording %s\n", j.name.c_str());
+                r = http_reply("200 OK", "application/json", "{\"deleted\":\"" + j.name + "\"}");
+            } else if (e == EBUSY) {
+                r = http_reply("409 Conflict", "text/plain", "still recording\n");
+            } else if (e == EINVAL || e == ENOENT) {
+                r = http_reply("404 Not Found", "text/plain", "not found\n");
+            } else {
+                r = http_reply("500 Internal Server Error", "text/plain", std::string(strerror(e)) + "\n");
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lk(jm);
+            done.push_back({j.client, std::move(r)});
+        }
+        uint64_t one = 1;
+        if (write(wake_fd, &one, sizeof(one)) < 0) {}
+    }
+}
+
+// The DVR folder, newest first. Only names the server would also serve. On
+// the worker (it reads every recording's length).
 std::string WebStream::Impl::recordings_json() {
     using Rec = dvr_lib::Recording;
     std::vector<Rec> recs = dvr_lib::list_recordings();
@@ -1142,7 +1263,10 @@ std::string WebStream::Impl::recordings_json() {
         while (dirent* e = readdir(d)) {
             std::string t = e->d_name;
             if (!ends_with(t, ".jpg")) continue;
-            const std::string rec = t.substr(0, t.size() - 4);
+            // One being made (<name>.jpg.tmp.jpg) is ffmpeg's until renamed:
+            // it goes only with its recording - it was deleted mid-write.
+            const std::string rec = ends_with(t, ".jpg.tmp.jpg") ? t.substr(0, t.size() - 12)
+                                                                 : t.substr(0, t.size() - 4);
             if (!std::any_of(recs.begin(), recs.end(), [&](const Rec& r) { return r.name == rec; }))
                 unlink((thumb_dir() + "/" + t).c_str());
         }
@@ -1212,15 +1336,20 @@ void WebStream::Impl::mux_item(Client* c, const Item& it,
     // iPhone's hardware decoder refused the lot ("media failed to decode").
     static thread_local std::vector<uint8_t> smp;
     annexb_to_sample(*it.au, smp, true);
-    if (!smp.empty())
+    if (!smp.empty()) {
         MP4E_put_sample(c->mux, c->wr.mux_track_id, smp.data(), (int)smp.size(), c->dur,
                         it.key ? MP4E_SAMPLE_RANDOM_ACCESS : MP4E_SAMPLE_DEFAULT);
+        // Out now: minimp4 holds a sample until the next one starts (for a
+        // picture's continuations, which this one has none of) - one
+        // picture of latency in the web view.
+        MP4E_flush(c->mux);
+    }
 }
 
 void WebStream::Impl::flush(Client* c) {
     while (c->pending()) {
         ssize_t n = send(c->fd, c->out.data() + c->out_off, c->pending(), MSG_NOSIGNAL);
-        if (n > 0) { c->out_off += (size_t)n; continue; }
+        if (n > 0) { c->out_off += (size_t)n; c->moved_us = get_time_us(); continue; }
         if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
         close(c->fd); c->fd = -1;
         return;

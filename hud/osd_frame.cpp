@@ -6,6 +6,7 @@
 
 void OSD::render_frame() {
     if (!layer_ready_) return;
+    frame_timers();                // whatever is on the screen, the gallery too
     Frame f;
     if (!frame_begin(f)) return;   // the gallery took the frame
     frame_take(f);
@@ -151,6 +152,64 @@ bool OSD::frame_begin(Frame& f) {
     return true;
 }
 
+// What runs on the clock, not on what is drawn: the trials' reverts and the
+// time zone. The gallery takes the whole frame (frame_begin) and frame_take
+// does not run under it, so with these there a trial outlived its 10 or 15 s
+// for as long as the gallery stayed open.
+void OSD::frame_timers() {
+    pthread_mutex_lock(&osd_mutex);
+    // SYSTEM > Time Zone, picked in the menu or from a phone: its TZ goes into
+    // force here, on the thread that draws the clock (setenv() must not race
+    // the time functions), and the menu's mirror follows a change made elsewhere.
+    zones::apply_pending_tz();
+    if (zones::generation() != menu_zone_gen_) {
+        menu_zone_gen_ = zones::generation();
+        if (menu_zone_ != zones::selected()) {
+            menu_zone_ = zones::selected();
+            menu_opt_tab_ = -1;
+            // A zone picked elsewhere (the web page) can take the Timezone row
+            // away from under the selection.
+            if (menu_open && menu_tab == kTabSystem) {
+                const int n = (int)menu_items(kTabSystem).size();
+                if (menu_index >= n) {
+                    menu_index = n - 1;
+                    if (menu_focus == 2) menu_focus = 1;
+                }
+            }
+            if (menu_open) menu_refresh_options();
+        }
+    }
+    // Refresh Sync on trial that nobody kept: back to the kept value.
+    if (sync_confirm_ && sync_confirm_left_s() <= 0) {
+        sync_confirm_ = false;
+        printf("menu: refresh sync %s not kept - back to %s\n", refresh_sync_label(refresh_sync().mode),
+               refresh_sync_label(sync_confirm_prev_));
+        menu_refresh_sync = sync_confirm_prev_;
+        if (dev) {
+            dev->set_sync_mode(sync_confirm_prev_);
+            dev->refollow();
+        }
+        // Back to OFF takes the Sync Margin row away, maybe from under the selection.
+        if (menu_open && menu_tab == 3) {
+            const int n = (int)menu_items(3).size();
+            if (menu_index >= n) {
+                menu_index = n - 1;
+                if (menu_focus == 2) menu_focus = 1;
+            }
+        }
+        if (menu_open) menu_refresh_options();   // the list's position too, not just the row's label
+        render_requested = true;
+    }
+    // A screen mode on trial that nobody kept: back to the screen's kept mode.
+    if (screen_confirm_ && screen_confirm_left_s() <= 0) {
+        screen_confirm_ = false;
+        printf("menu: screen mode %s not kept - restarting in the previous one\n",
+               screen_confirm_mode_.c_str());
+        kestrel_request_restart();
+    }
+    pthread_mutex_unlock(&osd_mutex);
+}
+
 void OSD::frame_take(Frame& f) {
     auto& tmp = f.tmp;
     auto& model_hud_c = f.model_hud_c;
@@ -179,7 +238,6 @@ void OSD::frame_take(Frame& f) {
     auto& hud_verbose = f.hud_verbose;
     auto& legacy_verbose = f.legacy_verbose;
     auto& link_copy = f.link_copy;
-    auto& adapt_copy = f.adapt_copy;
     // --- THREAD SAFETY: Copy shared state ---
     pthread_mutex_lock(&osd_mutex);
     sync_radio();               // what the radio published since, and the renderer's latency samples
@@ -224,27 +282,6 @@ void OSD::frame_take(Frame& f) {
                 + osd_vars.decoding_latency_avg + osd_vars.display_latency_avg;
         if (lat_max < lat_avg) lat_max = lat_avg;
     }
-    // SYSTEM > Time Zone, picked in the menu or from a phone: its TZ goes into
-    // force here, on the thread that draws the clock (setenv() must not race
-    // the time functions), and the menu's mirror follows a change made elsewhere.
-    zones::apply_pending_tz();
-    if (zones::generation() != menu_zone_gen_) {
-        menu_zone_gen_ = zones::generation();
-        if (menu_zone_ != zones::selected()) {
-            menu_zone_ = zones::selected();
-            menu_opt_tab_ = -1;
-            // A zone picked elsewhere (the web page) can take the Timezone row
-            // away from under the selection.
-            if (menu_open && menu_tab == kTabSystem) {
-                const int n = (int)menu_items(kTabSystem).size();
-                if (menu_index >= n) {
-                    menu_index = n - 1;
-                    if (menu_focus == 2) menu_focus = 1;
-                }
-            }
-            if (menu_open) menu_refresh_options();
-        }
-    }
     // AIR UNIT > SERIAL counts up while it is open: redraw four times a second.
     if (menu_open && menu_tab == kTabAirSerial) {
         const uint64_t t = get_time_us();
@@ -267,34 +304,6 @@ void OSD::frame_take(Frame& f) {
             settings_.set(hud::setting::imu_cam_tilt_deg, tilt_deg);
             printf("hud: camera tilt %d deg, taken at arming, saved\n", tilt_deg);
         }
-    }
-    // Refresh Sync on trial that nobody kept: back to the kept value.
-    if (sync_confirm_ && sync_confirm_left_s() <= 0) {
-        sync_confirm_ = false;
-        printf("menu: refresh sync %s not kept - back to %s\n", refresh_sync_label(refresh_sync().mode),
-               refresh_sync_label(sync_confirm_prev_));
-        menu_refresh_sync = sync_confirm_prev_;
-        if (dev) {
-            dev->set_sync_mode(sync_confirm_prev_);
-            dev->refollow();
-        }
-        // Back to OFF takes the Sync Margin row away, maybe from under the selection.
-        if (menu_open && menu_tab == 3) {
-            const int n = (int)menu_items(3).size();
-            if (menu_index >= n) {
-                menu_index = n - 1;
-                if (menu_focus == 2) menu_focus = 1;
-            }
-        }
-        if (menu_open) menu_refresh_options();   // the list's position too, not just the row's label
-        render_requested = true;
-    }
-    // A screen mode on trial that nobody kept: back to the screen's kept mode.
-    if (screen_confirm_ && screen_confirm_left_s() <= 0) {
-        screen_confirm_ = false;
-        printf("menu: screen mode %s not kept - restarting in the previous one\n",
-               screen_confirm_mode_.c_str());
-        kestrel_request_restart();
     }
     if (menu_open_at_start) {
         menu_open = true;
@@ -321,6 +330,7 @@ void OSD::frame_take(Frame& f) {
         // key handler takes, so no press can be halfway through a row.
         menu_refresh_options();
     }
+    if (menu_open && screen_modes_stale_) refill_screen_modes();
     // The canopy's motion (ui_* in osd.hpp), eased the way the gallery's zoom
     // is - each value closes the gap to its target by 1 - e^(-dt/tau) a frame -
     // and kept moving a frame at a time, started right after a flip as the
@@ -362,7 +372,6 @@ void OSD::frame_take(Frame& f) {
     (void)hud_panels;
 
     link_copy = osd_vars.radio_link;
-    adapt_copy = osd_vars.adapt;
     pthread_mutex_unlock(&osd_mutex);
     prof::mark(prof::kSnapshot);
     if (menu_moving) {
@@ -426,17 +435,21 @@ void OSD::frame_video(Frame& f) {
     // true only when FPV is actively displayed AND frames decoded recently —
     // VideoState latches LIVE, so without the freshness check the bottom-left
     // fps/resolution/bitrate labels freeze on stale values when video stops.
-    video_active = (vs == VideoState::LIVE) &&
-                        (get_time_us() - last_fpv_frame_us_ < 1500000ULL);
+    // The stamp is the renderer's and can be newer than the time read here: then
+    // it is fresh, not an age wrapped round to forever.
+    {
+        const uint64_t t = get_time_us(), last = last_fpv_frame_us_;
+        video_active = (vs == VideoState::LIVE) && (t <= last || t - last < 1500000ULL);
+    }
 
     // Upload / import latest bg video frame while not fully live (video path only)
     if (!video_active && bg_video_enabled && bg_player_) {
         if (bg_player_->is_drm() && canvas_->video_supported()) {
             // --- Zero-copy: the decoder's NV12 buffer taken as it is ---
-            import_drm_frame(bg_player_, bg_ext_tex_);
+            if (import_drm_frame(bg_player_, bg_ext_tex_)) bg_have_frame_ = true;
         } else {
             // --- Software frames: sws BGRA into an image ---
-            bg_player_->upload_latest_frame(*canvas_, bg_video_tex_);
+            if (bg_player_->upload_latest_frame(*canvas_, bg_video_tex_)) bg_have_frame_ = true;
         }
     }
 }
@@ -500,6 +513,11 @@ void OSD::measure_link(Frame& f) {
         canopy.rec_secs   = (unsigned)((get_time_us() - rec_started_us) / 1000000ULL);
     } else {
         rec_started_us = 0;
+        canopy.rec_failed[0] = '\0';
+        uint64_t at = 0;
+        const std::string why = DvrRecorder::instance().last_failure(&at);
+        if (!why.empty() && get_time_us() - at < 5000000ULL)
+            snprintf(canopy.rec_failed, sizeof(canopy.rec_failed), "%s", why.c_str());
     }
     {
         auto pwr_text = [&](char* out, size_t n) { air_pwr_text(link_copy, out, n); };
@@ -622,7 +640,8 @@ void OSD::measure_link(Frame& f) {
         if (connected) {
             if (range_blocks >= 0 && range_blocks <= 4)      warn = 2;
             else if (range_blocks >= 0 && range_blocks <= 7) warn = 1;
-            if (seen_this_link && get_time_us() - last_fpv_frame_us_ > 400000ULL)
+            const uint64_t t = get_time_us(), last = last_fpv_frame_us_;
+            if (seen_this_link && t > last && t - last > 400000ULL)   // a newer stamp is no freeze
                 warn = 2;
         }
         // The canopy reads the same measurements the arena panels draw rather

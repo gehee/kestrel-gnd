@@ -50,6 +50,7 @@
 #include <cstdio>
 #include <functional>
 #include <mutex>
+#include <pthread.h>
 #include <random>
 #include <thread>
 #include <time.h>
@@ -366,6 +367,10 @@ private:
     }
 
     void loop() {
+        // Started by the radio thread, whose SCHED_FIFO it would inherit: a
+        // search is tens of ms of CPU, not real-time work (each read is timed).
+        struct sched_param sp = {};
+        pthread_setschedparam(pthread_self(), SCHED_OTHER, &sp);
         std::vector<fe_read> buf;
         std::mt19937 rng((unsigned)mono_us());
         uint64_t last_fail_log = 0;
