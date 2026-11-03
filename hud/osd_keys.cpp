@@ -394,9 +394,10 @@ void OSD::handle_key(int key) {
                         case 5:
                             chan_open();
                             break;
-                        case 1: {   // saved per air unit there; nothing before it is known
+                        case 1:     // the level and the mode are one value: saved per air unit
+                        case 16: {  // there; nothing before it is known
                             const int prj = air_radio_.prj;
-                            if (prj > 0) parts_.air_radio.set_tx_power(ar_pwr_fit(prj, menu_ar_power));
+                            if (prj > 0) parts_.air_radio.set_tx_power(ar_pwr_fit(prj, menu_ar_power, air_radio_.fine));
                             break;
                         }
                         case 8:

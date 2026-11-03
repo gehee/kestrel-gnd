@@ -54,6 +54,9 @@ inline MadeSetting<int> air_tx_power_mw(const std::string& air, int def) {
     return {air + "_tx_power_mw", def};
 }
 inline MadeSetting<int> air_features(const std::string& air) { return {air + "_air", 0}; }
+// What it is (its project number, system/air/power.hpp): its power levels, before it has said so
+// on a link that was lost and reopened.
+inline MadeSetting<int> air_prj(const std::string& air) { return {air + "_prj", 0}; }
 // The distance's zero for an air unit (by its radio MAC, no colons), as
 // "<power-up id>:<raw>".
 

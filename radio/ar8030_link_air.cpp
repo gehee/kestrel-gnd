@@ -20,7 +20,7 @@ void Ar8030Link::publish_air_info() {
     model_.air_info(a);
 }
 
-const Ar8030Link::AirCap Ar8030Link::kAirCaps[10] = {
+const Ar8030Link::AirCap Ar8030Link::kAirCaps[11] = {
     { kAirFeatLatInfo,      "air-timing",    "Air Timing" },
     { kAirFeatApClock,      "radio-clock",   "Radio Clock" },
     { kAirSaidFrameClock,   "frame-clock",   "Frame Clock" },
@@ -31,6 +31,7 @@ const Ar8030Link::AirCap Ar8030Link::kAirCaps[10] = {
     { kAirFeatMaxBw,        "bandwidth-cap", "Bandwidth Cap" },
     { kAirFeat864p120,      "864p120",       "864p120" },
     { kAirFeat864p144,      "864p144",       "864p144" },
+    { kAirFeatPwrLvl,       "power-levels",  "TX Power Levels" },
 };
 
 std::vector<std::string> Ar8030Link::cap_names(const AirInfo &a) {
@@ -151,7 +152,13 @@ void Ar8030Link::save_sky_config() {
 void Ar8030Link::load_sky_link() {
     if (sky_cfg_key.empty()) return;
     tx_power_want_mw = settings_.get(radio::setting::air_tx_power_mw(sky_cfg_key, tx_power_want_mw));
-    tx_power_mw  = ar_pwr_fit(air_prj.load(), tx_power_want_mw);
+    // Fitted to the levels this air unit has: what it said on this link, else what it said
+    // last time. A link lost and reopened has heard nothing yet, and the smallest list
+    // would hold a Lite+ to 100 mW (and its own uplink with it) until the unit is back.
+    const int prj = air_prj.load() > 0 ? air_prj.load() : settings_.get(radio::setting::air_prj(sky_cfg_key));
+    const int rec = settings_.get(radio::setting::air_features(sky_cfg_key));   // 0x100 | its feature bits
+    const bool fine = air_pwr_fine() || ((rec & 0x100) && (rec & kAirFeatPwrLvl));
+    tx_power_mw  = ar_pwr_fit(prj, tx_power_want_mw, fine);
     tx_power_dbm = kArPwrLevels[ar_pwr_index(tx_power_mw)].dbm;
     printf("ar8030: [%s] restored radio cfg: power=%s (chosen %s)\n", sky_cfg_key.c_str(),
            kArPwrLevels[ar_pwr_index(tx_power_mw)].label, kArPwrLevels[ar_pwr_index(tx_power_want_mw)].label);
@@ -900,16 +907,27 @@ void Ar8030Link::note_air_info(const uint8_t *pl, size_t n) {
 void Ar8030Link::note_air_prj(int prj, const char *from) {
     if (prj <= 0 || prj == air_prj.load()) return;
     air_prj.store(prj);
+    if (!sky_cfg_key.empty()) settings_.set(radio::setting::air_prj(sky_cfg_key), prj);
     ar_pwr_offer o = ar_pwr_offered(prj);
     printf("ar8030: air unit is an %s (prj %d, from its %s): power up to %s\n", ar_air_name(prj), prj, from,
            kArPwrLevels[ar_pwr_index(o.mw[o.n - 1])].label);
-    int fit = ar_pwr_fit(prj, tx_power_want_mw);
+    refit_air_power();
+}
+
+// The chosen power fitted to the levels this air unit has: when it has said what it
+// is, and again when it says it takes kestrel-air's own (a 316mW AUTO chosen on a
+// Lite+ is 500mW AUTO until then). The menu's rows re-read it from levels_n.
+void Ar8030Link::refit_air_power() {
+    const int prj = air_prj.load();
+    if (prj <= 0) return;
+    const bool fine = air_pwr_fine();
+    int fit = ar_pwr_fit(prj, tx_power_want_mw, fine);
     if (fit != tx_power_mw) {
         printf("ar8030: power for it: %s (chosen %s, was %s)\n", kArPwrLevels[ar_pwr_index(fit)].label,
                kArPwrLevels[ar_pwr_index(tx_power_want_mw)].label, kArPwrLevels[ar_pwr_index(tx_power_mw)].label);
         request_rf(RF_TX_POWER_FIT, fit);
     }
-    model_.update_air_radio([&](air::RadioState& r) { r.prj = prj; r.levels_n++; });
+    model_.update_air_radio([&](air::RadioState& r) { r.prj = prj; r.fine = fine; r.levels_n++; });
 }
 
 void Ar8030Link::note_air_announce(bool ka, uint8_t proto, uint8_t feat) {
@@ -925,6 +943,7 @@ void Ar8030Link::note_air_announce(bool ka, uint8_t proto, uint8_t feat) {
     air_kestrel_ = ka;
     air_proto_ = proto;
     air_feat_ = feat;
+    refit_air_power();   // its power levels: the ones kestrel-air has, once it says so
     region_due = true;   // a new link: AUTO's list again (its pick was the handshake's)
     // What this air unit runs, for the next handshake (send_air_handshake).
     if (!sky_cfg_key.empty()) settings_.set(radio::setting::air_features(sky_cfg_key), ka ? 0x100 | feat : 0);
@@ -949,6 +968,7 @@ void Ar8030Link::note_air_announce(bool ka, uint8_t proto, uint8_t feat) {
                (feat & kAirFeatApClock) ? " us-radio-clock" : "",
                (feat & kAirFeatMaxBw) ? " max-bandwidth" : "",
                (feat & kAirFeat864p120) ? " 864p120" : "");
+        if (feat & kAirFeatPwrLvl) printf("ar8030: the air unit takes 150, 200 and 316 mW and their AUTO\n");
         // Its own settings, which it keeps in RAM only: sent once it has said
         // it is kestrel-air, at every link-up (the announcement comes again),
         // whichever of the two units was powered first. The bandwidth cap

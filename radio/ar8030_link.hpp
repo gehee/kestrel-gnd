@@ -164,7 +164,7 @@ class Ar8030Link : public radio::Link, private radio::VideoOut::Source {
         // kestrel-air's capabilities, named for the INFO tab, by the feature bit
         // (or AirInfo::said bit) that says the air unit has it on.
         struct AirCap { uint16_t bit; const char *key; const char *name; };
-        static const AirCap kAirCaps[10];
+        static const AirCap kAirCaps[11];
         // What the air unit has on, by name: its feature bits and what it said.
         static std::vector<std::string> cap_names(const AirInfo &a);
         int air_floor_us;       // fastest capture -> first slice (air_floor_ms), see air_delay_for
@@ -472,6 +472,10 @@ class Ar8030Link : public radio::Link, private radio::VideoOut::Source {
         AirInfo air_info_;
         void publish_air_info();
         void note_air_prj(int prj, const char *from);   // what the air unit is: its power levels
+        // The power levels this air unit is offered: its project's, and kestrel-air's
+        // own (kAirFeatPwrLvl) once it has said it takes them.
+        bool air_pwr_fine() const { return air_kestrel_ && (air_feat_ & kAirFeatPwrLvl); }
+        void refit_air_power();   // the chosen power fitted to them (the menu's choice is kept)
         void note_air_announce(bool ka, uint8_t proto, uint8_t feat);
         // Air-side times of each slice, us, over 5 s windows, from the header.
         std::vector<uint32_t> lat_enc_, lat_queue_, lat_write_;
@@ -487,6 +491,7 @@ class Ar8030Link : public radio::Link, private radio::VideoOut::Source {
         static constexpr uint8_t kAirFeatMaxBw = 0x10;     // takes the goggle's bandwidth cap (sky 0x41)
         static constexpr uint8_t kAirFeatFcImu = 0x20;     // the flight controller's IMU (the Lite+: none on the camera)
         static constexpr uint8_t kAirFeat864p120 = 0x40;   // 864p120: its camera's 1536x864 window at 120 fps
+        static constexpr uint8_t kAirFeatPwrLvl = 0x80;    // TX power: 150, 200, 316 mW and their AUTO (151, 201, 317)
         // Said in its info (KA_MSG_INFO), the header's byte being full: 864p144
         // (864p144=1), its OS02K10's 1536x864 window at 144 fps.
         static constexpr uint16_t kAirFeat864p144 = 0x100;

@@ -21,7 +21,10 @@ std::vector<std::pair<const char*, int>> OSD::ar_rf_items() const {
     // on that page now. Every consumer switches on the item id (.second), not the
     // row index, so this order is free to change.
     if (rf_caps & 16) v.push_back({"Channel",   5});  // RF_CHAN, RF_HOP
-    if (rf_caps & 1)  v.push_back({"TX Power",  1});  // RF_TX_POWER
+    // TX Power Mode (16) and TX Power (1) are one setting in two rows: FIXED or AUTO,
+    // and the level (AUTO's top). The value on the wire is stock's, N or N + 1.
+    if (rf_caps & 1)  v.push_back({"TX Power Mode", 16});  // RF_TX_POWER
+    if (rf_caps & 1)  v.push_back({"TX Power",  1});       // RF_TX_POWER
     // Radio Frame (12) and Steady Latency (15) are hidden: their settings
     // (ar8030_frame_mode, ar8030_steady) still apply from the yaml, and their
     // handlers stay, so listing them again is one line each here. Steady
@@ -482,7 +485,11 @@ std::vector<OSD::MenuItem> OSD::menu_items(int tab) const {
                     "allowed channel when the link connects, AUTO HOP lets the air unit hop by itself.",
                     "ENTER: OPEN"}); break;
                 case 1: items.push_back({it.first, 1,
-                    "Radio output. More reaches further and runs hotter."}); break;
+                    "Radio output. More reaches further and runs hotter. In AUTO, the most "
+                    "it may use: the air unit asks for no more than this."}); break;
+                case 16: items.push_back({it.first, 1,
+                    "FIXED holds the TX Power level. AUTO lets the link ask the air unit for "
+                    "what it needs, up to that level."}); break;
                 case 8: items.push_back({it.first, 1,
                     "Force the air unit's low-power standby on or off for now."}); break;
                 case 11: items.push_back({it.first, 1, link_->radio_fw == 1
@@ -947,10 +954,29 @@ void OSD::menu_apply_change(int tab, int index, int dir) {
                        // none before it has said what it is.
                        const int prj = air_radio_.prj;
                        if (prj <= 0) break;
-                       ar_pwr_offer o = ar_pwr_offered(prj);
-                       int i = ar_pwr_offer_index(prj, ar_pwr_fit(prj, menu_ar_power));
-                       i = menu_step(i < 0 ? 0 : i, dir, o.n);
-                       menu_ar_power = o.mw[i];
+                       // The level: the fixed level, or AUTO's top, among the ones the
+                       // mode has.
+                       const bool fine = air_radio_.fine;
+                       const int cur = ar_pwr_fit(prj, menu_ar_power, fine);
+                       const bool autom = ar_pwr_is_auto(cur);
+                       int t[kArPwrTopsMax];
+                       const int n = ar_pwr_tops(prj, fine, autom, t);
+                       if (n <= 0) break;
+                       int i = 0;
+                       while (i + 1 < n && t[i] < ar_pwr_top(cur)) i++;
+                       i = menu_step(i, dir, n);
+                       menu_ar_power = autom ? t[i] + 1 : t[i];
+                   }
+                   break;
+               case 16:
+                   {
+                       // The mode, at the same level where the air unit has it there.
+                       const int prj = air_radio_.prj;
+                       if (prj <= 0) break;
+                       const bool fine = air_radio_.fine;
+                       const int cur = ar_pwr_fit(prj, menu_ar_power, fine);
+                       const int v = ar_pwr_pick(prj, fine, !ar_pwr_is_auto(cur), ar_pwr_top(cur));
+                       if (v >= 0) menu_ar_power = v;
                    }
                    break;
                case 8: menu_ar_standby = menu_step(menu_ar_standby ? 1 : 0, dir, 2) != 0; break;  // forced on Enter
@@ -1225,8 +1251,18 @@ void OSD::menu_value_text(int tab, int i, char* val_buf, size_t cap) {
                 }
                 case 1: {   // TX power: -- until the air unit has said what it is
                     const int prj = air_radio_.prj;
-                    if (prj <= 0) snprintf(val_buf, cap, "--");
-                    else snprintf(val_buf, cap, "< %s >", kArPwrLevels[ar_pwr_index(ar_pwr_fit(prj, menu_ar_power))].label);
+                    if (prj <= 0) { snprintf(val_buf, cap, "--"); break; }
+                    // The level; in AUTO, the most it may use.
+                    const int cur = ar_pwr_fit(prj, menu_ar_power, air_radio_.fine);
+                    const int top = ar_pwr_top(cur);
+                    snprintf(val_buf, cap, ar_pwr_is_auto(cur) ? "< %dmW max >" : "< %dmW >", top);
+                    break;
+                }
+                case 16: {   // FIXED or AUTO
+                    const int prj = air_radio_.prj;
+                    if (prj <= 0) { snprintf(val_buf, cap, "--"); break; }
+                    snprintf(val_buf, cap, "< %s >",
+                             ar_pwr_is_auto(ar_pwr_fit(prj, menu_ar_power, air_radio_.fine)) ? "AUTO" : "FIXED");
                     break;
                 }
                 case 8:     // Standby. Shows the air's current state (menu value is

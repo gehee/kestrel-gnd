@@ -181,11 +181,11 @@ void Ar8030Link::apply_tx_power(int mw) {
                       (uint8_t)(lv.automode ? kArPwrLevels[0].dbm : lv.dbm) };
     // An Open8030 radio's mode 1 is the window it asks the AIR unit's power
     // in (it leaves its own alone): in the air unit's levels for the label,
-    // as kestrel-air sets them (stock's table) - 500 mW is 26, 100 mW 19 -
+    // as kestrel-air sets them (stock's table) - 500 mW is 26, 316 mW 24, 100 mW 19 -
     // and never above. The air radio also holds every request inside its
     // own range.
     if (lv.automode && radio_fw == 1) {
-        const int top = lv.mw - 1 >= 500 ? 26 : 19;   // AUTO levels: 501 and 101
+        const int top = ar_air_dbm_from_mw(lv.mw - 1);   // AUTO is the level + 1
         pa[1] = (uint8_t)top;
         pa[2] = 13;                                   // the air unit's 25 mW
     }
@@ -243,14 +243,14 @@ void Ar8030Link::apply_pending_rf() {
                 // at N); apply_tx_power() owns the mapping and both ioctls.
                 // The menu's choice: kept, and run fitted to this air unit.
                 tx_power_want_mw = val;
-                apply_tx_power(ar_pwr_fit(air_prj.load(), val));
+                apply_tx_power(ar_pwr_fit(air_prj.load(), val, air_pwr_fine()));
                 save_sky_link();
                 break;
             }
             case RF_TX_POWER_FIT:
                 // The choice fitted to the air unit that just said what it is;
                 // the choice stays as it was.
-                apply_tx_power(ar_pwr_fit(air_prj.load(), tx_power_want_mw));
+                apply_tx_power(ar_pwr_fit(air_prj.load(), tx_power_want_mw, air_pwr_fine()));
                 break;
             case RF_MCS: {
                 // val < 0 means AUTO: flip the mode rather than pin an index.
