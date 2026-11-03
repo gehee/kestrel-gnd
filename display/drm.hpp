@@ -336,15 +336,11 @@ public:
     // The ID (display/screen_id.h) of the screen this was set up for, "" if it
     // had none. A different one plugged in later restarts kestrel-gnd.
     std::string display_id;
-    // Screen Mode Auto: the refresh follows the camera's frame rate - set
-    // before init, with the rate last seen ("camera_fps") for the first mode.
-    // A different rate in the stream later (g_camera_fps) changes the mode at
-    // the same size, the highest whole multiple of it the screen offers. No
-    // phase lock: the two clocks still drift apart by their tolerances.
+    // Screen Mode Auto: the first mode is the screen's alone (mode_follow.h);
+    // the camera's frame rate in the stream (g_camera_fps) then sets the
+    // refresh at that size (check_follow_camera). No phase lock: the two
+    // clocks still drift apart by their tolerances.
     bool follow_camera = false;
-    uint32_t follow_fps = 0;
-    // ... and its lines ("camera_lines").
-    uint32_t follow_lines = 0;
     // The display lock sets each frame's length (Refresh Sync): how long the
     // one being scanned out is, us, 0 for the mode's own (frame_period_us).
     void set_frame_period(double us) { frame_period_now_us_.store(us, std::memory_order_relaxed); }

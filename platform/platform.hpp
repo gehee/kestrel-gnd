@@ -49,7 +49,6 @@ struct DisplaySetup {
     bool vrr = true;
     std::string screen_id;
     bool follow_camera = false;
-    uint32_t follow_fps = 0, follow_lines = 0;
     // Refresh Sync's settings (display::RefreshSync).
     int sync_mode = 0, sync_slice = 1, sync_margin_us = 0;
 };

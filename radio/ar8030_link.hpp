@@ -537,10 +537,12 @@ class Ar8030Link : public radio::Link, private radio::VideoOut::Source {
         uint64_t ap_log_ms_ = 0;
         void poll_ap_time();
         void poll_resends();             // Open8030: the air radio's resend map, from the stats thread
+        void rx_quality_diag(const FrameStampInfo &si, bool quality, uint64_t t);   // bench: our radio's frame errors every 5 s
         uint64_t resend_poll_ms_ = 0;
         uint32_t resend_done_frame_ = 0;     // our radio's frame of the newest taken
         bool     resend_done_valid_ = false;
         uint32_t frames_done_ = 0;           // the per-frame log: the newest frame written
+        struct { uint32_t done = 0, valid = 0, err = 0, unknown = 0, p[4] = {}; bool have = false; uint64_t t0 = 0; } diag_;   // rx_quality_diag
         bool     frames_done_valid_ = false;
         // Its totals since our radio started: blocks sent again, frames known, frames stalled.
         std::atomic<uint32_t> rs_blocks_{0}, rs_known_{0}, rs_stalls_{0};

@@ -118,12 +118,9 @@ int main(int argc, char **argv)
 		ds.osd_zpos = osd_zpos;
 		ds.vrr = enable_vrr;
 		ds.screen_id = screen_id_str;
-		// Auto: the refresh follows the camera, from the rate last seen.
+		// Auto: the mode by the screen alone (display/kms/mode_follow.h);
+		// the refresh follows the camera once its pictures come.
 		ds.follow_camera = !(mode_width > 0 && mode_height > 0 && mode_vrefresh > 0);
-		const int last_fps = g_settings.get(display::setting::camera_fps);
-		ds.follow_fps = last_fps > 0 ? (uint32_t)last_fps : 0;
-		const int last_lines = g_settings.get(display::setting::camera_lines);
-		ds.follow_lines = last_lines > 0 ? (uint32_t)last_lines : 0;
 		ds.sync_mode = o.sync_mode;
 		ds.sync_slice = o.sync_slice;
 		ds.sync_margin_us = o.sync_margin_us;

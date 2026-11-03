@@ -19,9 +19,7 @@ std::shared_ptr<display::Display> make_display(Settings& settings, const Display
     auto dev = std::make_shared<DrmDevice>(settings);
     dev->display_id = s.screen_id;   // a different screen plugged in restarts us
     dev->follow_camera = s.follow_camera;
-    dev->follow_fps = s.follow_fps;
-    dev->follow_lines = s.follow_lines;
-    dev->set_sync_mode(s.sync_mode);   // before init: Auto's first mode depends on it
+    dev->set_sync_mode(s.sync_mode);
     dev->set_sync_slice(s.sync_slice);
     dev->set_sync_margin_us(s.sync_margin_us);
     dev->init(s.width, s.height, s.refresh, s.video_zpos, s.osd_zpos, s.vrr);

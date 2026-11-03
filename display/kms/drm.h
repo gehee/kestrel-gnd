@@ -130,12 +130,12 @@ int modeset_setup_framebuffers(int fd, drmModeConnector *conn, struct modeset_ou
 
 void modeset_output_destroy(int fd, struct modeset_output *out);
 
-/* With no mode asked for (Auto) and follow_fps non-zero, the mode is the one
- * modeset_pick_follow() finds for it, if any: the screen refreshes in step
- * with the camera. */
-struct modeset_output *modeset_output_create(int fd, drmModeRes *res, drmModeConnector *conn, uint16_t mode_width, uint16_t mode_height, uint32_t mode_vrefresh, uint32_t follow_fps);
+/* With no mode asked for (Auto), the mode is modeset_pick_auto()'s
+ * (mode_follow.h); one the kernel refuses in a test commit gives way to the
+ * next in Auto's order. */
+struct modeset_output *modeset_output_create(int fd, drmModeRes *res, drmModeConnector *conn, uint16_t mode_width, uint16_t mode_height, uint32_t mode_vrefresh);
 
-int modeset_prepare(int fd, struct modeset_output *output_list, uint16_t mode_width, uint16_t mode_height, uint32_t mode_vrefresh, uint32_t follow_fps);
+int modeset_prepare(int fd, struct modeset_output *output_list, uint16_t mode_width, uint16_t mode_height, uint32_t mode_vrefresh);
 
 
 int modeset_perform_modeset(int fd, struct modeset_output *out, drmModeAtomicReq * req, plane_info* video_info, plane_info* osd_info);

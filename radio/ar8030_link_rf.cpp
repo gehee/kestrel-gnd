@@ -781,6 +781,37 @@ void Ar8030Link::region_auto_apply() {
 // goes on the stats screen at the time it ended; the totals go in the 3 s line.
 // A block sent again costs its slice a frame or more: the radio part's latency
 // tail (40 MHz at MCS 8 on the bench: p99 13-16 ms, 7.5 at MCS 6).
+// Bench: every 5 s, our radio's own view of the frames it heard - the
+// share its decoder flagged (the per-frame quality words, with any air
+// radio) and its receive counters (header samples, repeated end-of-packet
+// events, other users', errors forced by an invalid header) - to compare a
+// stock air radio with Open8030 on the same goggle.
+void Ar8030Link::rx_quality_diag(const FrameStampInfo &si, bool quality, uint64_t t) {
+    struct PhyInfo { uint32_t samples, duplicates, other_users, forced_errors, sample_us; } p{};
+    if (quality && si.q_frame) {
+        if (diag_.have && (int32_t)(si.q_frame - diag_.done) < 0) diag_.have = false;
+        for (int k = 63; k >= 0; k--) {
+            const uint32_t n = si.q_frame - (uint32_t)k;
+            if (diag_.have && (int32_t)(n - diag_.done) <= 0) continue;
+            const uint32_t w = si.q_word[k];
+            if (w >> 30 & 1) { diag_.valid++; diag_.err += w >> 31; } else diag_.unknown++;
+        }
+        diag_.done = si.q_frame; diag_.have = true;
+    }
+    if (!diag_.t0) diag_.t0 = t;
+    if (t - diag_.t0 < 5000) return;
+    uint32_t got = 0;
+    const int rc = arlink_request(0x0c5a001b, nullptr, 0, &p, sizeof(p), &got, 300);
+    printf("ar8030: our radio's frames in %.1f s: %u heard, %u flagged (%.2f%%), %u unknown, newest %u of %u (flags %x)"
+           " | headers +%u, repeated ends +%u, other users +%u, forced errors +%u%s\n",
+           (t - diag_.t0) / 1000.0, diag_.valid, diag_.err, diag_.valid ? 100.0 * diag_.err / diag_.valid : 0.0,
+           diag_.unknown, si.q_frame, si.frames, si.flags,
+           p.samples - diag_.p[0], p.duplicates - diag_.p[1], p.other_users - diag_.p[2], p.forced_errors - diag_.p[3],
+           rc == 0 && got >= sizeof(p) ? "" : " (no PHY info)");
+    diag_.p[0] = p.samples; diag_.p[1] = p.duplicates; diag_.p[2] = p.other_users; diag_.p[3] = p.forced_errors;
+    diag_.valid = diag_.err = diag_.unknown = 0; diag_.t0 = t;
+}
+
 void Ar8030Link::poll_resends() {
     if (radio_fw != 1 || !arlink_request || link_state_.load() != 2) return;
     const uint64_t t = now_ms();
@@ -801,6 +832,7 @@ void Ar8030Link::poll_resends() {
     const bool link_state = got >= sizeof(si);
     resend_known_.store(true);
     rs_blocks_.store(si.retries); rs_known_.store(si.retry_known_frames); rs_stalls_.store(si.retry_stalls);
+    rx_quality_diag(si, quality, t);
     if (!si.frame_ticks || r1 - r0 > 5000) return;
     // Frame n of ours ended at our radio's IRQ 5 number n; si.frames ended
     // since_us before the answer (the request's middle).

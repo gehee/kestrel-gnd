@@ -352,8 +352,8 @@ const char* OSD::menu_help_text(int tab, int i, const char* fallback) {
         if (dev && dev->has_output())
             snprintf(now, sizeof(now), "%dx%d @ %d Hz", dev->mode().w,
                      dev->mode().h, dev->mode().hz);
-        mode = std::string("Showing ") + now + ". Auto refreshes in step with the camera's frame rate\n"
-               "where the screen can, else at the highest refresh it offers.";
+        mode = std::string("Showing ") + now + ". Auto: the fastest 1080p above 60 Hz, else 720p above\n"
+               "60 Hz, else 1080p60, else 720p60; then in step with the camera.";
         return mode.c_str();
     }
     if (tab == kTabSystem && i == kSysTimezone && menu_zone_ >= 0) {

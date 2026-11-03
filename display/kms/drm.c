@@ -642,7 +642,67 @@ void modeset_output_destroy(int fd, struct modeset_output *out)
 	free(out);
 }
 
-struct modeset_output *modeset_output_create(int fd, drmModeRes *res, drmModeConnector *conn, uint16_t mode_width, uint16_t mode_height, uint32_t mode_vrefresh, uint32_t follow_fps)
+/* Whether the kernel would take out->mode on out's CRTC: a test commit,
+ * nothing changes. 0 yes, -errno no. A test it cannot run (not DRM master,
+ * no such property) counts as yes: then the real commit decides. */
+static int modeset_test_mode(int fd, struct modeset_output *out)
+{
+	drmModeAtomicReq *req = drmModeAtomicAlloc();
+	int ret = 0;
+
+	if (!req)
+		return 0;
+	if (set_drm_object_property(req, &out->connector, "CRTC_ID", out->crtc.id) >= 0 &&
+	    set_drm_object_property(req, &out->crtc, "MODE_ID", out->mode_blob_id) >= 0 &&
+	    set_drm_object_property(req, &out->crtc, "ACTIVE", 1) >= 0)
+		ret = drmModeAtomicCommit(fd, req, DRM_MODE_ATOMIC_TEST_ONLY | DRM_MODE_ATOMIC_ALLOW_MODESET, NULL);
+	drmModeAtomicFree(req);
+	return ret == -EACCES || ret == -EPERM ? 0 : ret;
+}
+
+/* The mode, tried before anything is made in its size: one the kernel
+ * refuses (the display controller cannot drive it, though the screen lists
+ * it) gives way to the next in Auto's order (mode_follow.h) - a black screen
+ * otherwise. Every one refused: the first stays, and the real commit says
+ * why. */
+static int modeset_settle_mode(int fd, drmModeConnector *conn, struct modeset_output *out)
+{
+	int order[128];
+	const int n = modeset_auto_order(conn, order, 128);
+	drmModeModeInfo first = out->mode;
+
+	for (int k = 0;; k++) {
+		const int ret = modeset_test_mode(fd, out);
+		if (ret == 0)
+			return 0;
+		printf("display: %dx%d@%d (%.3f Hz) refused by the display controller: %s\n",
+		       out->mode.hdisplay, out->mode.vdisplay, out->mode.vrefresh,
+		       modeset_mode_hz(&out->mode), strerror(-ret));
+		while (k < n && !memcmp(&conn->modes[order[k]], &first, sizeof(first)))
+			k++;
+		if (k >= n)
+			break;
+		drmModeModeInfo next = conn->modes[order[k]];
+		uint32_t blob = 0;
+		if (drmModeCreatePropertyBlob(fd, &next, sizeof(next), &blob) != 0)
+			break;
+		drmModeDestroyPropertyBlob(fd, out->mode_blob_id);
+		out->mode_blob_id = blob;
+		out->mode = next;
+		printf("display: trying %dx%d@%d instead\n", next.hdisplay, next.vdisplay, next.vrefresh);
+	}
+	printf("display: no mode taken in a test - keeping %dx%d@%d\n", first.hdisplay, first.vdisplay,
+	       first.vrefresh);
+	uint32_t blob = 0;
+	if (drmModeCreatePropertyBlob(fd, &first, sizeof(first), &blob) == 0) {
+		drmModeDestroyPropertyBlob(fd, out->mode_blob_id);
+		out->mode_blob_id = blob;
+		out->mode = first;
+	}
+	return -1;
+}
+
+struct modeset_output *modeset_output_create(int fd, drmModeRes *res, drmModeConnector *conn, uint16_t mode_width, uint16_t mode_height, uint32_t mode_vrefresh)
 {
 	int ret;
 	struct modeset_output *out;
@@ -722,12 +782,11 @@ struct modeset_output *modeset_output_create(int fd, drmModeRes *res, drmModeCon
             // can take, and there is no reason to disbelieve it.
             //
             // Preference: the highest advertised refresh at the requested
-            // resolution that does not exceed what was asked for, then the
-            // sink's own preferred mode, then whatever is first.
-            int best = -1, best_rate = -1, pref = -1;
+            // resolution that does not exceed what was asked for, else Auto's
+            // mode (mode_follow.h), else whatever is first.
+            int best = -1, best_rate = -1;
             for (int i = 0; i < conn->count_modes; i++) {
                 if (conn->modes[i].flags & DRM_MODE_FLAG_INTERLACE) continue;
-                if (conn->modes[i].type & DRM_MODE_TYPE_PREFERRED) pref = i;
                 if (conn->modes[i].hdisplay == mode_width &&
                     conn->modes[i].vdisplay == mode_height &&
                     (int)conn->modes[i].vrefresh <= (int)mode_vrefresh &&
@@ -735,38 +794,22 @@ struct modeset_output *modeset_output_create(int fd, drmModeRes *res, drmModeCon
                     best = i; best_rate = conn->modes[i].vrefresh;
                 }
             }
-            if (best < 0) best = (pref >= 0) ? pref : 0;
+            if (best < 0) best = modeset_pick_auto(conn);
+            if (best < 0) best = 0;
             printf("display: %dx%d@%d not advertised - using %dx%d@%d instead\n",
                    mode_width, mode_height, mode_vrefresh,
                    conn->modes[best].hdisplay, conn->modes[best].vdisplay,
                    conn->modes[best].vrefresh);
             fc = best;
 		} 
-    } else if ((fc = modeset_pick_follow(conn, follow_fps, 0, 0)) >= 0) {
-        printf("Auto: %dx%d@%d, in step with the camera's %u fps (%.3f Hz)\n",
-               conn->modes[fc].hdisplay, conn->modes[fc].vdisplay, conn->modes[fc].vrefresh,
-               follow_fps, modeset_mode_hz(&conn->modes[fc]));
     } else {
-        // No specific mode requested, auto-select highest refresh rate (and resolution)
-        fc = 0;
-        uint32_t max_refresh = 0;
-        uint32_t max_area = 0;
-        
-        for (int i = 0; i < conn->count_modes; i++) {
-            if (conn->modes[i].flags & DRM_MODE_FLAG_INTERLACE)
-                continue;   /* interlaced modes do not composite correctly here */
-            uint32_t refresh = conn->modes[i].vrefresh;
-            uint32_t area = conn->modes[i].hdisplay * conn->modes[i].vdisplay;
-            
-            // Priority: Higher Refresh > Higher Resolution
-            if (refresh > max_refresh || (refresh == max_refresh && area > max_area)) {
-                max_refresh = refresh;
-                max_area = area;
-                fc = i;
-            }
-        }
-        printf("Auto-selecting highest refresh rate mode: %dx%d@%d\n", 
-               conn->modes[fc].hdisplay, conn->modes[fc].vdisplay, conn->modes[fc].vrefresh);
+        // Auto (mode_follow.h): 1080p above 60 Hz, 720p above 60 Hz, 1080p60,
+        // 720p60, the fastest first; the camera plays no part.
+        fc = modeset_pick_auto(conn);
+        if (fc < 0) fc = 0;
+        printf("Auto: %dx%d@%d (%.3f Hz)\n",
+               conn->modes[fc].hdisplay, conn->modes[fc].vdisplay, conn->modes[fc].vrefresh,
+               modeset_mode_hz(&conn->modes[fc]));
     }
 	// Always a mode the sink advertised, so this is the only path now - the
 	// label that let the fabricated-timing branch skip this copy is gone with it.
@@ -831,6 +874,7 @@ struct modeset_output *modeset_output_create(int fd, drmModeRes *res, drmModeCon
 		fprintf(stderr, "cannot get plane properties\n");
 		goto out_blob;
 	}
+	modeset_settle_mode(fd, conn, out);
 
 	ret = modeset_setup_framebuffers(fd, conn, out);
 	if (ret) {
@@ -856,7 +900,7 @@ out_error:
 }
 
 
-int modeset_prepare(int fd, struct modeset_output *output_list, uint16_t mode_width, uint16_t mode_height, uint32_t mode_vrefresh, uint32_t follow_fps)
+int modeset_prepare(int fd, struct modeset_output *output_list, uint16_t mode_width, uint16_t mode_height, uint32_t mode_vrefresh)
 {
 	drmModeRes *res;
 	drmModeConnector *conn;
@@ -879,7 +923,7 @@ int modeset_prepare(int fd, struct modeset_output *output_list, uint16_t mode_wi
 			continue;
 		}
 
-		out = modeset_output_create(fd, res, conn, mode_width, mode_height, mode_vrefresh, follow_fps);
+		out = modeset_output_create(fd, res, conn, mode_width, mode_height, mode_vrefresh);
 		drmModeFreeConnector(conn);
 		if (!out)
 			continue;

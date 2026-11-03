@@ -41,8 +41,7 @@ void DrmDevice::init(uint16_t mode_width, uint16_t mode_height, uint32_t mode_vr
 	assert(drm_fd >= 0);
 	output_list = (struct modeset_output *)malloc(sizeof(struct modeset_output));
     output_list_original = output_list;
-	ret = modeset_prepare(drm_fd, output_list, mode_width, mode_height, mode_vrefresh,
-                          follow_camera && g_display_lock.load() != 2 ? follow_fps : 0);
+	ret = modeset_prepare(drm_fd, output_list, mode_width, mode_height, mode_vrefresh);
     // No connected display is not fatal: booting headless (or with a flaky HDMI
     // cable) used to fall through the compiled-out assert below onto an
     // UNINITIALIZED output struct. Wait here and pick the display up when it
@@ -52,16 +51,14 @@ void DrmDevice::init(uint16_t mode_width, uint16_t mode_height, uint32_t mode_vr
         fflush(stdout);
         while (ret != 0) {
             sleep(2);
-            ret = modeset_prepare(drm_fd, output_list, mode_width, mode_height, mode_vrefresh,
-                          follow_camera && g_display_lock.load() != 2 ? follow_fps : 0);
+            ret = modeset_prepare(drm_fd, output_list, mode_width, mode_height, mode_vrefresh);
         }
     }
 	assert(!ret);
     printf("modeset_prepare successful. Using connector %u, crtc %u\n", output_list->connector.id, output_list->crtc.id);
     fflush(stdout);
     output_list->allow_vrr = enable_vrr;
-    follow_done_fps_ = follow_camera ? follow_fps : 0;
-    follow_done_lines_ = follow_camera ? follow_lines : 0;
+    follow_done_fps_ = follow_done_lines_ = 0;
 
     video_zpos = vzpos;
     video_fb_x = 0;
@@ -340,11 +337,11 @@ void DrmDevice::handle_events() {
 }
 
 // Screen Mode Auto follows the camera (follow_camera): a frame rate new in
-// the stream puts the screen on the highest refresh that is a whole multiple
-// of it, at the size it has now (the framebuffers and the GL surface are
-// that size) - or, with none, on the highest refresh at that size, Auto's
-// choice without a camera. One modeset, so one blank, as for any mode change.
-// The rate is kept as "camera_fps", and the next start comes up in its mode.
+// the stream puts the screen on Auto's refresh for it at the size it has now
+// (the framebuffers and the GL surface are that size; mode_follow.h): above
+// 60 Hz if it has any, the highest in step with the camera, else the highest.
+// One modeset, so one blank, as for any mode change (none when Auto's
+// first mode is already that one).
 void DrmDevice::check_follow_camera() {
     if (refollow_.exchange(false)) follow_done_fps_ = follow_done_lines_ = 0;
     const int fps = g_camera_fps.load(std::memory_order_acquire);
@@ -353,10 +350,6 @@ void DrmDevice::check_follow_camera() {
         ((uint32_t)fps == follow_done_fps_ && (uint32_t)lines == follow_done_lines_)) return;
     follow_done_fps_ = (uint32_t)fps;
     follow_done_lines_ = (uint32_t)lines;
-    if (settings_.get(display::setting::camera_fps) != fps)
-        settings_.set(display::setting::camera_fps, fps);
-    if (settings_.get(display::setting::camera_lines) != lines)
-        settings_.set(display::setting::camera_lines, lines);
 
     drmModeConnector *conn = drmModeGetConnectorCurrent(drm_fd, output_list->connector.id);
     if (!conn) return;
@@ -364,15 +357,9 @@ void DrmDevice::check_follow_camera() {
     // A screen that takes any frame length (Refresh Sync FREE) keeps its
     // fastest mode: the lock makes its frames as long as the camera's, and
     // its quick scan-out lights the lower rows sooner.
-    int pick = g_display_lock.load() == 2 ? -1
-                                          : modeset_pick_follow(conn, (uint32_t)fps, cur.hdisplay, cur.vdisplay);
-    const bool in_step = pick >= 0;
-    for (int i = 0; !in_step && i < conn->count_modes; i++) {
-        const drmModeModeInfo &m = conn->modes[i];
-        if ((m.flags & DRM_MODE_FLAG_INTERLACE) || m.hdisplay != cur.hdisplay || m.vdisplay != cur.vdisplay)
-            continue;
-        if (pick < 0 || modeset_mode_hz(&m) > modeset_mode_hz(&conn->modes[pick])) pick = i;
-    }
+    int in_step = 0;
+    int pick = modeset_pick_rate(conn, g_display_lock.load() == 2 ? 0 : (uint32_t)fps,
+                                 cur.hdisplay, cur.vdisplay, &in_step);
     drmModeModeInfo m = {};
     if (pick >= 0) m = conn->modes[pick];
     drmModeFreeConnector(conn);
