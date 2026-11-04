@@ -19,7 +19,12 @@
 //
 //   4 Ascent Lite, 6 Ascent RC   25mW, 100mW, 100mW Auto       (also unknown)
 //   7 Ascent Lite+               25mW, 100mW, 200mW, 500mW, 500mW Auto
-//   5, 8 the GT family           up to 2W .. 10W by RF board - not offered here
+//   5, 8 the GT family           25 mW through 5W AUTO. The goggle uplink
+//                                stays at or below 27 dBm (stock SET 9 max
+//                                0x1B). cmd 0x22 carries the mW; G_Sky 17.5.15
+//                                map_pwr_dbm_486 turns that into the air dBm
+//                                (1W 27, 2W 30, 4W 33, 5W 34). 700 and 3000 mW
+//                                exist on the air and are not menu rows.
 //
 // (A goggle setting can narrow every unit to 25mW or 25/100mW; not modelled.)
 // Until the air unit has reported, stock's global is 0, which gets the Lite's
@@ -28,13 +33,20 @@ struct ar_pwr_level { int mw; int dbm; bool automode; const char* label; };
 // The mw field doubles as the value sent to the air unit (cmd 0x22), where
 // stock's convention is that AUTO is the level plus one - a bbproxy capture of
 // stock caught 101 on the wire for its "100mW Auto" entry, so 501 here means
-// "auto, capped at 500 mW". This table holds every level of both lists; what a
-// menu offers is kArPwrOffer*.
+// "auto, capped at 500 mW" and 5001 means "auto, capped at 5 W". This table
+// holds every level of every list; what a menu offers is kArPwrOffer*.
+// dbm is the goggle uplink only. From 1W up it stays 27: the air unit, not
+// the goggle, is what map_pwr_dbm_486 turns into 30/33/34 dBm. A readback of
+// 27 dBm therefore matches the 1W row; the menu shows the commanded mW.
 static const ar_pwr_level kArPwrLevels[] = {
     {   25, 11, false, "25mW"      }, {  100, 17, false, "100mW"     },
     {  101, 17, true,  "100mW AUTO"},
     {  200, 20, false, "200mW"     }, {  500, 24, false, "500mW"     },
     {  501, 24, true,  "500mW AUTO"},
+    { 1000, 27, false, "1W"        }, { 1001, 27, true,  "1W AUTO"   },
+    { 2000, 27, false, "2W"        }, { 2001, 27, true,  "2W AUTO"   },
+    { 4000, 27, false, "4W"        }, { 4001, 27, true,  "4W AUTO"   },
+    { 5000, 27, false, "5W"        }, { 5001, 27, true,  "5W AUTO"   },
 };
 static const int kArPwrCount = (int)(sizeof(kArPwrLevels) / sizeof(kArPwrLevels[0]));
 
@@ -53,8 +65,12 @@ static inline int ar_pwr_index(int mw) {
 enum { AR_AIR_LITE = 4, AR_AIR_RC = 6, AR_AIR_LITE_PLUS = 7 };
 static const int kArPwrOfferLite[]     = { 25, 100, 101 };
 static const int kArPwrOfferLitePlus[] = { 25, 100, 200, 500, 501 };
+static const int kArPwrOfferGt[] = {
+    25, 100, 101, 200, 500, 501, 1000, 1001, 2000, 2001, 4000, 4001, 5000, 5001
+};
 struct ar_pwr_offer { const int *mw; int n; };
 static inline ar_pwr_offer ar_pwr_offered(int air_prj) {
+    if (air_prj == 5 || air_prj == 8) return { kArPwrOfferGt, 14 };
     if (air_prj == AR_AIR_LITE_PLUS) return { kArPwrOfferLitePlus, 5 };
     return { kArPwrOfferLite, 3 };
 }
@@ -63,6 +79,8 @@ static inline const char *ar_air_name(int air_prj) {
         case AR_AIR_LITE: return "Ascent Lite";
         case AR_AIR_RC: return "Ascent RC";
         case AR_AIR_LITE_PLUS: return "Ascent Lite+";
+        case 5: return "Ascent GT";
+        case 8: return "Ascent GT Pro";
         default: return "unknown";
     }
 }
