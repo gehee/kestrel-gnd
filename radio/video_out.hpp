@@ -67,6 +67,7 @@ public:
         int hseq = -1;
         int idx = -1;
         bool last = false;
+        bool ends = false;   // last, said by a kestrel-air unit (stock's byte 32 is not known to mean it)
         uint64_t out_us = 0;
         uint32_t fps = 0;
     };
@@ -171,6 +172,9 @@ private:
     unsigned long long foreign_slices_ = 0;
     static constexpr int kLearnRun = 32;
     static constexpr uint32_t kLateMax = 4;
+    bool ends_off_ = false;          // slices came after the air unit said a picture ended: not believed
+    bool ended_by_mark_ = false;     // the last picture was ended by the air unit's mark
+    uint32_t late_marked_ = 0;       // late slices after such pictures, this window
     bool stream_paused_ = false;     // /tmp/kestrel-stream-off, or the frame mode's whole pictures
     unsigned pause_check_ = 0;
 

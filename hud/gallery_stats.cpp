@@ -154,7 +154,7 @@ void build_stats(const StatsFrame* frames, size_t n_frames, const StatsFlip* fli
         n_pics++;
         if (f.t_us + 2000000 > now_us) { n_recent++; skipped_recent += f.skipped; }
         tot_hist[std::min(kTotBins - 1, (int)(tot * 10.0f))]++;
-        if (ns >= 2 && f.nslices == ns) {
+        if (ns >= 1 && f.nslices == ns) {
             for (int s = 0; s < ns; s++) {
                 slice_hist[s][std::min(kTotBins - 1, (int)(f.slice_ms[s] * 10.0f))]++;                const float v[kSlF] = { f.sl[s].off, f.sl[s].enc, f.sl[s].rf, f.sl[s].dec,
                                         f.sl[s].dec_wait, f.sl[s].disp, f.sl[s].disp_wait, f.sl[s].enc_read,

@@ -1536,11 +1536,13 @@ void Renderer::update_stats(DecodedUnit *du, uint64_t display_start_ts) {
         int which = 0;
         // Each slice on its own, top to bottom (the HUD and the stats in SPLIT;
         // the first and the last also for the log): kLatSlices of them at most,
-        // spread from the first to the last when there are more.
+        // spread from the first to the last when there are more. A picture of
+        // one slice (a P1 Air's) too: its exposure and sensor readout are only
+        // here.
         float slice_ms[kLatSlices] = {0, 0, 0, 0};
         SliceStages sl[kLatSlices];
         int nslices = 0;
-        if (n >= 2) {
+        if (n >= 1) {
             const int m = std::min(n, kLatSlices);
             bool all = true;
             for (int k = 0; k < m; k++) {
@@ -1703,7 +1705,7 @@ void Renderer::add_latency_sample(uint64_t tx_enc, uint64_t tx_proc, uint64_t de
             lf.dec_wait_ms = waits->dec_wait / 1000.0f;
             lf.disp_wait_ms = waits->disp_wait / 1000.0f;
         }
-        if (slice_ms && nslices >= 2 && nslices <= kLatSlices) {
+        if (slice_ms && nslices >= 1 && nslices <= kLatSlices) {
             lf.nslices = (uint8_t)nslices;
             for (int k = 0; k < nslices; k++) lf.slice_ms[k] = slice_ms[k];
             if (sl)

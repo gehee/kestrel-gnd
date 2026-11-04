@@ -1122,15 +1122,21 @@ bool OSD::render_gallery(int W, int H) {
                     wt[i] = sh.wait_p50[i];
                     tot += st[i];
                 }
+                // A picture of one slice: its exposure before it and the sensor
+                // reading its rows (Enc's pale part), as the air unit says them.
+                const bool one_slice = sh.nslices == 1;
+                const float ex = one_slice ? sh.sl_p50[0].exp : 0.0f;
+                if (one_slice) { wt[0] = std::min(sh.sl_p50[0].enc_read, st[0]); tz = -ex; }
                 text("slice timeline", X(464), Yd(240), 11 * fs, 0, quiet, A);
                 if (tot > 0.05f) {
-                    const float k = (bx1 - bx0) / tot;
-                    bar(250, 16, 0, st, wt, 0, k);
+                    const float k = (bx1 - bx0) / (tot - tz);
+                    bar(250, 16, 0, st, wt, ex, k);
                     vblanks(st[0] + st[1] + st[2] + wt[3], 0, tot, k, 248, 20);
                     axis(282, tot, k);
                     SliceStages one{};
                     one.enc = st[0]; one.rf = st[1]; one.dec = st[2]; one.disp = st[3];
                     one.dec_wait = wt[2]; one.disp_wait = wt[3];
+                    one.exp = ex; one.enc_read = one_slice ? wt[0] : 0.0f;
                     table(&one, 1, "slowest slice", "", &sh.p50, &sh.p99);
                 }
             }

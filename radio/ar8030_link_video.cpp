@@ -135,6 +135,8 @@ void Ar8030Link::emit_nal(const uint8_t* nal, size_t len) {
                 const bool numbered = len >= 33 && (nal[32] & 0x60);
                 vhdr_.idx = numbered ? (nal[32] & 0x1f) : -1;
                 vhdr_.last = numbered && (nal[32] & 0x40);
+                // From kestrel-air, a picture can be decoded on it (video_out).
+                vhdr_.ends = vhdr_.last && air_kestrel_;
                 // A picture from the past, and everything up to the next
                 // header with it: nothing it says about the link is true.
                 if (new_pic) hdr_stale_ = stale_picture(cap32);

@@ -69,7 +69,8 @@ typedef struct {
     // CLOCK_MONOTONIC (0: not known): the stats screen's frame spacing.
     uint64_t shown_us = 0, cap_us = 0;
     // Each slice, top to bottom, from its own first row's capture to that row
-    // lit (ms); nslices 0: not timed slice by slice (see kLatSlices).
+    // lit (ms); nslices 0: not timed slice by slice (see kLatSlices), 1: a
+    // picture of one slice (its stages for the exposure and readout).
     uint8_t nslices = 0;
     float slice_ms[kLatSlices] = {0, 0, 0, 0};
     SliceStages sl[kLatSlices];   // each slice's stages and when it was captured

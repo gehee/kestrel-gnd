@@ -241,6 +241,7 @@ VideoOut::VideoOut(const char* tag, VideoCodec codec, std::shared_ptr<Vdec> vdec
       stream_decode_(stream_decode), model_(model), src_(src) {}
 
 void VideoOut::relearn() {
+    ends_off_ = false;
     last_slice_addr_ = -1;
     last_addr_cand_ = -1; last_addr_streak_ = 0; last_count_cand_ = 0; last_slice_count_ = 0;
     cut_last_hseq_ = -1; cut_period_ = 0; cut_confirms_ = 0; pics_since_cut_ = 0;
@@ -339,9 +340,11 @@ bool VideoOut::nal(const uint8_t* nal, size_t len, uint64_t recv_us, SliceHeader
             const int hseq = hdr.hseq;
             const int idx = hdr.idx;
             const bool idx_last = hdr.last;
+            const bool said_end = hdr.ends && !ends_off_;
             hdr.hseq = -1;
             hdr.idx = -1;
             hdr.last = false;
+            hdr.ends = false;
             // first_slice_segment_in_pic_flag is the first bit after the HEVC
             // 2-byte NAL header; a 1 marks the start of a new picture.
             uint8_t first_slice = (codec_ == VideoCodec::H265)
@@ -423,7 +426,8 @@ bool VideoOut::nal(const uint8_t* nal, size_t len, uint64_t recv_us, SliceHeader
                 au_streamed_ = false;
                 au_stream_done_ = false;
                 frames_seen_++;            // count real pictures, not slices
-                if (++late_window_pics_ >= 64) { late_window_pics_ = 0; late_slices_ = 0; }
+                if (++late_window_pics_ >= 64) { late_window_pics_ = 0; late_slices_ = 0; late_marked_ = 0; }
+                ended_by_mark_ = false;
             }
             uint32_t at = 0;
             if (!au_append(nal, len, &at)) {
@@ -481,8 +485,16 @@ bool VideoOut::nal(const uint8_t* nal, size_t len, uint64_t recv_us, SliceHeader
             // The picture's last slice: decode it now, not when the next
             // picture's first slice turns up - a frame interval later (10 ms
             // at 100 fps), which is how long every complete picture used to
-            // wait.
-            if (last_slice_addr_ > 0 && addr == last_slice_addr_)
+            // wait. A kestrel-air unit says which slice that is, and the
+            // picture is learned from as if the next one had ended it: a P1
+            // Air sends every picture as one slice at CTB 0, which the
+            // learning cannot take, and each waited 16.7 ms at 60 fps.
+            // Streamed pictures end as before (send_held_slices above).
+            if (said_end && !au_streamed_) {
+                learn_last_slice(au_max_addr_, au_slice_count_);
+                flush_access_unit(recv_us);
+                ended_by_mark_ = true;
+            } else if (last_slice_addr_ > 0 && addr == last_slice_addr_)
                 flush_access_unit(recv_us);
         } else if (decoding && (!is_param_set || ps_valid)) {
             // VPS/SPS/PPS are cached and SEI dropped inside the decoder; the
@@ -616,6 +628,13 @@ void VideoOut::learn_last_slice(int max_addr, int slices) {
 // and learn again.
 void VideoOut::late_slice() {
     late_slices_total_++;
+    if (ended_by_mark_ && ++late_marked_ > kLateMax && !ends_off_) {
+        // As many after pictures the air unit said had ended: its marks are
+        // wrong, and no longer believed.
+        printf("%s: %u slices after the air unit said their picture ended in %u pictures - "
+               "not believing it\n", tag_, late_marked_, late_window_pics_);
+        ends_off_ = true;
+    }
     if (++late_slices_ > kLateMax && last_slice_addr_ > 0) {
         printf("%s: %u slices after their picture ended in %u pictures - relearning "
                "where pictures end\n", tag_, late_slices_, late_window_pics_);
