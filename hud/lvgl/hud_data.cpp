@@ -13,7 +13,7 @@ HudData Controller::hud_data(uint64_t now) const {
     const auto& f = m.backend.flight;
     const bool fresh = f.stamp_us && now >= f.stamp_us && now - f.stamp_us < 2000000;
     HudData data;
-    data.enabled = m.hud_visible(); data.details = m.show_details; data.theme = m.theme; data.simulated = m.simulated;
+    data.enabled = m.hud_visible() && (m.show_hud || m.menu_open); data.details = m.show_details; data.theme = m.theme; data.simulated = m.simulated;
     if (!data.enabled) { data.show_status = false; return data; }
     data.show_status = m.show_status(now); data.status = m.status(now);
     auto visual = m.visual;
@@ -23,17 +23,18 @@ HudData Controller::hud_data(uint64_t now) const {
     }
     for (int side = 0; side < 2; ++side) {
         auto& p = data.panels[side];
-        p.visible = visual.visible; p.fresh = fresh;
+        p.visible = visual.visible && (m.show_hud || m.menu_open); p.fresh = fresh;
         p.picked = m.menu_open && m.stage == MenuStage::Pick && m.side == side;
         p.shade = visual.shade; p.rule = visual.rule; p.block = visual.block;
         p.dim = visual.idle_dim; p.rail_dim = visual.rail_dim;
     }
     auto& left = data.panels[0]; auto& right = data.panels[1];
     left.armed = fresh && f.arm == 1;
-    left.upper_label = fresh && f.have_pack_v && !f.have_cell_v ? "PACK" : "CELL";
+    const bool use_cell = m.per_cell && f.have_cell_v;
+    left.upper_label = use_cell ? "CELL" : "PACK";
     left.lower_label = "SAG";
-    if (fresh && (f.have_cell_v || f.have_pack_v)) {
-        left.primary = number(f.have_cell_v ? f.cell_v : f.pack_v, "%.2f"); left.primary_unit = "V";
+    if (fresh && (use_cell || f.have_pack_v)) {
+        left.primary = number(use_cell ? f.cell_v : f.pack_v, "%.2f"); left.primary_unit = "V";
     }
     if (fresh && f.have_amps) { left.secondary = number(f.amps, "%.1f"); left.secondary_unit = "A"; }
     if (fresh && f.arm == 0) left.state = "DISARMED";

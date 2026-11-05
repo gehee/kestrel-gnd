@@ -3,6 +3,7 @@
 #include "controller.hpp"
 #include "hud_source.hpp"
 #include "perspective_text.hpp"
+#include "idle_scene.hpp"
 #include "lvgl.h"
 #include <string>
 #include <vector>
@@ -29,6 +30,8 @@ private:
     std::optional<Model> menu_preview_;
     int width_, height_;
     PerspectiveText text_;
+    IdleScene idle_;
+    bool old_status_ = false;
     uint64_t now_ = 0;
     Telemetry presented_;
     bool initialized_ = false, old_fresh_ = false, old_valid_ = false;
@@ -49,7 +52,7 @@ private:
     uint64_t menu_snapshot_count_ = 0;
     uint64_t menu_snapshot_checked_us_ = 0;
     uint64_t last_tick_ = 0;
-    lv_obj_t *screen_ = nullptr, *menu_ = nullptr, *picker_ = nullptr;
+    lv_obj_t *screen_ = nullptr, *menu_ = nullptr, *picker_ = nullptr, *idle_object_ = nullptr, *dimmer_ = nullptr;
     void sync_hud_objects();
     void draw_hud(lv_layer_t* layer, size_t region);
     void draw_menu(lv_layer_t* layer);

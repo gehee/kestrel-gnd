@@ -34,6 +34,19 @@ HUD tools documented in the main README; stage those assets beside the receiver
 binary. `--assets` selects their directory. No hardware-specific host addresses,
 serial ports, power-controller IDs or pairing addresses belong in the build.
 
+The idle artwork is baked on the host from the same font and background used
+by the VRX Pro image. This optional step requires Python Cairo and Pillow;
+neither is needed on the receiver:
+
+```sh
+python3 tools/ui_scene_bake.py "$CHAKRA_FONT" .local/assets \
+  --background "$FPVOS_BACKGROUND_PNG"
+```
+
+Stage `idle-fpv.kui`, `idle-os.kui` and `idle-background.kui` with the existing
+Canopy masks and font atlas. Missing idle artwork falls back to a text wordmark;
+malformed artwork is rejected. Generated files belong in `.local/`, not Git.
+
 For tests without hardware, configure the same target with a host ar_libre,
 `-DKESTREL_TESTS=ON` and `-DKESTREL_UI_TEST_ASSETS` pointing at generated assets.
 
@@ -61,6 +74,45 @@ enter` (or menu/up/down/left/right/back/quit). `--preferences FILE` persists vis
 preferences; without it they last for the session. `--vector` selects Vector.
 `--replay FILE` plays a recorded framed radio stream without opening the radio.
 `--screenshot FILE` saves the final ARGB HUD as PAM, including transparency.
+
+## UI reference and verification
+
+The software UI follows the current VRX Pro implementation in
+`hud/hud_menu.cpp`, `hud/osd_menu_rows.cpp`, `hud/hud_canopy.cpp` and
+`hud/osd_images.cpp`. The [fpvOS simulator](https://gehee.github.io/fpvOS/#try)
+is a useful visual reference; the receiver sources define the behavior.
+
+Ground Unit contains HUD, DISPLAY, DVR and SYSTEM. Air Unit contains VIDEO
+(only while linked), RADIO, SERIAL and INFO. Group headings are skipped during
+navigation. OK opens/edits/applies; Back folds an edit while retaining its
+pending preview, folds the panel, then closes the menu. A pending value has
+an asterisk and an explanation in the help area. Applying one row does not
+persist other unfinished previews.
+
+Theme, HUD visibility and Canopy per-cell/pack voltage are local editable
+settings. Unsupported controls are dimmed and cannot execute an action.
+Values reflect available backend data; the menu does not invent air-unit
+identity, recording space or radio settings. SYSTEM receives build/version,
+decoder and display information from the composition root.
+
+The idle still, two-color wordmark, picker labels, panel bounds and animation,
+selection ring, expanded values and wrapped help use the original geometry.
+The video-acquisition caption is currently simpler than the original signal-lock
+animation. Idle video/warp, gallery/statistics and the channel page are not yet
+ported. Those require further UI and backend work; this is not full VRX Pro
+feature parity.
+
+For repeatable visual review, the host-built tool writes 1080p PAM screenshots
+with alpha, without opening hardware:
+
+```sh
+.local/build-ascent-host/hud/lvgl/kestrel-ui-shot .local/assets .local/ui-shots
+```
+
+Compare these with the original `hud_shot` tool using the same Chakra Petch font
+and background. Render tests also compare incremental frames against full redraws
+during opening and closing, and check that passive counters refresh at a bounded
+rate while navigation remains immediate.
 
 ## Current limits
 

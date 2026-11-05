@@ -28,7 +28,7 @@ add_library(kg_platform STATIC platform/ascent.cpp)
 target_link_libraries(kg_platform PUBLIC kg_display kg_bsp)
 add_subdirectory(hud/lvgl)
 add_executable(kestrel-gnd app/ascent_main.cpp radio/bb_sdk_shim.cpp)
-target_link_libraries(kestrel-gnd PRIVATE kg_platform kg_radio kg_lvgl_view)
+target_link_libraries(kestrel-gnd PRIVATE kg_platform kg_radio kg_lvgl_view kg_version)
 # The native ar_libre API is intentionally linked, including optional fast-path
 # symbols when packaged as a static archive; no SDK runtime interposition needed.
 target_link_options(kestrel-gnd PRIVATE -Wl,-u,arlink_version)

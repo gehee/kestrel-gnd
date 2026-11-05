@@ -75,26 +75,48 @@ int main(int argc, char** argv) {
         check(model.menu_open && model.stage == MenuStage::Pick, "OK wakes the canopy picker");
         controller.key(Key::Right); check(model.side == 1, "Pick air unit");
         controller.key(Key::Left); controller.key(Key::Enter);
-        check(model.stage == MenuStage::Browse && model.tab == 1, "Open the goggle HUD blade");
+        check(model.stage == MenuStage::Browse && model.tab == 2, "Open the ground HUD blade");
+        controller.key(Key::Right); // DISPLAY > Theme
         controller.key(Key::Enter); controller.key(Key::Down);
         check(model.stage == MenuStage::Edit && model.theme == 1, "Preview local theme in an edit transaction");
         controller.key(Key::Back);
-        check(model.stage == MenuStage::Browse && model.theme == 0, "Back cancels and restores the previous theme");
-        controller.key(Key::Enter); controller.key(Key::Down); controller.key(Key::Enter);
-        check(model.stage == MenuStage::Browse && model.theme == 1, "OK commits the preview");
+        check(model.stage == MenuStage::Browse && model.theme == 1 && model.pending("theme"), "Back folds an edit and keeps the pending preview like VRX Pro");
+        controller.key(Key::Enter); controller.key(Key::Enter);
+        check(model.stage == MenuStage::Browse && model.theme == 1 && !model.pending("theme"), "OK commits the preview");
         for (int i = 0; i < 40; ++i) controller.key(Key::Down);
         check(model.selected < int(model.rows(1000000).size()), "Dynamic row bounds");
         controller.key(Key::Back); check(model.stage == MenuStage::Pick && model.menu_open, "Back folds the blade first");
         controller.key(Key::Back); check(!model.menu_open, "Back then closes the canopy");
-        controller.key(Key::Enter); controller.key(Key::Enter); controller.key(Key::Right);
-        check(model.tab == 3, "Sections stay within their selected side");
-        controller.key(Key::Enter); controller.key(Key::Down); check(model.fps == 26, "UI cadence preview");
+        controller.key(Key::Enter); controller.key(Key::Enter);
+        check(model.tab == 3, "Reopening remembers DISPLAY on the selected side");
+        controller.key(Key::Enter); controller.key(Key::Down); check(model.theme == 2, "Theme preview");
         model.tab = 2; controller.key(Key::Enter);
-        check(model.fps == 25 && model.stage == MenuStage::Browse, "Changing rows during editing cancels; it cannot activate another action");
+        check(model.theme == 1 && model.stage == MenuStage::Browse, "Changing rows during editing cancels; it cannot activate another action");
+        model.tab = 3; model.selected = 4; controller.key(Key::Down);
+        check(model.selected == 6, "Navigation skips the ADVANCED group heading");
+        model.selected = 1; controller.key(Key::Enter);
+        check(model.stage == MenuStage::Browse, "Unavailable controls cannot start editing");
+        model.tab = 2; model.selected = 0; controller.key(Key::Enter); controller.key(Key::Up); controller.key(Key::Enter);
+        check(!model.show_hud && controller.hud_data(2300000).panels[0].visible, "HUD visibility setting applies");
+        controller.key(Key::Menu);
+        check(!controller.hud_data(2300000).panels[0].visible, "HUD OFF hides the canopy outside the menu");
+        model.show_hud = true;
+        // Applying one setting must not accidentally save a different row's
+        // unfinished preview. Both may be visible while browsing the menu.
+        Model pending_model; Controller pending_controller(pending_model);
+        UiPreferences saved;
+        pending_controller.save_preferences = [&](const UiPreferences& p) { saved = p; };
+        pending_controller.key(Key::Enter); pending_controller.key(Key::Enter);
+        pending_controller.key(Key::Enter); pending_controller.key(Key::Up); pending_controller.key(Key::Back);
+        pending_controller.key(Key::Right); pending_controller.key(Key::Enter);
+        pending_controller.key(Key::Down); pending_controller.key(Key::Enter);
+        check(saved.hud && saved.theme == 1 && pending_model.pending("hud"), "Applying Theme does not save pending HUD OFF");
+        pending_controller.key(Key::Left); pending_controller.key(Key::Enter); pending_controller.key(Key::Enter);
+        check(!saved.hud && saved.theme == 1 && !pending_model.pending("hud"), "A pending row is applied independently");
         Model failure;
         Controller failure_controller(failure);
         failure_controller.save_preferences = [](const UiPreferences&) { throw std::runtime_error("read-only config"); };
-        failure_controller.key(Key::Enter); failure_controller.key(Key::Enter); failure_controller.key(Key::Enter); failure_controller.key(Key::Down); failure_controller.key(Key::Enter);
+        failure_controller.key(Key::Enter); failure_controller.key(Key::Enter); failure_controller.key(Key::Right); failure_controller.key(Key::Enter); failure_controller.key(Key::Down); failure_controller.key(Key::Enter);
         check(failure.theme == 0 && failure.feedback.find("Save failed") != std::string::npos, "Failed persistence rolls back the preview");
         Key parsed;
         check(parse_key(" OK\n", parsed) && parsed == Key::Enter && !parse_key("bind", parsed), "Named controls are restricted to UI keys");
@@ -139,9 +161,9 @@ int main(int argc, char** argv) {
         std::vector<char> settings_directory(settings_pattern.begin(), settings_pattern.end()); settings_directory.push_back('\0');
         if (!mkdtemp(settings_directory.data())) throw std::runtime_error("Cannot create preferences test directory");
         const std::string settings_path = std::string(settings_directory.data()) + "/ui.conf";
-        store_preferences(settings_path, {2, 30, false, false});
+        store_preferences(settings_path, {2, 30, false, false, false, false});
         const auto loaded = load_preferences(settings_path);
-        check(loaded.theme == 2 && loaded.fps == 30 && !loaded.details && !loaded.repeat, "Local preferences round trip");
+        check(loaded.theme == 2 && loaded.fps == 30 && !loaded.details && !loaded.repeat && !loaded.hud && !loaded.per_cell, "Local preferences round trip");
         { std::ofstream invalid(settings_path); invalid << "UNRELATED_USER_FILE=1\n"; }
         bool invalid_settings = false;
         try { load_preferences(settings_path); } catch (const std::runtime_error&) { invalid_settings = true; }

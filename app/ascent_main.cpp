@@ -1,5 +1,6 @@
 // Native Ascent composition root: existing radio, software HUD, platform media.
 #include "platform/software.hpp"
+#include "kestrel_gnd_config.h"
 #include "radio/ar8030_link.hpp"
 #include "hud/lvgl/display.hpp"
 #include "hud/lvgl/input.hpp"
@@ -159,6 +160,10 @@ int main(int argc, char **argv) {
         lv_tick_set_cb([] { return uint32_t(kestrel_ui::monotonic_us() / 1000); });
         kestrel_ui::Display display(1920, 1080, "");
         kestrel_ui::Model model;
+        model.build = kestrel_gnd_build_time;
+        model.version = std::string(kestrel_gnd_version) + " (" + kestrel_gnd_git_hash + ")";
+        model.decoder = "V4L2 / Wave5";
+        model.screen_mode = "1920x1080 @ 60 Hz";
         model.backend.media.video_monitored = o.radio;
         model.backend.service.adapter = "fpvOS native Ascent";
         model.backend.service.hardware_delegated = false;

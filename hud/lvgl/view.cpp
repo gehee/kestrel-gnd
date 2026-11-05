@@ -26,12 +26,19 @@ void rect(lv_layer_t* layer, int x, int y, int w, int h, const float* rgb, float
 }
 }
 View::View(const Controller& controller, int w, int h, const std::string& assets, HudSource* hud)
-    : controller_(controller), model_(controller.model()), hud_(hud), width_(w), height_(h), text_(assets + "/canopy-font.kuf", w, h, 512 * 1024) {
+    : controller_(controller), model_(controller.model()), hud_(hud), width_(w), height_(h), text_(assets + "/canopy-font.kuf", w, h, 512 * 1024), idle_(assets, w, h) {
     if (!hud_) { owned_hud_ = std::make_unique<InlineHud>(w, h, assets); hud_ = owned_hud_.get(); }
     screen_ = lv_screen_active();
     lv_obj_remove_style_all(screen_);
     lv_obj_set_style_bg_opa(screen_, LV_OPA_TRANSP, 0);
     lv_obj_remove_flag(screen_, LV_OBJ_FLAG_SCROLLABLE);
+    idle_object_ = lv_obj_create(screen_);
+    dimmer_ = lv_obj_create(screen_);
+    for (auto* object : {idle_object_, dimmer_}) {
+        lv_obj_remove_style_all(object); lv_obj_set_size(object, w, h);
+        lv_obj_remove_flag(object, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_event_cb(object, draw_event, LV_EVENT_DRAW_MAIN, this);
+    }
     picker_ = lv_obj_create(screen_);
     lv_obj_remove_style_all(picker_);
     lv_obj_set_pos(picker_, 0, h * 58 / 100);
@@ -43,7 +50,7 @@ View::View(const Controller& controller, int w, int h, const std::string& assets
     lv_obj_add_flag(picker_, LV_OBJ_FLAG_HIDDEN);
     menu_ = lv_obj_create(screen_);
     lv_obj_remove_style_all(menu_);
-    lv_obj_set_size(menu_, w * 34 / 100, h * 92 / 100);
+    lv_obj_set_size(menu_, int(std::lround(w * 0.34f)), h);
     lv_obj_remove_flag(menu_, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(menu_, draw_event, LV_EVENT_DRAW_MAIN, this);
     lv_obj_add_flag(menu_, LV_OBJ_FLAG_HIDDEN);
@@ -65,7 +72,7 @@ void View::prepare_menu_snapshot() {
     // Snapshot a derived preview. The View never mutates controller state.
     menu_preview_ = model_;
     if (model_.stage == MenuStage::Pick) {
-        menu_preview_->tab = model_.remembered_section(); menu_preview_->selected = 0; menu_preview_->stage = MenuStage::Browse;
+        menu_preview_->tab = model_.remembered_section(); menu_preview_->selected = menu_preview_->first_row(now_); menu_preview_->stage = MenuStage::Browse;
     }
     const auto& menu = *menu_preview_;
     std::ostringstream signature;
@@ -74,19 +81,18 @@ void View::prepare_menu_snapshot() {
     for (const auto& row : menu.rows(now_)) signature << '\n' << row.id << ':' << row.value;
     const std::string key = signature.str();
     if (menu_snapshot_ && key == menu_snapshot_signature_) {
-        menu_preview_.reset(); return;
+        return;
     }
     const float progress = menu_progress_;
     const int active_side = active_menu_side_;
     active_menu_side_ = model_.side; menu_progress_ = 1; capturing_menu_ = true;
-    lv_obj_set_pos(menu_, active_menu_side_ ? width_ - lv_obj_get_width(menu_) : 0, height_ * 6 / 100);
+    lv_obj_set_pos(menu_, active_menu_side_ ? width_ - lv_obj_get_width(menu_) : 0, 0);
     drop_menu_snapshot();
-    // The blade is entirely opaque while moving. XRGB avoids an unnecessary
-    // per-pixel source-alpha blend when copying its cached image to ARGB.
-    menu_snapshot_ = lv_snapshot_take(menu_, LV_COLOR_FORMAT_XRGB8888);
+    // Preserve the original translucent panel over the video. Cache only the
+    // settled layout; moving panels are laid out in their interpolated bounds.
+    menu_snapshot_ = lv_snapshot_take(menu_, LV_COLOR_FORMAT_ARGB8888);
     capturing_menu_ = false; menu_progress_ = progress; active_menu_side_ = active_side;
-    menu_preview_.reset();
-    lv_obj_set_pos(menu_, active_side ? width_ - lv_obj_get_width(menu_) : 0, height_ * 6 / 100);
+    lv_obj_set_pos(menu_, active_side ? width_ - lv_obj_get_width(menu_) : 0, 0);
     if (menu_snapshot_) {
         menu_snapshot_signature_ = key; ++menu_snapshot_count_;
         lv_obj_invalidate(menu_);
@@ -96,7 +102,13 @@ void View::draw_event(lv_event_t* e) {
     auto* self = static_cast<View*>(lv_event_get_user_data(e));
     auto* target = lv_event_get_target(e);
     auto* layer = lv_event_get_layer(e);
-    if (target == self->menu_) self->draw_menu(layer);
+    if (target == self->idle_object_) self->idle_.draw(layer, self->model_, self->now_, self->menu_progress_, self->active_menu_side_);
+    else if (target == self->dimmer_) {
+        if (self->model_.menu_open || self->menu_progress_ > 0)
+            rect(layer, 0, 0, self->width_, self->height_, hud_theme_at(self->model_.theme).ground,
+                 (self->model_.menu_open ? 0.10f : 0.0f) + self->menu_progress_ * 0.06f);
+    }
+    else if (target == self->menu_) self->draw_menu(layer);
     else if (target == self->picker_) self->draw_picker(layer);
     else for (size_t i = 0; i < self->hud_objects_.size(); ++i) if (target == self->hud_objects_[i]) { self->draw_hud(layer, i); break; }
 }
@@ -110,7 +122,7 @@ void View::sync_hud_objects() {
         lv_obj_set_pos(object, r.x, r.y); lv_obj_set_size(object, r.width, r.height);
         lv_obj_add_event_cb(object, draw_event, LV_EVENT_DRAW_MAIN, this);
         // HUD is below picker/menu, including when a worker reconnects.
-        lv_obj_move_to_index(object, int(i)); hud_objects_.push_back(object);
+        lv_obj_move_to_index(object, int(i + 1)); hud_objects_.push_back(object);
     }
 }
 void View::draw_hud(lv_layer_t* layer, size_t index) {
@@ -125,68 +137,54 @@ void View::draw_hud(lv_layer_t* layer, size_t index) {
 void View::draw_picker(lv_layer_t* layer) {
     const auto& th = hud_theme_at(model_.theme);
     const float alpha = 1 - menu_progress_;
+    const auto frame = canopy::screen_frame(width_, height_);
     for (int side = 0; side < 2; ++side) {
         const bool selected = side == model_.side;
-        text_.panel(layer, side ? "AIR UNIT" : "GOGGLE", side == 0, 56, 412,
-                    canopy::kTextState, side != 0, selected ? th.text : th.quiet, alpha * (selected ? 1 : 0.6f));
-        text_.panel(layer, selected ? "OK TO OPEN" : "LEFT / RIGHT", side == 0, 56, 439,
-                    canopy::kTextRow, side != 0, th.quiet, alpha * 0.8f);
+        text_.panel(layer, side ? "AIR UNIT  >" : "<  GROUND UNIT", side == 0, 14,
+                    407 + canopy::kTextState * 0.25f / frame.U,
+                    canopy::kTextState, side != 0, selected ? th.accent : th.quiet, alpha);
+        text_.panel(layer, side ? "VIDEO   RADIO   SERIAL   INFO" : "HUD   DISPLAY   DVR   SYSTEM", side == 0, 14,
+                    427 + canopy::kTextUnit * 0.25f / frame.U,
+                    canopy::kTextUnit, side != 0, selected ? th.text : th.quiet, alpha * (selected ? 0.85f : 0.6f));
     }
 }
 lv_area_t View::menu_reveal(float progress) const {
-    // Ease all the way to an empty strip at the blade's lower edge. Ending at
-    // the canopy asset's top left a large rectangle to disappear when hidden.
-    // Quintic easing also makes the last 50-Hz pose only a few pixels tall.
-    const float p = std::clamp(progress, 0.0f, 1.0f);
-    const float e = std::clamp(p * p * p * (p * (p * 6 - 15) + 10), 0.0f, 1.0f);
-    const int h = int(std::lround((height_ * 92 / 100) * e));
-    const int y = height_ * 6 / 100 + height_ * 92 / 100 - h;
-    const int w = int(width_ * 0.31f + (lv_obj_get_width(menu_) - width_ * 0.31f) * e);
+    const float p = std::clamp(progress, 0.0f, 1.0f), e = p * p * (3 - 2 * p);
+    const float fh = std::tan(0.785f / 2) * 3.2f;
+    const float top = (fh - canopy::screen_frame(width_, height_).MY(456)) / (2 * fh) * height_;
+    const int y = int(std::lround(top + (height_ * 0.06f - top) * e));
+    const int h = int(std::lround(height_ - top + (height_ * 0.92f - (height_ - top)) * e));
+    const int w = int(std::lround(width_ * (0.31f + 0.03f * e)));
     const int x = active_menu_side_ ? width_ - w : 0;
     return {x, y, x + w - 1, y + h - 1};
 }
 void View::draw_menu(lv_layer_t* layer) {
     const auto& menu_model = menu_preview_ ? *menu_preview_ : model_;
     const auto& th = hud_theme_at(model_.theme);
-    lv_area_t bounds;
-    lv_obj_get_coords(menu_, &bounds);
-    const int x = bounds.x1, y = bounds.y1, w = lv_obj_get_width(menu_), h = height_ * 92 / 100;
+    const auto reveal = menu_reveal(menu_progress_);
+    const int x = reveal.x1, y = reveal.y1, w = reveal.x2 - x + 1, h = reveal.y2 - y + 1;
     const float u = height_ / 1080.0f;
     const int pad = int(22 * u), row_h = int(50 * u);
-    const auto reveal = menu_reveal(menu_progress_);
-    if (reveal.x1 > reveal.x2 || reveal.y1 > reveal.y2) return;
-    const int backdrop_x = reveal.x1, backdrop_y = reveal.y1;
-    const int backdrop_w = reveal.x2 - reveal.x1 + 1, backdrop_h = reveal.y2 - reveal.y1 + 1;
-    if (!capturing_menu_ && menu_snapshot_) {
-        // Reveal a single completed plane. Its opaque backing lets LVGL copy
-        // most pixels, avoiding rerendering/blending all menu primitives.
-        const lv_area_t previous_clip = layer->_clip_area;
-        lv_area_t clipped{std::max(previous_clip.x1, reveal.x1), std::max(previous_clip.y1, reveal.y1),
-                          std::min(previous_clip.x2, reveal.x2), std::min(previous_clip.y2, reveal.y2)};
-        if (clipped.x1 <= clipped.x2 && clipped.y1 <= clipped.y2) {
-            layer->_clip_area = clipped;
-            lv_draw_image_dsc_t d; lv_draw_image_dsc_init(&d); d.src = menu_snapshot_; d.opa = LV_OPA_COVER;
-            lv_area_t image_area{x, y, x + int(menu_snapshot_->header.w) - 1, y + int(menu_snapshot_->header.h) - 1};
-            lv_draw_image(layer, &d, &image_area);
-            layer->_clip_area = previous_clip;
-        }
+    if (!capturing_menu_ && menu_snapshot_ && menu_progress_ == 1) {
+        lv_draw_image_dsc_t d; lv_draw_image_dsc_init(&d); d.src = menu_snapshot_;
+        lv_area_t image_area{active_menu_side_ ? width_ - lv_obj_get_width(menu_) : 0, 0, 0, height_ - 1};
+        image_area.x2 = image_area.x1 + int(menu_snapshot_->header.w) - 1;
+        lv_draw_image(layer, &d, &image_area);
         return;
     }
-    // Keep the blade opaque when settled too: fading back to 94% requires a
-    // costly full-plane blend exactly at the animation's final keyframe.
-    rect(layer, backdrop_x, backdrop_y, backdrop_w, backdrop_h, th.ground, 1);
-    rect(layer, backdrop_x, backdrop_y, backdrop_w, std::max(1, int(3 * u)), th.accent, menu_progress_);
-    if (menu_progress_ < 0.5f) return;
-    const float content_alpha = std::clamp((menu_progress_ - 0.5f) * 2, 0.0f, 1.0f);
-    text_.canvas(layer, active_menu_side_ ? "AIR UNIT" : "GOGGLE", pad, pad + 14 * u, 15 * u, false, th.accent, content_alpha, x, y);
+    rect(layer, x, y, w, h, th.ground, 0.94f * std::min(1.0f, menu_progress_ * 1.6f));
+    rect(layer, x, y, w, std::max(1, int(3 * u)), th.accent, menu_progress_);
+    if (menu_progress_ <= 0.5f) return;
+    const float content_alpha = (menu_progress_ - 0.5f) * 2;
+    text_.canvas(layer, active_menu_side_ ? "AIR UNIT" : "GROUND UNIT", pad, pad + 14 * u, 15 * u, false, th.accent, content_alpha, x, y);
     int tab_x = pad;
-    const std::vector<int> tabs = active_menu_side_ ? std::vector<int>{0, 6, 5} : std::vector<int>{1, 3, 2, 4};
+    const auto tabs = menu_model.side_tabs();
     for (int tab : tabs) {
         const std::string title = Model::tab_name(tab);
         const int tw = int(text_.advance(title) * 21 * u / canopy::kFontPixels);
         text_.canvas(layer, title, tab_x, pad + 52 * u, 21 * u, false,
                       tab == menu_model.tab ? th.text : th.quiet, content_alpha, x, y);
-        if (tab == menu_model.tab) rect(layer, x + tab_x, y + pad + int(61 * u), tw, std::max(1, int(3 * u)), th.accent, 1);
+        if (tab == menu_model.tab) rect(layer, x + tab_x, y + pad + int(61 * u), tw, std::max(1, int(3 * u)), th.accent, content_alpha);
         tab_x += tw + int(26 * u);
     }
     const int list_top = pad + int(78 * u);
@@ -194,24 +192,47 @@ void View::draw_menu(lv_layer_t* layer) {
     const auto rows = menu_model.rows(now_);
     const bool editing = menu_model.stage == MenuStage::Edit;
     const int extra = editing ? int(80 * u) : 0;
-    const int help_y = h - int(150 * u);
-    const int visible = std::max(1, (help_y - list_top - extra - int(12 * u)) / row_h);
-    const int start = std::clamp(menu_model.selected - visible / 2, 0, std::max(0, int(rows.size()) - visible));
+    std::vector<std::string> help_lines;
+    std::istringstream paragraphs(menu_model.selected_help(now_));
+    std::string paragraph;
+    while (std::getline(paragraphs, paragraph) && help_lines.size() < 10) {
+        std::istringstream words(paragraph); std::string word, line;
+        while (words >> word) {
+            const auto candidate = line.empty() ? word : line + " " + word;
+            if (!line.empty() && text_.advance(candidate) * 18 * u / canopy::kFontPixels > w - 2 * pad) {
+                help_lines.push_back(line); line.clear();
+                if (help_lines.size() >= 10) break;
+            }
+            line = line.empty() ? word : line + " " + word;
+        }
+        if (!line.empty() && help_lines.size() < 10) help_lines.push_back(line);
+    }
+    const float help_y = h - pad - 18 * 1.4f * u * help_lines.size();
+    const float list_bottom = help_y - 20 * u;
+    const int visible = std::clamp(int((list_bottom - list_top - extra) / row_h), 3, 16);
+    const int start = std::clamp(menu_model.selected - (visible - 1) / 2, 0, std::max(0, int(rows.size()) - visible));
+    const float lit[] = {std::min(1.0f, th.ground[0] * 1.6f), std::min(1.0f, th.ground[1] * 1.6f), std::min(1.0f, th.ground[2] * 1.6f)};
     int ry = list_top;
     for (int i = start; i < std::min(int(rows.size()), start + visible); ++i) {
+        if (rows[i].heading) {
+            text_.canvas(layer, rows[i].name, pad, ry + row_h * 0.72f, 15 * u, false, th.quiet, 0.9f * content_alpha, x, y);
+            rect(layer, x + pad, y + ry + int(row_h * 0.86f), w - 2 * pad, 1, th.quiet, 0.3f * content_alpha);
+            ry += row_h; continue;
+        }
         const bool selected = i == menu_model.selected;
         const bool expanded = selected && editing;
         const int rh = row_h + (expanded ? extra : 0);
         if (selected) {
-            rect(layer, x + pad / 2, y + ry + 2, w - pad, rh - 4, th.ground, content_alpha);
+            rect(layer, x + pad / 2, y + ry + 2, w - pad, rh - 4, lit, 0.95f * content_alpha);
             rect(layer, x + pad / 2, y + ry + 2, w - pad, rh - 4, th.accent, content_alpha, std::max(1, int(3 * u)));
         }
         const float baseline = ry + row_h * 0.5f + 23 * u * 0.36f;
-        text_.canvas(layer, rows[i].name, pad, baseline, 23 * u, false, th.text, content_alpha * (selected ? 1 : 0.82f), x, y);
+        text_.canvas(layer, rows[i].name, pad, baseline, 23 * u, false, rows[i].disabled ? th.quiet : th.text, content_alpha * (selected || rows[i].disabled ? 1 : 0.82f), x, y);
         if (expanded) {
             const int current = menu_model.option_index(), n = int(rows[i].options.size());
             for (int delta = -1; delta <= 1; ++delta) {
-                const int choice = (current + delta + n) % n;
+                const int choice = current + delta;
+                if (choice < 0 || choice >= n) continue;
                 const float size = (delta == 0 ? 30 : 18) * u;
                 text_.canvas(layer, rows[i].options[choice], w - pad, ry + rh * 0.5f + delta * 34 * u + size * 0.36f,
                              size, true, delta == 0 ? th.accent : th.quiet, content_alpha * (delta == 0 ? 1 : 0.7f), x, y);
@@ -221,28 +242,28 @@ void View::draw_menu(lv_layer_t* layer) {
         const float available = w - 2 * pad - text_.advance(rows[i].name) * 23 * u / canopy::kFontPixels - 16 * u;
         const float value_width = text_.advance(rows[i].value) * 20 * u / canopy::kFontPixels;
         const float size = value_width > available && available > 0 ? std::max(12 * u, 20 * u * available / value_width) : 20 * u;
-        text_.canvas(layer, rows[i].value, w - pad, baseline, size, true,
-                     selected ? th.accent : th.quiet, content_alpha, x, y);
+        text_.canvas(layer, rows[i].value + (menu_model.pending(rows[i].id) ? " *" : ""), w - pad, baseline, size, true,
+                     rows[i].disabled ? th.quiet : selected ? th.accent : rows[i].editable ? th.text : th.quiet, content_alpha * (selected ? 1 : 0.85f), x, y);
         ry += rh;
     }
-    rect(layer, x + pad, y + help_y, w - 2 * pad, 1, th.quiet, 0.35f);
-    std::istringstream words(menu_model.selected_help(now_));
-    std::string word, line; int help_line = 0;
-    auto emit_line = [&]() {
-        text_.canvas(layer, line, pad, help_y + (28 + help_line * 26) * u, 18 * u, false, th.quiet, content_alpha * 0.85f, x, y);
-        ++help_line; line.clear();
+    if (!help_lines.empty()) rect(layer, x + pad, y + int(help_y - 10 * u), w - 2 * pad, 1, th.quiet, 0.35f * content_alpha);
+    const float help_color[] = {th.text[0] * 0.7f, th.text[1] * 0.7f, th.text[2] * 0.7f};
+    for (size_t i = 0; i < help_lines.size(); ++i)
+        text_.canvas(layer, help_lines[i], pad, help_y + 18 * 1.4f * u * i + 18 * 0.9f * u,
+                     18 * u, false, help_color, content_alpha, x, y);
+    auto arrow = [&](float cy, bool up) {
+        lv_draw_triangle_dsc_t tri; lv_draw_triangle_dsc_init(&tri);
+        const int cx = x + w / 2, sy = y + int(cy), size = std::max(1, int(6 * u));
+        tri.p[0] = {cx - size, sy + (up ? size / 2 : -size / 2)};
+        tri.p[1] = {cx + size, tri.p[0].y}; tri.p[2] = {cx, sy + (up ? -size / 2 : size / 2)};
+        tri.bg_color = color(th.quiet); tri.bg_opa = opacity(0.8f * content_alpha); lv_draw_triangle(layer, &tri);
     };
-    while (words >> word && help_line < 3) {
-        const auto candidate = line.empty() ? word : line + " " + word;
-        if (!line.empty() && text_.advance(candidate) * 18 * u / canopy::kFontPixels > w - 2 * pad) emit_line();
-        line = line.empty() ? word : line + " " + word;
-    }
-    if (!line.empty() && help_line < 3) emit_line();
-    text_.canvas(layer, editing ? "OK APPLY   /   BACK CANCEL" : "ARROWS NAVIGATE   /   OK EDIT   /   BACK FOLD", pad,
-                 h - 18 * u, 14 * u, false, th.accent, content_alpha * 0.8f, x, y);
+    if (start > 0) arrow(list_top + 2 * u, true);
+    if (start + visible < int(rows.size())) arrow(list_bottom + 6 * u, false);
+
 }
 void View::update(uint64_t now) {
-    text_.begin_frame();
+    text_.begin_frame(); idle_.begin_frame();
     now_ = now;
     hud_->update(controller_.hud_data(now), now);
     sync_hud_objects();
@@ -266,18 +287,17 @@ void View::update(uint64_t now) {
     const bool right_side = active_menu_side_ != 0;
     const int menu_w = lv_obj_get_width(menu_);
     const int mx = right_side ? width_ - menu_w : 0;
-    if (moving || old_tab_ != model_.tab || model_.menu_version != menu_version_) lv_obj_set_pos(menu_, mx, height_ * 6 / 100);
+    if (moving || old_tab_ != model_.tab || model_.menu_version != menu_version_) lv_obj_set_pos(menu_, mx, 0);
     hidden(menu_, next <= 0);
-    // Reveal the two-wing picker after the closing blade has settled. Fading
-    // it in during closure redraws both HUD wings for every moving frame.
-    hidden(picker_, !model_.menu_open || model_.stage != MenuStage::Pick || menu_progress_ > 0);
+    // The picker fades back in as the blade folds into the canopy.
+    hidden(picker_, !model_.menu_open && menu_progress_ == 0);
     const auto& t = model_.backend.vrx;
     const auto& flight = model_.backend.flight;
     const bool flight_fresh = flight.stamp_us && now >= flight.stamp_us && now - flight.stamp_us < 2000000;
     const bool fresh = t.fresh(now), valid = t.link_valid(now);
     const bool hud_visible = model_.hud_visible();
     for (size_t i = 0; i < hud_objects_.size(); ++i)
-        hidden(hud_objects_[i], !hud_visible || (hud_layout_.regions[i].role == hud_ipc::Role::Status && !model_.show_status(now)));
+        hidden(hud_objects_[i], !hud_visible || hud_layout_.regions[i].role == hud_ipc::Role::Status);
     const bool appearance = !initialized_ || old_theme_ != model_.theme || old_fresh_ != fresh || old_valid_ != valid || old_details_ != model_.show_details || old_hud_visible_ != hud_visible;
     const bool data = !initialized_ || model_.backend.flight_version != flight_version_ || flight_fresh != old_flight_fresh_ ||
         t.connected != presented_.connected || t.mcs != presented_.mcs ||
@@ -291,24 +311,12 @@ void View::update(uint64_t now) {
         (!moving && !menu_snapshot_ && (data || (model_.menu_open && (model_.tab == 2 || model_.tab == 4 || model_.tab == 6) && counters))))
         lv_obj_invalidate(menu_);
     else if (moving) {
-        // The cached plane is stationary: pixels shared by the two reveals
-        // have not changed. Repaint only newly exposed/removed edge strips,
-        // rather than copying the whole growing blade every frame.
-        const auto reveal = menu_reveal(next);
-        const lv_area_t shared{std::max(old_reveal.x1, reveal.x1), std::max(old_reveal.y1, reveal.y1),
-                               std::min(old_reveal.x2, reveal.x2), std::min(old_reveal.y2, reveal.y2)};
-        auto invalidate = [&](lv_area_t area) {
-            if (area.x1 <= area.x2 && area.y1 <= area.y2) lv_obj_invalidate_area(menu_, &area);
-        };
-        for (const auto area : {old_reveal, reveal}) {
-            if (shared.x1 > shared.x2 || shared.y1 > shared.y2) { invalidate(area); continue; }
-            invalidate({area.x1, area.y1, area.x2, shared.y1 - 1});
-            invalidate({area.x1, shared.y2 + 1, area.x2, area.y2});
-            invalidate({area.x1, shared.y1, shared.x1 - 1, shared.y2});
-            invalidate({shared.x2 + 1, shared.y1, area.x2, shared.y2});
-        }
+        // The content translates and fades with the blade, so the whole union
+        // changes (not just its edges). Repaint its old and new bounds.
+        lv_obj_invalidate_area(menu_, &old_reveal);
+        const auto reveal = menu_reveal(next); lv_obj_invalidate_area(menu_, &reveal);
     }
-    if (appearance || menu) lv_obj_invalidate(picker_);
+    if (appearance || menu || moving) lv_obj_invalidate(picker_);
     if (appearance || (menu && next == 0)) {
         for (auto* object : hud_objects_) lv_obj_invalidate(object);
     } else {
@@ -320,6 +328,10 @@ void View::update(uint64_t now) {
                     (hud_layout_.regions[i].role == hud_ipc::Role::RightWing && active_menu_side_ == 1)) lv_obj_invalidate(hud_objects_[i]);
         }
     }
+    const bool status_visible = model_.show_status(now);
+    if (appearance || moving || status_visible != old_status_ || menu || valid != old_valid_) lv_obj_invalidate(idle_object_);
+    if (appearance || moving || menu) lv_obj_invalidate(dimmer_);
+    old_status_ = status_visible;
     presented_ = t; initialized_ = true;
     old_fresh_ = fresh; old_valid_ = valid; old_theme_ = model_.theme;
     old_menu_ = model_.menu_open; old_tab_ = model_.tab; old_selected_ = model_.selected;
