@@ -45,6 +45,9 @@ Stop any other DRM/radio clients first. A display-only check needs no peer:
 kestrel-gnd --assets ./assets --no-radio --show-menu --seconds 20
 ```
 
+The example exits after twenty seconds and disables scanout. Omit `--seconds`
+to keep the menu running; this target does not start automatically at boot.
+
 Use `--force-display` only when the connected display reports disconnected and
 requires fpvOS's fixed-mode workaround. Always verify actual visible output;
 page-flip completion alone is insufficient.
@@ -68,8 +71,8 @@ This is an initial bring-up target, not a flight-ready receiver.
   It cannot currently sustain 1080p60 presentation. A faster buffer/composition
   path remains necessary.
 - The LVGL menu, control socket, hardware decoding, buffer recycling and orderly
-  shutdown have been exercised. HDMI capture stayed black with both this target
-  and the fpvOS reference player; visible output is not yet validated.
+  shutdown have been exercised. Visible menu output is confirmed on a directly
+  connected HDMI monitor. Capture-card output remains unvalidated.
 - Live RF association works, but repeated link drops and damaged video were also
   reproduced with the fpvOS reference radio tool. Continuous live video remains
   unvalidated.
