@@ -73,6 +73,7 @@ void Ar8030Link::load_sky_config() {
     const uint8_t *f = ar_hs_5;
     unsigned lf = f[4] | (f[5] << 8);
     sky::read_config_payload(f + 7, (lf >> 4) - 1, &sky_cfg);
+    if (native_sdio_) { sky_cfg.ch0_w = 1920; sky_cfg.ch0_h = 1080; sky_cfg.ch0_fps = 60; }
     if (sky_cfg_key.empty()) return;
 
     Settings &st = settings_;

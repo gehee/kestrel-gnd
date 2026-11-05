@@ -68,6 +68,8 @@ class Ar8030Link : public radio::Link, private radio::VideoOut::Source {
         radio::State held() const override;
 
     private:
+        bool native_sdio_;
+        std::optional<std::array<uint8_t, 4>> peer_;
         radio::Model& model_;            // what it learns goes to its model, which takes its commands
         Settings& settings_;             // the settings file: each air unit's own, the last peer
         // The streams it carries from the air unit, into the model's feeds

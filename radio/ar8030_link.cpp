@@ -10,7 +10,7 @@ Ar8030Link::Ar8030Link(radio::Model& model, const Ar8030Config& cfg,
                        volatile bool* stop_signal,
                        std::string host_, int host_port_,
                        int slot_, int video_port_)
-    : model_(model), settings_(settings), fc_out_(model.fc()), imu_out_(model.imu()),
+    : native_sdio_(cfg.native_sdio), peer_(cfg.peer), model_(model), settings_(settings), fc_out_(model.fc()), imu_out_(model.imu()),
       video_("ar8030", codec_, vdec_, cfg.decode_enabled, cfg.stream_decode, model, *this),
       codec(codec_), vdec(vdec_), should_stop(stop_signal),
       host(std::move(host_)), host_port(host_port_), slot(slot_), video_port(video_port_),
@@ -120,6 +120,7 @@ radio::State Ar8030Link::held() const {
 // own. The setting is saved here as the radio takes it (a stock radio's
 // width is 20 or 40), and written out before the restart.
 void Ar8030Link::restart_with(const Setting<int>& setting, int value, const char* why) {
+    if (native_sdio_) { printf("ar8030: %s requires a native radio restart\n", why); return; }
     printf("ar8030: %s - restarting the radio with it\n", why);
     fflush(stdout);
     settings_.set(setting, value);
@@ -179,7 +180,7 @@ void Ar8030Link::run() {
                 // own bring-up, so an early attempt can fail simply because the
                 // daemon is not up yet, and restarting it then would push the
                 // thing we are waiting for further away.
-                if (connect_fails >= kFailsBeforeDaemonRestart &&
+                if (!native_sdio_ && connect_fails >= kFailsBeforeDaemonRestart &&
                     (connect_fails % kFailsBeforeDaemonRestart) == 0) {
                     // On ar_libre this restarts the baseband itself: arlink.ko
                     // is unloaded and the radio power-cycled (bb_only.sh).

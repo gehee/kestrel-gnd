@@ -4,11 +4,17 @@
 // (Ar8030Link's constructor). After that, the link's values are its own -
 // changed by its commands and its threads, nothing else.
 #include <cstdlib>
+#include <cstdint>
+#include <array>
+#include <optional>
 #include <string>
 
 #include "system/air/power.hpp"
 
 struct Ar8030Config {
+    // Native SDIO has no vendor daemon or factory pairing store.
+    bool native_sdio = false;
+    std::optional<std::array<uint8_t, 4>> peer;
     // The channel and width to start on (--ar8030-freq / --ar8030-bw).
     // Defaults taken from the stock boot log for this board (rf_board 16):
     //   gui_fpv_bb_set_freq, freq=5740000 ; gui_fpv_bb_set_bandwidth, bandwidth=0

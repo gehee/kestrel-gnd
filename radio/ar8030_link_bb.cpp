@@ -157,8 +157,9 @@ void Ar8030Link::configure_link() {
     if (!dev) return;
 
     bb_mac_t macs[BB_CONFIG_MAX_SLOT_CANDIDATE];
-    int n = ar_load_candidate_macs(macs, BB_CONFIG_MAX_SLOT_CANDIDATE);
-    if (n > 0) {
+    int n = peer_ ? 1 : ar_load_candidate_macs(macs, BB_CONFIG_MAX_SLOT_CANDIDATE);
+    if (peer_) memcpy(macs[0].addr, peer_->data(), 4);
+    if (n > 0 && !native_sdio_) {
         for (int i = 0; i < n; i++)
             printf("ar8030: candidate[%d] = %02X:%02X:%02X:%02X\n", i,
                    macs[i].addr[0], macs[i].addr[1], macs[i].addr[2], macs[i].addr[3]);
@@ -168,7 +169,7 @@ void Ar8030Link::configure_link() {
         cand.mac_num = (uint8_t)n;
         memcpy(cand.mac_tab, macs, sizeof(bb_mac_t) * n);
         printf("ar8030: BB_SET_CANDIDATES -> %d\n", ar_ioctl(dev, BB_SET_CANDIDATES, &cand, NULL));
-    } else {
+    } else if (!n) {
         // Empty on a goggle never paired under stock (fpvOS merges stock's
         // list off the NAND at boot) and never bound here: not a fault, just
         // nothing to link with yet.
@@ -531,6 +532,9 @@ bool Ar8030Link::connect_bb() {
         for (int attempt = 1; attempt <= 2; attempt++) {
             int rc = bb_ioctl_ex(hdev, req, nullptr, nullptr, kBringupReqTimeoutMs);
             if (rc == 0) return true;
+            // Native firmware may already be initialized. START and the role
+            // check below must still succeed; never generalize this to USB.
+            if (native_sdio_ && req == BB_INIT_REQ && rc == -7) return true;
             printf("ar8030: %s returned %d (attempt %d/2)\n", name, rc, attempt);
             if (*should_stop) return false;
         }
@@ -540,8 +544,30 @@ bool Ar8030Link::connect_bb() {
     };
     if (!bounded_req(BB_INIT_REQ, "bb_init")) return false;
     if (*should_stop) return false;
+    if (native_sdio_) {
+        // Native startup must set uplink power and the explicit peer before
+        // START can associate. No factory partition or daemon is involved.
+        const uint8_t power_auto[3] = {0, 14, 14}, power[2] = {0, 14};
+        if (bb_ioctl_ex(hdev, BB_SET_POWER_AUTO, power_auto, nullptr, kBringupReqTimeoutMs) != 0 ||
+            bb_ioctl_ex(hdev, BB_SET_POWER, power, nullptr, kBringupReqTimeoutMs) != 0) return false;
+        bb_set_ap_mac_t ap{};
+        if (!peer_) return false;
+        memcpy(ap.mac.addr, peer_->data(), 4);
+        if (bb_ioctl_ex(hdev, BB_SET_AP_MAC, &ap, nullptr, kBringupReqTimeoutMs) != 0) return false;
+    }
     if (!bounded_req(BB_START_REQ, "bb_start")) return false;
     if (*should_stop) return false;
+
+    if (native_sdio_) {
+        bb_get_status_in_t in{}; in.user_bmp = 0x03ff;
+        bb_get_status_out_t out{};
+        uint32_t got = 0;
+        if (!arlink_request || arlink_request(BB_GET_STATUS, &in, sizeof(in), &out, sizeof(out), &got, kBringupReqTimeoutMs) != 0 ||
+            got < offsetof(bb_get_status_out_t, link_status) + sizeof(bb_link_status_t) || out.role != BB_ROLE_DEV) {
+            printf("ar8030: native ground role could not be verified\n");
+            return false;
+        }
+    }
 
     // Match what the stock ar_ldy_gnd does on a clean boot (captured with the
     // daemon MITM proxy): the video socket is opened RX|TX with explicit buffer
