@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fcntl.h>
+#include <filesystem>
 #include <linux/input.h>
 #include <poll.h>
 #include <stdexcept>
@@ -198,9 +199,12 @@ void Input::poll(Controller& controller, uint64_t now) {
 }
 std::string send_control(const std::string& path, const std::string& command) {
     if (command != "status") { Key key; if (!parse_key(command, key)) throw std::invalid_argument("Unknown menu key"); }
-    const auto destination = address(path);
-    const auto slash = path.find_last_of('/');
-    const std::string directory = slash == std::string::npos ? "." : path.substr(0, slash);
+    if (path.empty()) throw std::invalid_argument("Invalid local control socket path");
+    // The server resolves the reply address in its own working directory.
+    // Bind an absolute client path even when --control was given relatively.
+    const auto absolute = std::filesystem::absolute(path);
+    const auto destination = address(absolute.string());
+    const std::string directory = absolute.parent_path().string();
     std::string pattern = directory + "/.kestrel-ui-client-XXXXXX";
     std::vector<char> file(pattern.begin(), pattern.end()); file.push_back('\0');
     int temporary = mkstemp(file.data());
