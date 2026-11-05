@@ -124,7 +124,8 @@ This is an initial bring-up target, not a flight-ready receiver.
   path remains necessary.
 - The LVGL menu, control socket, hardware decoding, buffer recycling and orderly
   shutdown have been exercised. Visible menu output is confirmed on a directly
-  connected HDMI monitor. Capture-card output remains unvalidated.
+  connected HDMI monitor and through a USB HDMI capture card. The capture check
+  used the earlier bring-up UI; the recreated UI still needs device validation.
 - Live RF association works, but repeated link drops and damaged video were also
   reproduced with the fpvOS reference radio tool. Continuous live video remains
   unvalidated.
