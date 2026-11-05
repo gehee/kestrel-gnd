@@ -31,13 +31,26 @@ int main() {
     CHECK(ar_pwr_fit(AR_AIR_LITE_PLUS, 501) == 501);
     CHECK(ar_pwr_fit(AR_AIR_LITE, 317, true) == 101);        // a Lite: its 100mW AUTO
     CHECK(ar_pwr_fit(AR_AIR_LITE, 501) == 101);              // as before
+    // The P1 Air: up to 200 mW, with kestrel-air's levels; stock's Lite list without them
+    CHECK(ar_pwr_fit(AR_AIR_P1, 501, true) == 201);
+    CHECK(ar_pwr_fit(AR_AIR_P1, 317, true) == 201);
+    CHECK(ar_pwr_fit(AR_AIR_P1, 316, true) == 200);
+    CHECK(ar_pwr_fit(AR_AIR_P1, 150, true) == 150);
+    CHECK(ar_pwr_fit(AR_AIR_P1, 501) == 101);
 
     // The level row steps through the mode's levels, lowest first.
     int t[kArPwrTopsMax];
     int n = ar_pwr_tops(AR_AIR_LITE_PLUS, true, false, t);
     CHECK(n == 6 && t[0] == 25 && t[1] == 100 && t[2] == 150 && t[3] == 200 && t[4] == 316 && t[5] == 500);
     n = ar_pwr_tops(AR_AIR_LITE_PLUS, true, true, t);
-    CHECK(n == 4 && t[0] == 150 && t[1] == 200 && t[2] == 316 && t[3] == 500);   // AUTO from 25 is no AUTO
+    CHECK(n == 6 && t[0] == 25 && t[1] == 100 && t[2] == 150 && t[3] == 200 && t[4] == 316 && t[5] == 500);
+    // kestrel-air's: the same levels in both modes (the P1 Air up to 200 mW, a Lite 100).
+    for (const bool automode : {false, true}) {
+        n = ar_pwr_tops(AR_AIR_P1, true, automode, t);
+        CHECK(n == 4 && t[0] == 25 && t[1] == 100 && t[2] == 150 && t[3] == 200);
+        n = ar_pwr_tops(AR_AIR_LITE, true, automode, t);
+        CHECK(n == 2 && t[0] == 25 && t[1] == 100);
+    }
     n = ar_pwr_tops(AR_AIR_LITE_PLUS, false, true, t);
     CHECK(n == 1 && t[0] == 500);                            // stock: AUTO at 500 only
     n = ar_pwr_tops(AR_AIR_LITE, false, true, t);
@@ -47,7 +60,7 @@ int main() {
     n = ar_pwr_tops(AR_AIR_LITE_PLUS, 2, false, t);
     CHECK(n == 7 && t[4] == 316 && t[5] == 400 && t[6] == 500);
     n = ar_pwr_tops(AR_AIR_LITE_PLUS, 2, true, t);
-    CHECK(n == 5 && t[2] == 316 && t[3] == 400 && t[4] == 500);
+    CHECK(n == 7 && t[4] == 316 && t[5] == 400 && t[6] == 500);   // AUTO at every level too
     CHECK(ar_pwr_fit(AR_AIR_LITE_PLUS, 400, 2) == 400 && ar_pwr_fit(AR_AIR_LITE_PLUS, 401, 2) == 401);
     CHECK(ar_pwr_fit(AR_AIR_LITE_PLUS, 400, 1) == 316 && ar_pwr_fit(AR_AIR_LITE_PLUS, 401, 1) == 317);
     CHECK(ar_pwr_fit(AR_AIR_LITE_PLUS, 400) == 200);          // stock's list
@@ -59,10 +72,17 @@ int main() {
     // The mode row: the same level where the mode has it, else the next one up.
     CHECK(ar_pwr_pick(AR_AIR_LITE_PLUS, true, true, 316) == 317);
     CHECK(ar_pwr_pick(AR_AIR_LITE_PLUS, true, false, 316) == 316);
-    CHECK(ar_pwr_pick(AR_AIR_LITE_PLUS, true, true, 25) == 151);    // 25 mW has no AUTO: the lowest that does
+    CHECK(ar_pwr_pick(AR_AIR_LITE_PLUS, true, true, 25) == 26);     // 25 mW AUTO
+    CHECK(ar_pwr_pick(AR_AIR_P1, true, true, 25) == 26 && ar_pwr_pick(AR_AIR_P1, true, true, 100) == 101);
+    CHECK(ar_pwr_pick(AR_AIR_P1, true, false, 25) == 25);
     CHECK(ar_pwr_pick(AR_AIR_LITE_PLUS, false, true, 200) == 501);  // stock: 500mW AUTO is the only one
     CHECK(ar_pwr_pick(AR_AIR_LITE_PLUS, false, false, 500) == 500);
-    CHECK(ar_pwr_pick(AR_AIR_LITE, false, true, 25) == 101);
+    CHECK(ar_pwr_pick(AR_AIR_LITE, false, true, 25) == 101);         // stock's Lite list: 100mW AUTO only
+
+    // On the wire: 25 mW AUTO is 25 held, every other level its own value.
+    CHECK(ar_pwr_wire(26) == 25 && ar_pwr_wire(25) == 25 && ar_pwr_wire(101) == 101 && ar_pwr_wire(201) == 201);
+    for (const auto &l : kArPwrLevels) CHECK(ar_pwr_wire(l.mw) == (l.mw == 26 ? 25 : l.mw));
+    CHECK(ar_pwr_fit(AR_AIR_P1, 26, true) == 26 && ar_pwr_fit(AR_AIR_P1, 26) == 25);   // stock's list has no 25 AUTO
 
     // Round trip of the two rows over one value.
     int v = 316;

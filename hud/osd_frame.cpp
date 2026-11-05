@@ -687,8 +687,11 @@ void OSD::air_pwr_text(const gnd::LinkStats& link_copy, char* out, size_t n) con
         const ar_pwr_level &lv = kArPwrLevels[ar_pwr_index(cmd_mw)];
         int mw = lv.automode ? lv.mw - 1 : lv.mw;   // 501 (auto cap 500) -> 500
         // What the air unit says it transmits at (an Open8030 air radio),
-        // rather than what it was set to: AUTO moves it.
+        // rather than what it was set to: AUTO moves it. An air radio that
+        // says nothing (the P1 Air's Open8030) while its unit reports standby
+        // is at kestrel-air's standby level, 13 dBm, not the level for flight.
         if (const int dbm = air_live_dbm(); dbm > 0) mw = ar_air_mw_from_dbm(dbm);
+        else if (vtx_low_power) mw = ar_air_mw_from_dbm(13);
         const char *aflag = lv.automode ? " (A)" : "";
         if (mw >= 1000) snprintf(out, n, "%.1fW%s", mw / 1000.0f, aflag);
         else            snprintf(out, n, "%dmW%s", mw, aflag);

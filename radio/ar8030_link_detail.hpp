@@ -138,7 +138,7 @@ int ar_load_candidate_macs(bb_mac_t *out, int max);   // ar8030_link_bind.cpp
 // a fixed level and silently disabled its adaptation. See
 // references/sky-commands.md.
 static inline int sky_pwr_mw(const ar_pwr_level &lv) {
-    return lv.mw;                 // kArPwrLevels already stores AUTO as N+1
+    return ar_pwr_wire(lv.mw);    // kArPwrLevels already stores AUTO as N+1
 }
 
 static inline float pct_ms(std::vector<uint32_t> &v, int pct) {

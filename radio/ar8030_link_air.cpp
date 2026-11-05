@@ -191,7 +191,7 @@ std::vector<uint8_t> Ar8030Link::build_config_frame(const uint8_t *tmpl, size_t 
     // after the power frame. Left as captured it was stock's 500mW Auto (501):
     // every handshake - each link-up, each 2.5 s of quiet video - undid the
     // chosen power, and asked an Ascent Lite (100 mW) for 26 dBm.
-    const int mw = kArPwrLevels[ar_pwr_index(tx_power_mw)].mw;
+    const int mw = sky_pwr_mw(kArPwrLevels[ar_pwr_index(tx_power_mw)]);
     if (body.size() >= 47) { body[45] = (uint8_t)(mw & 0xFF); body[46] = (uint8_t)((mw >> 8) & 0xFF); }
     sky_proto.set_seq(tmpl[3]);                       // replaying stock's handshake
     return sky_proto.build(tmpl[6], body.data(), body.size());
@@ -261,7 +261,7 @@ void Ar8030Link::send_air_handshake(bool link_up) {
             // Stock's two power frames carry its own 500mW Auto. This air
             // unit's power instead, so a link-up never sets it to anything
             // else first. Same u16 LE payload as request_setting(CAM_PWR).
-            const int mw = kArPwrLevels[ar_pwr_index(tx_power_mw)].mw;
+            const int mw = sky_pwr_mw(kArPwrLevels[ar_pwr_index(tx_power_mw)]);
             const uint8_t v[2] = { (uint8_t)(mw & 0xFF), (uint8_t)((mw >> 8) & 0xFF) };
             sky_proto.set_seq(data[3]);
             rebuilt = sky_proto.build(data[6], v, sizeof(v));
@@ -881,6 +881,8 @@ void Ar8030Link::note_air_info(const uint8_t *pl, size_t n) {
         if (e.first == "board") {
             const long b = strtol(e.second.c_str(), nullptr, 10);
             note_air_prj(b == 472 ? AR_AIR_LITE_PLUS : b == 482 ? AR_AIR_LITE : 0, "info");
+        } else if (e.first == "model" && e.second == "BETAFPV P1 Air") {
+            note_air_prj(AR_AIR_P1, "info");   // its board type is 0: no stock number
         }
     // The modes it says it has beyond its header's bits (864p144): the Video
     // Mode row offers them, and a stored one it lacks goes back to the default.
@@ -956,7 +958,7 @@ void Ar8030Link::note_air_prj(int prj, const char *from) {
     if (prj <= 0 || prj == air_prj.load()) return;
     air_prj.store(prj);
     if (!sky_cfg_key.empty()) settings_.set(radio::setting::air_prj(sky_cfg_key), prj);
-    ar_pwr_offer o = ar_pwr_offered(prj);
+    ar_pwr_offer o = ar_pwr_offered(prj, air_pwr_fine());
     printf("ar8030: air unit is an %s (prj %d, from its %s): power up to %s\n", ar_air_name(prj), prj, from,
            kArPwrLevels[ar_pwr_index(o.mw[o.n - 1])].label);
     refit_air_power();

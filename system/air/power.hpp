@@ -28,7 +28,10 @@
 // on a Lite+: AUTO's top can be set under 500 mW. One whose info says pwr400=1
 // gets 400 mW (25 dBm) and its AUTO (401) too. The menu shows it as two
 // rows, the mode (FIXED / AUTO) and the level (the fixed level, or AUTO's
-// top); the value on the wire stays stock's.
+// top), and such an air unit has the same levels in both modes - 25 mW AUTO
+// (26) too, which goes on the wire as 25 (ar_pwr_wire): an air unit's AUTO
+// starts at 25 mW, so AUTO up to 25 is 25 held. Otherwise the value on the
+// wire stays stock's.
 // Until the air unit has reported, stock's global is 0, which gets the Lite's
 // list: the smaller one is the default here too.
 struct ar_pwr_level { int mw; int dbm; bool automode; const char* label; };
@@ -43,8 +46,8 @@ struct ar_pwr_level { int mw; int dbm; bool automode; const char* label; };
 // Lite+'s SNR was 1.5-4.7 dB under 200 mW's at every distance with a stronger
 // signal (flight 2026-10-30): its amplifier distorts past ~26.
 static const ar_pwr_level kArPwrLevels[] = {
-    {   25, 11, false, "25mW"      }, {  100, 17, false, "100mW"     },
-    {  101, 17, true,  "100mW AUTO"},
+    {   25, 11, false, "25mW"      }, {   26, 11, true,  "25mW AUTO" },
+    {  100, 17, false, "100mW"     }, {  101, 17, true,  "100mW AUTO"},
     {  150, 19, false, "150mW"     }, {  151, 19, true,  "150mW AUTO"},
     {  200, 20, false, "200mW"     }, {  201, 20, true,  "200mW AUTO"},
     {  316, 22, false, "316mW"     }, {  317, 22, true,  "316mW AUTO"},
@@ -65,27 +68,42 @@ static inline int ar_pwr_index(int mw) {
 }
 
 // What an air unit is offered, by the project number it reports (0: not yet).
-enum { AR_AIR_LITE = 4, AR_AIR_RC = 6, AR_AIR_LITE_PLUS = 7 };
+// AR_AIR_P1 is ours and never on the wire: a P1 Air's TLV 0x11 says 0 (it has
+// no stock project number), its kestrel-air info names it (model=).
+enum { AR_AIR_LITE = 4, AR_AIR_RC = 6, AR_AIR_LITE_PLUS = 7, AR_AIR_P1 = 100 };
 static const int kArPwrOfferLite[]     = { 25, 100, 101 };
 static const int kArPwrOfferLitePlus[] = { 25, 100, 200, 500, 501 };
-// With kestrel-air's own levels (fine 1): the fixed ones, then their AUTO;
-// fine 2 adds 400 mW.
-static const int kArPwrOfferLitePlusFine[] = { 25, 100, 150, 200, 316, 500, 151, 201, 317, 501 };
-static const int kArPwrOfferLitePlusFine400[] = { 25, 100, 150, 200, 316, 400, 500, 151, 201, 317, 401, 501 };
+// With kestrel-air's own levels (fine 1): the fixed ones, then each with its
+// AUTO, so both modes have the same levels; fine 2 adds 400 mW.
+static const int kArPwrOfferLiteFine[] = { 25, 100, 26, 101 };
+static const int kArPwrOfferLitePlusFine[] = { 25, 100, 150, 200, 316, 500, 26, 101, 151, 201, 317, 501 };
+static const int kArPwrOfferLitePlusFine400[] = { 25, 100, 150, 200, 316, 400, 500, 26, 101, 151, 201, 317, 401, 501 };
+// The P1 Air: up to 200 mW (its kestrel-air holds it at 23 dBm, stock P1's
+// own top), so neither 316, 400 nor 500, which it would not give.
+static const int kArPwrOfferP1Fine[] = { 25, 100, 150, 200, 26, 101, 151, 201 };
 struct ar_pwr_offer { const int *mw; int n; };
+#define AR_PWR_OFFER(a) ar_pwr_offer{ (a), (int)(sizeof(a) / sizeof((a)[0])) }
 static inline ar_pwr_offer ar_pwr_offered(int air_prj, int fine = 0) {
+    if (air_prj == AR_AIR_P1 && fine) return AR_PWR_OFFER(kArPwrOfferP1Fine);
     if (air_prj == AR_AIR_LITE_PLUS) {
-        if (fine >= 2) return { kArPwrOfferLitePlusFine400, 12 };
-        if (fine) return { kArPwrOfferLitePlusFine, 10 };
-        return { kArPwrOfferLitePlus, 5 };
+        if (fine >= 2) return AR_PWR_OFFER(kArPwrOfferLitePlusFine400);
+        if (fine) return AR_PWR_OFFER(kArPwrOfferLitePlusFine);
+        return AR_PWR_OFFER(kArPwrOfferLitePlus);
     }
-    return { kArPwrOfferLite, 3 };
+    if (fine) return AR_PWR_OFFER(kArPwrOfferLiteFine);
+    return AR_PWR_OFFER(kArPwrOfferLite);
 }
+// The value sent to the air unit (cmd 0x22, the handshake's power frames and
+// config body) for a level: its own, but 25 mW AUTO goes as 25 - an air unit's
+// AUTO starts at 25 mW (13 dBm), and neither stock nor kestrel-air has a 26
+// (kestrel-air takes a value it has not as 500 mW AUTO).
+static inline int ar_pwr_wire(int mw) { return mw == 26 ? 25 : mw; }
 static inline const char *ar_air_name(int air_prj) {
     switch (air_prj) {
         case AR_AIR_LITE: return "Ascent Lite";
         case AR_AIR_RC: return "Ascent RC";
         case AR_AIR_LITE_PLUS: return "Ascent Lite+";
+        case AR_AIR_P1: return "BETAFPV P1 Air";
         default: return "unknown";
     }
 }
@@ -100,6 +118,7 @@ static inline const char *ar_air_sn_prefix(int air_prj) {
         case 4: case 6: case 7: return "H_Sky_";
         case 5: return "G_Sky_";
         case 8: return "GR_Sky_";
+        case AR_AIR_P1: return "P1_Sky_";
         default: return "AvatarX_";
     }
 }
@@ -135,7 +154,7 @@ static inline int ar_pwr_top(int mw) {
 }
 // The levels the air unit has in a mode, lowest first: what the level row steps
 // through. Stock's lists have AUTO at one level only (100 on a Lite, 500 on a
-// Lite+).
+// Lite+); kestrel-air's the same levels in both modes.
 static const int kArPwrTopsMax = 8;
 static inline int ar_pwr_tops(int air_prj, int fine, bool automode, int out[kArPwrTopsMax]) {
     ar_pwr_offer o = ar_pwr_offered(air_prj, fine);
