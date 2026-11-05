@@ -133,8 +133,10 @@ This is an initial bring-up target, not a flight-ready receiver.
   reproduced with the fpvOS reference radio tool. Continuous live video remains
   unvalidated.
 - Menu edits currently cover visual preferences. RF/camera configuration, binding,
-  DVR/gallery, FC telemetry integration, and physical board-button mapping are
-  still pending. Unavailable temperature and supply readings remain blank.
+  DVR/gallery, FC telemetry integration, and physical board-button acquisition are
+  still pending. [Button and beeper interfaces](ascent-input-feedback.md) have
+  been traced in stock firmware; native platform enablement and hardware
+  validation remain. Unavailable temperature and supply readings remain blank.
 - Native SDIO does not run the USB firmware's frame-clock register sampler or
   automatically restart the radio driver after errors.
 
