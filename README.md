@@ -352,3 +352,28 @@ own licences, unchanged:
   the top of both files.
 - `include/rga/`: the im2d API headers of Rockchip's librga, Apache License
   2.0 (see [include/rga/README.md](include/rga/README.md)).
+
+## Software HUD development
+
+The Ascent software frontend from the development branch lives in `hud/lvgl/`.
+It preserves the LVGL 9.2.2 Canopy and Vector renderers, perspective text, menu
+controller, preferences, cropped HUD buffers and optional renderer worker.
+Projection helpers live in `render/software/`; flight values are shared with
+MSP through `system/flight_telemetry.hpp`. The frontend accepts normalized state
+and does not own the native radio or decoder.
+
+Build and test the frontend independently of DRM, GLES, FFmpeg and the radio SDK:
+
+```sh
+cmake -S . -B .local/build-lvgl -DKESTREL_LVGL_TOOLS_ONLY=ON -DKESTREL_TESTS=ON
+cmake --build .local/build-lvgl -j
+ctest --test-dir .local/build-lvgl --output-on-failure
+```
+
+`KESTREL_LVGL_SOURCE_DIR` selects an existing LVGL 9.2.2 checkout for offline
+builds. Without it, CMake fetches the pinned commit. Generate 1080p panel masks
+with `kestrel-ui-assetgen 1920 1080 ASSETS`, and the font with
+`python3 tools/ui_font_bake.py FONT.ttf ASSETS/canopy-font.kuf`. Use the original
+Chakra Petch SemiBold font and retain its OFL licence alongside the generated
+atlas. Configure `KESTREL_UI_TEST_ASSETS` with the absolute asset directory to
+also run rendering and HUD worker/recovery tests.

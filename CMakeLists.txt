@@ -10,6 +10,17 @@ set(KESTREL_GND_VERSION_LABEL "2026.10.beta2" CACHE STRING "Version shown in the
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Software HUD tools can be tested without the receiver's graphics/media SDKs.
+option(KESTREL_LVGL_TOOLS_ONLY "Build only the LVGL frontend tools and tests" OFF)
+if(KESTREL_LVGL_TOOLS_ONLY)
+    option(KESTREL_TESTS "Build unit tests" OFF)
+    if(KESTREL_TESTS)
+        enable_testing()
+    endif()
+    add_subdirectory(hud/lvgl)
+    return()
+endif()
+
 add_compile_options("-Wno-address-of-packed-member")
 include(cmake/features.cmake)
 set(TARGET kestrel-gnd)
