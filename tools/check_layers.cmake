@@ -1,3 +1,4 @@
+cmake_minimum_required(VERSION 3.13)
 # Checks that each part of kestrel-gnd includes only its own headers and
 # those of the parts it is built on - the libraries CMakeLists.txt makes, each
 # with the ones it links (kestrel_module). Run by ctest as `layers`, or by
