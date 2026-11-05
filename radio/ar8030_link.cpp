@@ -396,13 +396,26 @@ void Ar8030Link::run() {
                 // the air unit then talks but never streams.
                 bool video_gone  = last_data_ms ? (t_now - last_data_ms) > 2500
                                                 : last_rehandshake_ms && (t_now - last_rehandshake_ms) > 5000;
-                bool cooled      = (t_now - last_rehandshake_ms) > 6000;
-                if (air_talking && video_gone && cooled && rehandshakes < 4) {
+                // Four tries 6 s apart, then one every 15 s for as long as it
+                // talks without video - never none. The count goes back to 0
+                // only with video or a link-up, and a kestrel-air
+                // restarts on a link that stays up: four spent on one whose
+                // camera gave no frames left the next, healthy, without a
+                // handshake - no video for minutes, until kestrel-gnd
+                // restarted (2026-11-04). Its telemetry kept the idle reads
+                // from counting, so the reopen below never came either.
+                bool cooled      = (t_now - last_rehandshake_ms) > (rehandshakes < 4 ? 6000u : 15000u);
+                if (air_talking && video_gone && cooled) {
                     last_rehandshake_ms = t_now;
                     rehandshakes++;
-                    printf("ar8030: video silent %llums but telemetry still arriving - "
-                           "re-sending the air handshake (%d/4)\n",
-                           (unsigned long long)(t_now - last_data_ms), rehandshakes);
+                    if (rehandshakes <= 4)
+                        printf("ar8030: video silent %llums but telemetry still arriving - "
+                               "re-sending the air handshake (%d/4)\n",
+                               (unsigned long long)(t_now - last_data_ms), rehandshakes);
+                    else
+                        printf("ar8030: video silent %llums but telemetry still arriving - "
+                               "re-sending the air handshake (%d, every 15 s now)\n",
+                               (unsigned long long)(t_now - last_data_ms), rehandshakes);
                     send_air_handshake();
                 }
         };
