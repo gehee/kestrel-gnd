@@ -81,6 +81,10 @@ class Vdec {
         // was reset or took a run of slices without a picture out - a source
         // then holds slices back and asks for a keyframe.
         virtual bool keyframe_in() const { return true; }
+        // A terminal backend failure; composition roots can stop cleanly.
+        virtual bool failed() const { return false; }
+        // Last completed frame (CLOCK_MONOTONIC us), when the backend tracks it.
+        virtual uint64_t last_frame_us() const { return 0; }
 
         // While another decoder runs on the same hardware (a gallery clip, the
         // background video), live pictures go whole: a streamed one holds the
