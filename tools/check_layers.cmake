@@ -118,7 +118,8 @@ message(STATUS "layers: ${count} includes between folders checked")
 set(backend_free hud web dvr)
 set(backend_headers "<GLES" "<EGL/" "<gbm.h>" "<xf86drm" "<drm_fourcc.h>" "\"render/canvas_gles.hpp\""
     "\"render/gles_2d.hpp\"" "\"render/gl_context.hpp\"" "\"display/drm.hpp\"" "\"display/renderer.hpp\""
-    "\"display/kms/" "\"display/display_lock.hpp\"" "\"platform/gles_hud_layer.hpp\"" "\"hal/rockchip/" "\"hal/ffmpeg/")
+    "\"display/kms/" "\"display/display_lock.hpp\"" "\"platform/gles_hud_layer.hpp\"" "\"hal/rockchip/" "\"hal/ffmpeg/"
+    "\"hal/v4l2/" "\"display/ar9311_screen.hpp\"")
 set(nbk 0)
 foreach(name IN LISTS backend_free)
     if(NOT DEFINED dirs_${name})

@@ -38,7 +38,11 @@ std::string Model::status(uint64_t now) const {
     if (!telemetry.fresh(now)) return telemetry.stamp_us ? "BACKEND STALE" : "WAITING FOR BACKEND";
     if (!telemetry.connected) return "NO RF LINK";
     if (telemetry.mcs < 0) return "LINK UP / NO VALID MCS";
+    if (backend.media.video_monitored) return backend.media.video_fresh(now) ? "RECEIVING VIDEO" : "RF CONNECTED / WAITING FOR VIDEO";
     return "RF CONNECTED / VIDEO UNVERIFIED";
+}
+bool Model::show_status(uint64_t now) const {
+    return !backend.vrx.link_valid(now) || (backend.media.video_monitored && !backend.media.video_fresh(now));
 }
 RcSignal Model::rc_signal(uint64_t now) const {
     const auto& flight = backend.flight;
@@ -73,11 +77,11 @@ std::vector<MenuRow> Model::rows(uint64_t now) const {
     const auto& serial = backend.serial;
     const auto& flight = backend.flight;
     const bool fresh = telemetry.fresh(now), valid = telemetry.link_valid(now);
-    auto value = [&](int v, bool available) { return available ? std::to_string(v) : "--"; };
+    auto value = [&](int v, bool available) { return available && v != Telemetry::unavailable ? std::to_string(v) : "--"; };
     if (tab == 0) return {
-        reading("link", "State", status(now), "RF connection is not proof of decoded video. Stock backend owns reception."),
+        reading("link", "State", status(now), "RF connection is not proof of decoded video."),
         reading("mcs", "MCS", value(telemetry.mcs, valid), "Raw receive modulation/coding value; unavailable if telemetry is stale or the RF link is down."),
-        reading("frequency", "Frequency (raw)", value(telemetry.frequency_raw, valid), "Uncalibrated stock frequency-table value. No frequency command is sent by this menu."),
+        reading("frequency", telemetry.frequency_mhz > 0 ? "Frequency (MHz)" : "Frequency (raw)", value(telemetry.frequency_mhz > 0 ? telemetry.frequency_mhz : telemetry.frequency_raw, valid), "Uncalibrated stock frequency-table value. No frequency command is sent by this menu."),
         reading("distance", "Distance (raw)", value(telemetry.distance_raw, valid), "Raw stock ranging value; units/calibration are not yet validated."),
         reading("quality", "Quality grade (raw)", value(telemetry.quality_raw, valid), "Raw vendor quality enum, not a percentage or signal strength."),
         reading("rf_controls", "RF / camera controls", "Backend-owned", "Configuration writes require validated backend commands and readback. These rows are read-only.")};
@@ -125,10 +129,10 @@ std::vector<MenuRow> Model::rows(uint64_t now) const {
         reading("msp_other", "Other MSP", std::to_string(serial.unhandled), "Valid MSP functions whose data is not decoded yet, including DisplayPort grid messages."),
         reading("vendor_serial", "Vendor notifications", std::to_string(serial.vendor_notifications), "Separate channel-0 prefix-1 stock sky notifications. Contents remain opaque and are not parsed as MSP."),
         reading("notifications", "Unmapped messages", std::to_string(telemetry.unknown_frames), "Other stock envelope types whose framing or routing is not mapped. Valid serial/MSP envelopes are counted above instead."),
-        reading("serial_owner", "VRX UART", "Stock backend", "KestrelUI does not open or reconfigure the backend-owned ttyS4 serial port."),
+        reading("serial_owner", "FC transport", "Radio", "Flight controller bytes are provided by the receiver radio."),
         reading("fc", "FC polling", "Receive-only", "No MSP requests, UART-mode changes or backend control writes are sent.")};
     return {reading("voltage", "Receiver voltage", fresh && telemetry.voltage_mv > 0 ? std::to_string(telemetry.voltage_mv) + " mV" : "--", "Fitted stock supply-voltage measurement."),
-        reading("cpu", "CPU temperature", fresh ? std::to_string(telemetry.cpu_temperature_x100 / 100.0f) + " C" : "--", "Receiver CPU temperature, not air-unit temperature."),
+        reading("cpu", "CPU temperature", fresh && telemetry.cpu_temperature_x100 != Telemetry::unavailable ? std::to_string(telemetry.cpu_temperature_x100 / 100.0f) + " C" : "--", "Receiver CPU temperature, not air-unit temperature."),
         reading("rf_temperature", "RF temperature (raw)", value(telemetry.rf_temperature_raw, fresh), "Raw stock RF-board temperature field."),
         reading("status_count", "Status frames", std::to_string(telemetry.status_frames), "Validated periodic receiver status packets."),
         reading("unknown_count", "Unknown frames", std::to_string(telemetry.unknown_frames), "Correctly framed notifications with unmapped semantics."),

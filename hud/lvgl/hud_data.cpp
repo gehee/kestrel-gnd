@@ -15,7 +15,7 @@ HudData Controller::hud_data(uint64_t now) const {
     HudData data;
     data.enabled = m.hud_visible(); data.details = m.show_details; data.theme = m.theme; data.simulated = m.simulated;
     if (!data.enabled) { data.show_status = false; return data; }
-    data.show_status = !t.link_valid(now); data.status = m.status(now);
+    data.show_status = m.show_status(now); data.status = m.status(now);
     auto visual = m.visual;
     if (!visual.visible && m.menu_open) {
         visual.visible = true; visual.rule = visual.shade = visual.block = 1;
@@ -49,7 +49,7 @@ HudData Controller::hud_data(uint64_t now) const {
     left.detail1 = fresh && f.have_mode ? std::string("\xee\x80\x80   ") +
         std::string(f.mode, std::find(f.mode, f.mode + sizeof(f.mode), '\0')) : "\xee\x80\x80   FC TELEMETRY --";
     left.detail1_quiet = !(fresh && f.have_mode);
-    left.detail2 = "\xee\x80\x81   " + (t.fresh(now) ? number(t.cpu_temperature_x100 / 100.0f, "VRX %.0fC") : "VRX --C");
+    left.detail2 = "\xee\x80\x81   " + (t.fresh(now) && t.cpu_temperature_x100 != Telemetry::unavailable ? number(t.cpu_temperature_x100 / 100.0f, "VRX %.0fC") : "VRX --C");
     if (t.fresh(now) && t.voltage_mv > 0) left.detail2 += "  \xe2\x80\xa2 " + number(t.voltage_mv / 1000.0f, "%.1fV");
     const auto rc = m.rc_signal(now);
     right.upper_label = rc.label(); right.upper_level = rc.level(); right.lower_label = "VIDEO";
@@ -60,7 +60,9 @@ HudData Controller::hud_data(uint64_t now) const {
     int rung = 0;
     if (t.link_valid(now)) for (int value : ladder) if (t.mcs >= value) ++rung;
     right.lower_level = float(rung) / 7;
-    right.detail1 = (t.link_valid(now) ? "FREQ RAW " + std::to_string(t.frequency_raw) : "FREQ RAW --") + std::string("   \xee\x80\x80");
+    const bool frequency_valid = t.link_valid(now) && (t.frequency_mhz > 0 || t.frequency_raw != Telemetry::unavailable);
+    const std::string frequency = t.frequency_mhz > 0 ? std::to_string(t.frequency_mhz) + " MHz" : std::to_string(t.frequency_raw);
+    right.detail1 = (frequency_valid ? frequency : "FREQ --") + std::string("   \xee\x80\x80");
     right.detail2 = (t.link_valid(now) ? "VRX  MCS " + std::to_string(t.mcs) : "VRX  MCS --") + std::string("   \xee\x80\x81");
     // Renderer-neutral, display-ready instruments. The passive View never
     // infers units, cell count, capacity, signal source or telemetry freshness.
@@ -79,10 +81,10 @@ HudData Controller::hud_data(uint64_t now) const {
     signal.metered = true; signal.level = rc.level(); signal.scale = {"0", "25", "50", "75", "100"};
     auto& video = add(HudMetricId::Mcs, "VIDEO MCS", t.link_valid(now), std::to_string(t.mcs));
     video.metered = true; video.level = right.lower_level;
-    add(HudMetricId::FrequencyRaw, "FREQ RAW", t.link_valid(now), std::to_string(t.frequency_raw));
+    add(HudMetricId::FrequencyRaw, t.frequency_mhz > 0 ? "FREQUENCY" : "FREQ RAW", frequency_valid, frequency);
     add(HudMetricId::ReceiverVoltage, "RX SUPPLY", t.fresh(now) && t.voltage_mv > 0, number(t.voltage_mv / 1000.0f, "%.2f"), "V");
-    add(HudMetricId::CpuTemperature, "VRX CPU", t.fresh(now), number(t.cpu_temperature_x100 / 100.0f, "%.0f"), "C");
-    add(HudMetricId::RfTemperatureRaw, "RF TEMP RAW", t.fresh(now), std::to_string(t.rf_temperature_raw));
+    add(HudMetricId::CpuTemperature, "VRX CPU", t.fresh(now) && t.cpu_temperature_x100 != Telemetry::unavailable, number(t.cpu_temperature_x100 / 100.0f, "%.0f"), "C");
+    add(HudMetricId::RfTemperatureRaw, "RF TEMP RAW", t.fresh(now) && t.rf_temperature_raw != Telemetry::unavailable, std::to_string(t.rf_temperature_raw));
     add(HudMetricId::FlightState, "FC STATE", fresh && f.arm >= 0, f.arm == 1 ? "ARMED" : "DISARMED");
     add(HudMetricId::FlightMode, "MODE", fresh && f.have_mode, std::string(f.mode, std::find(f.mode, f.mode + sizeof(f.mode), '\0')));
     add(HudMetricId::FlightTimer, "FLIGHT TIMER", fresh && f.have_timer, std::to_string(f.timer_s), "s");
@@ -92,8 +94,8 @@ HudData Controller::hud_data(uint64_t now) const {
     add(HudMetricId::FcFirmware, "FC FW", m.backend.serial.fresh(now) && !m.backend.serial.firmware.empty(), m.backend.serial.firmware);
     add(HudMetricId::MspFeed, "MSP FEED", m.backend.serial.fresh(now), "ACTIVE");
     add(HudMetricId::RfState, "RECEIVER LINK", t.fresh(now), t.link_valid(now) ? "RF CONNECTED" : m.status(now));
-    add(HudMetricId::QualityRaw, "QUALITY RAW", t.link_valid(now), std::to_string(t.quality_raw));
-    add(HudMetricId::DistanceRaw, "DISTANCE RAW", t.link_valid(now), std::to_string(t.distance_raw));
+    add(HudMetricId::QualityRaw, "QUALITY RAW", t.link_valid(now) && t.quality_raw != Telemetry::unavailable, std::to_string(t.quality_raw));
+    add(HudMetricId::DistanceRaw, "DISTANCE RAW", t.link_valid(now) && t.distance_raw != Telemetry::unavailable, std::to_string(t.distance_raw));
     add(HudMetricId::UiCadence, "UI LIMIT", true, std::to_string(m.fps), "Hz");
     return data;
 }

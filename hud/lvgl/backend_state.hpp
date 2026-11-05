@@ -1,6 +1,7 @@
 #pragma once
 #include "system/flight_telemetry.hpp"
 #include <string>
+#include <limits>
 
 namespace kestrel_ui {
 enum Capability : uint32_t {
@@ -14,18 +15,24 @@ struct ServiceState {
     std::string adapter;
 };
 struct MediaState {
+    bool video_monitored = false;
+    uint64_t video_stamp_us = 0;
+    bool video_fresh(uint64_t now) const { return video_stamp_us && now >= video_stamp_us && now - video_stamp_us < 2000000; }
     bool recording_known = false, recording = false;
     bool playback_known = false, playing = false;
     std::string recording_id, playback_id;
 };
 struct Telemetry {
+    static constexpr int unavailable = std::numeric_limits<int>::min();
+    uint64_t freshness_us = 2000000;
+    int frequency_mhz = 0;
     uint64_t stamp_us = 0;
     bool connected = false;
-    int mcs = -1, quality_raw = 0, frequency_raw = 0, distance_raw = 0;
-    int voltage_mv = 0, cpu_temperature_x100 = 0, rf_temperature_raw = 0;
+    int mcs = -1, quality_raw = unavailable, frequency_raw = unavailable, distance_raw = unavailable;
+    int voltage_mv = 0, cpu_temperature_x100 = unavailable, rf_temperature_raw = unavailable;
     unsigned status_payload_bytes = 0;
     uint64_t status_frames = 0, unknown_frames = 0, bad_frames = 0;
-    bool fresh(uint64_t now) const { return stamp_us && now >= stamp_us && now - stamp_us < 2000000; }
+    bool fresh(uint64_t now) const { return stamp_us && now >= stamp_us && now - stamp_us < freshness_us; }
     bool link_valid(uint64_t now) const { return fresh(now) && connected && mcs >= 0; }
 };
 struct SerialTelemetry {

@@ -377,3 +377,5 @@ with `kestrel-ui-assetgen 1920 1080 ASSETS`, and the font with
 Chakra Petch SemiBold font and retain its OFL licence alongside the generated
 atlas. Configure `KESTREL_UI_TEST_ASSETS` with the absolute asset directory to
 also run rendering and HUD worker/recovery tests.
+
+Native Ascent AR9311 build instructions and current hardware-validation limits are in [docs/ascent.md](docs/ascent.md).

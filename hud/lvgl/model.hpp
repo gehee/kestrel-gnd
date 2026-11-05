@@ -62,6 +62,7 @@ public:
     std::string selected_help(uint64_t now) const;
     int option_index() const;
     std::string status(uint64_t now) const;
+    bool show_status(uint64_t now) const;
     RcSignal rc_signal(uint64_t now) const;
     SceneMode scene_mode() const;
     bool hud_visible() const;

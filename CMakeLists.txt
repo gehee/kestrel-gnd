@@ -33,6 +33,13 @@ if(USE_RKMPP)
     add_definitions(-DUSE_RKMPP)
 endif()
 
+# The AR9311 has a native V4L2/DRM pipeline and the software LVGL frontend.
+# Select its sources before discovering GLES/FFmpeg/Rockchip dependencies.
+if(KESTREL_HAL STREQUAL "ar9311")
+    include(cmake/ascent.cmake)
+    return()
+endif()
+
 # The system libraries, each linked by the parts that call it.
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(FFMPEG REQUIRED libavcodec libavformat libavutil libswscale)

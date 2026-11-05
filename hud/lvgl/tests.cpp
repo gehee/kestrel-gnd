@@ -213,7 +213,26 @@ int main(int argc, char** argv) {
             check(real_font.advance("AV") < real_font.advance("A") + real_font.advance("V"), "Real Chakra Petch kerning");
             check(real_font.rasterize("VRX 58C \xe2\x80\xa2 11.5V").pixels.size() < 128 * 1024, "Real HUD text stays bounded");
         }
-        std::puts("PASS: stock protocol, freshness, shared canopy/GLES geometry, projective rasterization, baked fonts and menus");
+        {
+            Model native; Controller c(native);
+            auto& t = native.backend.vrx;
+            const uint64_t now = 10000000;
+            t.stamp_us = now; t.connected = true; t.mcs = 5; t.frequency_mhz = 5800;
+            native.backend.media.video_monitored = true;
+            check(native.show_status(now) && native.status(now) == "RF CONNECTED / WAITING FOR VIDEO",
+                  "RF association must not imply decoded video");
+            auto data = c.hud_data(now);
+            for (const auto& metric : data.metrics) {
+                if (metric.id == HudMetricId::CpuTemperature || metric.id == HudMetricId::RfTemperatureRaw ||
+                    metric.id == HudMetricId::ReceiverVoltage || metric.id == HudMetricId::QualityRaw)
+                    check(!metric.valid, "Missing native sensors must remain unavailable");
+            }
+            native.backend.media.video_stamp_us = now;
+            check(!native.show_status(now), "A decoded frame clears waiting-for-video");
+            t.stamp_us = now + 2000000;
+            check(native.show_status(now + 2000000), "Video silence reopens status even with fresh RF stats");
+        }
+        std::puts("PASS: telemetry freshness, shared canopy/GLES geometry, projective rasterization, baked fonts and menus");
         return 0;
     } catch (const std::exception& e) { std::fprintf(stderr, "FAIL: %s\n", e.what()); return 1; }
 }

@@ -277,11 +277,11 @@ void View::update(uint64_t now) {
     const bool fresh = t.fresh(now), valid = t.link_valid(now);
     const bool hud_visible = model_.hud_visible();
     for (size_t i = 0; i < hud_objects_.size(); ++i)
-        hidden(hud_objects_[i], !hud_visible || (hud_layout_.regions[i].role == hud_ipc::Role::Status && valid));
+        hidden(hud_objects_[i], !hud_visible || (hud_layout_.regions[i].role == hud_ipc::Role::Status && !model_.show_status(now)));
     const bool appearance = !initialized_ || old_theme_ != model_.theme || old_fresh_ != fresh || old_valid_ != valid || old_details_ != model_.show_details || old_hud_visible_ != hud_visible;
     const bool data = !initialized_ || model_.backend.flight_version != flight_version_ || flight_fresh != old_flight_fresh_ ||
         t.connected != presented_.connected || t.mcs != presented_.mcs ||
-        t.frequency_raw != presented_.frequency_raw || t.distance_raw != presented_.distance_raw ||
+        t.frequency_mhz != presented_.frequency_mhz || t.frequency_raw != presented_.frequency_raw || t.distance_raw != presented_.distance_raw ||
         t.quality_raw != presented_.quality_raw || t.voltage_mv != presented_.voltage_mv ||
         t.cpu_temperature_x100 != presented_.cpu_temperature_x100 || t.rf_temperature_raw != presented_.rf_temperature_raw;
     const bool menu = old_menu_ != model_.menu_open || old_tab_ != model_.tab || old_selected_ != model_.selected || model_.menu_version != menu_version_;

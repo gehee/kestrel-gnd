@@ -77,6 +77,7 @@ inline int supply_mv(const SupplyAdc &s, int avg_pin_mv) {
 // Each box's facts, one per bsp/<box>.cpp.
 const Board &vrx_pro();
 const Board &pc();
+const Board &ascent();
 
 // The box this build is for (KESTREL_BOARD).
 const Board &board();
