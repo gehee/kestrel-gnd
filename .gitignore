@@ -1,6 +1,9 @@
 sysroot-rk3588/
 build-arm64/
 
+# Local development logs, artifacts, and machine-specific configuration
+/.local/
+
 v_rawl_rx
 v_rawl_rx.yaml
 cmake_install.cmake
