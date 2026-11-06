@@ -1,9 +1,10 @@
 /* LVGL 9.2 straight-alpha composition, including its opacity thresholds and
- * integer rounding. Only unmasked normal fills/images use this fast path;
- * LVGL retains all other formats, masks and blend modes.
+ * integer rounding. Normal fills (with or without masks) and unmasked ARGB
+ * images use this fast path; LVGL retains other formats and blend modes.
  */
 #include "argb_blend.h"
 #include <stdint.h>
+#include <string.h>
 #ifdef __aarch64__
 #include <arm_neon.h>
 #endif
@@ -57,25 +58,72 @@ static inline uint32x4_t mix4(uint32x4_t f, uint32x4_t b)
     return vbslq_u32(vorrq_u32(vcgeq_u32(a, vdupq_n_u32(LV_OPA_MAX)),
                               vcleq_u32(ba, vdupq_n_u32(LV_OPA_MIN))), f, result);
 }
+typedef struct { uint32x4_t f, b, result; } mix_cache;
+static inline uint32x4_t cached_mix4(uint32x4_t f, uint32x4_t b, mix_cache *cache)
+{
+    /* Flat panel spans repeat the same four pixels for hundreds of blocks.
+     * Retain the exact result, including alpha rounding, across those spans. */
+    if(vminvq_u32(vandq_u32(vceqq_u32(f, cache->f), vceqq_u32(b, cache->b))))
+        return cache->result;
+    cache->f = f; cache->b = b; cache->result = mix4(f, b);
+    return cache->result;
+}
 #endif
 lv_result_t kestrel_argb_fill(lv_draw_sw_blend_fill_dsc_t *d)
 {
-    if (d->mask_buf) return LV_RESULT_INVALID;
     uint32_t f = (uint32_t)d->opa << 24 | (uint32_t)d->color.red << 16 |
                  (uint32_t)d->color.green << 8 | d->color.blue;
+#ifdef __aarch64__
+    mix_cache cache = {vdupq_n_u32(0), vdupq_n_u32(0), vdupq_n_u32(0)};
+#endif
     for (int y = 0; y < d->dest_h; ++y) {
         uint32_t *dst = (uint32_t *)((uint8_t *)d->dest_buf + y * d->dest_stride);
+        const uint8_t *mask = d->mask_buf ? d->mask_buf + y * d->mask_stride : NULL;
         int x = 0;
 #ifdef __aarch64__
-        for (; x + 4 <= d->dest_w; x += 4) vst1q_u32(dst + x, mix4(vdupq_n_u32(f), vld1q_u32(dst + x)));
+        if(!mask) {
+            const uint32x4_t fg = vdupq_n_u32(f);
+            for(; x + 16 <= d->dest_w; x += 16) {
+                const uint32x4_t b0 = vld1q_u32(dst+x), b1 = vld1q_u32(dst+x+4);
+                const uint32x4_t b2 = vld1q_u32(dst+x+8), b3 = vld1q_u32(dst+x+12);
+                const uint32x4_t result = cached_mix4(fg, b0, &cache);
+                const uint32x4_t different = vorrq_u32(veorq_u32(b0,b1),
+                    vorrq_u32(veorq_u32(b0,b2),veorq_u32(b0,b3)));
+                vst1q_u32(dst+x,result);
+                if(!vmaxvq_u32(different)) {
+                    vst1q_u32(dst+x+4,result);vst1q_u32(dst+x+8,result);vst1q_u32(dst+x+12,result);
+                } else {
+                    vst1q_u32(dst+x+4,cached_mix4(fg,b1,&cache));
+                    vst1q_u32(dst+x+8,cached_mix4(fg,b2,&cache));
+                    vst1q_u32(dst+x+12,cached_mix4(fg,b3,&cache));
+                }
+            }
+        }
+        for (; x + 4 <= d->dest_w; x += 4) {
+            uint32x4_t fg = vdupq_n_u32(f);
+            if(mask) {
+                uint32_t packed; memcpy(&packed, mask + x, 4);
+                uint32x4_t a = vmovl_u16(vget_low_u16(vmovl_u8(vreinterpret_u8_u32(vdup_n_u32(packed)))));
+                if(d->opa < LV_OPA_MAX) a = vshrq_n_u32(vmulq_n_u32(a, d->opa), 8);
+                fg = vorrq_u32(vdupq_n_u32(f & 0xffffff), vshlq_n_u32(a, 24));
+            }
+            vst1q_u32(dst + x, cached_mix4(fg, vld1q_u32(dst + x), &cache));
+        }
 #endif
-        for (; x < d->dest_w; ++x) dst[x] = mix(f, dst[x]);
+        for (; x < d->dest_w; ++x) {
+            uint32_t fg = f;
+            if(mask) fg = (f & 0xffffff) | ((uint32_t)(d->opa >= LV_OPA_MAX ? mask[x] : (mask[x] * d->opa) >> 8) << 24);
+            dst[x] = mix(fg, dst[x]);
+        }
     }
     return LV_RESULT_OK;
 }
 lv_result_t kestrel_argb_image(lv_draw_sw_blend_image_dsc_t *d)
 {
     if (d->mask_buf || d->blend_mode != LV_BLEND_MODE_NORMAL) return LV_RESULT_INVALID;
+#ifdef __aarch64__
+    mix_cache cache = {vdupq_n_u32(0), vdupq_n_u32(0), vdupq_n_u32(0)};
+#endif
     for (int y = 0; y < d->dest_h; ++y) {
         uint32_t *dst = (uint32_t *)((uint8_t *)d->dest_buf + y * d->dest_stride);
         const uint32_t *src = (const uint32_t *)((const uint8_t *)d->src_buf + y * d->src_stride);
@@ -85,7 +133,7 @@ lv_result_t kestrel_argb_image(lv_draw_sw_blend_image_dsc_t *d)
             uint32x4_t f = vld1q_u32(src + x);
             if (d->opa < LV_OPA_MAX) f = vorrq_u32(vandq_u32(f, vdupq_n_u32(0xffffff)),
                 vshlq_n_u32(vshrq_n_u32(vmulq_n_u32(vshrq_n_u32(f, 24), d->opa), 8), 24));
-            vst1q_u32(dst + x, mix4(f, vld1q_u32(dst + x)));
+            vst1q_u32(dst + x, cached_mix4(f, vld1q_u32(dst + x), &cache));
         }
 #endif
         for (; x < d->dest_w; ++x) {

@@ -63,7 +63,42 @@ int main() {
                 check(dst[at] == (x < 263 ? reference(uint32_t(alpha) << 24 | 0x134de6, bg[at]) : bg[at]));
             }
         }
-        puts("ARGB blend matches LVGL across all alpha pairs, opacity thresholds, strides and tails");
+        std::vector<uint8_t> masks(stride*height+2);
+        for(size_t i=0;i<masks.size();++i)masks[i]=uint8_t(i/256);
+        for(int alpha:{0,1,2,3,127,252,253,254,255}) {
+            dst=bg;
+            lv_draw_sw_blend_fill_dsc_t d{};
+            d.dest_buf=dst.data()+1;d.dest_w=width;d.dest_h=height;d.dest_stride=stride*4;
+            d.color=lv_color_make(19,77,230);d.opa=alpha;d.mask_buf=masks.data()+1;d.mask_stride=stride;
+            check(kestrel_argb_fill(&d)==LV_RESULT_OK);
+            for(int y=0;y<height;++y)for(int x=0;x<stride;++x) {
+                const auto at=1+y*stride+x;
+                const unsigned a=alpha>=LV_OPA_MAX?masks[at]:(masks[at]*alpha)>>8;
+                check(dst[at]==(x<width?reference((a<<24)|0x134de6,bg[at]):bg[at]));
+            }
+        }
+        // Exercise repeated block hits and transitions out of the cache.
+        std::fill(src.begin(),src.end(),0xe0123456);std::fill(bg.begin(),bg.end(),0x28456789);
+        for(size_t i=7;i<src.size();i+=113)src[i]^=0x1a90375b;
+        dst=bg;lv_draw_sw_blend_image_dsc_t d{};
+        d.src_buf=src.data()+1;d.dest_buf=dst.data()+1;d.dest_w=width;d.dest_h=height;
+        d.src_stride=d.dest_stride=stride*4;d.opa=255;d.blend_mode=LV_BLEND_MODE_NORMAL;
+        check(kestrel_argb_image(&d)==LV_RESULT_OK);
+        for(int y=0;y<height;++y)for(int x=0;x<stride;++x) {
+            const auto at=1+y*stride+x;check(dst[at]==(x<width?reference(src[at],bg[at]):bg[at]));
+        }
+        for(size_t i=7;i<bg.size();i+=113)bg[i]^=0xe190375b;
+        for(int opacity:{0,1,2,3,127,252,253,254,255}) {
+            dst=bg;lv_draw_sw_blend_fill_dsc_t fill{};
+            fill.dest_buf=dst.data()+1;fill.dest_w=width;fill.dest_h=height;fill.dest_stride=stride*4;
+            fill.color=lv_color_make(19,77,230);fill.opa=opacity;
+            check(kestrel_argb_fill(&fill)==LV_RESULT_OK);
+            for(int y=0;y<height;++y)for(int x=0;x<stride;++x) {
+                const auto at=1+y*stride+x;
+                check(dst[at]==(x<width?reference((uint32_t(opacity)<<24)|0x134de6,bg[at]):bg[at]));
+            }
+        }
+        puts("ARGB blend matches LVGL across alpha pairs, masks, opacity thresholds, strides, tails and cached spans");
         return 0;
     } catch (const std::exception& e) { std::fprintf(stderr, "%s\n", e.what()); return 1; }
 }
