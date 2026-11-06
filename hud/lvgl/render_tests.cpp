@@ -233,6 +233,25 @@ int main(int argc, char** argv) {
             const auto normal_row=menu_row_height(10),small_row=menu_row_height(8);
             if(small_row>=normal_row || normal_row-small_row<8)throw std::runtime_error("UI Scaling did not resize menu row spacing");
             if(menu_row_height(10)!=normal_row)throw std::runtime_error("Restoring UI Scaling left stale menu geometry");
+            // Compare patched row snapshots against a genuinely rebuilt menu,
+            // not just a redraw of the same cached image. Theme round-trips
+            // force fresh snapshots while preserving layout and content.
+            for(int side:{0,1}) for(int tab:(side?std::vector<int>{1,7}:std::vector<int>{2,3})) {
+                model.side=side;model.tab=tab;model.selected=0;model.ui_scale=10;
+                for(int i=0;i<10;++i){now+=40000;controller.tick(now);view.update(now);lv_refr_now(display.lv_display());}
+                for(int row=0;row<int(model.rows(now).size());++row) {
+                    model.selected=row;++model.menu_version;
+                    view.update(now);lv_refr_now(display.lv_display());check_incremental();
+                    const auto patched=display.pixels();
+                    model.theme=1;++model.menu_version;view.update(now);lv_refr_now(display.lv_display());
+                    model.theme=0;++model.menu_version;view.update(now);lv_refr_now(display.lv_display());
+                    if(patched!=display.pixels()) {
+                        const auto pos=std::mismatch(patched.begin(),patched.end(),display.pixels().begin()).first-patched.begin();
+                        std::fprintf(stderr,"snapshot mismatch side=%d tab=%d row=%d xy=%ld,%ld\n",side,tab,row,long(pos%1920),long(pos/1920));
+                        throw std::runtime_error("Patched menu snapshot differs from a fresh capture");
+                    }
+                }
+            }
             model.backend.recordings={{"recording_20260101_123456.mp4",12345678},{"another.mp4",4000000}};
             for(auto scene:{kestrel_ui::SceneMode::GalleryBrowse,kestrel_ui::SceneMode::GalleryPlayback,kestrel_ui::SceneMode::GalleryBrowse,kestrel_ui::SceneMode::Live}) {
                 controller.set_scene(scene);

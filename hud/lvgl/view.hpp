@@ -30,6 +30,7 @@ private:
     uint64_t hud_revision_ = 0;
     std::vector<lv_obj_t*> hud_objects_;
     std::optional<Model> menu_preview_;
+    std::optional<Model> menu_cached_model_;
     int width_, height_;
     PerspectiveText text_;
     IdleScene idle_;
@@ -58,6 +59,7 @@ private:
     float menu_progress_ = 0;
     bool animating_ = false;
     bool capturing_menu_ = false;
+    bool menu_damage_applied_ = false;
     lv_draw_buf_t* menu_snapshot_ = nullptr;
     std::string menu_snapshot_signature_;
     uint64_t menu_snapshot_count_ = 0;
@@ -69,6 +71,16 @@ private:
     uint64_t channel_revision_ = 0;
     bool old_channel_ = false;
     lv_obj_t *screen_ = nullptr, *menu_ = nullptr, *picker_ = nullptr, *idle_object_ = nullptr, *dimmer_ = nullptr;
+    lv_obj_t *capture_screen_=nullptr,*menu_capture_=nullptr;
+    struct MenuLayout {
+        float u,help_y;
+        int pad,row_h,list_top,extra,start,visible;
+        std::vector<MenuRow> rows;
+        std::vector<std::string> help_lines;
+    };
+    std::optional<MenuLayout> menu_cached_layout_;
+    const MenuLayout* capture_layout_=nullptr;
+    MenuLayout menu_layout(const Model&,int width,int height) const;
     void sync_hud_objects();
     void draw_hud(lv_layer_t* layer, size_t region);
     void draw_menu(lv_layer_t* layer);

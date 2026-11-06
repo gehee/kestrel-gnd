@@ -6,11 +6,26 @@
 #include <fstream>
 #include <stdexcept>
 #include <sstream>
+#ifdef __aarch64__
+#include <arm_neon.h>
+#endif
 
 namespace kestrel_ui {
 namespace {
 lv_color_t color(const float* rgb) { return lv_color_make(uint8_t(rgb[0] * 255), uint8_t(rgb[1] * 255), uint8_t(rgb[2] * 255)); }
 lv_opa_t opacity(float v) { return lv_opa_t(std::clamp(v * 255, 0.0f, 255.0f)); }
+int equal_prefix(const uint32_t* a,const uint32_t* b,int width) {
+    int x=0;
+#ifdef __aarch64__
+    for(;x+16<=width;x+=16) {
+        auto different=vorrq_u32(veorq_u32(vld1q_u32(a+x),vld1q_u32(b+x)),veorq_u32(vld1q_u32(a+x+4),vld1q_u32(b+x+4)));
+        different=vorrq_u32(different,vorrq_u32(veorq_u32(vld1q_u32(a+x+8),vld1q_u32(b+x+8)),veorq_u32(vld1q_u32(a+x+12),vld1q_u32(b+x+12))));
+        if(vmaxvq_u32(different))break;
+    }
+#endif
+    while(x<width && a[x]==b[x])++x;
+    return x;
+}
 void hidden(lv_obj_t* object, bool hide) {
     if (lv_obj_has_flag(object, LV_OBJ_FLAG_HIDDEN) == hide) return;
     if (hide) lv_obj_add_flag(object, LV_OBJ_FLAG_HIDDEN);
@@ -80,8 +95,12 @@ View::View(const Controller& controller, int w, int h, const std::string& assets
     lv_obj_set_size(gallery_,w,h);lv_obj_remove_flag(gallery_,LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(gallery_,draw_event,LV_EVENT_DRAW_MAIN,this);
     lv_obj_add_flag(gallery_,LV_OBJ_FLAG_HIDDEN);
+    capture_screen_=lv_obj_create(nullptr);lv_obj_remove_style_all(capture_screen_);
+    menu_capture_=lv_obj_create(capture_screen_);lv_obj_remove_style_all(menu_capture_);
+    lv_obj_remove_flag(menu_capture_,LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(menu_capture_,draw_event,LV_EVENT_DRAW_MAIN,this);
 }
-View::~View() { lv_obj_clean(screen_); drop_menu_snapshot(); }
+View::~View() { lv_obj_delete(capture_screen_);lv_obj_clean(screen_); drop_menu_snapshot(); }
 void View::drop_menu_snapshot() {
     if (!menu_snapshot_) return;
     lv_image_cache_drop(menu_snapshot_); lv_image_header_cache_drop(menu_snapshot_);
@@ -103,7 +122,10 @@ void View::prepare_menu_snapshot() {
     std::ostringstream signature;
     signature << menu.side << ':' << menu.tab << ':' << menu.selected << ':' << menu.theme << ':' << menu.ui_scale << ':'
               << (menu.stage == MenuStage::Edit) << ':' << menu.selected_help(now_);
-    for (const auto& row : menu.rows(now_)) signature << '\n' << row.id << ':' << row.value;
+    for (const auto& row : menu.rows(now_)) {
+        signature << '\n' << row.id << ':' << row.name << ':' << row.value << ':' << row.disabled << row.editable << row.action << row.heading << menu.pending(row.id);
+        for(const auto& option:row.options)signature<<':'<<option;
+    }
     const std::string key = signature.str();
     if (menu_snapshot_ && key == menu_snapshot_signature_) {
         return;
@@ -112,15 +134,89 @@ void View::prepare_menu_snapshot() {
     const int active_side = active_menu_side_;
     active_menu_side_ = model_.side; menu_progress_ = 1; capturing_menu_ = true;
     lv_obj_set_pos(menu_, active_menu_side_ ? width_ - lv_obj_get_width(menu_) : 0, 0);
-    drop_menu_snapshot();
+    // Stable browsing changes only selected/value rows and their help text.
+    // Patch those bands into the cached blade. Scrolling, editing and geometry
+    // changes use a fresh capture, with exact pixel damage determined below.
+    if(menu_snapshot_ && menu_cached_model_ && menu_cached_layout_ && progress==1 && menu.stage==MenuStage::Browse &&
+       menu_cached_model_->stage==MenuStage::Browse && menu.side==menu_cached_model_->side &&
+       menu.tab==menu_cached_model_->tab && menu.theme==menu_cached_model_->theme &&
+       menu.ui_scale==menu_cached_model_->ui_scale && menu.side_tabs()==menu_cached_model_->side_tabs()) {
+        const auto reveal=menu_reveal(1);
+        const int w=reveal.x2-reveal.x1+1,h=reveal.y2-reveal.y1+1;
+        const auto& before=*menu_cached_layout_;
+        const auto after=menu_layout(menu,w,h);
+        if(before.start==after.start && before.visible==after.visible && before.rows.size()==after.rows.size()) {
+            std::vector<lv_area_t> bands;
+            for(int i=after.start;i<std::min(int(after.rows.size()),after.start+after.visible);++i) {
+                const auto& a=before.rows[i];const auto& b=after.rows[i];
+                const bool changed=(i==menu.selected)!=(i==menu_cached_model_->selected) ||
+                    std::tie(a.name,a.value,a.heading,a.disabled,a.editable,a.action)!=std::tie(b.name,b.value,b.heading,b.disabled,b.editable,b.action) ||
+                    menu.pending(b.id)!=menu_cached_model_->pending(a.id);
+                if(changed) {
+                    const int top=reveal.y1+after.list_top+(i-after.start)*after.row_h;
+                    bands.push_back({reveal.x1,std::max(0,top-2),reveal.x2,std::min(height_-1,top+after.row_h+2)});
+                }
+            }
+            if(before.help_lines!=after.help_lines) bands.push_back({reveal.x1,
+                reveal.y1+int(std::floor(std::min(before.help_y,after.help_y)-12*after.u)),reveal.x2,reveal.y2});
+            bool ok=true;
+            capture_layout_=&after;
+            lv_image_cache_drop(menu_snapshot_);
+            for(const auto& a:bands) {
+                lv_obj_set_pos(menu_capture_,a.x1,a.y1);lv_obj_set_size(menu_capture_,w,a.y2-a.y1+1);
+                auto* part=lv_snapshot_take(menu_capture_,LV_COLOR_FORMAT_ARGB8888);
+                if(!part) {ok=false;break;}
+                for(int row=0;row<int(part->header.h);++row)
+                    std::memcpy(menu_snapshot_->data+(a.y1+row)*menu_snapshot_->header.stride,
+                                part->data+row*part->header.stride,w*4);
+                lv_draw_buf_destroy(part);lv_obj_invalidate_area(menu_,&a);
+            }
+            capture_layout_=nullptr;
+            if(ok) {
+                menu_cached_layout_=after;
+                menu_cached_model_=menu;menu_snapshot_signature_=key;++menu_snapshot_count_;menu_damage_applied_=true;
+                capturing_menu_=false;menu_progress_=progress;active_menu_side_=active_side;return;
+            }
+        }
+    }
+    auto* previous_snapshot=menu_snapshot_;
     // Preserve the original translucent panel over the video. Cache only the
     // settled layout; moving panels are laid out in their interpolated bounds.
+    const auto bounds=menu_reveal(1);
+    const auto layout=menu_layout(menu,bounds.x2-bounds.x1+1,bounds.y2-bounds.y1+1);
+    capture_layout_=&layout;
     menu_snapshot_ = lv_snapshot_take(menu_, LV_COLOR_FORMAT_ARGB8888);
+    capture_layout_=nullptr;
     capturing_menu_ = false; menu_progress_ = progress; active_menu_side_ = active_side;
     lv_obj_set_pos(menu_, active_side ? width_ - lv_obj_get_width(menu_) : 0, 0);
     if (menu_snapshot_) {
+        menu_cached_model_=menu;menu_cached_layout_=layout;
         menu_snapshot_signature_ = key; ++menu_snapshot_count_;
-        lv_obj_invalidate(menu_);
+        if(previous_snapshot && previous_snapshot->header.w==menu_snapshot_->header.w &&
+           previous_snapshot->header.h==menu_snapshot_->header.h) {
+            // A selection/value change usually affects two rows and the help
+            // text. Retain all other pixels instead of repainting the blade.
+            std::vector<lv_area_t> damage;
+            const int w=menu_snapshot_->header.w,h=menu_snapshot_->header.h;
+            const int ox=lv_obj_get_x(menu_),oy=lv_obj_get_y(menu_);
+            for(int row=0;row<h;++row) {
+                const auto* old=reinterpret_cast<const uint32_t*>(previous_snapshot->data+row*previous_snapshot->header.stride);
+                const auto* fresh=reinterpret_cast<const uint32_t*>(menu_snapshot_->data+row*menu_snapshot_->header.stride);
+                const int left=equal_prefix(old,fresh,w);if(left==w)continue;
+                int right=w-1;
+                while(right>left && old[right]==fresh[right])--right;
+                lv_area_t a{ox+left,oy+row,ox+right,oy+row};
+                if(!damage.empty() && a.y1<=damage.back().y2+8) {
+                    auto& last=damage.back();last.x1=std::min(last.x1,a.x1);last.x2=std::max(last.x2,a.x2);last.y2=a.y2;
+                } else damage.push_back(a);
+            }
+            if(damage.size()>24)lv_obj_invalidate(menu_);
+            else for(const auto& a:damage)lv_obj_invalidate_area(menu_,&a);
+            menu_damage_applied_=true;
+        } else lv_obj_invalidate(menu_);
+    }
+    if(previous_snapshot) {
+        lv_image_cache_drop(previous_snapshot);lv_image_header_cache_drop(previous_snapshot);lv_draw_buf_destroy(previous_snapshot);
     }
 }
 void View::draw_event(lv_event_t* e) {
@@ -133,7 +229,7 @@ void View::draw_event(lv_event_t* e) {
             rect(layer, 0, 0, self->width_, self->height_, hud_theme_at(self->model_.theme).ground,
                  (self->model_.menu_open ? 0.10f : 0.0f) + self->menu_progress_ * 0.06f);
     }
-    else if (target == self->menu_) self->draw_menu(layer);
+    else if (target == self->menu_ || target == self->menu_capture_) self->draw_menu(layer);
     else if (target == self->picker_) self->draw_picker(layer);
     else if (target == self->channel_) self->draw_channel(layer);
     else if (target == self->clock_) {
@@ -261,40 +357,11 @@ lv_area_t View::menu_reveal(float progress) const {
     const int x = active_menu_side_ ? width_ - w : 0;
     return {x, y, x + w - 1, y + h - 1};
 }
-void View::draw_menu(lv_layer_t* layer) {
-    const auto& menu_model = menu_preview_ ? *menu_preview_ : model_;
-    const auto& th = hud_theme_at(model_.theme);
-    const auto reveal = menu_reveal(menu_progress_);
-    const int x = reveal.x1, y = reveal.y1, w = reveal.x2 - x + 1, h = reveal.y2 - y + 1;
-    const float u = height_ / 1080.0f * menu_model.ui_scale / 10.0f;
-    const int pad = int(22 * u), row_h = int(50 * u);
-    if (!capturing_menu_ && menu_snapshot_ && menu_progress_ == 1) {
-        lv_draw_image_dsc_t d; lv_draw_image_dsc_init(&d); d.src = menu_snapshot_;
-        lv_area_t image_area{active_menu_side_ ? width_ - lv_obj_get_width(menu_) : 0, 0, 0, height_ - 1};
-        image_area.x2 = image_area.x1 + int(menu_snapshot_->header.w) - 1;
-        lv_draw_image(layer, &d, &image_area);
-        return;
-    }
-    rect(layer, x, y, w, h, th.ground, 0.94f * std::min(1.0f, menu_progress_ * 1.6f));
-    rect(layer, x, y, w, std::max(1, int(3 * u)), th.accent, menu_progress_);
-    if (menu_progress_ <= 0.5f) return;
-    const float content_alpha = (menu_progress_ - 0.5f) * 2;
-    text_.canvas(layer, active_menu_side_ ? "AIR UNIT" : "GROUND UNIT", pad, pad + 14 * u, 15 * u, false, th.accent, content_alpha, x, y);
-    int tab_x = pad;
-    const auto tabs = menu_model.side_tabs();
-    for (int tab : tabs) {
-        const std::string title = Model::tab_name(tab);
-        const int tw = int(text_.advance(title) * 21 * u / canopy::kFontPixels);
-        text_.canvas(layer, title, tab_x, pad + 52 * u, 21 * u, false,
-                      tab == menu_model.tab ? th.text : th.quiet, content_alpha, x, y);
-        if (tab == menu_model.tab) rect(layer, x + tab_x, y + pad + int(61 * u), tw, std::max(1, int(3 * u)), th.accent, content_alpha);
-        tab_x += tw + int(26 * u);
-    }
-    const int list_top = pad + int(78 * u);
-    rect(layer, x + pad, y + list_top - int(6 * u), w - 2 * pad, 1, th.quiet, 0.3f);
-    const auto rows = menu_model.rows(now_);
-    const bool editing = menu_model.stage == MenuStage::Edit;
-    const int extra = editing ? int(80 * u) : 0;
+View::MenuLayout View::menu_layout(const Model& menu_model,int w,int h) const {
+    const float u=height_/1080.0f*menu_model.ui_scale/10.0f;
+    const int pad=int(22*u),row_h=int(50*u),list_top=pad+int(78*u);
+    const auto rows=menu_model.rows(now_);
+    const int extra=menu_model.stage==MenuStage::Edit?int(80*u):0;
     std::vector<std::string> help_lines;
     std::istringstream paragraphs(menu_model.selected_help(now_));
     std::string paragraph;
@@ -314,6 +381,47 @@ void View::draw_menu(lv_layer_t* layer) {
     const float list_bottom = help_y - 20 * u;
     const int visible = std::clamp(int((list_bottom - list_top - extra) / row_h), 3, 16);
     const int start = std::clamp(menu_model.selected - (visible - 1) / 2, 0, std::max(0, int(rows.size()) - visible));
+    return {u,help_y,pad,row_h,list_top,extra,start,visible,rows,help_lines};
+}
+void View::draw_menu(lv_layer_t* layer) {
+    const auto& menu_model = menu_preview_ ? *menu_preview_ : model_;
+    const auto& th = hud_theme_at(model_.theme);
+    const auto reveal = menu_reveal(menu_progress_);
+    const int x = reveal.x1, y = reveal.y1, w = reveal.x2 - x + 1, h = reveal.y2 - y + 1;
+    if (!capturing_menu_ && menu_snapshot_ && menu_progress_ == 1) {
+        lv_draw_image_dsc_t d; lv_draw_image_dsc_init(&d); d.src = menu_snapshot_;
+        lv_area_t image_area{active_menu_side_ ? width_ - lv_obj_get_width(menu_) : 0, 0, 0, height_ - 1};
+        image_area.x2 = image_area.x1 + int(menu_snapshot_->header.w) - 1;
+        lv_draw_image(layer, &d, &image_area);
+        return;
+    }
+    const auto layout_value=capture_layout_?MenuLayout{}:menu_layout(menu_model,w,h);
+    const auto& layout=capture_layout_?*capture_layout_:layout_value;
+    const float u=layout.u;
+    const int pad=layout.pad,row_h=layout.row_h;
+    rect(layer, x, y, w, h, th.ground, 0.94f * std::min(1.0f, menu_progress_ * 1.6f));
+    rect(layer, x, y, w, std::max(1, int(3 * u)), th.accent, menu_progress_);
+    if (menu_progress_ <= 0.5f) return;
+    const float content_alpha = (menu_progress_ - 0.5f) * 2;
+    text_.canvas(layer, active_menu_side_ ? "AIR UNIT" : "GROUND UNIT", pad, pad + 14 * u, 15 * u, false, th.accent, content_alpha, x, y);
+    int tab_x = pad;
+    const auto tabs = menu_model.side_tabs();
+    for (int tab : tabs) {
+        const std::string title = Model::tab_name(tab);
+        const int tw = int(text_.advance(title) * 21 * u / canopy::kFontPixels);
+        text_.canvas(layer, title, tab_x, pad + 52 * u, 21 * u, false,
+                      tab == menu_model.tab ? th.text : th.quiet, content_alpha, x, y);
+        if (tab == menu_model.tab) rect(layer, x + tab_x, y + pad + int(61 * u), tw, std::max(1, int(3 * u)), th.accent, content_alpha);
+        tab_x += tw + int(26 * u);
+    }
+    const int list_top=layout.list_top;
+    rect(layer, x + pad, y + list_top - int(6 * u), w - 2 * pad, 1, th.quiet, 0.3f);
+    const auto& rows=layout.rows;
+    const bool editing = menu_model.stage == MenuStage::Edit;
+    const int extra=layout.extra;
+    const auto& help_lines=layout.help_lines;
+    const float help_y=layout.help_y,list_bottom=help_y-20*u;
+    const int start=layout.start,visible=layout.visible;
     const float lit[] = {std::min(1.0f, th.ground[0] * 1.6f), std::min(1.0f, th.ground[1] * 1.6f), std::min(1.0f, th.ground[2] * 1.6f)};
     int ry = list_top;
     for (int i = start; i < std::min(int(rows.size()), start + visible); ++i) {
@@ -366,6 +474,7 @@ void View::draw_menu(lv_layer_t* layer) {
 
 }
 void View::update(uint64_t now) {
+    menu_damage_applied_=false;
     text_.begin_frame(); idle_.prepare(model_, now);
     now_ = now;
     const bool gallery=model_.scene==SceneMode::GalleryBrowse || model_.scene==SceneMode::GalleryPlayback;
@@ -461,7 +570,7 @@ void View::update(uint64_t now) {
     const bool menu = old_menu_ != model_.menu_open || old_tab_ != model_.tab || old_selected_ != model_.selected || model_.menu_version != menu_version_;
     const bool counters = t.status_frames != presented_.status_frames || t.unknown_frames != presented_.unknown_frames ||
                           t.bad_frames != presented_.bad_frames || model_.rejected_inputs != rejected_inputs_;
-    if (appearance || (!moving && menu) || (moving && next == 0) ||
+    if (appearance || (!moving && menu && !menu_damage_applied_) || (moving && next == 0) ||
         (!moving && !menu_snapshot_ && (data || (model_.menu_open && (model_.tab == 2 || model_.tab == 4 || model_.tab == 6) && counters))))
         lv_obj_invalidate(menu_);
     else if (moving) {

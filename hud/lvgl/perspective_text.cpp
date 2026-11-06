@@ -40,9 +40,11 @@ void PerspectiveText::canvas(lv_layer_t* layer, const std::string& text, float x
     const float top = baseline - canopy::kTextBaseline * scale;
     const float h = canopy::kTextCellHeight * scale;
     const float w = ((int(std::ceil(font_.advance(text) + 6)) + 15) & ~15) * scale;
-    // Menu translation does not change the rasterization key: cached glyphs
-    // slide as one object, rather than generating a new bitmap each tick.
-    paint(layer, text, {{{x, top}, {x + w, top}, {x + w, top + h}, {x, top + h}}}, rgb, alpha, offset_x, offset_y);
+    // Flat menu text is a reusable sprite. Anchor it on the pixel grid and
+    // keep position out of its raster key: right-aligned values and help text
+    // move as the blade unfolds, but their glyphs and size do not change.
+    paint(layer, text, {{{0, 0}, {w, 0}, {w, h}, {0, h}}}, rgb, alpha,
+          offset_x+int(std::lround(x)),offset_y+int(std::lround(top)));
 }
 void PerspectiveText::paint(lv_layer_t* layer, const std::string& text, const std::array<canopy::Point, 4>& quad,
                             const float* rgb, float alpha, int offset_x, int offset_y) {
