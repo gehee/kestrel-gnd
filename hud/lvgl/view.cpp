@@ -128,6 +128,9 @@ void View::prepare_menu_snapshot() {
     }
     const std::string key = signature.str();
     if (menu_snapshot_ && key == menu_snapshot_signature_) {
+        // Several queued keys can return to the same selection in one tick.
+        // A version change alone must not repaint an unchanged cached blade.
+        menu_damage_applied_=true;
         return;
     }
     const float progress = menu_progress_;
@@ -145,12 +148,13 @@ void View::prepare_menu_snapshot() {
         const int w=reveal.x2-reveal.x1+1,h=reveal.y2-reveal.y1+1;
         const auto& before=*menu_cached_layout_;
         const auto after=menu_layout(menu,w,h);
-        if(before.start==after.start && before.visible==after.visible && before.rows.size()==after.rows.size()) {
+        if(before.start==after.start && before.rows.size()==after.rows.size() &&
+           std::min(int(before.rows.size()),before.start+before.visible)==std::min(int(after.rows.size()),after.start+after.visible)) {
             std::vector<lv_area_t> bands;
             for(int i=after.start;i<std::min(int(after.rows.size()),after.start+after.visible);++i) {
                 const auto& a=before.rows[i];const auto& b=after.rows[i];
                 const bool changed=(i==menu.selected)!=(i==menu_cached_model_->selected) ||
-                    std::tie(a.name,a.value,a.heading,a.disabled,a.editable,a.action)!=std::tie(b.name,b.value,b.heading,b.disabled,b.editable,b.action) ||
+                    std::tie(a.id,a.name,a.value,a.heading,a.disabled,a.editable,a.action)!=std::tie(b.id,b.name,b.value,b.heading,b.disabled,b.editable,b.action) ||
                     menu.pending(b.id)!=menu_cached_model_->pending(a.id);
                 if(changed) {
                     const int top=reveal.y1+after.list_top+(i-after.start)*after.row_h;
@@ -158,7 +162,7 @@ void View::prepare_menu_snapshot() {
                 }
             }
             if(before.help_lines!=after.help_lines) bands.push_back({reveal.x1,
-                reveal.y1+int(std::floor(std::min(before.help_y,after.help_y)-12*after.u)),reveal.x2,reveal.y2});
+                std::max(0,reveal.y1+int(std::floor(std::min(before.help_y,after.help_y)-24*after.u))),reveal.x2,reveal.y2});
             bool ok=true;
             capture_layout_=&after;
             lv_image_cache_drop(menu_snapshot_);

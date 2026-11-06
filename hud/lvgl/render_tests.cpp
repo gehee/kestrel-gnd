@@ -252,6 +252,9 @@ int main(int argc, char** argv) {
                     }
                 }
             }
+            const auto settled_menu=display.presentations;
+            ++model.menu_version;view.update(now);lv_refr_now(display.lv_display());
+            if(display.presentations!=settled_menu)throw std::runtime_error("Unchanged menu version caused a redundant redraw");
             model.backend.recordings={{"recording_20260101_123456.mp4",12345678},{"another.mp4",4000000}};
             for(auto scene:{kestrel_ui::SceneMode::GalleryBrowse,kestrel_ui::SceneMode::GalleryPlayback,kestrel_ui::SceneMode::GalleryBrowse,kestrel_ui::SceneMode::Live}) {
                 controller.set_scene(scene);
