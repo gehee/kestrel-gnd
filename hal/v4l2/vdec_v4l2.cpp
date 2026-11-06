@@ -17,7 +17,10 @@ namespace {
 constexpr unsigned max_buffers = 32, packet_bytes = 4 * 1024 * 1024;
 // Native SDIO delivers several complete pictures in a single read. Capacity is
 // burst tolerance, not a playout delay: the decoder drains immediately.
-constexpr size_t pending_frames = 16, pending_bytes = 8 * 1024 * 1024;
+// Picture count alone does not measure latency: narrow-band SDIO can deliver
+// dozens of tiny pictures together. Age/bytes are the normal backlog limits;
+// this count cap only bounds metadata for pathological tiny access units.
+constexpr size_t pending_frames = 128, pending_bytes = 8 * 1024 * 1024;
 constexpr uint64_t pending_age_us = 150000;
 constexpr auto output_type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
 constexpr auto capture_type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
@@ -169,6 +172,7 @@ void VdecV4l2::feed_packet_to_decoder(void *data, int len, int64_t pts, uint64_t
     p.pts = pts;
     p.timing = {recv, now_us(), enc, proc, key, next_slice_times_};
     packets_.push_back(std::move(p));
+    if (packets_.size() > peak_pending_) peak_pending_ = packets_.size();
     ready_ = true;
 }
 void VdecV4l2::run_frame() {
@@ -211,7 +215,7 @@ void VdecV4l2::decode() {
     std::array<bool, max_buffers> busy{}, held{};
     std::unordered_map<uint64_t, timing_stats> stamps;
     unsigned ncap = 0, stride = 0, coded_height = 0, width = 0, height = 0, left = 0, top = 0;
-    uint64_t last_progress = now_us();
+    uint64_t last_progress = now_us(), last_report = last_progress;
     while (!*stop_ && !quit_) {
         // Only this thread dequeues and requeues buffers. frame_ref pins each
         // mmap until the presenter releases it; no ioctl runs from a deleter.
@@ -248,6 +252,8 @@ void VdecV4l2::decode() {
                     p = std::move(packets_.front());
                     packets_.pop_front();
                 }
+                const auto wait = now_us() - p.timing.decode_start_us;
+                if (wait > peak_wait_us_) peak_wait_us_ = wait;
                 if (p.bytes.size() > out[i]->size)
                     throw std::runtime_error("compressed frame exceeds driver buffer");
                 memcpy(out[i]->ptr, p.bytes.data(), p.bytes.size());
@@ -387,6 +393,13 @@ void VdecV4l2::decode() {
                 ++frames_;
                 last_progress = now_us();
             }
+        if (now_us() - last_report >= 5000000) {
+            last_report = now_us();
+            printf("v4l2: decoded=%llu dropped=%llu queue_overflows=%llu capture_errors=%llu peak_pending=%llu peak_wait=%.1fms\n",
+                   (unsigned long long)frames_.load(), (unsigned long long)dropped_.load(),
+                   (unsigned long long)overflows_.load(), (unsigned long long)capture_errors_.load(),
+                   (unsigned long long)peak_pending_.load(), peak_wait_us_.load() / 1000.0);
+        }
         // Silence on RF is normal; a decoder with outstanding work must make progress.
         if (now_us() - last_progress > 10000000 &&
             std::any_of(busy.begin(), busy.begin() + nout, [](bool b) { return b; }))

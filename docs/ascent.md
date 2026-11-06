@@ -20,8 +20,9 @@ presented; partial-slice scanout is not supported. Superseded pictures are dropp
 and video is blanked after two seconds without a decoded frame. Fresh decoded
 video is shown even when RF telemetry is unavailable.
 
-Compressed input absorbs short SDIO read bursts (up to 16 pending pictures),
-with an 8 MiB byte budget and a 150 ms pending-age limit. Overflow or decoder
+Compressed input absorbs short SDIO read bursts, with an 8 MiB byte budget
+and a 150 ms pending-age limit. A separate 128-picture cap bounds metadata for
+tiny access units; narrow-band radio reads can deliver dozens together. Overflow or decoder
 errors request a fresh keyframe rather than accumulating stale video. Diagnostic
 logs distinguish queue overflow from hardware decode errors.
 
@@ -182,10 +183,11 @@ This is an initial bring-up target, not a flight-ready receiver.
   have now been exercised on the receiver. Capture initially showed black frames
   or a vertical offset; cycling capture-card power restored a correctly aligned
   image. Capture re-lock behavior still needs further investigation.
-- Short live RF runs now work with the burst-tolerant decoder queue: one run
-  decoded 4,653 frames with no decoder drops, queue overflows or capture errors.
-  Earlier firmware tests also reproduced RF drops/damage with the reference
-  radio tool. Long-duration RF reliability remains unvalidated.
+- Short live RF runs now work with the burst-tolerant decoder queue. A
+  multi-minute 5 MHz run decoded over 7,500 frames without decoder drops, queue
+  overflows or capture errors, including bursts of 18 pending pictures. Long
+  keyframe-recovery freezes were eliminated in this test; brief stutters remain
+  with uneven radio delivery. Long-duration RF reliability remains unvalidated.
 - Menu edits currently cover visual preferences. RF/camera configuration,
   DVR/gallery and FC telemetry integration remain incomplete. Physical buttons
   and asynchronous beeper feedback are wired into Kestrel; LINK queues the

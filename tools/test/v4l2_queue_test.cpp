@@ -21,10 +21,10 @@ int main() {
         check(!decoder.keyframe_in(), "Predictive video cannot start without a keyframe");
         const auto initial_drops = decoder.dropped();
         feed(19);
-        for (int i = 0; i < 11; ++i) feed(1);
+        for (int i = 0; i < 47; ++i) feed(1);
         check(decoder.keyframe_in() && decoder.dropped() == initial_drops,
               "A short SDIO burst discarded the prediction chain");
-        for (int i = 0; i < 32; ++i) feed(1);
+        for (int i = 0; i < 256; ++i) feed(1);
         check(!decoder.keyframe_in() && decoder.dropped() > initial_drops,
               "An unconsumed backlog must remain bounded and request recovery");
         feed(1);
