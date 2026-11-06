@@ -152,7 +152,9 @@ class Ar9311Screen final : public PlaneScreen {
     enum class Slot { Free, Writing, Ready, Pending, Active };
     int width_, height_;
     int fd_ = -1;
-    Buffer black_;
+    // Match the last decoded source during flush/idle, so changing decoders
+    // does not reconfigure the scaler or interrupt the HDMI signal.
+    Buffer black_, black_720_;
     std::array<Buffer, 3> ui_{};
     std::array<Slot, 3> slots_{};
     std::array<base::DamageRows, 3> ui_damage_;
@@ -208,6 +210,7 @@ class Ar9311Screen final : public PlaneScreen {
         for (auto &b : ui_)
             destroy(b);
         destroy(black_);
+        destroy(black_720_);
         if (mode_) {
             drm_mode_destroy_blob b{};
             b.blob_id = mode_;
@@ -216,28 +219,28 @@ class Ar9311Screen final : public PlaneScreen {
         close(fd_);
         fd_ = -1;
     }
-    void create(Buffer &b, bool rgb) {
+    void create(Buffer &b, bool rgb, int width, int height) {
         drm_mode_create_dumb d{};
-        d.width = width_;
-        d.height = rgb ? height_ : height_*3/2;
+        d.width = width;
+        d.height = rgb ? height : height*3/2;
         d.bpp = rgb ? 32 : 8;
         ctl(fd_, DRM_IOCTL_MODE_CREATE_DUMB, &d, "plane buffer allocation");
         b.handle = d.handle;
         b.pitch = d.pitch;
         b.size = d.size;
-        if (d.pitch != unsigned(rgb ? ((width_+511)&~511)*4 : width_) || d.size < uint64_t(d.pitch) * d.height)
+        if (d.pitch != unsigned(rgb ? ((width+511)&~511)*4 : width) || d.size < uint64_t(d.pitch) * d.height)
             throw std::runtime_error("unsupported plane pitch/size");
         drm_mode_fb_cmd2 fb{};
-        fb.width = width_;
-        fb.height = height_;
+        fb.width = width;
+        fb.height = height;
         fb.pixel_format = rgb ? DRM_FORMAT_ARGB8888 : DRM_FORMAT_YUV420;
         fb.handles[0] = d.handle;
         fb.pitches[0] = d.pitch;
         if (!rgb) {
             fb.handles[1] = fb.handles[2] = d.handle;
-            fb.pitches[1] = fb.pitches[2] = width_/2;
-            fb.offsets[1] = width_ * height_;
-            fb.offsets[2] = width_ * height_ * 5 / 4;
+            fb.pitches[1] = fb.pitches[2] = width/2;
+            fb.offsets[1] = width * height;
+            fb.offsets[2] = width * height * 5 / 4;
         }
         ctl(fd_, DRM_IOCTL_MODE_ADDFB2, &fb, "plane framebuffer");
         b.fb = fb.fb_id;
@@ -250,7 +253,7 @@ class Ar9311Screen final : public PlaneScreen {
         b.pixels = static_cast<uint8_t *>(pixels);
         memset(b.pixels, rgb ? 0 : 128, b.size);
         if (!rgb)
-            memset(b.pixels, 16, width_ * height_);
+            memset(b.pixels, 16, width * height);
     }
     void wait_flip(uint64_t cookie, uint32_t fb) {
         pollfd p{fd_, POLLIN, 0};
@@ -360,9 +363,11 @@ class Ar9311Screen final : public PlaneScreen {
             blob.length = sizeof(m);
             ctl(fd_, DRM_IOCTL_MODE_CREATEPROPBLOB, &blob, "Ascent screen mode");
             mode_ = blob.blob_id;
-            create(black_, false);
+            create(black_, false, 1920, 1080);
+            if (height_ == 720)
+                create(black_720_, false, 1280, 720);
             for (auto &b : ui_)
-                create(b, true);
+                create(b, true, width_, height_);
             // EDID alone does not prove that installed firmware can drive a
             // mode. TEST_ONLY also checks the fixed 1080p-to-720p video path.
             // --force-display permits this probe without a valid EDID.
@@ -376,7 +381,7 @@ class Ar9311Screen final : public PlaneScreen {
                 probe.data=uintptr_t(&candidate); probe.length=sizeof(candidate);
                 ctl(fd_,DRM_IOCTL_MODE_CREATEPROPBLOB,&probe,"720p capability probe");
                 Atomic test;
-                test.plane(primary_,crtc_.id,black_.fb,width_,height_,1280,720);
+                test.plane(primary_,crtc_.id,black_.fb,1920,1080,1280,720);
                 test.plane(overlay_,crtc_.id,0,1280,720,1280,720);
                 test.add(connector_,{{"CRTC_ID",crtc_.id}});
                 test.add(crtc_,{{"MODE_ID",probe.blob_id},{"ACTIVE",1}});
@@ -473,10 +478,14 @@ class Ar9311Screen final : public PlaneScreen {
     void run() override {
         std::unique_ptr<Imported> showing, pending;
         int active_ui = -1, next_ui = -1;
+        int source_width = width_, source_height = height_;
         uint64_t cookie = 0;
         try {
             Atomic initial;
-            initial.plane(primary_, crtc_.id, black_.fb, width_, height_, width_, height_);
+            // Preserve the native-size startup sequence. Once video arrives,
+            // blanks retain its geometry across every subsequent decoder flush.
+            initial.plane(primary_, crtc_.id, height_ == 720 ? black_720_.fb : black_.fb,
+                          source_width, source_height, width_, height_);
             initial.plane(overlay_, crtc_.id, 0, width_, height_, width_, height_);
             initial.add(connector_, {{"CRTC_ID", crtc_.id}});
             initial.add(crtc_, {{"MODE_ID", mode_}, {"ACTIVE", 1}});
@@ -505,21 +514,25 @@ class Ar9311Screen final : public PlaneScreen {
                 const bool video_changed = frame != (showing ? showing->frame : nullptr);
                 if (video_changed && frame)
                     pending = std::make_unique<Imported>(fd_, frame);
+                const int next_width = frame ? frame->width : source_width;
+                const int next_height = frame ? frame->height : source_height;
+                const uint32_t blank_fb = next_height == 720 ? black_720_.fb : black_.fb;
                 uint32_t video_fb =
-                    video_changed ? (pending ? pending->fb : black_.fb) : (showing ? showing->fb : black_.fb);
+                    video_changed ? (pending ? pending->fb : blank_fb) : (showing ? showing->fb : blank_fb);
                 Atomic a;
-                a.plane(primary_, crtc_.id, video_fb, frame?frame->width:width_, frame?frame->height:height_, width_, height_);
+                a.plane(primary_, crtc_.id, video_fb, next_width, next_height, width_, height_);
                 a.plane(overlay_, crtc_.id, next_ui < 0 ? 0 : ui_[next_ui].fb, width_, height_, width_, height_);
                 if (frame && ltrace::on()) ltrace::rec(ltrace::kRender, clock_us(), uint32_t(frame->pts), video_fb);
-                // The 720p scaler needs a modeset when changing between the native
-                // black frame and scaled video. Normal frame flips stay unchanged.
-                const bool geometry_changed = bool(frame) != bool(showing) ||
-                    (frame && showing && (frame->width != showing->frame->width ||
-                                          frame->height != showing->frame->height));
+                // Only a real source-size change needs the firmware's scaler
+                // modeset. Flushes use matching I420 black buffers, and release
+                // the old decoder lease only after the blank flip completes.
+                const bool geometry_changed = next_width != source_width || next_height != source_height;
                 const uint32_t flags = DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT |
                     (geometry_changed ? DRM_MODE_ATOMIC_ALLOW_MODESET : 0);
                 a.commit(fd_, flags, ++cookie);
                 wait_flip(cookie, video_fb);
+                source_width = next_width;
+                source_height = next_height;
                 if (video_changed) {
                     showing = std::move(pending);
                     ++video_updates_;

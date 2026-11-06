@@ -112,10 +112,14 @@ There is no software resizing of the complete UI or camera picture. Existing
 `ascent-60hz` board profile. Live 720p video and native UI have been checked
 on an HDMI monitor and capture device. The driver initializes the scaler
 filter before scanout and requests a modeset when the 720p primary source
-changes geometry or format. The presenter allows this transition between the
-startup/blank frame and scaled video; ordinary frame flips do not modeset.
-This avoids changing the scaler while the output pipeline is active. Other
-monitors still need testing.
+changes geometry or format. After the native-size startup frame, the presenter
+keeps blank frames at the last decoded source size. Entering/leaving playback,
+decoder flushes and video timeouts therefore keep the same scaler configuration
+and HDMI signal for equal-size sources. Blank buffers are allocated and filled
+once; no software video scaling or periodic idle rendering is needed. The old
+decoder buffer is released only after the blank frame's page flip completes.
+A real source-size change still allows the driver's required modeset. Other
+monitors still need testing, including recovery after output-resolution changes.
 The compiled asset profiles and menu do not establish a sustained 60 FPS UI.
 
 ## Run
