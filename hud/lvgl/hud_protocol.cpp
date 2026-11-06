@@ -79,6 +79,7 @@ Layout decode_layout(const std::vector<uint8_t>& bytes) {
     r.end(); layout.validate(); return layout;
 }
 std::vector<uint8_t> encode(const HudData& data) {
+    if(data.text_scale<5 || data.text_scale>20) throw std::runtime_error("Invalid HUD text scale");
     if (data.theme < 0 || data.theme > 255) throw std::runtime_error("Invalid HUD theme");
     Writer w; w.flag(data.enabled); w.flag(data.details); w.flag(data.show_status); w.u(data.theme, 4); w.text(data.status);
     for (const auto& p : data.panels) {
@@ -97,6 +98,7 @@ std::vector<uint8_t> encode(const HudData& data) {
         w.text(item.label); w.text(item.value); w.text(item.unit); w.u(item.scale.size(), 1);
         for (const auto& label : item.scale) w.text(label);
     }
+    w.u(data.text_scale,1);
     return w.out;
 }
 HudData decode_data(const std::vector<uint8_t>& bytes) {
@@ -120,6 +122,8 @@ HudData decode_data(const std::vector<uint8_t>& bytes) {
         for (size_t j = 0; j < labels; ++j) item.scale.push_back(r.text());
         data.metrics.push_back(std::move(item));
     }
+    data.text_scale=int(r.u(1));
+    if(data.text_scale<5 || data.text_scale>20) throw std::runtime_error("Invalid HUD text scale");
     r.end(); return data;
 }
 std::vector<uint8_t> encode(const Frame& frame) {
@@ -131,7 +135,7 @@ Frame decode_frame(const std::vector<uint8_t>& bytes) {
     r.end(); if (f.slot > 1) throw std::runtime_error("Invalid HUD frame slot"); return f;
 }
 bool send(int socket, Type type, uint64_t sequence, const std::vector<uint8_t>& payload, int fd) {
-    Writer w; w.u(magic, 4); w.u(3, 2); w.u(uint16_t(type), 2); w.u(sequence, 8);
+    Writer w; w.u(magic, 4); w.u(4, 2); w.u(uint16_t(type), 2); w.u(sequence, 8);
     w.out.insert(w.out.end(), payload.begin(), payload.end());
     if (w.out.size() > max_packet) throw std::runtime_error("Oversized HUD packet");
     iovec io{w.out.data(), w.out.size()}; msghdr msg{}; msg.msg_iov = &io; msg.msg_iovlen = 1;
@@ -166,7 +170,7 @@ bool receive(int socket, Packet& packet) {
     }
     if (!fds.empty()) packet.fd = fds[0];
     packet.payload.assign(buffer, buffer + n); Reader r{packet.payload};
-    if (r.u(4) != magic || r.u(2) != 3) throw std::runtime_error("Unsupported HUD protocol");
+    if (r.u(4) != magic || r.u(2) != 4) throw std::runtime_error("Unsupported HUD protocol");
     const auto type = r.u(2); if (type < 1 || type > 5) throw std::runtime_error("Invalid HUD message type");
     packet.type = Type(type); packet.sequence = r.u(8);
     packet.payload.erase(packet.payload.begin(), packet.payload.begin() + r.at); return true;

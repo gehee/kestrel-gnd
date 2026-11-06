@@ -19,11 +19,12 @@ void PerspectiveText::begin_frame() {
     }
 }
 float PerspectiveText::design_advance(const std::string& text, float size) const {
-    return font_.advance(text) * size / (canopy::kTextCellHeight * canopy::screen_frame(width_, height_).UX);
+    return font_.advance(text) * size * scale_ / (canopy::kTextCellHeight * canopy::screen_frame(width_, height_).UX);
 }
 void PerspectiveText::panel(lv_layer_t* layer, const std::string& text, bool left, float x,
                             float y, float size, bool right_align, const float* rgb, float alpha) {
     if (text.empty() || alpha <= 0) return;
+    size*=scale_;
     // The glyph strip has the same padding/aligned width as the GLES texture.
     const float bitmap_width = float((int(std::ceil(font_.advance(text) + 6)) + 15) & ~15);
     const auto quad = canopy::text_quad(width_, height_, left, x, y, size, bitmap_width, font_.advance(text), right_align);
@@ -33,6 +34,7 @@ void PerspectiveText::canvas(lv_layer_t* layer, const std::string& text, float x
                              float pixels, bool right_align, const float* rgb, float alpha,
                              int offset_x, int offset_y) {
     if (text.empty() || alpha <= 0) return;
+    pixels*=scale_;
     const float scale = pixels / canopy::kFontPixels;
     if (right_align) x -= font_.advance(text) * scale;
     const float top = baseline - canopy::kTextBaseline * scale;

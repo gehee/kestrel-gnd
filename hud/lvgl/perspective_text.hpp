@@ -10,7 +10,8 @@ public:
     PerspectiveText(const std::string& font_path, int width, int height, size_t budget = 1024 * 1024);
     ~PerspectiveText();
     void begin_frame();
-    float advance(const std::string& text) const { return font_.advance(text); }
+    float advance(const std::string& text) const { return font_.advance(text)*scale_; }
+    void set_scale(float scale) { scale_=scale; }
     float design_advance(const std::string& text, float size) const;
     void panel(lv_layer_t* layer, const std::string& text, bool left, float x,
                float y, float size, bool right_align, const float* rgb, float alpha);
@@ -28,6 +29,7 @@ private:
     };
     FontAtlas font_;
     int width_, height_;
+    float scale_=1;
     size_t bytes_ = 0;
     size_t budget_;
     uint64_t clock_ = 0, rasterizations_ = 0;

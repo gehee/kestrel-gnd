@@ -191,6 +191,26 @@ int main(int argc, char** argv) {
             const auto idle_presentations=display.presentations;
             for(int i=0;i<60;++i) {now+=16667;controller.tick(now);view.update(now);lv_refr_now(display.lv_display());}
             if(display.presentations!=idle_presentations) throw std::runtime_error("Static idle rerendered without a content change");
+            if(view.betaflight_available()) {
+                model.bf_osd=true;model.backend.serial.stamp_us=now;
+                const auto empty=display.pixels();
+                model.backend.bf_grid[10*53+26]='A';model.backend.bf_grid[10*53+27]=6;
+                view.update(now);lv_refr_now(display.lv_display());check_incremental();
+                if(display.pixels()==empty) throw std::runtime_error("Betaflight characters did not render");
+                model.backend.bf_grid.fill(0);view.update(now);lv_refr_now(display.lv_display());check_incremental();
+                if(display.pixels()!=empty) throw std::runtime_error("Betaflight clear left stale glyph pixels");
+            }
+            model.dynamic=2;model.backend.vrx.connected=true;model.backend.vrx.mcs=5;
+            for(int i=0;i<24;++i) {
+                now+=16667;model.backend.vrx.stamp_us=now;
+                model.backend.hud_dx=.04f*std::sin(i*.3f);model.backend.hud_dy=.02f*std::cos(i*.3f);model.backend.hud_bank=.03f*std::sin(i*.3f);
+                controller.tick(now);view.update(now);lv_refr_now(display.lv_display());check_incremental();
+            }
+            model.dynamic=0;view.update(now);lv_refr_now(display.lv_display());check_incremental();
+            const auto unscaled=display.pixels();
+            model.ui_scale=15;view.update(now);lv_refr_now(display.lv_display());check_incremental();
+            if(display.pixels()==unscaled) throw std::runtime_error("UI scale did not resize HUD text");
+            model.ui_scale=10;view.update(now);lv_refr_now(display.lv_display());check_incremental();
             std::printf("PASS: 240 frames, menu motion/tabs/themes, text LRU lifetime, stable-cache reuse, channel/clock damage, static idle; bytes=%zu rasters=%llu\n",
                         view.text_cache_bytes(), (unsigned long long)view.text_rasterizations());
         }

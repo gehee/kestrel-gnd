@@ -26,7 +26,7 @@ void rect(lv_layer_t* layer, int x, int y, int w, int h, const float* rgb, float
 }
 }
 View::View(const Controller& controller, int w, int h, const std::string& assets, HudSource* hud)
-    : controller_(controller), model_(controller.model()), hud_(hud), width_(w), height_(h), text_(assets + "/canopy-font.kuf", w, h, 512 * 1024), idle_(assets, w, h) {
+    : controller_(controller), model_(controller.model()), hud_(hud), width_(w), height_(h), text_(assets + "/canopy-font.kuf", w, h, 512 * 1024), idle_(assets, w, h), bf_atlas_(assets+"/betaflight.kui") {
     if (!hud_) { owned_hud_ = std::make_unique<InlineHud>(w, h, assets); hud_ = owned_hud_.get(); }
     screen_ = lv_screen_active();
     lv_obj_remove_style_all(screen_);
@@ -68,6 +68,14 @@ View::View(const Controller& controller, int w, int h, const std::string& assets
     lv_obj_set_size(clock_,w/5,h/16);
     lv_obj_remove_flag(clock_,LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(clock_,draw_event,LV_EVENT_DRAW_MAIN,this);
+    bf_object_=lv_obj_create(screen_);lv_obj_remove_style_all(bf_object_);
+    lv_obj_set_size(bf_object_,w,h);lv_obj_remove_flag(bf_object_,LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(bf_object_,draw_event,LV_EVENT_DRAW_MAIN,this);
+    lv_obj_move_to_index(bf_object_,1);
+    debug_object_=lv_obj_create(screen_);lv_obj_remove_style_all(debug_object_);
+    lv_obj_set_pos(debug_object_,w*2/3,h-h/30);lv_obj_set_size(debug_object_,w/3,h/30);
+    lv_obj_remove_flag(debug_object_,LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(debug_object_,draw_event,LV_EVENT_DRAW_MAIN,this);
 }
 View::~View() { lv_obj_clean(screen_); drop_menu_snapshot(); }
 void View::drop_menu_snapshot() {
@@ -126,22 +134,27 @@ void View::draw_event(lv_event_t* e) {
     else if (target == self->channel_) self->draw_channel(layer);
     else if (target == self->clock_) {
         const float size=24.0f*self->height_/1080;
-        const float x=(self->width_-self->text_.advance(self->clock_text_)*size/64)/2;
+        const float x=(self->width_-self->text_.advance(self->clock_text_)*size/canopy::kFontPixels)/2;
         self->text_.canvas(layer,self->clock_text_,x,36.0f*self->height_/1080,size,false,hud_theme_at(self->model_.theme).text,.9f);
     }
+    else if(target==self->bf_object_ && self->bf_visible_) self->bf_atlas_.draw(layer,self->bf_grid_,self->width_,self->height_);
+    else if(target==self->debug_object_) self->text_.canvas(layer,self->debug_text_,self->width_-18,self->height_-12,
+        18.0f*self->height_/1080,true,hud_theme_at(self->model_.theme).quiet,1);
     else for (size_t i = 0; i < self->hud_objects_.size(); ++i) if (target == self->hud_objects_[i]) { self->draw_hud(layer, i); break; }
 }
 void View::sync_hud_objects() {
     if (hud_layout_ == hud_->layout()) return;
     for (auto* object : hud_objects_) lv_obj_delete(object);
-    hud_objects_.clear(); hud_layout_ = hud_->layout();
+    hud_objects_.clear(); hud_layout_ = hud_->layout(); motion_transform_={};
     for (size_t i = 0; i < hud_layout_.regions.size(); ++i) {
         const auto& r = hud_layout_.regions[i]; auto* object = lv_obj_create(screen_);
         lv_obj_remove_style_all(object); lv_obj_remove_flag(object, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_transform_pivot_x(object,width_/2-int(r.x),0);
+        lv_obj_set_style_transform_pivot_y(object,height_/2-int(r.y),0);
         lv_obj_set_pos(object, r.x, r.y); lv_obj_set_size(object, r.width, r.height);
         lv_obj_add_event_cb(object, draw_event, LV_EVENT_DRAW_MAIN, this);
         // HUD is below picker/menu, including when a worker reconnects.
-        lv_obj_move_to_index(object, int(i + 1)); hud_objects_.push_back(object);
+        lv_obj_move_to_index(object, int(i + (bf_object_?2:1))); hud_objects_.push_back(object);
     }
 }
 void View::draw_hud(lv_layer_t* layer, size_t index) {
@@ -150,7 +163,7 @@ void View::draw_hud(lv_layer_t* layer, size_t index) {
     if (menu_progress_ > 0 && ((r.role == hud_ipc::Role::LeftWing && active_menu_side_ == 0) ||
                              (r.role == hud_ipc::Role::RightWing && active_menu_side_ == 1))) return;
     lv_draw_image_dsc_t d; lv_draw_image_dsc_init(&d); d.src = image; d.opa = LV_OPA_COVER;
-    lv_area_t area{int32_t(r.x), int32_t(r.y), int32_t(r.x + r.width - 1), int32_t(r.y + r.height - 1)};
+    lv_area_t area; lv_obj_get_coords(hud_objects_[index],&area);
     lv_draw_image(layer, &d, &area);
 }
 void View::draw_picker(lv_layer_t* layer) {
@@ -318,6 +331,20 @@ void View::draw_menu(lv_layer_t* layer) {
 void View::update(uint64_t now) {
     text_.begin_frame(); idle_.prepare(model_, now);
     now_ = now;
+    const bool bf=model_.bf_osd && model_.hud_visible() && model_.backend.serial.fresh(now);
+    if(bf!=bf_visible_ || (bf && bf_grid_!=model_.backend.bf_grid)) {
+        bf_visible_=bf;
+        for(int row=0;row<20;++row) for(int col=0;col<53;++col) {
+            const int i=row*53+col;
+            const auto glyph=bf?model_.backend.bf_grid[i]:0;
+            if(glyph==bf_grid_[i])continue;
+            bf_grid_[i]=glyph;
+            lv_area_t area{(6+col*36)*width_/1920,row*54*height_/1080,(6+(col+1)*36)*width_/1920,(row+1)*54*height_/1080};
+            lv_obj_invalidate_area(bf_object_,&area);
+        }
+    }
+    const auto debug=model_.debug && model_.hud_visible() && !model_.menu_open?model_.backend.radio_debug:std::string();
+    if(debug!=debug_text_ || old_theme_!=model_.theme) {debug_text_=debug;lv_obj_invalidate(debug_object_);}
     auto clock=model_.clock_text(std::time(nullptr),now);
     if(model_.backend.media.recording) clock=clock.empty()?"REC":"REC  "+clock;
     if(clock!=clock_text_ || old_theme_!=model_.theme) {
@@ -326,6 +353,24 @@ void View::update(uint64_t now) {
     hud_->update(controller_.hud_data(now), now);
     sync_hud_objects();
     const bool hud_changed = hud_revision_ != hud_->revision();
+    const float pixels_per_world=height_/(2*std::tan(.785f/2)*3.2f);
+    const bool motion=model_.dynamic && !model_.menu_open;
+    const std::array<int,3> transform{motion?int(std::lround(model_.backend.hud_dx*pixels_per_world)):0,
+        motion?-int(std::lround(model_.backend.hud_dy*pixels_per_world)):0,
+        motion?int(std::lround(-model_.backend.hud_bank*1800/3.14159265f)):0};
+    if(transform!=motion_transform_) {
+        for(auto* object:hud_objects_) {
+            if(transform[0]!=motion_transform_[0]) lv_obj_set_style_translate_x(object,transform[0],0);
+            if(transform[1]!=motion_transform_[1]) lv_obj_set_style_translate_y(object,transform[1],0);
+            if(transform[2]!=motion_transform_[2]) lv_obj_set_style_transform_rotation(object,transform[2],0);
+        }
+        motion_transform_=transform;
+        // LVGL's software transform samples relative to its clipped layer.
+        // Keep the sampling origin stable while a rotated HUD moves; static
+        // HUD and menu navigation retain their bounded damage path.
+        lv_obj_invalidate(screen_);
+    }
+    if(hud_changed && transform[2]) lv_obj_invalidate(screen_);
     const float dt = last_tick_ ? std::min(0.1f, float(now - last_tick_) / 1000000) : 0;
     last_tick_ = now;
     const bool unfolded = model_.menu_open && model_.stage != MenuStage::Pick;

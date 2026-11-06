@@ -12,6 +12,8 @@
 #include "dvr/dvr_sink.hpp"
 #include "dvr/stream_recorder.hpp"
 #include "dvr/settings.hpp"
+#include "msp/msp_osd.hpp"
+#include "motion/imu_reader.hpp"
 #include "hud/lvgl/view.hpp"
 #include <csignal>
 #include <cstdio>
@@ -151,6 +153,10 @@ int main(int argc, char **argv) {
         radio::Model radio_model(settings);
         bus::Waker updates;
         radio_model.radio().watch(&updates);
+        bus::Waker fc_updates;
+        radio_model.fc().watch(&fc_updates);
+        motion::ImuReader imu_reader(radio_model.imu());
+        MspOsd flight_controller;
         // Resources outlive every thread, including when creating one fails.
         volatile bool stop = false;
         const VideoCodec codec = VideoCodec::H265;
@@ -227,6 +233,10 @@ int main(int argc, char **argv) {
         kestrel_ui::InlineHud hud(1920, 1080, o.assets,
                                   o.vector ? kestrel_ui::HudStyle::Vector : kestrel_ui::HudStyle::Canopy);
         kestrel_ui::View view(controller, 1920, 1080, o.assets, &hud);
+        model.backend.bf_available=view.betaflight_available();
+        uint32_t bf_version=~uint32_t(0);
+        uint32_t fc_last_frames=0;
+        flight_controller.set_cell_size(1,1);
         if (o.menu)
             controller.open_menu();
         const auto start = kestrel_ui::monotonic_us();
@@ -239,6 +249,31 @@ int main(int argc, char **argv) {
         while (!interrupted && !model.quit && !source_exited && !receiver.screen->failed() &&
                !receiver.decoder->failed()) {
             const auto now = kestrel_ui::monotonic_us();
+            air::FcChunk chunk;
+            while(radio_model.fc().take(chunk)) {
+                if(chunk.screen_reset) {
+                    flight_controller.reset_screen();
+                    model.backend.serial={}; model.backend.flight={};
+                    fc_last_frames=flight_controller.msp_counts().frames;
+                }
+                if(chunk.n) flight_controller.parse_bytes(chunk.b,chunk.n);
+            }
+            const auto fc_counts=flight_controller.msp_counts();
+            model.backend.serial.frames=fc_counts.frames;
+            model.backend.serial.bytes=fc_counts.bytes;
+            if(fc_counts.frames!=fc_last_frames) model.backend.serial.stamp_us=now;
+            fc_last_frames=fc_counts.frames;
+            model.backend.flight=flight_controller.get_telem();
+            model.backend.flight_version=flight_controller.content_version();
+            if(bf_version!=model.backend.flight_version) {
+                bf_version=model.backend.flight_version; model.backend.bf_grid.fill(0);
+                flight_controller.draw_region(0,0,20,53,0,0,[&](float x,float y,const std::vector<uint16_t>& span) {
+                    const int row=int(-y),col=int(x);
+                    if(row<0 || row>=20)return;
+                    for(size_t i=0;i<span.size() && col+int(i)<53;++i) if(col+int(i)>=0)
+                        model.backend.bf_grid[row*53+col+i]=span[i];
+                });
+            }
             if (o.seconds && now - start >= uint64_t(o.seconds) * 1000000)
                 break;
             if (menu_requested) {
@@ -252,6 +287,18 @@ int main(int argc, char **argv) {
             telemetry.connected = state.link.active && state.link.state == gnd::kLinkUp;
             telemetry.mcs = telemetry.connected ? state.link.mcs : -1;
             telemetry.frequency_mhz = state.link.tx_freq;
+            flight_controller.set_motion_wanted(model.dynamic>0 && telemetry.link_valid(now));
+            if(model.dynamic && telemetry.link_valid(now) && model.backend.media.video_fresh(now) && !model.menu_open) {
+                constexpr float scale[]={0,.5f,1,3};bool moving=false;
+                flight_controller.get_hud_offset(model.backend.hud_dx,model.backend.hud_dy,model.backend.hud_bank,scale[model.dynamic],moving);
+            } else {
+                flight_controller.reset_hud_motion();model.backend.hud_dx=model.backend.hud_dy=model.backend.hud_bank=0;
+            }
+            if(telemetry.link_valid(now)) {
+                char details[128];std::snprintf(details,sizeof(details),"%.0f us / %s / %s MHz / MCS %d",state.link.frame_us,
+                    state.link.frame_mode_asked==2?"SHORT":"STANDARD",gnd::bw_step_label(state.link.bw_step),state.link.mcs);
+                model.backend.radio_debug=details;
+            } else model.backend.radio_debug="";
             // Native ranging is metres; the legacy raw field is not reused.
             telemetry.distance_raw = kestrel_ui::Telemetry::unavailable;
             model.backend.service.connected = o.radio;

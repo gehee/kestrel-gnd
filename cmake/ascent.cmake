@@ -20,6 +20,10 @@ add_library(kg_hal STATIC hal/v4l2/vdec_v4l2.cpp)
 target_link_libraries(kg_hal PUBLIC kg_base)
 add_library(kg_region STATIC region/zones.cpp region/zones_data.cpp region/fpv_rules.cpp)
 target_link_libraries(kg_region PUBLIC kg_base)
+add_library(kg_motion STATIC motion/imu_stream.cpp motion/imu_reader.cpp)
+target_link_libraries(kg_motion PUBLIC kg_base)
+add_library(kg_msp STATIC msp/msp_osd.cpp msp/msp_telem.cpp)
+target_link_libraries(kg_msp PUBLIC kg_motion)
 add_library(kg_radio STATIC radio/ar8030_link.cpp radio/ar8030_link_bb.cpp radio/ar8030_link_bind.cpp
     radio/ar8030_link_air.cpp radio/ar8030_link_rf.cpp radio/ar8030_link_stats.cpp radio/ar8030_link_video.cpp
     radio/bb_watchdog.cpp radio/ar8030_sky.cpp radio/model.cpp radio/air_imu.cpp radio/streams.cpp radio/video_out.cpp)
@@ -35,7 +39,7 @@ add_subdirectory(hud/lvgl)
 add_library(kg_dvr STATIC dvr/stream_recorder.cpp dvr/dvr_sink.cpp dvr/hevc_repair.cpp dvr/writer.cpp dvr/mp4.cpp dvr/dvr_library.cpp)
 target_link_libraries(kg_dvr PUBLIC kg_base)
 add_executable(kestrel-gnd app/ascent_main.cpp radio/bb_sdk_shim.cpp)
-target_link_libraries(kestrel-gnd PRIVATE kg_platform kg_radio kg_lvgl_view kg_dvr kg_version)
+target_link_libraries(kestrel-gnd PRIVATE kg_platform kg_radio kg_lvgl_view kg_dvr kg_msp kg_version)
 # The native ar_libre API is intentionally linked, including optional fast-path
 # symbols when packaged as a static archive; no SDK runtime interposition needed.
 target_link_options(kestrel-gnd PRIVATE -Wl,-u,arlink_version)
@@ -44,12 +48,18 @@ if(KESTREL_TESTS)
     add_executable(ascent_menu_test tools/test/ascent_menu_test.cpp)
     target_link_libraries(ascent_menu_test PRIVATE kg_lvgl_core kg_region)
     add_test(NAME ascent_menu COMMAND ascent_menu_test)
+    foreach(msp_test msp_telem_test msp_osd_hide_test msp_osd_lq_test)
+        add_executable(${msp_test} tools/test/${msp_test}.cpp)
+        target_link_libraries(${msp_test} PRIVATE kg_msp)
+        add_test(NAME ${msp_test} COMMAND ${msp_test})
+    endforeach()
     file(WRITE "${PROJECT_BINARY_DIR}/layers.txt"
         "utils: utils |\nbase: base | utils\nsystem: system | base\nhal: hal | base\n"
         "bsp: bsp | base\nregion: region | base\nrender: render | base\n"
         "radio: radio | hal region system\ndisplay: display | hal\n"
         "platform: platform | hal bsp render display\nhud: hud/lvgl | render system\n"
-        "dvr: dvr | platform\napp: app | platform radio hud region dvr\n")
+        "motion: motion | system\nmsp: msp | motion\n"
+        "dvr: dvr | platform\napp: app | platform radio hud region dvr msp\n")
     add_test(NAME layers COMMAND ${CMAKE_COMMAND} -DSRC=${PROJECT_SOURCE_DIR}
         -DLAYERS=${PROJECT_BINARY_DIR}/layers.txt -DNM=${CMAKE_NM} -DLIBDIR=${PROJECT_BINARY_DIR}
         -P ${PROJECT_SOURCE_DIR}/tools/check_layers.cmake)

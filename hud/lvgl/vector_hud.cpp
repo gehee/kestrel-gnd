@@ -41,7 +41,7 @@ VectorHud::VectorHud(int w, int h, const std::string& assets)
 VectorHud::~VectorHud() { if (screen_) lv_obj_delete(screen_); }
 void VectorHud::render(const HudData& data, HudBuffer& buffer, uint32_t slot) {
     if (data.theme < 0 || data.theme >= hud_theme_count() || !(buffer.layout() == layout_)) throw std::runtime_error("Invalid Vector HUD setup");
-    data_ = data; text_.begin_frame();
+    data_ = data; text_.begin_frame();text_.set_scale(data.text_scale/10.0f);
     if (last_buffer_ != &buffer) {
         previous_slot_ = -1; last_buffer_ = &buffer;
         for (auto& cached : signatures_) cached.clear();
@@ -62,6 +62,7 @@ void VectorHud::render(const HudData& data, HudBuffer& buffer, uint32_t slot) {
 }
 std::vector<uint8_t> VectorHud::signature(size_t region) const {
     HudData relevant; relevant.enabled = data_.enabled; relevant.theme = data_.theme;
+    relevant.text_scale=data_.text_scale;
     relevant.details = (region == 0 || region == 5) ? data_.details : true;
     if (region == 0) relevant.simulated = data_.simulated;
     if (region == 1) relevant.status = data_.status;

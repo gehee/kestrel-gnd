@@ -48,7 +48,7 @@ HudView::~HudView() { if (screen_) lv_obj_delete(screen_); }
 void HudView::render(const HudData& data, HudBuffer& buffer, uint32_t slot) {
     if (data.theme < 0 || data.theme >= hud_theme_count() || !(buffer.layout() == layout_))
         throw std::runtime_error("Invalid HUD theme or renderer buffer layout");
-    data_ = data; text_.begin_frame();
+    data_ = data; text_.begin_frame();text_.set_scale(data.text_scale/10.0f);
     for (size_t i = 0; i < objects_.size(); ++i) {
         const auto& r = layout_.regions[i]; lv_draw_buf_t draw{};
         if (lv_draw_buf_init(&draw, r.width, r.height, LV_COLOR_FORMAT_ARGB8888, r.width * 4,

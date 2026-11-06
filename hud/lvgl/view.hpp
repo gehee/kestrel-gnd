@@ -4,6 +4,7 @@
 #include "hud_source.hpp"
 #include "perspective_text.hpp"
 #include "idle_scene.hpp"
+#include "betaflight.hpp"
 #include "lvgl.h"
 #include <string>
 #include <vector>
@@ -19,6 +20,7 @@ public:
     uint64_t text_rasterizations() const { return text_.rasterizations() + hud_->rasters(); }
     bool animating() const { return animating_; }
     uint64_t menu_snapshots() const { return menu_snapshot_count_; }
+    bool betaflight_available() const { return bf_atlas_.available(); }
 private:
     const Controller& controller_;
     const Model& model_;
@@ -31,6 +33,13 @@ private:
     int width_, height_;
     PerspectiveText text_;
     IdleScene idle_;
+    BetaflightAtlas bf_atlas_;
+    lv_obj_t* bf_object_=nullptr;
+    lv_obj_t* debug_object_=nullptr;
+    std::array<uint16_t,1060> bf_grid_{};
+    bool bf_visible_=false;
+    std::string debug_text_;
+    std::array<int,3> motion_transform_{};
     bool old_status_ = false;
     uint64_t now_ = 0;
     Telemetry presented_;

@@ -4,6 +4,7 @@
 #include <map>
 #include <vector>
 #include <limits>
+#include <array>
 
 namespace kestrel_ui {
 enum Capability : uint32_t {
@@ -77,6 +78,10 @@ struct ReceiverControl {
     std::vector<ReceiverChoice> choices;
 };
 struct BackendState : ReceiverState {
+    std::array<uint16_t,53*20> bf_grid{};
+    bool bf_available=false;
+    float hud_dx=0,hud_dy=0,hud_bank=0;
+    std::string radio_debug;
     ChannelState channels;
     std::map<std::string, ReceiverControl> controls;
     std::map<std::string, std::string> air_info;

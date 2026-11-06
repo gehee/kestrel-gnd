@@ -30,6 +30,7 @@ struct HudMetric {
 struct HudData {
     bool enabled = true, details = true, show_status = true;
     int theme = 0;
+    int text_scale = 10; // tenths, 5..20; geometry is unchanged
     std::string status;
     std::array<HudPanelData, 2> panels;
     bool simulated = false;

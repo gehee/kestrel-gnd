@@ -39,4 +39,19 @@ if(KESTREL_UI_FONT OR KESTREL_UI_BACKGROUND)
         VERBATIM)
     add_custom_target(kestrel-idle-assets ALL DEPENDS "${_idle_output}")
     install(FILES "${_idle_output}" DESTINATION share/kestrel/ui)
+    set(_bf_tool "${PROJECT_BINARY_DIR}/host-tools/kestrel-bf-bake")
+    set(_bf_output "${PROJECT_BINARY_DIR}/ui-assets/betaflight.kui")
+    add_custom_command(OUTPUT "${_bf_tool}"
+        COMMAND "${KESTREL_HOST_CXX}" -std=c++17 -O2 "-I${PROJECT_SOURCE_DIR}"
+            "${PROJECT_SOURCE_DIR}/tools/ui_bf_bake.cpp" "${PROJECT_SOURCE_DIR}/msp/betaflight_glyphs.cpp"
+            ${_idle_flags} -o "${_bf_tool}"
+        DEPENDS "${_idle_tool}" "${PROJECT_SOURCE_DIR}/tools/ui_bf_bake.cpp"
+            "${PROJECT_SOURCE_DIR}/msp/betaflight_glyphs.cpp" "${PROJECT_SOURCE_DIR}/msp/betaflight_glyphs.hpp"
+        VERBATIM)
+    add_custom_command(OUTPUT "${_bf_output}"
+        COMMAND "${_bf_tool}" "${KESTREL_UI_FONT}" "${_bf_output}.tmp"
+        COMMAND "${CMAKE_COMMAND}" -E rename "${_bf_output}.tmp" "${_bf_output}"
+        DEPENDS "${_bf_tool}" "${_idle_output}" "${KESTREL_UI_FONT}" VERBATIM)
+    add_custom_target(kestrel-bf-assets ALL DEPENDS "${_bf_output}")
+    install(FILES "${_bf_output}" DESTINATION share/kestrel/ui)
 endif()

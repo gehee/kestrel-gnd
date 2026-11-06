@@ -13,6 +13,7 @@ HudData Controller::hud_data(uint64_t now) const {
     const auto& f = m.backend.flight;
     const bool fresh = f.stamp_us && now >= f.stamp_us && now - f.stamp_us < 2000000;
     HudData data;
+    data.text_scale=m.ui_scale;
     data.enabled = m.hud_visible() && (m.show_hud || m.menu_open); data.details = m.show_details; data.theme = m.theme; data.simulated = m.simulated;
     if (!data.enabled) { data.show_status = false; return data; }
     data.show_status = m.show_status(now); data.status = m.status(now);

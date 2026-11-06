@@ -134,22 +134,25 @@ std::vector<MenuRow> Model::rows(uint64_t now) const {
     if (tab == 2) {
         std::vector<MenuRow> result{
             choice("hud", "HUD Style", show_hud ? 1 : 0, {"OFF", hud_style == "vector" ? "VECTOR" : "CANOPY"}, "Which overlay is drawn over the video."),
-            unavailable("bf_osd", "Betaflight OSD", "Draw Betaflight's own OSD across the screen.")};
+            backend.bf_available?choice("bf_osd", "Betaflight OSD", bf_osd, {"OFF","ON"}, "Draw Betaflight's own OSD across the screen."):
+                reading("bf_osd","Betaflight OSD","ASSETS MISSING","Install the generated Betaflight glyph atlas.")};
         if (show_hud && hud_style != "vector") result.push_back(choice("per_cell", "Canopy Voltage", per_cell ? 0 : 1, {"PER CELL", "PACK"},
             "The canopy's headline voltage: per cell reads the same on any pack size."));
         result.push_back(unavailable("distance", "Calib Distance", "Zero the range reading where you are standing."));
         result.push_back(choice("clock", "Clock", clock, {"OFF","IDLE ONLY 12H","IDLE ONLY 24H","ON 12H","ON 24H"}, "When the time is shown at the top of the screen, and how it is written."));
-        result.push_back(unavailable("dynamic", "Dynamic HUD", "Let the panels move with the aircraft."));
-        result.push_back(unavailable("debug", "Debug Info", "A line of radio details under the right panel, for field tests: the radio's frame, and the mode it means."));
+        result.push_back(choice("dynamic", "Dynamic HUD", dynamic, {"OFF","SMALL","MEDIUM","EXTREME"}, "Let the panels move with the aircraft's camera IMU or flight-controller attitude."));
+        result.push_back(choice("debug", "Debug Info", debug, {"OFF","ON"}, "Show the radio's current frame and bandwidth under the right panel."));
         return result;
     }
     if (tab == 3) {
         std::vector<std::string> themes;
+        std::vector<std::string> scales;
+        for(int i=5;i<=20;++i) scales.push_back(std::to_string(i/10)+"."+std::to_string(i%10)+"x");
         for (int i = 0; i < hud_theme_count(); ++i) themes.push_back(hud_theme_at(i).name);
         return {choice("theme", "Theme", theme, std::move(themes), "Which hues carry which meaning."),
             reading("bg_video", "Idle Background", "STATIC", "The compiled artwork is cached and drawn only when it changes."),
-            unavailable("picture_size", "Picture Size", "Shrink the whole picture if your optics clip the edges."),
-            unavailable("ui_scale", "UI Scaling", "Size of the HUD's type. The panels stay put."),
+            reading("picture_size", "Picture Size", "FULL", "The native display driver currently exposes fixed full-screen planes. Hardware scaling needs driver support."),
+            choice("ui_scale", "UI Scaling", ui_scale-5, scales, "Size of the HUD's type. The panels stay put."),
             reading("brightness", "Brightness", "MONITOR", "Use the external monitor's brightness control. HDMI does not expose a local panel backlight."),
             heading("ADVANCED"),
             reading("frame_mode", "Frame Mode", "FULL DECODE", "The decoder receives whole pictures; only complete decoded frames are displayed.")};
@@ -199,6 +202,10 @@ int Model::setting(const std::string& id) const {
     if (id == "repeat") return key_repeat ? 1 : 0;
     if (id == "fps") return fps - 1;
     if (id == "clock") return clock;
+    if (id == "bf_osd") return bf_osd;
+    if (id == "debug") return debug;
+    if (id == "dynamic") return dynamic;
+    if (id == "ui_scale") return ui_scale-5;
     return 0;
 }
 void Model::set_setting(const std::string& id, int value) {
@@ -214,12 +221,18 @@ void Model::set_setting(const std::string& id, int value) {
     else if (id == "repeat") key_repeat = value != 0;
     else if (id == "fps") fps = std::clamp(value + 1, 1, 60);
     else if (id == "clock") clock = std::clamp(value,0,4);
+    else if (id == "bf_osd") bf_osd=value!=0;
+    else if (id == "debug") debug=value!=0;
+    else if (id == "dynamic") dynamic=std::clamp(value,0,3);
+    else if (id == "ui_scale") ui_scale=std::clamp(value+5,5,20);
 }
 void Model::set_preferences(const UiPreferences& p) {
-    if (p.theme < 0 || p.theme >= hud_theme_count() || p.fps < 1 || p.fps > 60 || p.clock<0 || p.clock>4)
+    if (p.theme < 0 || p.theme >= hud_theme_count() || p.fps < 1 || p.fps > 60 || p.clock<0 || p.clock>4 || p.dynamic<0 || p.dynamic>3 || p.ui_scale<5 || p.ui_scale>20)
         throw std::invalid_argument("Invalid UI preferences");
     theme = p.theme; fps = p.fps; show_details = p.details; key_repeat = p.repeat; show_hud = p.hud; per_cell = p.per_cell;
     clock=p.clock;
+    bf_osd=p.bf_osd;debug=p.debug;dynamic=p.dynamic;
+    ui_scale=p.ui_scale;
 }
 std::string Model::clock_text(std::time_t wall_time,uint64_t now) const {
     if(!hud_visible() || !clock || (clock<=2 && !show_status(now))) return {};

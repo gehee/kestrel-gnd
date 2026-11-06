@@ -21,10 +21,11 @@ add_library(kg_lvgl_core STATIC model.cpp controller.cpp hud_data.cpp font_atlas
 target_include_directories(kg_lvgl_core PUBLIC "${PROJECT_SOURCE_DIR}")
 target_compile_options(kg_lvgl_core PRIVATE -Wall -Wextra -Wpedantic)
 add_library(kg_lvgl_view STATIC hud_view.cpp vector_hud.cpp hud_renderer.cpp
-    perspective_text.cpp hud_source.cpp display.cpp view.cpp idle_scene.cpp)
+    perspective_text.cpp hud_source.cpp display.cpp view.cpp idle_scene.cpp betaflight.cpp)
 target_link_libraries(kg_lvgl_view PUBLIC kg_lvgl_core lvgl m pthread)
 if(TARGET kestrel-idle-assets)
     add_dependencies(kg_lvgl_view kestrel-idle-assets)
+    add_dependencies(kg_lvgl_view kestrel-bf-assets)
 endif()
 target_compile_options(kg_lvgl_view PRIVATE -Wall -Wextra -Wpedantic)
 add_executable(kestrel-hud hud_main.cpp)
