@@ -61,6 +61,32 @@ int main() {
         bool rejected=false;
         try {controls.apply("Max Bitrate",18,now);} catch(const std::invalid_argument&) {rejected=true;}
         check(rejected && encoder.calls==1,"Invalid value must not reach transport");
+        unit.value.info.kv_n=2;
+        std::strcpy(unit.value.info.kv[1].key,"cam_ctrl");
+        std::strcpy(unit.value.info.kv[1].value,"ev,wb_lock");++unit.revision;
+        controls.update(state,now);
+        check(state.controls.at("EV").enabled && state.controls.at("White Balance").enabled,"P1 advertises implemented controls explicitly");
+        check(!state.controls.at("Saturation").enabled && !state.controls.at("Rotate").enabled,"Capability list does not enable unrelated controls");
+        controls.apply("White Balance",-1,now);
+        check(camera.field==air::CameraField::AWB && camera.last==-1,"P1 lock uses its advertised value");
+        rejected=false;
+        try{controls.apply("White Balance",5200,now);}catch(const std::invalid_argument&){rejected=true;}
+        check(rejected,"Uncalibrated Kelvin presets are not offered on P1");
+        camera.value.ev_x10=-7;camera.value.awb=-1;++camera.revision;
+        controls.update(state,now);
+        model.menu_open=true;model.side=1;model.tab=0;model.selected=4;model.stage=MenuStage::Browse;
+        controller.apply_receiver=[&](const std::string& id,int v){return controls.apply(id,v,monotonic_us());};
+        check(model.rows(now)[4].value=="-0.7" && model.rows(now)[5].value=="Lock current","Camera readback updates EV and signed WB lock");
+        controller.key(Key::Enter);controller.key(Key::Down);controller.key(Key::Enter);
+        check(camera.field==air::CameraField::EV && camera.last==-3,"Next edit starts from reported EV");
+        check(model.rows(now)[4].value=="-0.7","Request alone must not claim application");
+        camera.value.ev_x10=-3;++camera.revision;controls.update(state,now);
+        check(model.rows(now)[4].value=="-0.3","Applied camera report completes edit");
+        std::strcpy(unit.value.info.kv[1].value,"not_ev,wb_lock_extra");++unit.revision;
+        controls.update(state,now);
+        check(!state.controls.at("EV").enabled && !state.controls.at("White Balance").enabled,"Capability tokens require an exact match");
+        unit.value.info.kv_n=1;++unit.revision;controls.update(state,now);
+        check(!state.controls.at("EV").enabled,"Reconnecting to older P1 firmware disables missing controls");
         std::strcpy(unit.value.info.kv[0].value,"Ascent Lite"); ++unit.revision;
         controls.update(state,now);
         controls.apply("White Balance",5200,now);

@@ -26,17 +26,26 @@ void ReceiverControls::update(BackendState& state, uint64_t now) {
         control.reason = !linked ? "Connect an air unit." : !supported ? why : !known ? "Waiting for the air unit's settings." : "";
     };
     // Values and labels match VRX Pro's on-wire domains. P1's current native
-    // camera backend does not implement these ISP controls; never offer its
+    // camera backend advertises implemented controls explicitly; never offer its
     // settings-only echoes as proof that a sensor/ISP control exists.
     const char* p1_reason = "The connected P1 camera driver does not implement this control.";
+    const auto camera_controls=u.info.get("cam_ctrl");
+    auto supports=[&](const char* name) {
+        const auto list=","+camera_controls+",";
+        return u.info.kestrel && list.find(std::string(",")+name+",")!=std::string::npos;
+    };
+    const bool native_ev=p1 && supports("ev"), native_wb=p1 && supports("wb_lock");
     bool camera = u.stock || (!p1 && u.info.kestrel && !u.info.get("model").empty());
     choice("Rotate",c.angle,c.angle_n || c.camera_n,camera,{{0,"0"},{180,"180"}},p1_reason);
     choice("Scene",c.scene,c.camera_n,camera,{{0,"Race"},{2,"Standard"}},p1_reason);
-    choice("EV",c.ev_x10,c.camera_n,camera,{{-10,"-1.0"},{-7,"-0.7"},{-3,"-0.3"},{0,"0"},{3,"+0.3"},{7,"+0.7"},{10,"+1.0"}},p1_reason);
+    choice("EV",c.ev_x10,c.camera_n,camera || native_ev,{{-10,"-1.0"},{-7,"-0.7"},{-3,"-0.3"},{0,"0"},{3,"+0.3"},{7,"+0.7"},{10,"+1.0"}},p1_reason);
     std::vector<ReceiverChoice> wb{{0,"Auto"}}, level{{0,"Auto"}};
     for(int k=4000;k<=7000;k+=100) wb.push_back({k,std::to_string(k)+"K"});
     for(int k=1;k<=10;++k) level.push_back({k,std::to_string(k)});
-    choice("White Balance",c.awb,c.camera_n,camera,wb,p1_reason);
+    if(native_wb) wb={{0,"Auto"},{-1,"Lock current"}};
+    choice("White Balance",c.awb,c.camera_n,camera || native_wb,wb,p1_reason);
+    if(native_wb && controls_["White Balance"].enabled)
+        controls_["White Balance"].reason="Auto adapts white balance; Lock current holds the current colors across restarts.";
     choice("Saturation",c.sat,c.camera_n,camera,level,p1_reason);
     choice("Contrast",c.contrast,c.camera_n,camera,level,p1_reason);
     choice("Sharpness",c.sharp,c.camera_n,camera,level,p1_reason);

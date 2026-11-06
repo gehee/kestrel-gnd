@@ -446,6 +446,18 @@ void Ar8030Link::scan_air_status(const uint8_t *buf, int n) {
         if (pl_len > 1) {
             sky::SkyConfig air;
             if (sky::read_config_payload(pl + 1, pl_len - 1, &air)) {
+                // Kestrel's source serializer confirms these offsets. Publish
+                // actual camera readback, never a transport ACK or saved request.
+                if (air_kestrel_) {
+                    const auto previous = model_.camera().state();
+                    const int wb = static_cast<int16_t>(air.awb_cct);
+                    if (!previous.camera_n || previous.ev_x10 != air.ev_x10 || previous.awb != wb) {
+                        model_.update_camera([&](air::CameraState& c) {
+                            c.ev_x10 = air.ev_x10; c.awb = wb; ++c.camera_n;
+                        });
+                        printf("ar8030: camera readback ev=%d wb=%d\n", air.ev_x10, wb);
+                    }
+                }
                 // Re-report whenever the camera's own view changes, not just
                 // once: this is the only read-back that says whether a setting
                 // actually reached it. The ack channel cannot be relied on -
