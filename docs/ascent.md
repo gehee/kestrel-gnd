@@ -83,6 +83,36 @@ mismatches are rejected. Generated files belong in `.local/`, not Git.
 For tests without hardware, configure the same target with a host ar_libre,
 `-DKESTREL_TESTS=ON` and `-DKESTREL_UI_TEST_ASSETS` pointing at generated assets.
 
+## Compiled resolution profiles and screen selection
+
+Supplying `KESTREL_UI_FONT` and `KESTREL_UI_BACKGROUND` also builds
+`ui-assets/1280x720` and `ui-assets/1920x1080`, plus a shared `menu-fonts`
+directory. Install all three under the directory passed to `--assets`. Each
+profile contains its native-size idle scenes, canopy artwork, and Betaflight
+atlas. Menu fonts are baked at integer pixel sizes 8 through 48 and loaded on
+demand. Refresh rates reuse the same resolution assets. Legacy flat 1080p asset
+directories still work.
+
+SYSTEM > Screen Mode offers 720p60 and 1080p60 when the installed DRM driver,
+monitor, and compiled profiles allow them. The application probes the kernel
+with a test-only atomic commit before exposing 720p. `--force-display` skips
+monitor detection but still requires the kernel to accept the mode. Switching
+recreates the display and receiver session; stop recording/playback first.
+Select KEEP within 15 seconds to save the new mode. An unconfirmed or failed
+trial restores the previous mode. A saved 720p mode that fails on startup falls
+back to 1080p. `--screen-mode 1280x720@60` or `1920x1080@60` overrides the saved
+startup choice for development.
+
+The video remains a 1080p decoded DMA-BUF. A compatible 720p driver must scale
+that primary plane in hardware while scanning out the UI at native 1280x720.
+There is no software resizing of the complete UI or camera picture. Existing
+1080p-only fpvOS firmware continues to expose only 1080p in this menu.
+
+The 720p kernel/bridge profile is still experimental: register readback and
+mode switching have been exercised, but a visible HDMI picture is required to
+validate its timing, scaler quality, and monitor compatibility before release.
+The compiled asset profiles and menu do not establish a sustained 60 FPS UI.
+
 ## Run
 
 Stop any other DRM/radio clients first. A display-only check needs no peer:

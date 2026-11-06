@@ -167,7 +167,7 @@ std::vector<MenuRow> Model::rows(uint64_t now) const {
         reading("build", "Build", build, "When this receiver application was built."),
         reading("version", "Version", version, "The receiver application version and source revision."),
         reading("decoder", "Decoder", decoder, "The Ascent hardware video decoder."),
-        reading("screen_mode", "Screen Mode", screen_mode, "The current HDMI mode. Mode selection is not yet supported."),
+        backend.controls.count("screen_mode") ? unavailable("screen_mode", "Screen Mode", "Select the HDMI output resolution. Confirm the new picture within 15 seconds or it will revert.") : reading("screen_mode", "Screen Mode", screen_mode, "The current HDMI output mode."),
         reading("wifi", "WiFi AP", "NOT SUPPORTED", "The native Ascent image has no WiFi AP or spectator video service."), heading("WHERE YOU FLY"),
         unavailable("licence", "Amateur Licence", "Whether you hold an amateur radio licence."),
         unavailable("area", "Area", "Where you fly, starting with the part of the world."),

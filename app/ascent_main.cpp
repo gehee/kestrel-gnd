@@ -1,5 +1,7 @@
 // Native Ascent composition root: existing radio, software HUD, platform media.
 #include "base/ltrace.hpp"
+#include "display/mode_trial.hpp"
+#include "display/settings.hpp"
 #include "platform/software.hpp"
 #include "platform/ascent_panel.hpp"
 #include "kestrel_gnd_config.h"
@@ -38,6 +40,7 @@ struct Options {
     std::string assets = "/usr/share/kestrel/ui", input, control, preferences, command, screenshot;
     bool radio = true, menu = false, vector = false, profile = false;
     unsigned seconds = 0;
+    bool explicit_mode = false;
     Ar8030Config link;
 };
 Options options(int argc, char **argv) {
@@ -61,6 +64,13 @@ Options options(int argc, char **argv) {
         };
         if (arg == "--assets")
             o.assets = value();
+        else if (arg == "--screen-mode") {
+            o.explicit_mode = true;
+            const auto mode=value();
+            if(mode=="1280x720@60") {o.platform.display_width=1280;o.platform.display_height=720;}
+            else if(mode=="1920x1080@60") {o.platform.display_width=1920;o.platform.display_height=1080;}
+            else throw std::invalid_argument("Supported screen modes: 1280x720@60, 1920x1080@60");
+        }
         else if (arg == "--drm")
             o.platform.display_device = value();
         else if (arg == "--decoder")
@@ -108,8 +118,9 @@ Options options(int argc, char **argv) {
                 throw std::invalid_argument("peer must be a four-byte radio MAC: AA:BB:CC:DD");
             o.link.peer = std::array<uint8_t, 4>{uint8_t(a), uint8_t(b), uint8_t(c), uint8_t(d)};
         } else if (arg == "--help") {
-            puts("Ascent VRX receiver (native fpvOS, 1920x1080@60)\n"
+            puts("Ascent VRX receiver (native fpvOS, 720p60/1080p60)\n"
                  "  --peer AA:BB:CC:DD   Air unit radio MAC, for this session\n"
+                 "  --screen-mode MODE  1280x720@60 or 1920x1080@60\n"
                  "  --assets DIR        Generated LVGL assets\n"
                  "  --force-display     Use fixed HDMI mode when detection reports disconnected\n"
                  "  --input /dev/input/eventN  Optional evdev buttons\n"
@@ -131,25 +142,10 @@ Options options(int argc, char **argv) {
     return o;
 }
 
-} // namespace
-int main(int argc, char **argv) {
+int run_session(Options o, Settings& settings, display::ModeTrial& mode) {
     try {
-        setvbuf(stdout, nullptr, _IOLBF, 0);
-        auto o = options(argc, argv);
-        if (!o.command.empty()) {
-            if (o.control.empty())
-                throw std::invalid_argument("--send-key requires --control");
-            puts(kestrel_ui::send_control(o.control, o.command).c_str());
-            return 0;
-        }
-        if (!o.trace_dir.empty())
-            ltrace::start(o.trace_dir);
-        signal(SIGINT, signal_handler);
-        signal(SIGTERM, signal_handler);
-        signal(SIGUSR1, signal_handler);
-        Settings settings;
-        if (o.settings_file.empty() && !o.preferences.empty()) o.settings_file=o.preferences+".receiver";
-        if (!o.settings_file.empty()) settings.load(o.settings_file);
+        o.platform.display_height = mode.current;
+        o.platform.display_width = mode.current == 720 ? 1280 : 1920;
         zones::load(settings);
         o.link.max_kbps=settings.get(radio::setting::ar8030_max_kbps);
         o.link.max_mcs=settings.get(radio::setting::ar8030_max_mcs);
@@ -163,6 +159,11 @@ int main(int argc, char **argv) {
         MspOsd flight_controller;
         // Resources outlive every thread, including when creating one fails.
         volatile bool stop = false;
+        const auto assets_root = std::filesystem::path(o.assets);
+        const int screen_w=o.platform.display_width,screen_h=o.platform.display_height;
+        const auto profile=std::filesystem::path(o.assets)/(std::to_string(screen_w)+"x"+std::to_string(screen_h));
+        if(std::filesystem::is_directory(profile)) o.assets=profile.string();
+        else if(screen_h!=1080)throw std::runtime_error("Install generated 720p UI assets before selecting this mode");
         const VideoCodec codec = VideoCodec::H265;
         auto receiver = platform::make_software_receiver(o.platform, codec, &stop);
         auto source_decoder=std::make_shared<hal::SourceDecoder>([&] {
@@ -210,13 +211,14 @@ int main(int argc, char **argv) {
             });
         }
         lv_init();
+        struct LvLifetime { ~LvLifetime() { lv_deinit(); } } lv_lifetime;
         lv_tick_set_cb([] { return uint32_t(kestrel_ui::monotonic_us() / 1000); });
-        kestrel_ui::Display display(1920, 1080, "");
+        kestrel_ui::Display display(screen_w, screen_h, "");
         kestrel_ui::Model model;
         model.build = kestrel_gnd_build_time;
         model.version = std::string(kestrel_gnd_version) + " (" + kestrel_gnd_git_hash + ")";
         model.decoder = "V4L2 / Wave5";
-        model.screen_mode = "1920x1080 @ 60 Hz";
+        model.screen_mode = std::to_string(screen_w)+"x"+std::to_string(screen_h)+" @ 60 Hz";
         model.backend.media.video_monitored = o.radio;
         model.backend.service.adapter = "fpvOS native Ascent";
         model.backend.service.hardware_delegated = false;
@@ -228,7 +230,23 @@ int main(int argc, char **argv) {
         dvr::StreamPlayer::State playback;
         uint64_t playback_checked=0;
         kestrel_ui::ReceiverControls controls(radio_model.camera(),radio_model.encoder(),radio_model.air_radio(),radio_model.air_unit(),radio_model.radio());
+        std::vector<kestrel_ui::ReceiverChoice> screen_choices;
+        for(int height:{720,1080}) if(receiver.screen->supports_height(height) &&
+            std::filesystem::is_directory(assets_root/(height==720?"1280x720":"1920x1080")))
+            screen_choices.push_back({height,height==720?"1280x720 @ 60 Hz":"1920x1080 @ 60 Hz"});
         controller.apply_receiver=[&](const std::string& id,int value) {
+            if(id=="screen_mode") {
+                if(mode.pending) {
+                    mode.keep(); settings.set(display::setting::ascent_screen_height,mode.current); settings.flush();
+                    return std::string("Screen mode saved");
+                }
+                if(recorder.is_recording() || recorder.state().finishing || player.state().busy)
+                    throw std::runtime_error("Stop recording or playback before changing screen mode");
+                if(std::none_of(screen_choices.begin(),screen_choices.end(),[&](const auto& choice){return choice.value==value;}))
+                    throw std::runtime_error("Screen mode or compiled assets unavailable");
+                mode.select(value); model.quit=mode.restart;
+                return std::string("Testing screen mode");
+            }
             if(id=="record") {
                 if(!recorder.is_recording() && (player.state().busy || !model.backend.media.video_fresh(kestrel_ui::monotonic_us()) || !recorder.state().storage_ready))
                     throw std::runtime_error("Recording needs live video and writable storage");
@@ -259,8 +277,8 @@ int main(int argc, char **argv) {
         // until the UI has finished drawing them.
         const auto hud_executable=std::filesystem::read_symlink("/proc/self/exe").parent_path() /
             (o.vector ? "kestrel-hud-vector" : "kestrel-hud");
-        kestrel_ui::HudClient hud(1920,1080,o.assets,hud_executable.string());
-        kestrel_ui::View view(controller, 1920, 1080, o.assets, &hud);
+        kestrel_ui::HudClient hud(screen_w,screen_h,o.assets,hud_executable.string());
+        kestrel_ui::View view(controller, screen_w, screen_h, o.assets, &hud);
         model.backend.bf_available=view.betaflight_available();
         uint32_t bf_version=~uint32_t(0);
         uint32_t fc_last_frames=0;
@@ -268,6 +286,11 @@ int main(int argc, char **argv) {
         if (o.menu)
             controller.open_menu();
         const auto start = kestrel_ui::monotonic_us();
+        mode.started(start);
+        if(mode.pending) {
+            controller.open_menu(); model.side=0; model.tab=5; model.selected=3;
+            model.stage=kestrel_ui::MenuStage::Browse;
+        }
         uint64_t drawn = 0, frame_deadline=start;
         int previous_bind = gnd::BIND_IDLE;
         std::string recording_error;
@@ -277,6 +300,7 @@ int main(int argc, char **argv) {
         while (!interrupted && !model.quit && !source_exited && !receiver.screen->failed() &&
                !receiver.decoder->failed()) {
             const auto now = kestrel_ui::monotonic_us();
+            if(mode.tick(now)) break;
             air::FcChunk chunk;
             while(radio_model.fc().take(chunk)) {
                 if(chunk.screen_reset) {
@@ -332,6 +356,19 @@ int main(int argc, char **argv) {
             model.backend.service.connected = o.radio;
             model.backend.service.provider_connected = telemetry.fresh(now);
             controls.update(model.backend, now);
+            auto& screen_control=model.backend.controls["screen_mode"];
+            screen_control={}; screen_control.known=true; screen_control.enabled=true;
+            screen_control.value=mode.current;
+            if(mode.pending) {
+                screen_control.action=true;
+                screen_control.text="KEEP " + model.screen_mode;
+                screen_control.reason="Press OK to keep. Reverting in " + std::to_string((mode.deadline-now+999999)/1000000) + " seconds.";
+            } else {
+                screen_control.text=model.screen_mode;
+                screen_control.choices=screen_choices;
+                if(screen_control.choices.size()<2) screen_control.reason="Additional modes require compatible firmware, monitor and compiled assets.";
+            }
+
             region_menu.update(model.backend);
             channel_menu.update(model.backend,now,model.channel_open);
             if(!playback_checked || now-playback_checked>=250000) {
@@ -424,7 +461,7 @@ int main(int argc, char **argv) {
             const auto overlay_start = kestrel_ui::monotonic_us();
             if (display.presentations != drawn) {
                 drawn = display.presentations;
-                receiver.screen->overlay_damage(display.pixels().data(), 1920, 1080, display.take_damage());
+                receiver.screen->overlay_damage(display.pixels().data(), screen_w, screen_h, display.take_damage());
             }
             const auto rendered = kestrel_ui::monotonic_us();
             // Keep an absolute phase: sleep/wakeup overhead must not lower
@@ -465,8 +502,40 @@ int main(int argc, char **argv) {
                (unsigned long long)receiver.screen->presented(), (unsigned long long)display.presentations);
         return source_failed || worker_failed || receiver.screen->failed() || receiver.decoder->failed() ? 1
                                                                                                          : 0;
+    } catch(const std::exception& e) {
+        fprintf(stderr,"screen session: %s\n",e.what()); return 1;
+    }
+}
+} // namespace
+
+int main(int argc, char **argv) {
+    try {
+        setvbuf(stdout, nullptr, _IOLBF, 0);
+        auto o = options(argc, argv);
+        if (!o.command.empty()) {
+            if (o.control.empty()) throw std::invalid_argument("--send-key requires --control");
+            puts(kestrel_ui::send_control(o.control, o.command).c_str()); return 0;
+        }
+        if (!o.trace_dir.empty()) ltrace::start(o.trace_dir);
+        signal(SIGINT, signal_handler); signal(SIGTERM, signal_handler); signal(SIGUSR1, signal_handler);
+        Settings settings;
+        if (o.settings_file.empty() && !o.preferences.empty()) o.settings_file=o.preferences+".receiver";
+        if (!o.settings_file.empty()) settings.load(o.settings_file);
+        int height=o.explicit_mode?o.platform.display_height:settings.get(display::setting::ascent_screen_height);
+        if(height!=720 && height!=1080)height=1080;
+        display::ModeTrial mode(height);
+        for(;;) {
+            mode.restart=false;
+            const int result=run_session(o,settings,mode);
+            if(interrupted)return result;
+            if(result && mode.pending) mode.revert();
+            else if(result && mode.current!=1080) {
+                mode.current=mode.confirmed=1080; mode.restart=true;
+                fprintf(stderr,"screen: falling back to 1920x1080 @ 60 Hz\n");
+            }
+            if(!mode.restart)return result;
+        }
     } catch (const std::exception &e) {
-        fprintf(stderr, "ascent: %s\n", e.what());
-        return 1;
+        fprintf(stderr, "ascent: %s\n", e.what()); return 1;
     }
 }

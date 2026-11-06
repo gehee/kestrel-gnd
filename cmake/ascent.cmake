@@ -70,6 +70,8 @@ if(KESTREL_TESTS)
     add_test(NAME layers COMMAND ${CMAKE_COMMAND} -DSRC=${PROJECT_SOURCE_DIR}
         -DLAYERS=${PROJECT_BINARY_DIR}/layers.txt -DNM=${CMAKE_NM} -DLIBDIR=${PROJECT_BINARY_DIR}
         -P ${PROJECT_SOURCE_DIR}/tools/check_layers.cmake)
+    add_executable(mode_trial_test tools/test/mode_trial_test.cpp)
+    add_test(NAME mode_trial COMMAND mode_trial_test)
     add_executable(ui_damage_test tools/test/damage_test.cpp)
     add_test(NAME ui_damage COMMAND ui_damage_test)
     add_executable(v4l2_queue_test tools/test/v4l2_queue_test.cpp)

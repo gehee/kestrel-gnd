@@ -72,24 +72,24 @@ struct Atomic {
             values.push_back(item.second);
         }
     }
-    void plane(const Properties &object, uint32_t crtc, uint32_t fb) {
+    void plane(const Properties &object, uint32_t crtc, uint32_t fb, int sw, int sh, int dw, int dh) {
         add(object, {{"FB_ID", fb},
                      {"CRTC_ID", fb ? crtc : 0},
                      {"SRC_X", 0},
                      {"SRC_Y", 0},
-                     {"SRC_W", 1920u << 16},
-                     {"SRC_H", 1080u << 16},
+                     {"SRC_W", uint64_t(sw) << 16},
+                     {"SRC_H", uint64_t(sh) << 16},
                      {"CRTC_X", 0},
                      {"CRTC_Y", 0},
-                     {"CRTC_W", 1920},
-                     {"CRTC_H", 1080}});
+                     {"CRTC_W", uint64_t(dw)},
+                     {"CRTC_H", uint64_t(dh)}});
         if (object.keys.count("pixel blend mode")) {
             ++counts.back();
             properties.push_back(object.keys.at("pixel blend mode"));
             values.push_back(1); // DRM_MODE_BLEND_COVERAGE (straight alpha)
         }
     }
-    void commit(int fd, uint32_t flags, uint64_t cookie = 0) {
+    bool commit(int fd, uint32_t flags, uint64_t cookie = 0) {
         drm_mode_atomic a{};
         a.flags = flags;
         a.count_objs = objects.size();
@@ -98,7 +98,10 @@ struct Atomic {
         a.props_ptr = uintptr_t(properties.data());
         a.prop_values_ptr = uintptr_t(values.data());
         a.user_data = cookie;
+        if (flags & DRM_MODE_ATOMIC_TEST_ONLY)
+            return ioctl(fd, DRM_IOCTL_MODE_ATOMIC, &a) == 0;
         ctl(fd, DRM_IOCTL_MODE_ATOMIC, &a, "atomic plane commit");
+        return true;
     }
 };
 class Ar9311Screen final : public PlaneScreen {
@@ -146,12 +149,13 @@ class Ar9311Screen final : public PlaneScreen {
         }
     };
     enum class Slot { Free, Writing, Ready, Pending, Active };
+    int width_, height_;
     int fd_ = -1;
     Buffer black_;
     std::array<Buffer, 3> ui_{};
     std::array<Slot, 3> slots_{};
-    std::array<base::DamageRows, 3> ui_damage_{{{1920, 1080}, {1920, 1080}, {1920, 1080}}};
-    bool first_overlay_ = true;
+    std::array<base::DamageRows, 3> ui_damage_;
+    bool first_overlay_ = true, supports_720_ = false;
     Properties connector_, crtc_, primary_, overlay_;
     uint32_t mode_ = 0;
     bool active_ = false;
@@ -182,8 +186,8 @@ class Ar9311Screen final : public PlaneScreen {
         if (!active_)
             return;
         Atomic a;
-        a.plane(primary_, crtc_.id, 0);
-        a.plane(overlay_, crtc_.id, 0);
+        a.plane(primary_, crtc_.id, 0, width_, height_, width_, height_);
+        a.plane(overlay_, crtc_.id, 0, width_, height_, width_, height_);
         a.add(crtc_, {{"ACTIVE", 0}, {"MODE_ID", 0}});
         a.add(connector_, {{"CRTC_ID", 0}});
         a.commit(fd_, DRM_MODE_ATOMIC_ALLOW_MODESET);
@@ -210,26 +214,26 @@ class Ar9311Screen final : public PlaneScreen {
     }
     void create(Buffer &b, bool rgb) {
         drm_mode_create_dumb d{};
-        d.width = 1920;
-        d.height = rgb ? 1080 : 1620;
+        d.width = width_;
+        d.height = rgb ? height_ : height_*3/2;
         d.bpp = rgb ? 32 : 8;
         ctl(fd_, DRM_IOCTL_MODE_CREATE_DUMB, &d, "plane buffer allocation");
         b.handle = d.handle;
         b.pitch = d.pitch;
         b.size = d.size;
-        if (d.pitch != unsigned(rgb ? 8192 : 1920) || d.size < uint64_t(d.pitch) * d.height)
+        if (d.pitch != unsigned(rgb ? ((width_+511)&~511)*4 : width_) || d.size < uint64_t(d.pitch) * d.height)
             throw std::runtime_error("unsupported plane pitch/size");
         drm_mode_fb_cmd2 fb{};
-        fb.width = 1920;
-        fb.height = 1080;
+        fb.width = width_;
+        fb.height = height_;
         fb.pixel_format = rgb ? DRM_FORMAT_ARGB8888 : DRM_FORMAT_YUV420;
         fb.handles[0] = d.handle;
         fb.pitches[0] = d.pitch;
         if (!rgb) {
             fb.handles[1] = fb.handles[2] = d.handle;
-            fb.pitches[1] = fb.pitches[2] = 960;
-            fb.offsets[1] = 1920 * 1080;
-            fb.offsets[2] = 1920 * 1080 * 5 / 4;
+            fb.pitches[1] = fb.pitches[2] = width_/2;
+            fb.offsets[1] = width_ * height_;
+            fb.offsets[2] = width_ * height_ * 5 / 4;
         }
         ctl(fd_, DRM_IOCTL_MODE_ADDFB2, &fb, "plane framebuffer");
         b.fb = fb.fb_id;
@@ -242,7 +246,7 @@ class Ar9311Screen final : public PlaneScreen {
         b.pixels = static_cast<uint8_t *>(pixels);
         memset(b.pixels, rgb ? 0 : 128, b.size);
         if (!rgb)
-            memset(b.pixels, 16, 1920 * 1080);
+            memset(b.pixels, 16, width_ * height_);
     }
     void wait_flip(uint64_t cookie, uint32_t fb) {
         pollfd p{fd_, POLLIN, 0};
@@ -271,8 +275,10 @@ class Ar9311Screen final : public PlaneScreen {
     }
 
   public:
-    Ar9311Screen(const std::string &device, bool force, volatile bool *stop) : stop_(stop) {
+    Ar9311Screen(const std::string &device, bool force, volatile bool *stop, int width, int height) : width_(width), height_(height), ui_damage_{{{width,height},{width,height},{width,height}}}, stop_(stop) {
         try {
+            if (!((width_==1920 && height_==1080) || (width_==1280 && height_==720)))
+                throw std::invalid_argument("Unsupported Ascent screen mode");
             fd_ = open(device.c_str(), O_RDWR | O_CLOEXEC);
             if (fd_ < 0)
                 throw std::runtime_error("cannot open " + device);
@@ -295,6 +301,17 @@ class Ar9311Screen final : public PlaneScreen {
             drm_mode_get_connector c{};
             c.connector_id = connectors[0];
             ctl(fd_, DRM_IOCTL_MODE_GETCONNECTOR, &c, "connector status");
+            std::vector<drm_mode_modeinfo> modes(c.count_modes);
+            c.modes_ptr = uintptr_t(modes.data());
+            c.count_props = c.count_encoders = 0;
+            ctl(fd_, DRM_IOCTL_MODE_GETCONNECTOR, &c, "HDMI modes");
+            if (c.count_modes > modes.size()) throw std::runtime_error("HDMI modes changed");
+            for (unsigned i = 0; i < c.count_modes; ++i) {
+                const auto& mode = modes[i];
+                if (mode.hdisplay == 1280 && mode.vdisplay == 720 && mode.clock == 74250 &&
+                    mode.htotal == 1650 && mode.vtotal == 750 && !(mode.flags & DRM_MODE_FLAG_INTERLACE))
+                    supports_720_ = true;
+            }
             if (c.connection != 1 && !force)
                 throw std::runtime_error("HDMI disconnected; use --force-display");
             drm_mode_get_plane_res planes{};
@@ -325,27 +342,44 @@ class Ar9311Screen final : public PlaneScreen {
             if (!primary_.id || !overlay_.id)
                 throw std::runtime_error("fpvOS needs YUV primary and ARGB hardware overlay planes");
             drm_mode_modeinfo m{};
-            m.clock = 148500;
-            m.hdisplay = 1920;
-            m.hsync_start = 2008;
-            m.hsync_end = 2052;
-            m.htotal = 2200;
-            m.vdisplay = 1080;
-            m.vsync_start = 1084;
-            m.vsync_end = 1089;
-            m.vtotal = 1125;
+            const bool small=height_==720;
+            m.clock = small?74250:148500;
+            m.hdisplay = width_;m.vdisplay = height_;
+            m.hsync_start = small?1390:2008;m.hsync_end = small?1430:2052;m.htotal = small?1650:2200;
+            m.vsync_start = small?725:1084;m.vsync_end = small?730:1089;m.vtotal = small?750:1125;
             m.vrefresh = 60;
             m.flags = DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC;
             m.type = DRM_MODE_TYPE_DRIVER;
-            strcpy(m.name, "1920x1080");
+            snprintf(m.name,sizeof(m.name),"%dx%d",width_,height_);
             drm_mode_create_blob blob{};
             blob.data = uintptr_t(&m);
             blob.length = sizeof(m);
-            ctl(fd_, DRM_IOCTL_MODE_CREATEPROPBLOB, &blob, "1080p60 mode");
+            ctl(fd_, DRM_IOCTL_MODE_CREATEPROPBLOB, &blob, "Ascent screen mode");
             mode_ = blob.blob_id;
             create(black_, false);
             for (auto &b : ui_)
                 create(b, true);
+            // EDID alone does not prove that installed firmware can drive a
+            // mode. TEST_ONLY also checks the fixed 1080p-to-720p video path.
+            // --force-display permits this probe without a valid EDID.
+            if (force || supports_720_) {
+                auto candidate=m;
+                candidate.clock=74250; candidate.hdisplay=1280; candidate.vdisplay=720;
+                candidate.hsync_start=1390; candidate.hsync_end=1430; candidate.htotal=1650;
+                candidate.vsync_start=725; candidate.vsync_end=730; candidate.vtotal=750;
+                snprintf(candidate.name,sizeof(candidate.name),"1280x720");
+                drm_mode_create_blob probe{};
+                probe.data=uintptr_t(&candidate); probe.length=sizeof(candidate);
+                ctl(fd_,DRM_IOCTL_MODE_CREATEPROPBLOB,&probe,"720p capability probe");
+                Atomic test;
+                test.plane(primary_,crtc_.id,black_.fb,width_,height_,1280,720);
+                test.plane(overlay_,crtc_.id,0,1280,720,1280,720);
+                test.add(connector_,{{"CRTC_ID",crtc_.id}});
+                test.add(crtc_,{{"MODE_ID",probe.blob_id},{"ACTIVE",1}});
+                supports_720_=test.commit(fd_,DRM_MODE_ATOMIC_ALLOW_MODESET|DRM_MODE_ATOMIC_TEST_ONLY);
+                drm_mode_destroy_blob destroy_probe{};destroy_probe.blob_id=probe.blob_id;
+                ioctl(fd_,DRM_IOCTL_MODE_DESTROYPROPBLOB,&destroy_probe);
+            }
             printf("display: hardware planes video=%u UI=%u, DMA-BUF scanout\n", primary_.id, overlay_.id);
         } catch (...) {
             close_display();
@@ -354,7 +388,7 @@ class Ar9311Screen final : public PlaneScreen {
     }
     ~Ar9311Screen() override { close_display(); }
     void queue_frame(std::shared_ptr<DecodedUnit> frame) override {
-        if (!frame || frame->width != 1920 || frame->height != 1080 || !frame->has_prime_fd ||
+        if (!frame || !((frame->width == 1920 && frame->height == 1080) || (frame->width == width_ && frame->height == height_)) || !frame->has_prime_fd ||
             frame->prime_fd < 0 || frame->drm_pixel_format != DRM_FORMAT_YUV420) {
             failed_ = true;
             wake_.notify_all();
@@ -377,7 +411,7 @@ class Ar9311Screen final : public PlaneScreen {
     }
     void overlay_damage(const uint32_t *argb, unsigned width, unsigned height,
                         const std::vector<base::Damage>& damage) override {
-        if (!argb || width != 1920 || height != 1080)
+        if (!argb || width != unsigned(width_) || height != unsigned(height_))
             throw std::invalid_argument("UI plane geometry");
         // This state belongs exclusively to the UI producer. Even a dropped
         // update must remain dirty in every buffer until its next upload.
@@ -424,6 +458,7 @@ class Ar9311Screen final : public PlaneScreen {
         }
         wake_.notify_all();
     }
+    bool supports_height(int height) const override { return height == 1080 || (height == 720 && supports_720_); }
     uint64_t presented() const override { return presented_.load(); }
     uint64_t overlay_presented() const override { return ui_updates_.load(); }
     void hold_video(bool on) override { hold_video_=on;wake_.notify_all(); }
@@ -434,8 +469,8 @@ class Ar9311Screen final : public PlaneScreen {
         uint64_t cookie = 0;
         try {
             Atomic initial;
-            initial.plane(primary_, crtc_.id, black_.fb);
-            initial.plane(overlay_, crtc_.id, 0);
+            initial.plane(primary_, crtc_.id, black_.fb, width_, height_, width_, height_);
+            initial.plane(overlay_, crtc_.id, 0, width_, height_, width_, height_);
             initial.add(connector_, {{"CRTC_ID", crtc_.id}});
             initial.add(crtc_, {{"MODE_ID", mode_}, {"ACTIVE", 1}});
             initial.commit(fd_, DRM_MODE_ATOMIC_ALLOW_MODESET);
@@ -466,8 +501,8 @@ class Ar9311Screen final : public PlaneScreen {
                 uint32_t video_fb =
                     video_changed ? (pending ? pending->fb : black_.fb) : (showing ? showing->fb : black_.fb);
                 Atomic a;
-                a.plane(primary_, crtc_.id, video_fb);
-                a.plane(overlay_, crtc_.id, next_ui < 0 ? 0 : ui_[next_ui].fb);
+                a.plane(primary_, crtc_.id, video_fb, frame?frame->width:width_, frame?frame->height:height_, width_, height_);
+                a.plane(overlay_, crtc_.id, next_ui < 0 ? 0 : ui_[next_ui].fb, width_, height_, width_, height_);
                 if (frame && ltrace::on()) ltrace::rec(ltrace::kRender, clock_us(), uint32_t(frame->pts), video_fb);
                 a.commit(fd_, DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT, ++cookie);
                 wait_flip(cookie, video_fb);
@@ -515,7 +550,7 @@ class Ar9311Screen final : public PlaneScreen {
     }
 };
 } // namespace
-std::shared_ptr<PlaneScreen> make_ar9311_screen(const std::string &path, bool force, volatile bool *stop) {
-    return std::make_shared<Ar9311Screen>(path, force, stop);
+std::shared_ptr<PlaneScreen> make_ar9311_screen(const std::string &path, bool force, volatile bool *stop, int width, int height) {
+    return std::make_shared<Ar9311Screen>(path, force, stop, width, height);
 }
 } // namespace display
