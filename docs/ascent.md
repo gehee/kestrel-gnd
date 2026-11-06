@@ -182,9 +182,10 @@ This is an initial bring-up target, not a flight-ready receiver.
   have now been exercised on the receiver. Capture initially showed black frames
   or a vertical offset; cycling capture-card power restored a correctly aligned
   image. Capture re-lock behavior still needs further investigation.
-- Live RF association works, but repeated link drops and damaged video were also
-  reproduced with the fpvOS reference radio tool. Continuous live video remains
-  unvalidated.
+- Short live RF runs now work with the burst-tolerant decoder queue: one run
+  decoded 4,653 frames with no decoder drops, queue overflows or capture errors.
+  Earlier firmware tests also reproduced RF drops/damage with the reference
+  radio tool. Long-duration RF reliability remains unvalidated.
 - Menu edits currently cover visual preferences. RF/camera configuration,
   DVR/gallery and FC telemetry integration remain incomplete. Physical buttons
   and asynchronous beeper feedback are wired into Kestrel; LINK queues the
