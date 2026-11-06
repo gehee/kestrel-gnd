@@ -53,7 +53,14 @@ int main() {
         camera.value.camera_n=1; unit.value.info.version=true; unit.value.info.kestrel=true;
         unit.value.info.kv_n=1; std::strcpy(unit.value.info.kv[0].key,"model");
         std::strcpy(unit.value.info.kv[0].value,"BETAFPV P1 Air");
+        ground.value.dist_m=42; ground.value.link.bw_step=4;
+        ground.value.link.air_pwr_mw=101; ground.value.video_mbps=4.5f;
+        ground.value.link.rx_data_rate_kbps=9700;
+        unit.value.low_power=true; unit.value.vtx_temp_valid=false;
         controls.update(state,now);
+        check(state.link.distance_m==42 && state.link.bandwidth_step==4 && state.link.air_power_mw==101 &&
+              state.link.video_mbps==4.5f && state.link.link_mbps==9.7f && state.link.standby && !state.link.vtx_temperature_valid,
+              "HUD consumes calibrated native units and actual standby without fabricating temperature");
         check(!state.controls.at("EV").enabled,"P1 settings echoes must not enable missing ISP controls");
         check(state.controls.at("Max Bitrate").enabled,"P1 bitrate is supported");
         controls.apply("Max Bitrate",18000,now);

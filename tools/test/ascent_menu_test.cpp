@@ -1,4 +1,5 @@
 #include "app/ascent_menu.hpp"
+#include "radio/ar8030_sky.hpp"
 #include "region/settings.hpp"
 #include "hud/lvgl/controller.hpp"
 #include <cstdio>

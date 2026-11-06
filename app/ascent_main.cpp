@@ -333,6 +333,8 @@ int run_session(Options o, Settings& settings, display::ModeTrial& mode) {
                 controller.key(kestrel_ui::Key::Menu);
             }
             model.backend.media.video_stamp_us = receiver.decoder->last_frame_us();
+            const auto video = receiver.screen->video_stats();
+            model.backend.video = {video.stamp_us, video.width, video.height, video.fps, video.latency_ms};
             const auto state = radio_model.radio().state();
             auto &telemetry = model.backend.vrx;
             telemetry.stamp_us = state.link.last_update_ms * 1000;

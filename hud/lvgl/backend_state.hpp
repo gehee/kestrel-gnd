@@ -51,6 +51,18 @@ struct VtxState {
     uint64_t stamp_us = 0;
     std::string identity, firmware;
 };
+// Native link readings retain explicit units; legacy packet fields stay separate.
+struct LinkDetails {
+    int distance_m = -1, bandwidth_step = -1, air_power_mw = 0;
+    float video_mbps = 0, link_mbps = 0;
+    bool standby = false, vtx_temperature_valid = false;
+    float vtx_temperature_c = 0;
+};
+struct VideoDetails {
+    uint64_t stamp_us = 0;
+    int width = 0, height = 0, fps = 0;
+    float latency_ms = -1; // capture to completed scanout; -1 if air clock unknown
+};
 struct ReceiverState {
     Telemetry vrx;
     VtxState vtx;
@@ -58,6 +70,8 @@ struct ReceiverState {
     BfTelem flight;
     uint64_t flight_version = 0;
     MediaState media;
+    LinkDetails link;
+    VideoDetails video;
 };
 struct ReceiverChoice { int value; std::string label; };
 struct ChannelReading {

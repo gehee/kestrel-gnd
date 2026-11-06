@@ -16,6 +16,12 @@ class PlaneScreen : public hal::FrameSink {
     // Recorded playback may intentionally stop feeding while paused. Keep its
     // last picture until an explicit decoder flush; live reception times out.
     virtual void hold_video(bool) {}
+    struct VideoStats {
+        uint64_t stamp_us = 0;
+        int width = 0, height = 0, fps = 0;
+        float latency_ms = -1;
+    };
+    virtual VideoStats video_stats() const { return {}; }
     virtual bool supports_height(int height) const { return height == 1080; }
     virtual void run() = 0;
     virtual uint64_t presented() const = 0;

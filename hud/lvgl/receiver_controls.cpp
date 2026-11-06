@@ -9,6 +9,16 @@ void ReceiverControls::update(BackendState& state, uint64_t now) {
     const auto g = ground_.state();
     const bool linked = g.link.active && g.link.state == gnd::kLinkUp &&
         g.link.last_update_ms && now / 1000 >= g.link.last_update_ms && now / 1000 - g.link.last_update_ms < 6000;
+    const auto unit = unit_.state();
+    auto& details = state.link;
+    details.distance_m = linked ? g.dist_m : -1;
+    details.bandwidth_step = linked ? g.link.bw_step : -1;
+    details.air_power_mw = linked ? g.link.air_pwr_mw : 0;
+    details.video_mbps = linked ? g.video_mbps : 0;
+    details.link_mbps = linked ? g.link.rx_data_rate_kbps / 1000.0f : 0;
+    details.standby = linked && unit.low_power;
+    details.vtx_temperature_valid = linked && unit.vtx_temp_valid;
+    details.vtx_temperature_c = unit.vtx_cpu_c;
     const std::array<uint32_t,5> versions{camera_.version(),encoder_.version(),air_.version(),unit_.version(),ground_.version()};
     if (initialized_ && versions == versions_ && linked == connected_ && state.service.connected == service_connected_) return;
     service_connected_ = state.service.connected;

@@ -4,6 +4,7 @@
 #include <array>
 #include <cerrno>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstdio>
 #include <cstring>
@@ -160,7 +161,10 @@ class Ar9311Screen final : public PlaneScreen {
     uint32_t mode_ = 0;
     bool active_ = false;
     volatile bool *stop_;
-    std::mutex mutex_;
+    mutable std::mutex mutex_;
+    VideoStats video_stats_;
+    uint64_t stats_start_ = 0, stats_frames_ = 0;
+    std::vector<float> latency_samples_;
     std::condition_variable wake_;
     std::shared_ptr<DecodedUnit> latest_;
     bool done_ = false, video_active_ = false;
@@ -459,6 +463,9 @@ class Ar9311Screen final : public PlaneScreen {
         wake_.notify_all();
     }
     bool supports_height(int height) const override { return height == 1080 || (height == 720 && supports_720_); }
+    VideoStats video_stats() const override {
+        std::lock_guard<std::mutex> lock(mutex_); return video_stats_;
+    }
     uint64_t presented() const override { return presented_.load(); }
     uint64_t overlay_presented() const override { return ui_updates_.load(); }
     void hold_video(bool on) override { hold_video_=on;wake_.notify_all(); }
@@ -527,6 +534,27 @@ class Ar9311Screen final : public PlaneScreen {
                     if (active_ui >= 0)
                         slots_[active_ui] = Slot::Active;
                     video_active_ = bool(showing);
+                    if (video_changed && frame) {
+                        const uint64_t stamp = clock_us();
+                        if (!stats_start_) stats_start_ = stamp;
+                        ++stats_frames_;
+                        if (frame->recv_ts && stamp >= frame->recv_ts && frame->tx_processing_delay_us != kAirUnknown)
+                            latency_samples_.push_back(float(stamp - frame->recv_ts + uint64_t(frame->tx_encode_delay_us) + frame->tx_processing_delay_us) / 1000);
+                        video_stats_.stamp_us = stamp;
+                        video_stats_.width = frame->width; video_stats_.height = frame->height;
+                        if (stamp - stats_start_ >= 1000000) {
+                            video_stats_.fps = int(std::lround(stats_frames_ * 1000000.0 / (stamp - stats_start_)));
+                            video_stats_.latency_ms = -1;
+                            if (!latency_samples_.empty()) {
+                                auto middle = latency_samples_.begin() + latency_samples_.size() / 2;
+                                std::nth_element(latency_samples_.begin(), middle, latency_samples_.end());
+                                video_stats_.latency_ms = *middle;
+                            }
+                            latency_samples_.clear(); stats_frames_ = 0; stats_start_ = stamp;
+                        }
+                    } else if (video_changed) {
+                        video_stats_ = {}; stats_start_ = stats_frames_ = 0; latency_samples_.clear();
+                    }
                 }
                 ++presented_;
                 wake_.notify_all();

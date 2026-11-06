@@ -393,7 +393,12 @@ void Ar8030Link::scan_air_status(const uint8_t *buf, int n) {
             // clearly shows 50°C for the same state, so that field is not
             // temperature - see below for what it turned out to be instead.
             uint8_t vtx_cpu = pl[1];
-            model_.update_unit([&](air::UnitState &a) { a.vtx_cpu_c = (float)vtx_cpu; a.vtx_temp_valid = true; });
+            const bool native_report = model_.air_unit().state().info.kestrel;
+            const auto period = sky::period_status(pl, native_report);
+            model_.update_unit([&](air::UnitState &a) {
+                a.vtx_cpu_c = float(period.temperature_c);
+                a.vtx_temp_valid = period.temperature_valid;
+            });
 
             static uint64_t vtx_log_ms = 0;
             uint64_t vtx_now = now_ms();
@@ -411,12 +416,13 @@ void Ar8030Link::scan_air_status(const uint8_t *buf, int n) {
             // while this field cleanly stepped from ~840 (idle) to ~714
             // (armed) in lockstep with VTX temperature climbing 47C->64C -
             // a ~130-count gap with no overlap across ~45 samples each side.
-            // kVtxStandbyThresh sits in the middle of that gap; it is a
+            // The threshold in sky::period_status sits in the middle of that gap; it is a
             // two-sample calibration and may need retuning against more
             // hardware/distance/thermal conditions.
-            static constexpr uint16_t kVtxStandbyThresh = 780;
             uint16_t b2930 = ((uint16_t)pl[29] << 8) | pl[30];
-            bool low_power = b2930 >= kVtxStandbyThresh;
+            // fpvOS reports flags in byte 29, followed by TSSI; the stock
+            // two-byte standby heuristic does not apply to that format.
+            bool low_power = period.low_power;
             model_.low_power(low_power);
 
             static uint16_t last_b2930 = 0xFFFF;
