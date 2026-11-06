@@ -40,6 +40,8 @@ private:
     bool bf_visible_=false;
     std::string debug_text_;
     std::array<int,3> motion_transform_{};
+    lv_obj_t* gallery_=nullptr;
+    std::string gallery_signature_;
     bool old_status_ = false;
     uint64_t now_ = 0;
     Telemetry presented_;
@@ -73,6 +75,7 @@ private:
     lv_area_t menu_reveal(float progress) const;
     void draw_picker(lv_layer_t* layer);
     void draw_channel(lv_layer_t* layer);
+    void draw_gallery(lv_layer_t* layer);
     void prepare_menu_snapshot();
     void drop_menu_snapshot();
     static void draw_event(lv_event_t* event);

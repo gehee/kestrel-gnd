@@ -76,6 +76,10 @@ View::View(const Controller& controller, int w, int h, const std::string& assets
     lv_obj_set_pos(debug_object_,w*2/3,h-h/30);lv_obj_set_size(debug_object_,w/3,h/30);
     lv_obj_remove_flag(debug_object_,LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(debug_object_,draw_event,LV_EVENT_DRAW_MAIN,this);
+    gallery_=lv_obj_create(screen_);lv_obj_remove_style_all(gallery_);
+    lv_obj_set_size(gallery_,w,h);lv_obj_remove_flag(gallery_,LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(gallery_,draw_event,LV_EVENT_DRAW_MAIN,this);
+    lv_obj_add_flag(gallery_,LV_OBJ_FLAG_HIDDEN);
 }
 View::~View() { lv_obj_clean(screen_); drop_menu_snapshot(); }
 void View::drop_menu_snapshot() {
@@ -140,6 +144,7 @@ void View::draw_event(lv_event_t* e) {
     else if(target==self->bf_object_ && self->bf_visible_) self->bf_atlas_.draw(layer,self->bf_grid_,self->width_,self->height_);
     else if(target==self->debug_object_) self->text_.canvas(layer,self->debug_text_,self->width_-18,self->height_-12,
         18.0f*self->height_/1080,true,hud_theme_at(self->model_.theme).quiet,1);
+    else if(target==self->gallery_) self->draw_gallery(layer);
     else for (size_t i = 0; i < self->hud_objects_.size(); ++i) if (target == self->hud_objects_[i]) { self->draw_hud(layer, i); break; }
 }
 void View::sync_hud_objects() {
@@ -213,6 +218,38 @@ void View::draw_channel(lv_layer_t* layer) {
     }
     label("LEFT / RIGHT  Select     UP  Quietest     DOWN  Current     OK  Apply     BACK  Close",pad,height_-46*u,20,theme.text);
     label(!scan.fresh?"Scan stale; waiting for radio":model_.feedback,pad,height_-17*u,18,theme.quiet);
+}
+void View::draw_gallery(lv_layer_t* layer) {
+    const auto& theme=hud_theme_at(model_.theme);const float u=height_/1080.0f;
+    const bool playing=model_.scene==SceneMode::GalleryPlayback;
+    auto label=[&](const std::string& s,float x,float y,float size,const float* rgb) {
+        text_.canvas(layer,s,x*u,y*u,size*u,false,rgb,1);
+    };
+    if(playing) {
+        rect(layer,0,0,width_,int(105*u),theme.ground,.88f);
+        label(model_.backend.playback_paused?"PAUSED":"PLAYBACK",32,42,26,theme.accent);
+        label(model_.backend.media.playback_id,240,42,22,theme.text);
+        const auto elapsed=model_.backend.playback_position_us/1000000,total=model_.backend.playback_duration_us/1000000;
+        label(std::to_string(elapsed)+" / "+std::to_string(total)+" s   OK: pause/resume   BACK: gallery",32,82,20,theme.text);
+        if(!model_.backend.playback_error.empty())label(model_.backend.playback_error,32,145,24,theme.accent);
+        return;
+    }
+    rect(layer,0,0,width_,height_,theme.ground,.95f);
+    label("RECORDINGS",48,70,36,theme.accent);
+    const auto& clips=model_.backend.recordings;
+    if(clips.empty())label("No recordings in this folder",48,180,28,theme.text);
+    const int selected=std::clamp(model_.gallery_selected,0,std::max(0,int(clips.size())-1));
+    const int start=selected/6*6;
+    for(int i=start;i<std::min(start+6,int(clips.size()));++i) {
+        const int slot=i-start;const int x=48+(slot%2)*920,y=130+(slot/2)*265;
+        rect(layer,int(x*u),int(y*u),int(880*u),int(230*u),theme.quiet,.12f);
+        if(i==selected)rect(layer,int(x*u),int(y*u),int(880*u),int(230*u),theme.accent,1,2);
+        label(clips[i].name,x+24,y+62,25,theme.text);
+        label(std::to_string(clips[i].bytes/(1024*1024))+" MiB",x+24,y+122,23,theme.quiet);
+        label("OK  PLAY",x+24,y+190,20,i==selected?theme.accent:theme.quiet);
+    }
+    label("ARROWS  Select     OK  Play     BACK  Live video",48,1000,24,theme.text);
+    label(model_.feedback,48,1045,20,theme.quiet);
 }
 lv_area_t View::menu_reveal(float progress) const {
     const float p = std::clamp(progress, 0.0f, 1.0f), e = p * p * (3 - 2 * p);
@@ -331,6 +368,16 @@ void View::draw_menu(lv_layer_t* layer) {
 void View::update(uint64_t now) {
     text_.begin_frame(); idle_.prepare(model_, now);
     now_ = now;
+    const bool gallery=model_.scene==SceneMode::GalleryBrowse || model_.scene==SceneMode::GalleryPlayback;
+    hidden(gallery_,!gallery);
+    if(gallery) {
+        std::ostringstream signature;
+        signature<<int(model_.scene)<<':'<<model_.gallery_selected<<':'<<model_.theme<<':'<<model_.feedback<<':'
+            <<model_.backend.playback_position_us/1000000<<':'<<model_.backend.playback_duration_us/1000000<<':'
+            <<model_.backend.playback_paused<<':'<<model_.backend.media.playback_id<<':'<<model_.backend.playback_error;
+        if(model_.scene==SceneMode::GalleryBrowse) for(const auto& clip:model_.backend.recordings)signature<<clip.name<<':'<<clip.bytes<<';';
+        if(signature.str()!=gallery_signature_) {gallery_signature_=signature.str();lv_obj_invalidate(gallery_);}
+    }
     const bool bf=model_.bf_osd && model_.hud_visible() && model_.backend.serial.fresh(now);
     if(bf!=bf_visible_ || (bf && bf_grid_!=model_.backend.bf_grid)) {
         bf_visible_=bf;

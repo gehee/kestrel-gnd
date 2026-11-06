@@ -160,6 +160,7 @@ std::vector<MenuRow> Model::rows(uint64_t now) const {
     if (tab == 4) return {
         reading("dvr_source", "Source", "FPV STREAM", "Records the received video. Screen capture requires a hardware compositor-to-encoder path."),
         unavailable("record", "Recording", "Start or stop recording; the REC button does the same."),
+        unavailable("gallery", "Gallery", "Browse and play recordings."),
         unavailable("folder", "Folder", "Where recordings are written."),
         unavailable("space", "Space Left", "Room remaining on the recordings partition.")};
     if (tab == 5) return {
@@ -167,7 +168,7 @@ std::vector<MenuRow> Model::rows(uint64_t now) const {
         reading("version", "Version", version, "The receiver application version and source revision."),
         reading("decoder", "Decoder", decoder, "The Ascent hardware video decoder."),
         reading("screen_mode", "Screen Mode", screen_mode, "The current HDMI mode. Mode selection is not yet supported."),
-        unavailable("wifi", "WiFi AP", "Wifi access point for spectators."), heading("WHERE YOU FLY"),
+        reading("wifi", "WiFi AP", "NOT SUPPORTED", "The native Ascent image has no WiFi AP or spectator video service."), heading("WHERE YOU FLY"),
         unavailable("licence", "Amateur Licence", "Whether you hold an amateur radio licence."),
         unavailable("area", "Area", "Where you fly, starting with the part of the world."),
         unavailable("country", "Country", "The country you fly in: its rules for the radio's channels."),

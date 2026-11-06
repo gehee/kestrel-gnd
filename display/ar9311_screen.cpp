@@ -162,6 +162,7 @@ class Ar9311Screen final : public PlaneScreen {
     bool done_ = false, video_active_ = false;
     std::atomic<uint64_t> presented_{0};
     std::atomic<bool> failed_{false};
+    std::atomic<bool> hold_video_{false};
     uint64_t video_updates_ = 0, ui_updates_ = 0;
 
     void destroy(Buffer &b) {
@@ -423,6 +424,7 @@ class Ar9311Screen final : public PlaneScreen {
         wake_.notify_all();
     }
     uint64_t presented() const override { return presented_.load(); }
+    void hold_video(bool on) override { hold_video_=on;wake_.notify_all(); }
     bool failed() const override { return failed_.load(); }
     void run() override {
         std::unique_ptr<Imported> showing, pending;
@@ -441,7 +443,7 @@ class Ar9311Screen final : public PlaneScreen {
                 {
                     std::unique_lock<std::mutex> lock(mutex_);
                     frame = latest_;
-                    if (frame && frame->dec_end_ts && clock_us() - frame->dec_end_ts > 2000000)
+                    if (!hold_video_ && frame && frame->dec_end_ts && clock_us() - frame->dec_end_ts > 2000000)
                         frame.reset();
                     next_ui = active_ui;
                     for (int i = 0; i < 3; ++i)

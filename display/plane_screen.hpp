@@ -13,6 +13,9 @@ class PlaneScreen : public hal::FrameSink {
     virtual void overlay(const uint32_t *argb, unsigned width, unsigned height) = 0;
     virtual void overlay_damage(const uint32_t *argb, unsigned width, unsigned height,
                                 const std::vector<base::Damage>&) { overlay(argb, width, height); }
+    // Recorded playback may intentionally stop feeding while paused. Keep its
+    // last picture until an explicit decoder flush; live reception times out.
+    virtual void hold_video(bool) {}
     virtual void run() = 0;
     virtual uint64_t presented() const = 0;
     virtual bool failed() const = 0;

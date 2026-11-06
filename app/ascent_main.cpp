@@ -14,6 +14,8 @@
 #include "dvr/settings.hpp"
 #include "msp/msp_osd.hpp"
 #include "motion/imu_reader.hpp"
+#include "hal/source_decoder.hpp"
+#include "dvr/stream_player.hpp"
 #include "hud/lvgl/view.hpp"
 #include <csignal>
 #include <cstdio>
@@ -161,8 +163,19 @@ int main(int argc, char **argv) {
         volatile bool stop = false;
         const VideoCodec codec = VideoCodec::H265;
         auto receiver = platform::make_software_receiver(o.platform, codec, &stop);
+        auto source_decoder=std::make_shared<hal::SourceDecoder>([&] {
+            return platform::make_software_decoder(o.platform,codec,receiver.screen,&stop);
+        },&stop);
+        receiver.decoder=source_decoder;
         if(o.recordings.empty()) o.recordings=settings.get(dvr::setting::dvr_dir);
         dvr::StreamRecorder recorder(o.recordings,codec,1920,1080,60);
+        dvr::StreamPlayer player(o.recordings,{
+            [&](bool playing){receiver.screen->hold_video(playing);source_decoder->playback(playing);},
+            [&]{return source_decoder->playback_ready();},
+            [&]{return source_decoder->playback_failed() || source_decoder->failed();},
+            [&](const std::vector<uint8_t>& data,uint64_t pts,uint8_t nal,bool key) {
+                source_decoder->feed_playback(const_cast<uint8_t*>(data.data()),int(data.size()),pts,kestrel_ui::monotonic_us(),nal,key);
+            },[&](bool paused){source_decoder->pause_input(paused);}});
         DvrSink recording_sink(codec,recorder);
         Ar8030Link link(radio_model, o.link, settings, codec, receiver.decoder, &stop);
         link.add_video_sink(&recording_sink);
@@ -182,8 +195,8 @@ int main(int argc, char **argv) {
             }
         } workers{stop, {}, {}, {}};
         workers.display = std::thread([&] { receiver.screen->run(); });
+        workers.decoder = std::thread([&] { receiver.decoder->run_frame(); });
         if (o.radio) {
-            workers.decoder = std::thread([&] { receiver.decoder->run_frame(); });
             workers.radio = std::thread([&] {
                 try {
                     link.run();
@@ -210,13 +223,22 @@ int main(int argc, char **argv) {
         kestrel_ui::Controller controller(model);
         ascent::RegionMenu region_menu;
         ascent::ChannelMenu channel_menu(radio_model.radio());
+        dvr::StreamPlayer::State playback;
+        uint64_t playback_checked=0;
         kestrel_ui::ReceiverControls controls(radio_model.camera(),radio_model.encoder(),radio_model.air_radio(),radio_model.air_unit(),radio_model.radio());
         controller.apply_receiver=[&](const std::string& id,int value) {
             if(id=="record") {
-                if(!recorder.is_recording() && (!model.backend.media.video_fresh(kestrel_ui::monotonic_us()) || !recorder.state().storage_ready))
+                if(!recorder.is_recording() && (player.state().busy || !model.backend.media.video_fresh(kestrel_ui::monotonic_us()) || !recorder.state().storage_ready))
                     throw std::runtime_error("Recording needs live video and writable storage");
                 recorder.toggle(); return std::string("Recording change requested");
             }
+            if(id.compare(0,5,"play:")==0) {
+                const auto rec=recorder.state();
+                if(recorder.is_recording() || rec.finishing)throw std::runtime_error("Stop recording and wait for it to finish saving first");
+                player.play(id.substr(5));playback=player.state();playback_checked=0;return std::string("Opening recording");
+            }
+            if(id=="playback_stop") {player.stop();return std::string("Playback stopped");}
+            if(id=="playback_pause") {player.pause();return std::string("Playback pause changed");}
             if (region_menu.owns(id)) return region_menu.apply(id,value);
             if (id=="channel") return channel_menu.apply(value,model.backend);
             return controls.apply(id,value,kestrel_ui::monotonic_us());
@@ -306,11 +328,28 @@ int main(int argc, char **argv) {
             controls.update(model.backend, now);
             region_menu.update(model.backend);
             channel_menu.update(model.backend,now,model.channel_open);
+            if(!playback_checked || now-playback_checked>=250000) {
+                const bool was_busy=playback.busy;
+                playback=player.state();playback_checked=now;
+                model.backend.recordings.clear();
+                for(const auto& clip:playback.recordings)model.backend.recordings.push_back({clip.name,clip.size});
+                if(was_busy && !playback.busy && model.scene==kestrel_ui::SceneMode::GalleryPlayback) {
+                    controller.set_scene(kestrel_ui::SceneMode::GalleryBrowse);
+                    model.feedback=playback.error.empty()?"Playback finished":playback.error;
+                }
+            }
+            model.backend.media.playback_known=true;model.backend.media.playing=playback.playing;
+            model.backend.media.playback_id=playback.file;
+            model.backend.playback_busy=playback.busy;model.backend.playback_paused=playback.paused;
+            model.backend.playback_position_us=playback.position_us;model.backend.playback_duration_us=playback.duration_us;
+            model.backend.playback_error=playback.error;
+            auto& gallery=model.backend.controls["gallery"];gallery={};gallery.known=true;gallery.enabled=true;gallery.action=true;
+            gallery.text=std::to_string(playback.recordings.size())+" RECORDINGS";
             const auto recording=recorder.state();
             model.backend.media.recording_known=true; model.backend.media.recording=recording.recording;
             model.backend.media.recording_id=recording.file;
             auto& rec=model.backend.controls["record"]; rec={};rec.known=true;rec.action=true;
-            rec.enabled=recorder.is_recording() || (recording.storage_ready && model.backend.media.video_fresh(now));
+            rec.enabled=recorder.is_recording() || (!playback.busy && recording.storage_ready && model.backend.media.video_fresh(now));
             rec.text=recorder.is_recording()?"STOP":recording.finishing?"SAVING":"START";
             rec.reason=recording.error.empty()?"Records the received video without re-encoding.":recording.error;
             auto& folder=model.backend.controls["folder"];folder={};folder.known=true;folder.text=o.recordings;
@@ -411,6 +450,7 @@ int main(int argc, char **argv) {
         if (!o.screenshot.empty())
             display.dump(o.screenshot);
         const bool source_failed = source_exited.load();
+        player.stop();
         workers.finish();
         printf("ascent: HDMI presentations=%llu UI presentations=%llu\n",
                (unsigned long long)receiver.screen->presented(), (unsigned long long)display.presentations);

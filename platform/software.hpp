@@ -13,4 +13,5 @@ struct SoftwareReceiver {
     std::shared_ptr<Vdec> decoder;
 };
 SoftwareReceiver make_software_receiver(const SoftwareSetup &, VideoCodec, volatile bool *stop);
+std::shared_ptr<Vdec> make_software_decoder(const SoftwareSetup&,VideoCodec,std::shared_ptr<hal::FrameSink>,volatile bool* stop);
 } // namespace platform

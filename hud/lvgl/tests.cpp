@@ -127,8 +127,18 @@ int main(int argc, char** argv) {
         check(!model.hud_visible() && !controller.hud_data(2300000).enabled, "Gallery browsing hides the passive HUD");
         controller.set_scene(SceneMode::GalleryPlayback);
         check(!model.hud_visible(), "Gallery playback hides the passive HUD");
+        std::string playback_action;
+        controller.apply_receiver=[&](const std::string& id,int){playback_action=id;return std::string();};
+        controller.key(Key::Enter);
+        check(playback_action=="playback_pause", "OK toggles playback pause");
+        controller.key(Key::Back);
+        check(model.scene_mode()==SceneMode::GalleryBrowse && playback_action=="playback_stop", "Back stops playback and restores the catalog");
         controller.key(Key::Back);
         check(model.scene_mode() == SceneMode::Live && model.hud_visible(), "Back from gallery restores live HUD visibility");
+        model.backend.controls["gallery"].enabled=true;
+        controller.key(Key::Back);
+        check(model.scene_mode()==SceneMode::GalleryBrowse,"Back on live picture opens gallery like VRX Pro");
+        controller.key(Key::Back);
         model.backend.flight.stamp_us = 3000000;
         model.backend.flight.have_rssi = true; model.backend.flight.rssi_pct = 45;
         controller.tick(3000000);

@@ -211,6 +211,13 @@ int main(int argc, char** argv) {
             model.ui_scale=15;view.update(now);lv_refr_now(display.lv_display());check_incremental();
             if(display.pixels()==unscaled) throw std::runtime_error("UI scale did not resize HUD text");
             model.ui_scale=10;view.update(now);lv_refr_now(display.lv_display());check_incremental();
+            model.backend.recordings={{"recording_20260101_123456.mp4",12345678},{"another.mp4",4000000}};
+            for(auto scene:{kestrel_ui::SceneMode::GalleryBrowse,kestrel_ui::SceneMode::GalleryPlayback,kestrel_ui::SceneMode::GalleryBrowse,kestrel_ui::SceneMode::Live}) {
+                controller.set_scene(scene);
+                for(int i=0;i<20;++i) {
+                    now+=20000;controller.tick(now);view.update(now);lv_refr_now(display.lv_display());check_incremental();
+                }
+            }
             std::printf("PASS: 240 frames, menu motion/tabs/themes, text LRU lifetime, stable-cache reuse, channel/clock damage, static idle; bytes=%zu rasters=%llu\n",
                         view.text_cache_bytes(), (unsigned long long)view.text_rasterizations());
         }

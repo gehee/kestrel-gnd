@@ -48,6 +48,30 @@ void Controller::key(Key key, bool repeat) {
     if (repeat && (!m.key_repeat || !arrow)) return;
     ++m.key_count; m.last_key = key_name(key); ++m.menu_version;
     if (key == Key::Quit) { if (m.stage == MenuStage::Edit) cancel_edit(); m.quit = true; return; }
+    if(m.scene==SceneMode::GalleryBrowse || m.scene==SceneMode::GalleryPlayback) {
+        if(key==Key::Back || key==Key::Menu) {
+            try {if(m.scene==SceneMode::GalleryPlayback && apply_receiver) apply_receiver("playback_stop",0);}
+            catch(const std::exception& e) {m.feedback=e.what();return;}
+            set_scene(key==Key::Back && m.scene==SceneMode::GalleryPlayback?SceneMode::GalleryBrowse:SceneMode::Live);
+        } else if(m.scene==SceneMode::GalleryPlayback && key==Key::Enter) {
+            try {if(apply_receiver) apply_receiver("playback_pause",0);}
+            catch(const std::exception& e) {m.feedback=e.what();}
+        } else if(m.scene==SceneMode::GalleryBrowse) {
+            const auto& clips=m.backend.recordings;
+            const int last=std::max(0,int(clips.size())-1);
+            if(key==Key::Up || key==Key::Left) m.gallery_selected=std::clamp(m.gallery_selected-1,0,last);
+            if(key==Key::Down || key==Key::Right) m.gallery_selected=std::clamp(m.gallery_selected+1,0,last);
+            if(key==Key::Enter && !clips.empty()) {
+                m.gallery_selected=std::clamp(m.gallery_selected,0,last);
+                try {
+                    if(!apply_receiver)throw std::runtime_error("Playback is not connected");
+                    apply_receiver("play:"+clips[m.gallery_selected].name,0);
+                    set_scene(SceneMode::GalleryPlayback);
+                } catch(const std::exception& e) {m.feedback=e.what();}
+            }
+        }
+        return;
+    }
     if (m.channel_open) {
         const auto& scan=m.backend.channels;
         if(key==Key::Back || key==Key::Menu) {m.channel_open=false; m.feedback.clear(); return;}
@@ -83,7 +107,14 @@ void Controller::key(Key key, bool repeat) {
         else open_menu();
         return;
     }
-    if (!m.menu_open) { if (key == Key::Enter) open_menu(); return; }
+    if (!m.menu_open) {
+        if(key==Key::Enter)open_menu();
+        else if(key==Key::Back) {
+            const auto gallery=m.backend.controls.find("gallery");
+            if(gallery!=m.backend.controls.end() && gallery->second.enabled)set_scene(SceneMode::GalleryBrowse);
+        }
+        return;
+    }
     if (m.stage == MenuStage::Edit) {
         if (!m.edit_intact()) { cancel_edit(); return; }
         if (key == Key::Back || key == Key::Left) { m.edit_id_.clear(); m.stage = MenuStage::Browse; return; }
@@ -153,6 +184,7 @@ void Controller::key(Key key, bool repeat) {
         index = std::clamp(index + (key == Key::Right ? 1 : -1), 0, int(tabs.size()) - 1);
         m.remembered_tab_[m.side] = m.tab = tabs[index]; m.selected = m.first_row(monotonic_us());
     } else if (key == Key::Enter && menu[m.selected].action) {
+        if(menu[m.selected].id=="gallery") {set_scene(SceneMode::GalleryBrowse);return;}
         if(menu[m.selected].id=="channel") {
             m.channel_open=true; m.channel_mhz=m.backend.channels.automatic?0:m.backend.channels.current_mhz; return;
         }

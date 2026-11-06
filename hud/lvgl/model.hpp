@@ -49,6 +49,7 @@ public:
     bool menu_open = false, quit = false;
     bool channel_open = false;
     int channel_mhz = 0;
+    int gallery_selected=0;
     int tab = 0, selected = 0, theme = 0;
     int side = 0, fps = 25;
     int clock = 0;

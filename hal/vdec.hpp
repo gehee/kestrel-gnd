@@ -85,6 +85,8 @@ class Vdec {
         virtual bool failed() const { return false; }
         // Last completed frame (CLOCK_MONOTONIC us), when the backend tracks it.
         virtual uint64_t last_frame_us() const { return 0; }
+        // An intentionally paused file source is not a stalled live decoder.
+        virtual void pause_input(bool) {}
 
         // While another decoder runs on the same hardware (a gallery clip, the
         // background video), live pictures go whole: a streamed one holds the

@@ -78,6 +78,11 @@ struct ReceiverControl {
     std::vector<ReceiverChoice> choices;
 };
 struct BackendState : ReceiverState {
+    struct Recording {std::string name;uint64_t bytes=0;};
+    std::vector<Recording> recordings;
+    bool playback_busy=false,playback_paused=false;
+    uint64_t playback_position_us=0,playback_duration_us=0;
+    std::string playback_error;
     std::array<uint16_t,53*20> bf_grid{};
     bool bf_available=false;
     float hud_dx=0,hud_dy=0,hud_bank=0;

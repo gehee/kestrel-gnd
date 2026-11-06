@@ -405,6 +405,7 @@ void VdecV4l2::decode() {
                    (unsigned long long)peak_pending_.load(), peak_wait_us_.load() / 1000.0);
         }
         // Silence on RF is normal; a decoder with outstanding work must make progress.
+        if(paused_)last_progress=now_us();
         if (now_us() - last_progress > 10000000 &&
             std::any_of(busy.begin(), busy.begin() + nout, [](bool b) { return b; }))
             throw std::runtime_error("decoder stalled for ten seconds");
