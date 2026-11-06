@@ -93,15 +93,23 @@ atlas. Menu fonts are baked at integer pixel sizes 8 through 48 and loaded on
 demand. Refresh rates reuse the same resolution assets. Legacy flat 1080p asset
 directories still work.
 
-SYSTEM > Screen Mode offers 720p60 and 1080p60 when the installed DRM driver,
-monitor, and compiled profiles allow them. The application probes the kernel
-with a test-only atomic commit before exposing 720p. `--force-display` skips
-monitor detection but still requires the kernel to accept the mode. Switching
-recreates the display and receiver session; stop recording/playback first.
-Select KEEP within 15 seconds to save the new mode. An unconfirmed or failed
-trial restores the previous mode. A saved 720p mode that fails on startup falls
-back to 1080p. `--screen-mode 1280x720@60` or `1920x1080@60` overrides the saved
-startup choice for development.
+SYSTEM > Screen Mode supports 720p50/60/100/120 and 1080p50/60. It offers
+only modes accepted by the installed DRM driver, advertised by the connected
+monitor, and backed by compiled resolution assets. Each candidate receives a
+test-only atomic commit, including the fixed 1080p-to-720p video path.
+`--force-display` bypasses monitor detection/EDID but still requires driver
+acceptance; this is useful for development and does not guarantee a visible
+picture on an incompatible sink. Switching recreates the display and receiver
+session; stop recording/playback first. Select KEEP within 15 seconds to save
+both resolution and refresh rate. An unconfirmed or failed trial restores the
+previous complete mode. A saved mode that fails on startup falls back to
+1080p60. Existing resolution-only settings retain 60 Hz.
+`--screen-mode 1280x720@120`, for example, overrides the saved startup choice.
+The other accepted rates are 50, 60 and 100 at 720p, and 50 or 60 at 1080p.
+
+Output refresh rate is independent of the UI frame-rate preference and source
+video rate. A 120 Hz output can repeat a 60 FPS video/UI frame; it does not
+cause extra rendering of the static idle image or duplicate asset bundles.
 
 The video remains a 1080p decoded DMA-BUF. A compatible 720p driver must scale
 that primary plane in hardware while scanning out the UI at native 1280x720.
@@ -110,8 +118,9 @@ There is no software resizing of the complete UI or camera picture. Existing
 
 720p requires fpvOS's `0021-drm-artosyn-ascent-display-modes.patch`, the subsequent
 Ascent PLL divider and 720p lane-rate corrections, and the `ascent-60hz` board
-profile. The 720p mode uses matching DSI PHY timing and a lower shared transport
-clock; retaining the 1080p transport rate caused vertical duplication across
+profile. The additional rates require the subsequent HDMI refresh-rate
+patches and the `ascent-hdmi` VO/DSI profile with its matching LT9611 quirk.
+720p50/60 use matching DSI PHY timing and a lower shared transport clock; retaining the 1080p transport rate caused vertical duplication across
 both the UI and video after resolution changes. Live 720p video and native UI
 have been checked
 on an HDMI monitor and capture device. The driver initializes the scaler
@@ -144,8 +153,8 @@ kestrel-gnd --assets ./assets --no-radio --show-menu --seconds 20
 The example exits after twenty seconds and disables scanout. Omit `--seconds`
 to keep the menu running; this target does not start automatically at boot.
 
-Use `--force-display` only when the connected display reports disconnected and
-requires fpvOS's fixed-mode workaround. Always verify actual visible output;
+Use `--force-display` for development with a disconnected/misreported sink or
+a known-compatible mode missing from EDID. Always verify actual visible output;
 page-flip completion alone is insufficient.
 
 For reception, pass the air unit's four-byte radio MAC with `--peer`. This is a
@@ -228,7 +237,7 @@ traces in ignored `.local/`; tracing is disabled unless explicitly requested.
 
 This is an initial bring-up target, not a flight-ready receiver.
 
-- Fixed 1920x1080 I420 video, with 1080p60 or 720p60 HDMI. Output mode
+- Fixed 1920x1080 I420 video, with 1080p50/60 or 720p50/60/100/120 HDMI. Output mode
   changes restart the receiver session; other refresh rates are not supported.
 - Hardware scanout sustained 600 video updates over a ten-second interval with
   the UI uploaded exactly once. HDMI capture confirmed moving decoded video,

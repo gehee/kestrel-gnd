@@ -71,6 +71,7 @@ if(KESTREL_TESTS)
         -DLAYERS=${PROJECT_BINARY_DIR}/layers.txt -DNM=${CMAKE_NM} -DLIBDIR=${PROJECT_BINARY_DIR}
         -P ${PROJECT_SOURCE_DIR}/tools/check_layers.cmake)
     add_executable(mode_trial_test tools/test/mode_trial_test.cpp)
+    target_include_directories(mode_trial_test PRIVATE "${DRM_UAPI_INCLUDE_DIR}")
     add_test(NAME mode_trial COMMAND mode_trial_test)
     add_executable(ui_damage_test tools/test/damage_test.cpp)
     add_test(NAME ui_damage COMMAND ui_damage_test)

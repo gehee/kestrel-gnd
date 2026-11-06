@@ -6,7 +6,7 @@
 namespace platform {
 struct SoftwareSetup {
     std::string display_device = "/dev/dri/card0", decoder_device = "/dev/video0";
-    int display_width=1920, display_height=1080;
+    int display_width=1920, display_height=1080, display_hz=60;
     bool force_display = false;
 };
 struct SoftwareReceiver {

@@ -1,5 +1,6 @@
 #pragma once
 #include "hal/vdec.hpp"
+#include "display/ascent_mode.hpp"
 #include "base/damage.hpp"
 #include <memory>
 #include <stdexcept>
@@ -27,7 +28,7 @@ class PlaneScreen : public hal::FrameSink {
         float latency_ms = -1;
     };
     virtual VideoStats video_stats() const { return {}; }
-    virtual bool supports_height(int height) const { return height == 1080; }
+    virtual bool supports_mode(AscentMode mode) const { return mode == AscentMode{}; }
     virtual void run() = 0;
     virtual uint64_t presented() const = 0;
     // Completed flips which replaced the UI buffer, independently of video.

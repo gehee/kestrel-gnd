@@ -1,5 +1,6 @@
 // Native AR9311: independent DMA-BUF video and ARGB UI planes, blended by VO.
 #include "display/ar9311_screen.hpp"
+#include "display/ascent_kms_mode.hpp"
 #include "base/ltrace.hpp"
 #include <array>
 #include <cerrno>
@@ -158,7 +159,8 @@ class Ar9311Screen final : public PlaneScreen {
     std::array<Buffer, 3> ui_{};
     std::array<Slot, 3> slots_{};
     std::array<base::DamageRows, 3> ui_damage_;
-    bool first_overlay_ = true, supports_720_ = false;
+    bool first_overlay_ = true;
+    std::vector<AscentMode> supported_modes_;
     Properties connector_, crtc_, primary_, overlay_;
     uint32_t mode_ = 0;
     bool active_ = false;
@@ -282,9 +284,9 @@ class Ar9311Screen final : public PlaneScreen {
     }
 
   public:
-    Ar9311Screen(const std::string &device, bool force, volatile bool *stop, int width, int height) : width_(width), height_(height), ui_damage_{{{width,height},{width,height},{width,height}}}, stop_(stop) {
+    Ar9311Screen(const std::string &device, bool force, volatile bool *stop, int width, int height, int hz) : width_(width), height_(height), ui_damage_{{{width,height},{width,height},{width,height}}}, stop_(stop) {
         try {
-            if (!((width_==1920 && height_==1080) || (width_==1280 && height_==720)))
+            if (!AscentMode{height,hz}.valid() || AscentMode{height,hz}.width()!=width)
                 throw std::invalid_argument("Unsupported Ascent screen mode");
             fd_ = open(device.c_str(), O_RDWR | O_CLOEXEC);
             if (fd_ < 0)
@@ -313,12 +315,6 @@ class Ar9311Screen final : public PlaneScreen {
             c.count_props = c.count_encoders = 0;
             ctl(fd_, DRM_IOCTL_MODE_GETCONNECTOR, &c, "HDMI modes");
             if (c.count_modes > modes.size()) throw std::runtime_error("HDMI modes changed");
-            for (unsigned i = 0; i < c.count_modes; ++i) {
-                const auto& mode = modes[i];
-                if (mode.hdisplay == 1280 && mode.vdisplay == 720 && mode.clock == 74250 &&
-                    mode.htotal == 1650 && mode.vtotal == 750 && !(mode.flags & DRM_MODE_FLAG_INTERLACE))
-                    supports_720_ = true;
-            }
             if (c.connection != 1 && !force)
                 throw std::runtime_error("HDMI disconnected; use --force-display");
             drm_mode_get_plane_res planes{};
@@ -348,16 +344,7 @@ class Ar9311Screen final : public PlaneScreen {
             }
             if (!primary_.id || !overlay_.id)
                 throw std::runtime_error("fpvOS needs YUV primary and ARGB hardware overlay planes");
-            drm_mode_modeinfo m{};
-            const bool small=height_==720;
-            m.clock = small?74250:148500;
-            m.hdisplay = width_;m.vdisplay = height_;
-            m.hsync_start = small?1390:2008;m.hsync_end = small?1430:2052;m.htotal = small?1650:2200;
-            m.vsync_start = small?725:1084;m.vsync_end = small?730:1089;m.vtotal = small?750:1125;
-            m.vrefresh = 60;
-            m.flags = DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC;
-            m.type = DRM_MODE_TYPE_DRIVER;
-            snprintf(m.name,sizeof(m.name),"%dx%d",width_,height_);
+            auto m=ascent_kms_mode({height,hz});
             drm_mode_create_blob blob{};
             blob.data = uintptr_t(&m);
             blob.length = sizeof(m);
@@ -371,24 +358,31 @@ class Ar9311Screen final : public PlaneScreen {
             // EDID alone does not prove that installed firmware can drive a
             // mode. TEST_ONLY also checks the fixed 1080p-to-720p video path.
             // --force-display permits this probe without a valid EDID.
-            if (force || supports_720_) {
-                auto candidate=m;
-                candidate.clock=74250; candidate.hdisplay=1280; candidate.vdisplay=720;
-                candidate.hsync_start=1390; candidate.hsync_end=1430; candidate.htotal=1650;
-                candidate.vsync_start=725; candidate.vsync_end=730; candidate.vtotal=750;
-                snprintf(candidate.name,sizeof(candidate.name),"1280x720");
+            for(const auto mode:ascent_modes) {
+                auto candidate=ascent_kms_mode(mode);
+                const bool advertised=std::any_of(modes.begin(),modes.begin()+c.count_modes,[&](const auto& edid) {
+                    return same_ascent_timing(edid,candidate);
+                });
+                if(!force && !advertised) continue;
                 drm_mode_create_blob probe{};
                 probe.data=uintptr_t(&candidate); probe.length=sizeof(candidate);
-                ctl(fd_,DRM_IOCTL_MODE_CREATEPROPBLOB,&probe,"720p capability probe");
+                ctl(fd_,DRM_IOCTL_MODE_CREATEPROPBLOB,&probe,"HDMI capability probe");
                 Atomic test;
-                test.plane(primary_,crtc_.id,black_.fb,1920,1080,1280,720);
-                test.plane(overlay_,crtc_.id,0,1280,720,1280,720);
+                test.plane(primary_,crtc_.id,black_.fb,1920,1080,mode.width(),mode.height);
+                test.plane(overlay_,crtc_.id,0,mode.width(),mode.height,mode.width(),mode.height);
                 test.add(connector_,{{"CRTC_ID",crtc_.id}});
                 test.add(crtc_,{{"MODE_ID",probe.blob_id},{"ACTIVE",1}});
-                supports_720_=test.commit(fd_,DRM_MODE_ATOMIC_ALLOW_MODESET|DRM_MODE_ATOMIC_TEST_ONLY);
+                if(test.commit(fd_,DRM_MODE_ATOMIC_ALLOW_MODESET|DRM_MODE_ATOMIC_TEST_ONLY)) {
+                    supported_modes_.push_back(mode);
+                    printf("display: supported HDMI mode %s%s\n",mode.name().c_str(),advertised?"":" (forced)");
+                } else {
+                    fprintf(stderr,"display: firmware rejected %s: %s\n",mode.name().c_str(),strerror(errno));
+                }
                 drm_mode_destroy_blob destroy_probe{};destroy_probe.blob_id=probe.blob_id;
                 ioctl(fd_,DRM_IOCTL_MODE_DESTROYPROPBLOB,&destroy_probe);
             }
+            if(!supports_mode({height,hz}))
+                throw std::runtime_error("Requested HDMI mode is not supported by the display and firmware");
             printf("display: hardware planes video=%u UI=%u, DMA-BUF scanout\n", primary_.id, overlay_.id);
         } catch (...) {
             close_display();
@@ -467,7 +461,9 @@ class Ar9311Screen final : public PlaneScreen {
         }
         wake_.notify_all();
     }
-    bool supports_height(int height) const override { return height == 1080 || (height == 720 && supports_720_); }
+    bool supports_mode(AscentMode mode) const override {
+        return std::find(supported_modes_.begin(),supported_modes_.end(),mode)!=supported_modes_.end();
+    }
     VideoStats video_stats() const override {
         std::lock_guard<std::mutex> lock(mutex_); return video_stats_;
     }
@@ -598,9 +594,9 @@ class Ar9311Screen final : public PlaneScreen {
     }
 };
 } // namespace
-std::shared_ptr<PlaneScreen> make_ar9311_screen(const std::string &path, bool force, volatile bool *stop, int width, int height) {
+std::shared_ptr<PlaneScreen> make_ar9311_screen(const std::string &path, bool force, volatile bool *stop, int width, int height, int hz) {
     try {
-        return std::make_shared<Ar9311Screen>(path, force, stop, width, height);
+        return std::make_shared<Ar9311Screen>(path, force, stop, width, height, hz);
     } catch (const std::exception& e) {
         throw ScreenError(e.what());
     }

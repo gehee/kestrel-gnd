@@ -66,10 +66,10 @@ Options options(int argc, char **argv) {
             o.assets = value();
         else if (arg == "--screen-mode") {
             o.explicit_mode = true;
-            const auto mode=value();
-            if(mode=="1280x720@60") {o.platform.display_width=1280;o.platform.display_height=720;}
-            else if(mode=="1920x1080@60") {o.platform.display_width=1920;o.platform.display_height=1080;}
-            else throw std::invalid_argument("Supported screen modes: 1280x720@60, 1920x1080@60");
+            const auto mode=display::parse_ascent_mode(value());
+            o.platform.display_width=mode.width();
+            o.platform.display_height=mode.height;
+            o.platform.display_hz=mode.hz;
         }
         else if (arg == "--drm")
             o.platform.display_device = value();
@@ -118,11 +118,11 @@ Options options(int argc, char **argv) {
                 throw std::invalid_argument("peer must be a four-byte radio MAC: AA:BB:CC:DD");
             o.link.peer = std::array<uint8_t, 4>{uint8_t(a), uint8_t(b), uint8_t(c), uint8_t(d)};
         } else if (arg == "--help") {
-            puts("Ascent VRX receiver (native fpvOS, 720p60/1080p60)\n"
+            puts("Ascent VRX receiver (native fpvOS, 720p/1080p HDMI)\n"
                  "  --peer AA:BB:CC:DD   Air unit radio MAC, for this session\n"
-                 "  --screen-mode MODE  1280x720@60 or 1920x1080@60\n"
+                 "  --screen-mode MODE  1280x720@50/60/100/120 or 1920x1080@50/60\n"
                  "  --assets DIR        Generated LVGL assets\n"
-                 "  --force-display     Use fixed HDMI mode when detection reports disconnected\n"
+                 "  --force-display     Bypass HDMI detection/EDID; retain driver mode checks\n"
                  "  --input /dev/input/eventN  Optional evdev buttons\n"
                  "  --control PATH      Optional local UI control socket\n"
                  "  --send-key KEY      Send menu/up/down/left/right/enter/back/quit to that socket\n"
@@ -144,8 +144,9 @@ Options options(int argc, char **argv) {
 
 display::SessionResult run_session(Options o, Settings& settings, display::ModeTrial& mode) {
     try {
-        o.platform.display_height = mode.current;
-        o.platform.display_width = mode.current == 720 ? 1280 : 1920;
+        o.platform.display_height = mode.current.height;
+        o.platform.display_hz = mode.current.hz;
+        o.platform.display_width = mode.current.width();
         zones::load(settings);
         o.link.max_kbps=settings.get(radio::setting::ar8030_max_kbps);
         o.link.max_mcs=settings.get(radio::setting::ar8030_max_mcs);
@@ -218,7 +219,7 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
         model.build = kestrel_gnd_build_time;
         model.version = std::string(kestrel_gnd_version) + " (" + kestrel_gnd_git_hash + ")";
         model.decoder = "V4L2 / Wave5";
-        model.screen_mode = std::to_string(screen_w)+"x"+std::to_string(screen_h)+" @ 60 Hz";
+        model.screen_mode = mode.current.label();
         model.backend.media.video_monitored = o.radio;
         model.backend.service.adapter = "fpvOS native Ascent";
         model.backend.service.hardware_delegated = false;
@@ -231,20 +232,23 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
         uint64_t playback_checked=0;
         kestrel_ui::ReceiverControls controls(radio_model.camera(),radio_model.encoder(),radio_model.air_radio(),radio_model.air_unit(),radio_model.radio());
         std::vector<kestrel_ui::ReceiverChoice> screen_choices;
-        for(int height:{720,1080}) if(receiver.screen->supports_height(height) &&
-            std::filesystem::is_directory(assets_root/(height==720?"1280x720":"1920x1080")))
-            screen_choices.push_back({height,height==720?"1280x720 @ 60 Hz":"1920x1080 @ 60 Hz"});
+        for(const auto candidate:display::ascent_modes) if(receiver.screen->supports_mode(candidate) &&
+            std::filesystem::is_directory(assets_root/(candidate.height==720?"1280x720":"1920x1080")))
+            screen_choices.push_back({candidate.id(),candidate.label()});
         controller.apply_receiver=[&](const std::string& id,int value) {
             if(id=="screen_mode") {
                 if(mode.pending) {
-                    mode.keep(); settings.set(display::setting::ascent_screen_height,mode.current); settings.flush();
+                    mode.keep();
+                    settings.set(display::setting::ascent_screen_height,mode.current.height);
+                    settings.set(display::setting::ascent_screen_hz,mode.current.hz);
+                    settings.flush();
                     return std::string("Screen mode saved");
                 }
                 if(recorder.is_recording() || recorder.state().finishing || player.state().busy)
                     throw std::runtime_error("Stop recording or playback before changing screen mode");
                 if(std::none_of(screen_choices.begin(),screen_choices.end(),[&](const auto& choice){return choice.value==value;}))
                     throw std::runtime_error("Screen mode or compiled assets unavailable");
-                mode.select(value); model.quit=mode.restart;
+                mode.select(display::AscentMode::from_id(value)); model.quit=mode.restart;
                 return std::string("Testing screen mode");
             }
             if(id=="record") {
@@ -361,7 +365,7 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
             controls.update(model.backend, now);
             auto& screen_control=model.backend.controls["screen_mode"];
             screen_control={}; screen_control.known=true; screen_control.enabled=true;
-            screen_control.value=mode.current;
+            screen_control.value=mode.current.id();
             if(mode.pending) {
                 screen_control.action=true;
                 screen_control.text="KEEP " + model.screen_mode;
@@ -528,16 +532,18 @@ int main(int argc, char **argv) {
         Settings settings;
         if (o.settings_file.empty() && !o.preferences.empty()) o.settings_file=o.preferences+".receiver";
         if (!o.settings_file.empty()) settings.load(o.settings_file);
-        int height=o.explicit_mode?o.platform.display_height:settings.get(display::setting::ascent_screen_height);
-        if(height!=720 && height!=1080)height=1080;
-        display::ModeTrial mode(height);
+        display::AscentMode selected = o.explicit_mode ?
+            display::AscentMode{o.platform.display_height,o.platform.display_hz} :
+            display::AscentMode{settings.get(display::setting::ascent_screen_height),settings.get(display::setting::ascent_screen_hz)};
+        if(!selected.valid()) selected={};
+        display::ModeTrial mode(selected);
         for(;;) {
             mode.restart=false;
             const auto result=run_session(o,settings,mode);
             const int status=result==display::SessionResult::Stopped?0:1;
             if(interrupted)return status;
             if(mode.recover(result))
-                fprintf(stderr,"screen: recovering display at %dx%d @ 60 Hz\n",mode.current==720?1280:1920,mode.current);
+                fprintf(stderr,"screen: recovering display at %s\n",mode.current.label().c_str());
             if(!mode.restart)return status;
         }
     } catch (const std::exception &e) {

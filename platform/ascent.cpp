@@ -7,7 +7,7 @@ std::shared_ptr<Vdec> make_software_decoder(const SoftwareSetup& config,VideoCod
 }
 SoftwareReceiver make_software_receiver(const SoftwareSetup &config, VideoCodec codec, volatile bool *stop) {
     SoftwareReceiver r;
-    r.screen = display::make_ar9311_screen(config.display_device, config.force_display, stop, config.display_width, config.display_height);
+    r.screen = display::make_ar9311_screen(config.display_device, config.force_display, stop, config.display_width, config.display_height, config.display_hz);
     r.decoder = make_software_decoder(config,codec,r.screen,stop);
     return r;
 }

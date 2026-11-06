@@ -1,4 +1,5 @@
 #pragma once
+#include "display/ascent_mode.hpp"
 #include <cstdint>
 #include <stdexcept>
 
@@ -8,14 +9,16 @@ enum class SessionResult { Stopped, Failed, DisplayFailed };
 // recreates its display session when restart is set, including on timeout.
 class ModeTrial {
 public:
-    explicit ModeTrial(int height) : current(height), confirmed(height) {}
-    int current, confirmed;
+    explicit ModeTrial(AscentMode mode) : current(mode), confirmed(mode) {
+        if (!mode.valid()) throw std::invalid_argument("Unsupported screen mode");
+    }
+    AscentMode current, confirmed;
     bool pending = false, restart = false;
     uint64_t deadline = 0;
-    void select(int height) {
-        if (height != 720 && height != 1080) throw std::invalid_argument("Unsupported screen mode");
-        if (height == current) return;
-        current = height; pending = restart = true; deadline = 0;
+    void select(AscentMode mode) {
+        if (!mode.valid()) throw std::invalid_argument("Unsupported screen mode");
+        if (mode == current) return;
+        current = mode; pending = restart = true; deadline = 0;
     }
     void started(uint64_t now) { if (pending) deadline = now + 15000000; }
     void keep() { confirmed = current; pending = false; deadline = 0; }
