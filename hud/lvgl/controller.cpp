@@ -48,6 +48,31 @@ void Controller::key(Key key, bool repeat) {
     if (repeat && (!m.key_repeat || !arrow)) return;
     ++m.key_count; m.last_key = key_name(key); ++m.menu_version;
     if (key == Key::Quit) { if (m.stage == MenuStage::Edit) cancel_edit(); m.quit = true; return; }
+    if (m.channel_open) {
+        const auto& scan=m.backend.channels;
+        if(key==Key::Back || key==Key::Menu) {m.channel_open=false; m.feedback.clear(); return;}
+        std::vector<int> choices{0};
+        for(const auto& c:scan.readings) choices.push_back(c.mhz);
+        auto at=std::find(choices.begin(),choices.end(),m.channel_mhz);
+        int index=at==choices.end()?0:int(at-choices.begin());
+        if(key==Key::Left || key==Key::Right) {
+            index=std::clamp(index+(key==Key::Left?-1:1),0,int(choices.size())-1);
+            m.channel_mhz=choices[index]; m.feedback.clear();
+        } else if(key==Key::Down) {m.channel_mhz=scan.current_mhz; m.feedback.clear();}
+        else if(key==Key::Up) {
+            const ChannelReading* best=nullptr;
+            for(int pass=0;pass<2 && !best;++pass) for(const auto& c:scan.readings)
+                if((pass || c.permitted) && (!best || c.peak_dbm<best->peak_dbm)) best=&c;
+            if(best) m.channel_mhz=best->mhz;
+            m.feedback.clear();
+        } else if(key==Key::Enter) {
+            try {
+                if(!apply_receiver) throw std::runtime_error("Receiver controls are not connected");
+                m.feedback=apply_receiver("channel",m.channel_mhz);
+            } catch(const std::exception& e) {m.feedback=e.what();}
+        }
+        return;
+    }
     if (!m.hud_visible()) {
         if (key == Key::Back) set_scene(SceneMode::Live);
         else if (key == Key::Menu) open_menu();
@@ -128,6 +153,9 @@ void Controller::key(Key key, bool repeat) {
         index = std::clamp(index + (key == Key::Right ? 1 : -1), 0, int(tabs.size()) - 1);
         m.remembered_tab_[m.side] = m.tab = tabs[index]; m.selected = m.first_row(monotonic_us());
     } else if (key == Key::Enter && menu[m.selected].action) {
+        if(menu[m.selected].id=="channel") {
+            m.channel_open=true; m.channel_mhz=m.backend.channels.automatic?0:m.backend.channels.current_mhz; return;
+        }
         try {
             if (!apply_receiver) throw std::runtime_error("Receiver controls are not connected");
             m.feedback=apply_receiver(menu[m.selected].id,0);

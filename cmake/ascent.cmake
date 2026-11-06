@@ -36,12 +36,15 @@ target_link_libraries(kestrel-gnd PRIVATE kg_platform kg_radio kg_lvgl_view kg_v
 target_link_options(kestrel-gnd PRIVATE -Wl,-u,arlink_version)
 install(TARGETS kestrel-gnd RUNTIME DESTINATION bin)
 if(KESTREL_TESTS)
+    add_executable(ascent_menu_test tools/test/ascent_menu_test.cpp)
+    target_link_libraries(ascent_menu_test PRIVATE kg_lvgl_core kg_region)
+    add_test(NAME ascent_menu COMMAND ascent_menu_test)
     file(WRITE "${PROJECT_BINARY_DIR}/layers.txt"
         "utils: utils |\nbase: base | utils\nsystem: system | base\nhal: hal | base\n"
         "bsp: bsp | base\nregion: region | base\nrender: render | base\n"
         "radio: radio | hal region system\ndisplay: display | hal\n"
         "platform: platform | hal bsp render display\nhud: hud/lvgl | render system\n"
-        "app: app | platform radio hud\n")
+        "app: app | platform radio hud region\n")
     add_test(NAME layers COMMAND ${CMAKE_COMMAND} -DSRC=${PROJECT_SOURCE_DIR}
         -DLAYERS=${PROJECT_BINARY_DIR}/layers.txt -DNM=${CMAKE_NM} -DLIBDIR=${PROJECT_BINARY_DIR}
         -P ${PROJECT_SOURCE_DIR}/tools/check_layers.cmake)

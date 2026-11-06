@@ -7,6 +7,7 @@
 #include <vector>
 #include <functional>
 #include <map>
+#include <ctime>
 
 namespace kestrel_ui {
 
@@ -26,6 +27,7 @@ enum class SceneMode { Live, Menu, GalleryBrowse, GalleryPlayback };
 struct UiPreferences {
     int theme = 0, fps = 25;
     bool details = true, repeat = true, hud = true, per_cell = true;
+    int clock = 0;
 };
 struct MenuRow {
     std::string name, value;
@@ -42,8 +44,11 @@ public:
     BackendState backend;
     SceneMode scene = SceneMode::Live;
     bool menu_open = false, quit = false;
+    bool channel_open = false;
+    int channel_mhz = 0;
     int tab = 0, selected = 0, theme = 0;
     int side = 0, fps = 25;
+    int clock = 0;
     bool show_details = true, key_repeat = true, show_hud = true, per_cell = true;
     MenuStage stage = MenuStage::Pick;
     uint64_t menu_version = 0, key_count = 0, rejected_inputs = 0;
@@ -56,7 +61,8 @@ public:
     bool simulated = false;
     std::string hud_style = "canopy";
     canopy::LinkVisual visual;
-    UiPreferences preferences() const { return {theme, fps, show_details, key_repeat, show_hud, per_cell}; }
+    UiPreferences preferences() const { return {theme, fps, show_details, key_repeat, show_hud, per_cell, clock}; }
+    std::string clock_text(std::time_t wall_time, uint64_t now) const;
     void set_preferences(const UiPreferences& p);
     std::vector<int> side_tabs() const;
     int first_row(uint64_t now) const;

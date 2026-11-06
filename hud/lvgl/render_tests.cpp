@@ -174,7 +174,24 @@ int main(int argc, char** argv) {
                     check_incremental();
                 }
             }
-            std::printf("PASS: 240 frames, menu motion/tabs/themes, text LRU lifetime, stable-cache reuse; bytes=%zu rasters=%llu\n",
+            model.clock=4;
+            model.menu_open=true; model.stage=kestrel_ui::MenuStage::Browse; model.side=1; model.tab=1;
+            model.backend.channels.readings={{5780,-89,-70,true,"OK"},{5800,-95,-92,true,"OK"},{5820,-75,-74,false,"NOT ALLOWED"}};
+            model.backend.channels.current_mhz=5800; model.backend.channels.fresh=true;
+            for(bool open:{true,false,true,false}) {
+                model.channel_open=open; ++model.menu_version;
+                for(int i=0;i<8;++i) {
+                    now+=40000; controller.tick(now); view.update(now); lv_refr_now(display.lv_display()); check_incremental();
+                }
+            }
+            model.clock=0; model.menu_open=false;
+            for(int i=0;i<20;++i) {
+                now+=40000; controller.tick(now); view.update(now); lv_refr_now(display.lv_display());
+            }
+            const auto idle_presentations=display.presentations;
+            for(int i=0;i<60;++i) {now+=16667;controller.tick(now);view.update(now);lv_refr_now(display.lv_display());}
+            if(display.presentations!=idle_presentations) throw std::runtime_error("Static idle rerendered without a content change");
+            std::printf("PASS: 240 frames, menu motion/tabs/themes, text LRU lifetime, stable-cache reuse, channel/clock damage, static idle; bytes=%zu rasters=%llu\n",
                         view.text_cache_bytes(), (unsigned long long)view.text_rasterizations());
         }
         lv_deinit();

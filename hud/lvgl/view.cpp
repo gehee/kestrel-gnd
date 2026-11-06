@@ -55,6 +55,19 @@ View::View(const Controller& controller, int w, int h, const std::string& assets
     lv_obj_add_event_cb(menu_, draw_event, LV_EVENT_DRAW_MAIN, this);
     lv_obj_add_flag(menu_, LV_OBJ_FLAG_HIDDEN);
     sync_hud_objects();
+    channel_=lv_obj_create(screen_);
+    lv_obj_remove_style_all(channel_);
+    lv_obj_set_pos(channel_,0,h*62/100);
+    lv_obj_set_size(channel_,w,h-h*62/100);
+    lv_obj_remove_flag(channel_,LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(channel_,draw_event,LV_EVENT_DRAW_MAIN,this);
+    lv_obj_add_flag(channel_,LV_OBJ_FLAG_HIDDEN);
+    clock_=lv_obj_create(screen_);
+    lv_obj_remove_style_all(clock_);
+    lv_obj_set_pos(clock_,w/2-w/10,0);
+    lv_obj_set_size(clock_,w/5,h/16);
+    lv_obj_remove_flag(clock_,LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(clock_,draw_event,LV_EVENT_DRAW_MAIN,this);
 }
 View::~View() { lv_obj_clean(screen_); drop_menu_snapshot(); }
 void View::drop_menu_snapshot() {
@@ -110,6 +123,12 @@ void View::draw_event(lv_event_t* e) {
     }
     else if (target == self->menu_) self->draw_menu(layer);
     else if (target == self->picker_) self->draw_picker(layer);
+    else if (target == self->channel_) self->draw_channel(layer);
+    else if (target == self->clock_) {
+        const float size=24.0f*self->height_/1080;
+        const float x=(self->width_-self->text_.advance(self->clock_text_)*size/64)/2;
+        self->text_.canvas(layer,self->clock_text_,x,36.0f*self->height_/1080,size,false,hud_theme_at(self->model_.theme).text,.9f);
+    }
     else for (size_t i = 0; i < self->hud_objects_.size(); ++i) if (target == self->hud_objects_[i]) { self->draw_hud(layer, i); break; }
 }
 void View::sync_hud_objects() {
@@ -147,6 +166,40 @@ void View::draw_picker(lv_layer_t* layer) {
                     427 + canopy::kTextUnit * 0.25f / frame.U,
                     canopy::kTextUnit, side != 0, selected ? th.text : th.quiet, alpha * (selected ? 0.85f : 0.6f));
     }
+}
+void View::draw_channel(lv_layer_t* layer) {
+    const auto& scan=model_.backend.channels;
+    const auto& theme=hud_theme_at(model_.theme);
+    const float u=height_/1080.0f;
+    const int top=height_*62/100, pad=int(28*u), bottom=height_-int(108*u);
+    const float amber[]={.95f,.79f,.30f}, danger[]={.93f,.33f,.28f};
+    rect(layer,0,top,width_,height_-top,theme.ground,.94f);
+    auto label=[&](const std::string& s,float x,float y,int size,const float* rgb) {
+        text_.canvas(layer,s,x,y,size*u,false,rgb,1);
+    };
+    label("CHANNEL",pad,top+40*u,28,theme.text);
+    std::string selection=model_.channel_mhz?std::to_string(model_.channel_mhz)+" MHz":"AUTO";
+    const ChannelReading* selected=nullptr;
+    for(const auto& c:scan.readings) if(c.mhz==model_.channel_mhz) selected=&c;
+    if(selected) selection+="   "+std::to_string(selected->dbm)+" dBm   "+selected->rule;
+    label(selection,pad+220*u,top+40*u,23,theme.text);
+    const float left=pad+100*u, right=width_-pad, pitch=(right-left)/std::max<size_t>(1,scan.readings.size());
+    const int chart_top=top+int(78*u), chart_height=bottom-chart_top;
+    auto bar_y=[&](int dbm) {return bottom-int(std::clamp((dbm+110)/60.0f,0.0f,1.0f)*chart_height);};
+    label("AUTO",pad,bottom,20,model_.channel_mhz?theme.quiet:theme.accent);
+    for(size_t i=0;i<scan.readings.size();++i) {
+        const auto& c=scan.readings[i]; const int x=int(left+i*pitch), w=std::max(2,int(pitch)-4);
+        const bool chosen=c.mhz==model_.channel_mhz;
+        const float* hue=c.dbm<=-88?theme.data:c.dbm<=-80?amber:danger;
+        rect(layer,x,bar_y(c.dbm),w,bottom-bar_y(c.dbm),hue,scan.fresh?.8f:.25f);
+        rect(layer,x,bar_y(c.peak_dbm),w,2,theme.text,.65f);
+        if(chosen) rect(layer,x-2,chart_top-4,w+4,chart_height+8,theme.accent,1,2);
+        if(c.mhz==scan.current_mhz) label("LINK",x,chart_top-12*u,14,theme.text);
+        if(chosen || i%std::max<size_t>(1,scan.readings.size()/12)==0)
+            label(std::to_string(c.mhz),x,bottom+26*u,14,theme.quiet);
+    }
+    label("LEFT / RIGHT  Select     UP  Quietest     DOWN  Current     OK  Apply     BACK  Close",pad,height_-46*u,20,theme.text);
+    label(!scan.fresh?"Scan stale; waiting for radio":model_.feedback,pad,height_-17*u,18,theme.quiet);
 }
 lv_area_t View::menu_reveal(float progress) const {
     const float p = std::clamp(progress, 0.0f, 1.0f), e = p * p * (3 - 2 * p);
@@ -265,6 +318,10 @@ void View::draw_menu(lv_layer_t* layer) {
 void View::update(uint64_t now) {
     text_.begin_frame(); idle_.prepare(model_, now);
     now_ = now;
+    const auto clock=model_.clock_text(std::time(nullptr),now);
+    if(clock!=clock_text_ || old_theme_!=model_.theme) {
+        clock_text_=clock; lv_obj_invalidate(clock_);
+    }
     hud_->update(controller_.hud_data(now), now);
     sync_hud_objects();
     const bool hud_changed = hud_revision_ != hud_->revision();
@@ -275,7 +332,7 @@ void View::update(uint64_t now) {
     // is refreshed in the picker or when the fully opened content changes.
     // Keep the outgoing blade intact during closure, even though the model has
     // already returned to Pick (or the user changes the next side quickly).
-    if (model_.menu_open && (menu_progress_ == 0 || (unfolded && menu_progress_ == 1))) prepare_menu_snapshot();
+    if (!model_.channel_open && model_.menu_open && (menu_progress_ == 0 || (unfolded && menu_progress_ == 1))) prepare_menu_snapshot();
     const float target = unfolded ? 1 : 0;
     const auto old_reveal = menu_reveal(menu_progress_);
     const float next = model_.hud_visible() ? menu_progress_ + std::clamp(target - menu_progress_, -dt / 0.24f, dt / 0.24f) : 0;
@@ -288,9 +345,13 @@ void View::update(uint64_t now) {
     const int menu_w = lv_obj_get_width(menu_);
     const int mx = right_side ? width_ - menu_w : 0;
     if (moving || old_tab_ != model_.tab || model_.menu_version != menu_version_) lv_obj_set_pos(menu_, mx, 0);
-    hidden(menu_, next <= 0);
+    hidden(menu_, next <= 0 || model_.channel_open);
     // The picker fades back in as the blade folds into the canopy.
-    hidden(picker_, !model_.menu_open && menu_progress_ == 0);
+    hidden(picker_, model_.channel_open || menu_progress_ == 1 || (!model_.menu_open && menu_progress_ == 0));
+    hidden(channel_,!model_.channel_open);
+    if(model_.channel_open && (old_channel_!=model_.channel_open || channel_revision_!=model_.backend.channels.revision ||
+                              menu_version_!=model_.menu_version || old_theme_!=model_.theme)) lv_obj_invalidate(channel_);
+    old_channel_=model_.channel_open; channel_revision_=model_.backend.channels.revision;
     const auto& t = model_.backend.vrx;
     const auto& flight = model_.backend.flight;
     const bool flight_fresh = flight.stamp_us && now >= flight.stamp_us && now - flight.stamp_us < 2000000;

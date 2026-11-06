@@ -59,6 +59,17 @@ struct ReceiverState {
     MediaState media;
 };
 struct ReceiverChoice { int value; std::string label; };
+struct ChannelReading {
+    int mhz = 0, dbm = 0, peak_dbm = 0;
+    bool permitted = false;
+    std::string rule;
+};
+struct ChannelState {
+    bool fresh = false, automatic = false;
+    int current_mhz = 0;
+    uint64_t revision = 0;
+    std::vector<ChannelReading> readings;
+};
 struct ReceiverControl {
     int value = 0;
     bool known = false, enabled = false, action = false;
@@ -66,6 +77,7 @@ struct ReceiverControl {
     std::vector<ReceiverChoice> choices;
 };
 struct BackendState : ReceiverState {
+    ChannelState channels;
     std::map<std::string, ReceiverControl> controls;
     std::map<std::string, std::string> air_info;
     // Transport/session metadata belongs to the service, not the platform.

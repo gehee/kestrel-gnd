@@ -138,7 +138,7 @@ std::vector<MenuRow> Model::rows(uint64_t now) const {
         if (show_hud && hud_style != "vector") result.push_back(choice("per_cell", "Canopy Voltage", per_cell ? 0 : 1, {"PER CELL", "PACK"},
             "The canopy's headline voltage: per cell reads the same on any pack size."));
         result.push_back(unavailable("distance", "Calib Distance", "Zero the range reading where you are standing."));
-        result.push_back(unavailable("clock", "Clock", "When the time is shown at the top of the screen, and how it is written."));
+        result.push_back(choice("clock", "Clock", clock, {"OFF","IDLE ONLY 12H","IDLE ONLY 24H","ON 12H","ON 24H"}, "When the time is shown at the top of the screen, and how it is written."));
         result.push_back(unavailable("dynamic", "Dynamic HUD", "Let the panels move with the aircraft."));
         result.push_back(unavailable("debug", "Debug Info", "A line of radio details under the right panel, for field tests: the radio's frame, and the mode it means."));
         return result;
@@ -147,10 +147,10 @@ std::vector<MenuRow> Model::rows(uint64_t now) const {
         std::vector<std::string> themes;
         for (int i = 0; i < hud_theme_count(); ++i) themes.push_back(hud_theme_at(i).name);
         return {choice("theme", "Theme", theme, std::move(themes), "Which hues carry which meaning."),
-            unavailable("bg_video", "Background Video", "Play the idle scene when nothing is linked."),
+            reading("bg_video", "Idle Background", "STATIC", "The compiled artwork is cached and drawn only when it changes."),
             unavailable("picture_size", "Picture Size", "Shrink the whole picture if your optics clip the edges."),
             unavailable("ui_scale", "UI Scaling", "Size of the HUD's type. The panels stay put."),
-            unavailable("brightness", "Brightness", "Panel backlight. Lifts video and HUD together."),
+            reading("brightness", "Brightness", "MONITOR", "Use the external monitor's brightness control. HDMI does not expose a local panel backlight."),
             heading("ADVANCED"),
             reading("frame_mode", "Frame Mode", "FULL DECODE", "The decoder receives whole pictures; only complete decoded frames are displayed.")};
     }
@@ -166,7 +166,8 @@ std::vector<MenuRow> Model::rows(uint64_t now) const {
         unavailable("wifi", "WiFi AP", "Wifi access point for spectators."), heading("WHERE YOU FLY"),
         unavailable("licence", "Amateur Licence", "Whether you hold an amateur radio licence."),
         unavailable("area", "Area", "Where you fly, starting with the part of the world."),
-        unavailable("country", "Country", "The country you fly in: its rules for the radio's channels.")};
+        unavailable("country", "Country", "The country you fly in: its rules for the radio's channels."),
+        unavailable("timezone", "Timezone", "Which local time the clock and recording filenames use.")};
     if (tab == 6) {
         auto info = [&](const char* key) { auto it=backend.air_info.find(key); return it==backend.air_info.end()?std::string("--"):it->second; };
         std::vector<MenuRow> rows{heading("AIR UNIT"),
@@ -196,6 +197,7 @@ int Model::setting(const std::string& id) const {
     if (id == "details") return show_details ? 1 : 0;
     if (id == "repeat") return key_repeat ? 1 : 0;
     if (id == "fps") return fps - 1;
+    if (id == "clock") return clock;
     return 0;
 }
 void Model::set_setting(const std::string& id, int value) {
@@ -210,11 +212,20 @@ void Model::set_setting(const std::string& id, int value) {
     else if (id == "details") show_details = value != 0;
     else if (id == "repeat") key_repeat = value != 0;
     else if (id == "fps") fps = std::clamp(value + 1, 1, 60);
+    else if (id == "clock") clock = std::clamp(value,0,4);
 }
 void Model::set_preferences(const UiPreferences& p) {
-    if (p.theme < 0 || p.theme >= hud_theme_count() || p.fps < 1 || p.fps > 60)
+    if (p.theme < 0 || p.theme >= hud_theme_count() || p.fps < 1 || p.fps > 60 || p.clock<0 || p.clock>4)
         throw std::invalid_argument("Invalid UI preferences");
     theme = p.theme; fps = p.fps; show_details = p.details; key_repeat = p.repeat; show_hud = p.hud; per_cell = p.per_cell;
+    clock=p.clock;
+}
+std::string Model::clock_text(std::time_t wall_time,uint64_t now) const {
+    if(!hud_visible() || !clock || (clock<=2 && !show_status(now))) return {};
+    std::tm tm{};
+    if(!localtime_r(&wall_time,&tm)) return {};
+    char text[32]; std::strftime(text,sizeof(text),clock%2?"%I:%M %p":"%H:%M",&tm);
+    return text;
 }
 bool Model::edit_intact() const {
     const auto menu = rows(monotonic_us());

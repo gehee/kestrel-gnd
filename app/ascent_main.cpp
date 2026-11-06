@@ -8,6 +8,7 @@
 #include "hud/lvgl/input.hpp"
 #include "hud/lvgl/preferences.hpp"
 #include "hud/lvgl/receiver_controls.hpp"
+#include "ascent_menu.hpp"
 #include "hud/lvgl/view.hpp"
 #include <csignal>
 #include <cstdio>
@@ -137,6 +138,7 @@ int main(int argc, char **argv) {
         Settings settings;
         if (o.settings_file.empty() && !o.preferences.empty()) o.settings_file=o.preferences+".receiver";
         if (!o.settings_file.empty()) settings.load(o.settings_file);
+        zones::load(settings);
         o.link.max_kbps=settings.get(radio::setting::ar8030_max_kbps);
         o.link.max_mcs=settings.get(radio::setting::ar8030_max_mcs);
         o.link.tx_power_mw=o.link.tx_power_want_mw=settings.get(radio::setting::tx_power_mw);
@@ -190,8 +192,12 @@ int main(int argc, char **argv) {
         model.backend.vrx.freshness_us = 6000000; // native full radio poll is every three seconds
         model.set_preferences(kestrel_ui::load_preferences(o.preferences));
         kestrel_ui::Controller controller(model);
+        ascent::RegionMenu region_menu;
+        ascent::ChannelMenu channel_menu(radio_model.radio());
         kestrel_ui::ReceiverControls controls(radio_model.camera(),radio_model.encoder(),radio_model.air_radio(),radio_model.air_unit(),radio_model.radio());
         controller.apply_receiver=[&](const std::string& id,int value) {
+            if (region_menu.owns(id)) return region_menu.apply(id,value);
+            if (id=="channel") return channel_menu.apply(value,model.backend);
             return controls.apply(id,value,kestrel_ui::monotonic_us());
         };
         if (!o.preferences.empty())
@@ -235,6 +241,8 @@ int main(int argc, char **argv) {
             model.backend.service.connected = o.radio;
             model.backend.service.provider_connected = telemetry.fresh(now);
             controls.update(model.backend, now);
+            region_menu.update(model.backend);
+            channel_menu.update(model.backend,now,model.channel_open);
             input.poll(controller, now);
             auto notice = [&](const char* text) {
                 if (!model.menu_open) controller.open_menu();

@@ -52,12 +52,18 @@ private:
     uint64_t menu_snapshot_count_ = 0;
     uint64_t menu_snapshot_checked_us_ = 0;
     uint64_t last_tick_ = 0;
+    lv_obj_t* channel_ = nullptr;
+    lv_obj_t* clock_ = nullptr;
+    std::string clock_text_;
+    uint64_t channel_revision_ = 0;
+    bool old_channel_ = false;
     lv_obj_t *screen_ = nullptr, *menu_ = nullptr, *picker_ = nullptr, *idle_object_ = nullptr, *dimmer_ = nullptr;
     void sync_hud_objects();
     void draw_hud(lv_layer_t* layer, size_t region);
     void draw_menu(lv_layer_t* layer);
     lv_area_t menu_reveal(float progress) const;
     void draw_picker(lv_layer_t* layer);
+    void draw_channel(lv_layer_t* layer);
     void prepare_menu_snapshot();
     void drop_menu_snapshot();
     static void draw_event(lv_event_t* event);
