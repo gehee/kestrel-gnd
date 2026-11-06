@@ -4,9 +4,9 @@ The Gnd485 stock firmware polls an external I²C ADC for the menu keys, a
 separate GPIO for LINK, and drives the beeper through PWM. These are different
 board connections from the RK3568 VRX Pro and the AR9311 VR04 goggles.
 
-The button portion of this firmware-derived interface map has been confirmed
-through physical presses on native fpvOS. PWM operation and register readback
-have been tested, but audible beeper output remains unverified.
+This firmware-derived interface map has been confirmed through physical button
+presses and a dedicated audible beeper test on native fpvOS. PWM operation and
+register readback have also been tested.
 The physical SoC package pad, PCB net and beeper transistor polarity have not
 been established. No unidentified GPIO was driven during this investigation.
 
@@ -86,10 +86,15 @@ These call sites establish available tone settings; not every caller's product
 meaning has been reconstructed. The startup script separately pulses channel 0
 at 1 kHz, 10% duty for 5 ms. Under native fpvOS, two 100 ms pulses at 1 kHz,
 10% duty, separated by 250 ms, were requested. Hardware readback after release
-showed the channel disabled. Audible output has not been verified; the earlier
-confirmation claim was corrected by the operator. Other stock tone patterns
-remain untested. Duty controls electrical drive; it is not a linear
-calibrated loudness scale.
+showed the channel disabled; audible output from that test was not confirmed.
+
+A subsequent dedicated listening test used **1 kHz, 20% duty**, with pulses of
+150 ms, 150 ms and 500 ms separated by 350 ms. The operator explicitly confirmed
+hearing that exact short-short-long pattern from the VRX. PWM was disabled and
+unexported afterward, with hardware readback confirming disabled state. This
+confirms audible output for the tested pattern; other stock tone patterns remain
+untested. Duty controls electrical drive; it is not a linear calibrated loudness
+scale.
 
 ## Integration boundary
 
@@ -120,7 +125,7 @@ transport:
 fpvOS commit `edd9790` enables I²C3, built-in `i2c-dev` and the Artosyn PWM
 provider. The installed image passed update readback, a cold boot, PWM range
 and polarity checks, and decoder/platform regression checks. Physical button
-press/release is confirmed; beeper acoustic validation remains outstanding.
+press/release and the dedicated audible beeper pattern are confirmed.
 Kestrel acquisition, debounce/repeat, read-error recovery and notification
 scheduling still need implementation before these inputs drive the menu,
 binding or upgrade actions.

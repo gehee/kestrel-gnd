@@ -135,8 +135,8 @@ This is an initial bring-up target, not a flight-ready receiver.
 - Menu edits currently cover visual preferences. RF/camera configuration, binding,
   DVR/gallery, FC telemetry integration, and physical board-button acquisition are
   still pending. [Button and beeper interfaces](ascent-input-feedback.md) have
-  been traced in stock firmware and enabled in fpvOS. Button presses are
-  physically validated; audible beeper output is not yet verified. Kestrel
+  been traced in stock firmware and enabled in fpvOS. Button presses and a
+  dedicated audible beeper pattern are physically validated. Kestrel
   input/feedback integration remains. Unavailable temperature and supply
   readings remain blank.
 - Native SDIO does not run the USB firmware's frame-clock register sampler or
