@@ -17,7 +17,7 @@ double cpu_us() {
 }
 int main(int argc, char** argv) {
     try {
-        if (argc != 5 && argc != 6) throw std::runtime_error("Usage: kestrel-ui-animation-bench ASSETS FPS DRAW_ROWS timer|paced [navigate]");
+        if (argc != 5 && argc != 6) throw std::runtime_error("Usage: kestrel-ui-animation-bench ASSETS FPS DRAW_ROWS(0=direct) timer|paced [navigate]");
         const int fps = std::stoi(argv[2]), rows = std::stoi(argv[3]);
         const std::string mode = argv[4];
         const bool paced = mode == "paced";

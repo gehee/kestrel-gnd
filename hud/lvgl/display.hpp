@@ -11,7 +11,9 @@ namespace kestrel_ui {
 // selected framebuffer page; its visible contents are restored on normal exit.
 class Display {
 public:
-    Display(int width, int height, const std::string& framebuffer, int draw_rows = 192);
+    // draw_rows == 0 renders directly into the retained overlay. A positive
+    // value enables the staging-buffer path for comparison and regression tools.
+    Display(int width, int height, const std::string& framebuffer, int draw_rows = 0);
     ~Display();
     Display(const Display&) = delete;
     Display& operator=(const Display&) = delete;

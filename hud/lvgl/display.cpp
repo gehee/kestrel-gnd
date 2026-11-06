@@ -13,7 +13,7 @@
 
 namespace kestrel_ui {
 Display::Display(int w, int h, const std::string& framebuffer, int draw_rows) : width_(w), height_(h) {
-    if (draw_rows < 1 || draw_rows > 512) throw std::invalid_argument("Invalid partial draw-buffer height");
+    if (draw_rows < 0 || draw_rows > 512) throw std::invalid_argument("Invalid partial draw-buffer height");
     if (!framebuffer.empty()) {
         fd_ = open(framebuffer.c_str(), O_RDWR | O_CLOEXEC);
         if (fd_ < 0) throw std::runtime_error("Cannot open framebuffer: " + std::string(std::strerror(errno)));
@@ -58,15 +58,17 @@ Display::Display(int w, int h, const std::string& framebuffer, int draw_rows) : 
             throw;
         }
     }
-    // A larger partial buffer reduces repeated custom DRAW callbacks during
-    // menu animation. 192 rows costs ~1.4 MiB at 1080p, still no full-frame
-    // draw buffer or GPU context. The retained surface supports screenshots.
+    // Draw directly into the retained overlay by default. LVGL clears and
+    // repaints only damaged regions; no staging-to-overlay copy is needed.
+    // Partial buffers remain available to compare rendering paths in tools.
     pixels_.resize(size_t(width_) * height_);
     draw_buffer_.resize(size_t(width_) * draw_rows);
     display_ = lv_display_create(width_, height_);
     if (!display_) throw std::runtime_error("Cannot create LVGL display");
     lv_display_set_color_format(display_, LV_COLOR_FORMAT_ARGB8888);
-    lv_display_set_buffers(display_, draw_buffer_.data(), nullptr, draw_buffer_.size() * 4, LV_DISPLAY_RENDER_MODE_PARTIAL);
+    lv_display_set_buffers(display_, draw_rows ? draw_buffer_.data() : pixels_.data(), nullptr,
+        draw_rows ? draw_buffer_.size() * 4 : pixels_.size() * 4,
+        draw_rows ? LV_DISPLAY_RENDER_MODE_PARTIAL : LV_DISPLAY_RENDER_MODE_DIRECT);
     lv_display_set_user_data(display_, this);
     lv_display_set_flush_cb(display_, flush_cb);
 }
@@ -95,9 +97,11 @@ void Display::flush(const lv_area_t& a, const uint8_t* source) {
         damage_.push_back({a.x1, a.y1, a.x2 - a.x1 + 1, a.y2 - a.y1 + 1});
     }
     const size_t row_bytes = size_t(a.x2 - a.x1 + 1) * 4;
+    const bool direct=draw_buffer_.empty();
+    if(direct) source += (size_t(a.y1)*width_+a.x1)*4;
     for (int y = a.y1; y <= a.y2; ++y) {
         auto* dest = pixels_.data() + size_t(y) * width_ + a.x1;
-        std::memcpy(dest, source, row_bytes);
+        if(!direct) std::memcpy(dest, source, row_bytes);
         if (mapping_) {
             auto* fb = mapping_ + size_t(y + yoffset_) * stride_ + size_t(a.x1 + xoffset_) * 4;
             if (red_ == 16 && green_ == 8 && blue_ == 0 && alpha_ == 24) std::memcpy(fb, source, row_bytes);
@@ -108,7 +112,7 @@ void Display::flush(const lv_area_t& a, const uint8_t* source) {
                 std::memcpy(fb + x * 4, &converted, 4);
             }
         }
-        source += row_bytes;
+        source += direct ? size_t(width_)*4 : row_bytes;
         bytes_written += row_bytes;
     }
     ++flushes;
