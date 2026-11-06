@@ -1,7 +1,7 @@
 #include "hal/v4l2/vdec_v4l2.hpp"
 #include "base/time_util.h"
-#include <array>
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
@@ -36,7 +36,10 @@ void checked(int fd, unsigned long op, void *p, const char *name) {
 struct Mapping {
     void *ptr = MAP_FAILED;
     size_t size = 0;
+    int prime_fd = -1;
     ~Mapping() {
+        if (prime_fd >= 0)
+            close(prime_fd);
         if (ptr != MAP_FAILED)
             munmap(ptr, size);
     }
@@ -79,6 +82,14 @@ unsigned allocate(int fd, v4l2_buf_type type, unsigned count,
         maps[i]->ptr = mmap(nullptr, p.length, PROT_READ | PROT_WRITE, MAP_SHARED, fd, p.m.mem_offset);
         if (maps[i]->ptr == MAP_FAILED)
             throw std::runtime_error("map V4L2 buffer");
+        if (type == capture_type) {
+            v4l2_exportbuffer exported{};
+            exported.type = type;
+            exported.index = i;
+            exported.flags = O_CLOEXEC | O_RDWR;
+            checked(fd, VIDIOC_EXPBUF, &exported, "export decoded DMA-BUF");
+            maps[i]->prime_fd = exported.fd;
+        }
     }
     return r.count;
 }
@@ -100,12 +111,8 @@ void queue(int fd, v4l2_buf_type type, unsigned index, size_t size, size_t used,
 VdecV4l2::VdecV4l2(VideoCodec codec, std::string device, std::shared_ptr<hal::FrameSink> sink,
                    volatile bool *stop)
     : codec_(codec), device_(std::move(device)), sink_(std::move(sink)), stop_(stop) {}
-VdecV4l2::~VdecV4l2() {
-    cleanup();
-}
-void VdecV4l2::cleanup() {
-    quit_ = true;
-}
+VdecV4l2::~VdecV4l2() { cleanup(); }
+void VdecV4l2::cleanup() { quit_ = true; }
 void VdecV4l2::feed_packet_to_decoder(void *data, int len, int64_t pts, uint64_t recv, uint8_t nal,
                                       uint32_t enc, uint32_t proc, bool key) {
     if (len <= 0 || unsigned(len) > packet_bytes || quit_ || failed_)
@@ -330,8 +337,16 @@ void VdecV4l2::decode() {
                 frame->width = width;
                 frame->height = height;
                 frame->frame_ref = cap[b.index];
-                frame->has_prime_fd = false;
-                frame->prime_fd = -1;
+                frame->has_prime_fd = true;
+                frame->prime_fd = cap[b.index]->prime_fd;
+                frame->drm_pixel_format = V4L2_PIX_FMT_YUV420; // same fourcc as DRM YU12
+                frame->pitches[0] = stride;
+                frame->pitches[1] = frame->pitches[2] = stride / 2;
+                frame->offsets[0] = p.data_offset + top * stride + left;
+                frame->offsets[1] =
+                    p.data_offset + stride * coded_height + (top / 2) * (stride / 2) + left / 2;
+                frame->offsets[2] =
+                    p.data_offset + stride * coded_height * 5 / 4 + (top / 2) * (stride / 2) + left / 2;
                 auto *pixels = static_cast<uint8_t *>(cap[b.index]->ptr) + p.data_offset;
                 frame->data[0] = pixels + top * stride + left;
                 frame->data[1] = pixels + stride * coded_height + (top / 2) * (stride / 2) + left / 2;

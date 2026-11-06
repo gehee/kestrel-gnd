@@ -1,5 +1,5 @@
 #pragma once
-#include "display/software_screen.hpp"
+#include "display/plane_screen.hpp"
 #include "hal/vdec.hpp"
 #include "base/video_codec.hpp"
 #include <string>
@@ -9,7 +9,7 @@ struct SoftwareSetup {
     bool force_display = false;
 };
 struct SoftwareReceiver {
-    std::shared_ptr<display::SoftwareScreen> screen;
+    std::shared_ptr<display::PlaneScreen> screen;
     std::shared_ptr<Vdec> decoder;
 };
 SoftwareReceiver make_software_receiver(const SoftwareSetup &, VideoCodec, volatile bool *stop);

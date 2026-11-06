@@ -271,8 +271,7 @@ int main(int argc, char **argv) {
             const auto overlay_start = kestrel_ui::monotonic_us();
             if (display.presentations != drawn) {
                 drawn = display.presentations;
-                receiver.screen->overlay(
-                    std::make_shared<hal::I420Overlay>(1920, 1080, display.pixels().data()));
+                receiver.screen->overlay(display.pixels().data(), 1920, 1080);
             }
             const auto rendered = kestrel_ui::monotonic_us();
             // FPS is a frame budget, not an extra delay after rendering.
