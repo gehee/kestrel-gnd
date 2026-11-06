@@ -318,7 +318,8 @@ void View::draw_menu(lv_layer_t* layer) {
 void View::update(uint64_t now) {
     text_.begin_frame(); idle_.prepare(model_, now);
     now_ = now;
-    const auto clock=model_.clock_text(std::time(nullptr),now);
+    auto clock=model_.clock_text(std::time(nullptr),now);
+    if(model_.backend.media.recording) clock=clock.empty()?"REC":"REC  "+clock;
     if(clock!=clock_text_ || old_theme_!=model_.theme) {
         clock_text_=clock; lv_obj_invalidate(clock_);
     }

@@ -9,6 +9,9 @@
 #include "hud/lvgl/preferences.hpp"
 #include "hud/lvgl/receiver_controls.hpp"
 #include "ascent_menu.hpp"
+#include "dvr/dvr_sink.hpp"
+#include "dvr/stream_recorder.hpp"
+#include "dvr/settings.hpp"
 #include "hud/lvgl/view.hpp"
 #include <csignal>
 #include <cstdio>
@@ -25,7 +28,7 @@ void signal_handler(int signal) {
 }
 struct Options {
     platform::SoftwareSetup platform;
-    std::string trace_dir, settings_file;
+    std::string trace_dir, settings_file, recordings;
     std::string assets = "/usr/share/kestrel/ui", input, control, preferences, command, screenshot;
     bool radio = true, menu = false, vector = false, profile = false;
     unsigned seconds = 0;
@@ -76,6 +79,8 @@ Options options(int argc, char **argv) {
             o.trace_dir = value();
         else if (arg == "--settings")
             o.settings_file = value();
+        else if (arg == "--recordings")
+            o.recordings = value();
         else if (arg == "--profile")
             o.profile = true;
         else if (arg == "--vector")
@@ -107,6 +112,7 @@ Options options(int argc, char **argv) {
                  "  --preferences FILE  Save visual preferences (optional)\n"
                  "  --show-menu --vector --no-radio --seconds N\n"
                  "  --settings FILE     Save receiver and per-air-unit settings\n"
+                 "  --recordings DIR    Existing folder for received-stream MP4 recordings\n"
                  "  --profile           Log UI and display timing every five seconds\n"
                  "  --trace-dir DIR     Watch DIR/ltrace.req; write frame timing to DIR/ltrace.bin\n"
                  "  --drm DEVICE --decoder DEVICE --replay FILE");
@@ -149,7 +155,11 @@ int main(int argc, char **argv) {
         volatile bool stop = false;
         const VideoCodec codec = VideoCodec::H265;
         auto receiver = platform::make_software_receiver(o.platform, codec, &stop);
+        if(o.recordings.empty()) o.recordings=settings.get(dvr::setting::dvr_dir);
+        dvr::StreamRecorder recorder(o.recordings,codec,1920,1080,60);
+        DvrSink recording_sink(codec,recorder);
         Ar8030Link link(radio_model, o.link, settings, codec, receiver.decoder, &stop);
+        link.add_video_sink(&recording_sink);
         std::atomic<bool> source_exited{false}, worker_failed{false};
         struct Join {
             volatile bool &stop;
@@ -196,6 +206,11 @@ int main(int argc, char **argv) {
         ascent::ChannelMenu channel_menu(radio_model.radio());
         kestrel_ui::ReceiverControls controls(radio_model.camera(),radio_model.encoder(),radio_model.air_radio(),radio_model.air_unit(),radio_model.radio());
         controller.apply_receiver=[&](const std::string& id,int value) {
+            if(id=="record") {
+                if(!recorder.is_recording() && (!model.backend.media.video_fresh(kestrel_ui::monotonic_us()) || !recorder.state().storage_ready))
+                    throw std::runtime_error("Recording needs live video and writable storage");
+                recorder.toggle(); return std::string("Recording change requested");
+            }
             if (region_menu.owns(id)) return region_menu.apply(id,value);
             if (id=="channel") return channel_menu.apply(value,model.backend);
             return controls.apply(id,value,kestrel_ui::monotonic_us());
@@ -217,6 +232,7 @@ int main(int argc, char **argv) {
         const auto start = kestrel_ui::monotonic_us();
         uint64_t drawn = 0;
         int previous_bind = gnd::BIND_IDLE;
+        std::string recording_error;
         uint64_t profile_start = start, profile_loops = 0, profile_drawn = 0, profile_presented = 0;
         uint64_t render_us = 0, overlay_us = 0, longest_loop_us = 0;
         uint64_t longest_render_us = 0, longest_overlay_us = 0;
@@ -243,6 +259,17 @@ int main(int argc, char **argv) {
             controls.update(model.backend, now);
             region_menu.update(model.backend);
             channel_menu.update(model.backend,now,model.channel_open);
+            const auto recording=recorder.state();
+            model.backend.media.recording_known=true; model.backend.media.recording=recording.recording;
+            model.backend.media.recording_id=recording.file;
+            auto& rec=model.backend.controls["record"]; rec={};rec.known=true;rec.action=true;
+            rec.enabled=recorder.is_recording() || (recording.storage_ready && model.backend.media.video_fresh(now));
+            rec.text=recorder.is_recording()?"STOP":recording.finishing?"SAVING":"START";
+            rec.reason=recording.error.empty()?"Records the received video without re-encoding.":recording.error;
+            auto& folder=model.backend.controls["folder"];folder={};folder.known=true;folder.text=o.recordings;
+            auto& space=model.backend.controls["space"];space={};space.known=true;
+            space.text=std::to_string(recording.free_bytes/(1024*1024))+" MiB";
+            space.reason=recording.storage_ready?"":"Storage unavailable or less than 64 MiB free.";
             input.poll(controller, now);
             auto notice = [&](const char* text) {
                 if (!model.menu_open) controller.open_menu();
@@ -250,12 +277,16 @@ int main(int argc, char **argv) {
                 ++model.menu_version;
                 printf("panel: %s\n", text);
             };
+            if(recording.error!=recording_error) {
+                recording_error=recording.error;
+                if(!recording_error.empty()) {notice(recording_error.c_str());panel.beep(platform::PanelTone::Failure);}
+            }
             for (const auto& event : panel.take()) {
                 if (event.repeat && !model.key_repeat) continue;
                 printf("panel: key=%s%s\n", bsp::ascent_panel::name(event.key), event.repeat ? " repeat" : "");
                 if (event.key == platform::PanelKey::Rec) {
-                    notice("Recording is not available yet");
-                    panel.beep(platform::PanelTone::Failure);
+                    try {model.feedback=controller.apply_receiver("record",0);panel.beep();}
+                    catch(const std::exception& e) {notice(e.what());panel.beep(platform::PanelTone::Failure);}
                 } else if (event.key == platform::PanelKey::Upgrade) {
                     notice("Button-triggered upgrade is not available yet");
                     panel.beep(platform::PanelTone::Failure);

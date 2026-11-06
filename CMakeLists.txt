@@ -185,7 +185,7 @@ kestrel_module(platform FOLDERS platform DEPS hal bsp render display
     SOURCES platform/caps.cpp platform/kms_gles.cpp platform/gles_hud_layer.cpp ${KESTREL_PLATFORM_SRC}
     LIBS ${GFX_LIBRARIES} ${DRM_LIBRARIES})
 kestrel_module(dvr FOLDERS dvr DEPS platform
-    SOURCES dvr/h264_cfr.cpp dvr/hevc_repair.cpp dvr/dvr.cpp dvr/dvr_sink.cpp
+    SOURCES dvr/h264_cfr.cpp dvr/hevc_repair.cpp dvr/dvr.cpp dvr/dvr_sink.cpp dvr/writer.cpp dvr/mp4.cpp
             dvr/dvr_library.cpp dvr/dvr_recover.cpp)
 kestrel_module(hud FOLDERS hud icons DEPS bsp render msp display platform dvr region system
     SOURCES hud/gallery.cpp hud/gallery_stats.cpp hud/osd_gallery.cpp hud/osd_screen.cpp

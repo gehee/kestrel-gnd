@@ -15,12 +15,13 @@
 #include "base/bus.hpp"
 #include "base/video_codec.hpp"
 #include "dvr/hevc_repair.hpp"
+#include "dvr/recording_target.hpp"
 
 class DvrSink : public bus::VideoSink {
 public:
     // screen_rec: whether REC records the screen (DVR > Source SCREEN) - then
     // the screen recorder has the pictures, and this sink takes none.
-    DvrSink(VideoCodec codec, std::function<bool()> screen_rec);
+    DvrSink(VideoCodec codec, RecordingTarget& target, std::function<bool()> screen_rec = {});
     ~DvrSink() override;
     DvrSink(const DvrSink&) = delete;
     DvrSink& operator=(const DvrSink&) = delete;
@@ -39,6 +40,7 @@ private:
         bus::PictureRef pic;                          // the picture, in the pool...
         std::shared_ptr<std::vector<uint8_t>> copy;   // ...or a copy of it
         uint64_t pts = 0;
+        uint64_t session = 0;
         int8_t whole = -1;                            // bus::PictureBuf::whole
         ParamSets ps;                                 // Params: the stream's new VPS/SPS/PPS
     };
@@ -53,6 +55,8 @@ private:
     void take(Item& it);
     bool has_keyframe(const uint8_t* au, size_t n) const;
     const VideoCodec codec_;
+    RecordingTarget& target_;
+    uint64_t session_ = 0;
     std::function<bool()> screen_rec_;
     bool keyed_ = false;            // the recording running has had its keyframe
     bool rec_was_ = false;          // a recording was running at the last picture

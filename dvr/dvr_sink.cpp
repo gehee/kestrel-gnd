@@ -5,7 +5,7 @@
 #include <cstdio>
 #include <ctime>
 
-#include "dvr/dvr.hpp"
+
 
 static uint64_t now_ms() {
     timespec ts;
@@ -18,8 +18,8 @@ static uint64_t now_ms() {
 // them, so the picture is copied.
 static constexpr int kPoolReserve = 8;
 
-DvrSink::DvrSink(VideoCodec codec, std::function<bool()> screen_rec)
-    : codec_(codec), screen_rec_(std::move(screen_rec)) {
+DvrSink::DvrSink(VideoCodec codec, RecordingTarget& target, std::function<bool()> screen_rec)
+    : codec_(codec), target_(target), screen_rec_(std::move(screen_rec)) {
     ring_.set_waker(&wake_);
     thread_ = std::thread(&DvrSink::run, this);
 }
@@ -54,7 +54,7 @@ void DvrSink::on_parameter_sets(const std::vector<std::vector<uint8_t>>& ps) {
 // pic->pts is the picture's time: its capture stamp, else its arrival.
 void DvrSink::on_picture(const bus::PictureRef& pic) {
     if (screen_rec_ && screen_rec_()) return;
-    if (!DvrRecorder::instance().is_recording()) {
+    if (!target_.is_recording()) {
         if (rec_queued_) {                         // the end of one: the sink's thread winds it up
             Item it;
             it.kind = Item::Stopped;
@@ -65,6 +65,7 @@ void DvrSink::on_picture(const bus::PictureRef& pic) {
     rec_queued_ = true;
     Item it;
     it.pts = pic->pts;
+    it.session = target_.session();
     it.whole = pic->whole;
     if (pic->pool->free_count() < kPoolReserve) {
         static uint64_t copied = 0;
@@ -101,7 +102,7 @@ void DvrSink::run() {
 
 void DvrSink::take(Item& it) {
     if (it.kind == Item::Params) {
-        DvrRecorder::instance().set_parameter_sets(*it.ps);
+        target_.set_parameter_sets(*it.ps);
         if (codec_ == VideoCodec::H265) repair_.set_parameter_sets(*it.ps);
         return;
     }
@@ -113,7 +114,9 @@ void DvrSink::take(Item& it) {
         keyed_ = false;
         return;
     }
-    DvrRecorder &rec = DvrRecorder::instance();
+    RecordingTarget &rec = target_;
+    if (!rec.is_recording() || it.session != rec.session()) return;
+    if (session_ != it.session) {session_=it.session; rec_was_=false; keyed_=false;}
     if (!rec_was_) {
         rec_was_ = true;
         repair_.reset();
@@ -134,6 +137,7 @@ void DvrSink::take(Item& it) {
             keyframe_wanted_.store(true);   // the radio asks, after its next picture
         }
     }
+    if (!keyed_) return;
     // A picture or slice the radio lost: a copy in its place, so the pictures
     // after it find what they refer to - Apple's decoder stopped at the first
     // loss and waited for a keyframe that never came (see dvr/hevc_repair).

@@ -1,6 +1,9 @@
 # Native Ascent: no vendor daemon, EGL/GBM, FFmpeg or Rockchip dependencies.
 option(KESTREL_TESTS "Build unit tests" OFF)
 if(KESTREL_TESTS)
+    add_executable(stream_recorder_test tools/test/stream_recorder_test.cpp)
+    target_link_libraries(stream_recorder_test PRIVATE kg_dvr)
+    add_test(NAME stream_recorder COMMAND stream_recorder_test)
     enable_testing()
 endif()
 include_directories("${PROJECT_SOURCE_DIR}" "${PROJECT_BINARY_DIR}")
@@ -29,8 +32,10 @@ target_link_libraries(kg_platform PUBLIC kg_display kg_bsp)
 add_executable(ascent-planes-probe tools/test/ascent_planes_probe.cpp)
 target_link_libraries(ascent-planes-probe PRIVATE kg_display kg_hal)
 add_subdirectory(hud/lvgl)
+add_library(kg_dvr STATIC dvr/stream_recorder.cpp dvr/dvr_sink.cpp dvr/hevc_repair.cpp dvr/writer.cpp dvr/mp4.cpp dvr/dvr_library.cpp)
+target_link_libraries(kg_dvr PUBLIC kg_base)
 add_executable(kestrel-gnd app/ascent_main.cpp radio/bb_sdk_shim.cpp)
-target_link_libraries(kestrel-gnd PRIVATE kg_platform kg_radio kg_lvgl_view kg_version)
+target_link_libraries(kestrel-gnd PRIVATE kg_platform kg_radio kg_lvgl_view kg_dvr kg_version)
 # The native ar_libre API is intentionally linked, including optional fast-path
 # symbols when packaged as a static archive; no SDK runtime interposition needed.
 target_link_options(kestrel-gnd PRIVATE -Wl,-u,arlink_version)
@@ -44,7 +49,7 @@ if(KESTREL_TESTS)
         "bsp: bsp | base\nregion: region | base\nrender: render | base\n"
         "radio: radio | hal region system\ndisplay: display | hal\n"
         "platform: platform | hal bsp render display\nhud: hud/lvgl | render system\n"
-        "app: app | platform radio hud region\n")
+        "dvr: dvr | platform\napp: app | platform radio hud region dvr\n")
     add_test(NAME layers COMMAND ${CMAKE_COMMAND} -DSRC=${PROJECT_SOURCE_DIR}
         -DLAYERS=${PROJECT_BINARY_DIR}/layers.txt -DNM=${CMAKE_NM} -DLIBDIR=${PROJECT_BINARY_DIR}
         -P ${PROJECT_SOURCE_DIR}/tools/check_layers.cmake)

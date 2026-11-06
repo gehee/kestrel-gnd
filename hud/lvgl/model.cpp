@@ -155,9 +155,10 @@ std::vector<MenuRow> Model::rows(uint64_t now) const {
             reading("frame_mode", "Frame Mode", "FULL DECODE", "The decoder receives whole pictures; only complete decoded frames are displayed.")};
     }
     if (tab == 4) return {
-        unavailable("dvr_source", "Source", "What REC captures: the FPV stream, or the screen."),
-        reading("folder", "Folder", "--", "Where recordings are written. Recording is not yet supported on Ascent."),
-        reading("space", "Space Left", "--", "Room remaining on the recordings partition.")};
+        reading("dvr_source", "Source", "FPV STREAM", "Records the received video. Screen capture requires a hardware compositor-to-encoder path."),
+        unavailable("record", "Recording", "Start or stop recording; the REC button does the same."),
+        unavailable("folder", "Folder", "Where recordings are written."),
+        unavailable("space", "Space Left", "Room remaining on the recordings partition.")};
     if (tab == 5) return {
         reading("build", "Build", build, "When this receiver application was built."),
         reading("version", "Version", version, "The receiver application version and source revision."),
