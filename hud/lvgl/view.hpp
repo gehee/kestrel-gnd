@@ -43,6 +43,8 @@ private:
     std::array<int,3> motion_transform_{};
     lv_obj_t* gallery_=nullptr;
     std::string gallery_signature_;
+    std::array<lv_image_dsc_t,6> thumbnail_images_{};
+    std::array<std::shared_ptr<const media::Thumbnail>,6> thumbnails_{};
     bool old_status_ = false;
     uint64_t now_ = 0;
     Telemetry presented_;

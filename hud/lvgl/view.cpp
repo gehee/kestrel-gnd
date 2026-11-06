@@ -117,7 +117,7 @@ View::View(const Controller& controller, int w, int h, const std::string& assets
     lv_obj_remove_flag(menu_capture_,LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(menu_capture_,draw_event,LV_EVENT_DRAW_MAIN,this);
 }
-View::~View() { lv_obj_delete(capture_screen_);lv_obj_clean(screen_); drop_menu_snapshot(); }
+View::~View() { for(auto& image:thumbnail_images_){lv_image_cache_drop(&image);lv_image_header_cache_drop(&image);} lv_obj_delete(capture_screen_);lv_obj_clean(screen_); drop_menu_snapshot(); }
 void View::draw_edge(lv_layer_t* layer, int side) {
     if (!edge_opacity_) return;
     lv_draw_image_dsc_t d; lv_draw_image_dsc_init(&d);
@@ -380,9 +380,15 @@ void View::draw_gallery(lv_layer_t* layer) {
         const int slot=i-start;const int x=48+(slot%2)*920,y=130+(slot/2)*265;
         rect(layer,int(x*u),int(y*u),int(880*u),int(230*u),theme.quiet,.12f);
         if(i==selected)rect(layer,int(x*u),int(y*u),int(880*u),int(230*u),theme.accent,1,2);
-        label(clips[i].name,x+24,y+62,25,theme.text);
-        label(std::to_string(clips[i].bytes/(1024*1024))+" MiB",x+24,y+122,23,theme.quiet);
-        label("OK  PLAY",x+24,y+190,20,i==selected?theme.accent:theme.quiet);
+        if(thumbnails_[slot]) {
+            lv_draw_image_dsc_t d;lv_draw_image_dsc_init(&d);d.src=&thumbnail_images_[slot];
+            const auto& image=*thumbnails_[slot];
+            lv_area_t area{int((x+20)*u),int((y+25)*u),int((x+20)*u)+image.width-1,int((y+25)*u)+image.height-1};
+            lv_draw_image(layer,&d,&area);
+        } else label("NO PREVIEW",x+40,y+122,20,theme.quiet);
+        label(clips[i].name,x+365,y+62,19,theme.text);
+        label(std::to_string(clips[i].bytes/(1024*1024))+" MiB",x+365,y+122,23,theme.quiet);
+        label("OK  PLAY",x+365,y+190,20,i==selected?theme.accent:theme.quiet);
     }
     label("ARROWS  Select     OK  Play     BACK  Live video",48,1000,24,theme.text);
     label(model_.feedback,48,1045,20,theme.quiet);
@@ -520,6 +526,19 @@ void View::update(uint64_t now) {
     const bool gallery=model_.scene==SceneMode::GalleryBrowse || model_.scene==SceneMode::GalleryPlayback;
     hidden(gallery_,!gallery);
     if(gallery) {
+        const int first=std::max(0,model_.gallery_selected)/6*6;
+        for(int slot=0;slot<6;++slot) {
+            const auto image=first+slot<int(model_.backend.recordings.size())?model_.backend.recordings[first+slot].thumbnail:nullptr;
+            if(image==thumbnails_[slot])continue;
+            lv_image_cache_drop(&thumbnail_images_[slot]);lv_image_header_cache_drop(&thumbnail_images_[slot]);
+            thumbnails_[slot]=image;auto& d=thumbnail_images_[slot];d={};
+            if(image) {
+                d.header.magic=LV_IMAGE_HEADER_MAGIC;d.header.cf=LV_COLOR_FORMAT_ARGB8888;
+                d.header.w=image->width;d.header.h=image->height;d.header.stride=image->width*4;
+                d.data_size=image->argb.size()*4;d.data=reinterpret_cast<const uint8_t*>(image->argb.data());
+            }
+            lv_obj_invalidate(gallery_);
+        }
         std::ostringstream signature;
         signature<<int(model_.scene)<<':'<<model_.gallery_selected<<':'<<model_.theme<<':'<<model_.feedback<<':'
             <<model_.backend.playback_position_us/1000000<<':'<<model_.backend.playback_duration_us/1000000<<':'

@@ -1,5 +1,7 @@
 #pragma once
 #include "system/flight_telemetry.hpp"
+#include "system/thumbnail.hpp"
+#include <memory>
 #include <string>
 #include <map>
 #include <vector>
@@ -92,7 +94,7 @@ struct ReceiverControl {
     std::vector<ReceiverChoice> choices;
 };
 struct BackendState : ReceiverState {
-    struct Recording {std::string name;uint64_t bytes=0;};
+    struct Recording {std::string name;uint64_t bytes=0;std::shared_ptr<const media::Thumbnail> thumbnail;};
     std::vector<Recording> recordings;
     bool playback_busy=false,playback_paused=false;
     uint64_t playback_position_us=0,playback_duration_us=0;

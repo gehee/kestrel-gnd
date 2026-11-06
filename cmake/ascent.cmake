@@ -36,7 +36,7 @@ target_link_libraries(kg_platform PUBLIC kg_display kg_bsp)
 add_executable(ascent-planes-probe tools/test/ascent_planes_probe.cpp)
 target_link_libraries(ascent-planes-probe PRIVATE kg_display kg_hal)
 add_subdirectory(hud/lvgl)
-add_library(kg_dvr STATIC dvr/stream_recorder.cpp dvr/stream_player.cpp dvr/dvr_sink.cpp dvr/hevc_repair.cpp dvr/writer.cpp dvr/mp4.cpp dvr/dvr_library.cpp)
+add_library(kg_dvr STATIC dvr/thumbnails.cpp dvr/stream_recorder.cpp dvr/stream_player.cpp dvr/dvr_sink.cpp dvr/hevc_repair.cpp dvr/writer.cpp dvr/mp4.cpp dvr/dvr_library.cpp)
 target_link_libraries(kg_dvr PUBLIC kg_base)
 add_executable(kestrel-gnd app/ascent_main.cpp radio/bb_sdk_shim.cpp)
 target_link_libraries(kestrel-gnd PRIVATE kg_platform kg_radio kg_lvgl_view kg_dvr kg_msp kg_version)
@@ -46,6 +46,9 @@ target_link_options(kestrel-gnd PRIVATE -Wl,-u,arlink_version)
 add_dependencies(kestrel-gnd kestrel-hud kestrel-hud-vector)
 install(TARGETS kestrel-gnd kestrel-hud kestrel-hud-vector RUNTIME DESTINATION bin)
 if(KESTREL_TESTS)
+    add_executable(thumbnails_test tools/test/thumbnails_test.cpp)
+    target_link_libraries(thumbnails_test PRIVATE kg_dvr)
+    add_test(NAME thumbnails COMMAND thumbnails_test)
     add_executable(stream_player_test tools/test/stream_player_test.cpp)
     target_link_libraries(stream_player_test PRIVATE kg_dvr)
     add_test(NAME stream_player COMMAND stream_player_test)
@@ -66,7 +69,7 @@ if(KESTREL_TESTS)
         "radio: radio | hal region system\ndisplay: display | hal\n"
         "platform: platform | hal bsp render display\nhud: hud/lvgl | render system\n"
         "motion: motion | system\nmsp: msp | motion\n"
-        "dvr: dvr | platform\napp: app | platform radio hud region dvr msp\n")
+        "dvr: dvr | platform hal system\napp: app | platform radio hud region dvr msp\n")
     add_test(NAME layers COMMAND ${CMAKE_COMMAND} -DSRC=${PROJECT_SOURCE_DIR}
         -DLAYERS=${PROJECT_BINARY_DIR}/layers.txt -DNM=${CMAKE_NM} -DLIBDIR=${PROJECT_BINARY_DIR}
         -P ${PROJECT_SOURCE_DIR}/tools/check_layers.cmake)

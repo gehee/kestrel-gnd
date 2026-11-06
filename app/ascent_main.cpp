@@ -13,6 +13,7 @@
 #include "ascent_menu.hpp"
 #include "dvr/dvr_sink.hpp"
 #include "dvr/stream_recorder.hpp"
+#include "dvr/thumbnails.hpp"
 #include "dvr/settings.hpp"
 #include "msp/msp_osd.hpp"
 #include "motion/imu_reader.hpp"
@@ -166,9 +167,17 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
         if(std::filesystem::is_directory(profile)) o.assets=profile.string();
         else if(screen_h!=1080)throw display::ScreenError("Install generated 720p UI assets before selecting this mode");
         const VideoCodec codec = VideoCodec::H265;
+        dvr::Thumbnails thumbnails(o.recordings.empty()?settings.get(dvr::setting::dvr_dir):o.recordings);
+        struct PreviewSink : hal::FrameSink {
+            dvr::Thumbnails& thumbnails; std::shared_ptr<hal::FrameSink> screen;
+            PreviewSink(dvr::Thumbnails& t,std::shared_ptr<hal::FrameSink> s):thumbnails(t),screen(std::move(s)) {}
+            void queue_frame(std::shared_ptr<DecodedUnit> frame) override {thumbnails.capture(frame);screen->queue_frame(std::move(frame));}
+            void request_flush() override {screen->request_flush();}
+        };
         auto receiver = platform::make_software_receiver(o.platform, codec, &stop);
+        auto preview_sink=std::make_shared<PreviewSink>(thumbnails,receiver.screen);
         auto source_decoder=std::make_shared<hal::SourceDecoder>([&] {
-            return platform::make_software_decoder(o.platform,codec,receiver.screen,&stop);
+            return platform::make_software_decoder(o.platform,codec,preview_sink,&stop);
         },&stop);
         receiver.decoder=source_decoder;
         if(o.recordings.empty()) o.recordings=settings.get(dvr::setting::dvr_dir);
@@ -297,7 +306,7 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
         }
         uint64_t drawn = 0, frame_deadline=start;
         int previous_bind = gnd::BIND_IDLE;
-        std::string recording_error;
+        std::string recording_error,thumbnail_session;
         uint64_t profile_start = start, profile_loops = 0, profile_drawn = 0, profile_presented = 0, profile_ui_flips = 0;
         uint64_t render_us = 0, overlay_us = 0, longest_loop_us = 0;
         uint64_t longest_render_us = 0, longest_overlay_us = 0;
@@ -396,6 +405,20 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
             auto& gallery=model.backend.controls["gallery"];gallery={};gallery.known=true;gallery.enabled=true;gallery.action=true;
             gallery.text=std::to_string(playback.recordings.size())+" RECORDINGS";
             const auto recording=recorder.state();
+            const auto thumbnail_id=playback.playing?"play:"+playback.file:
+                recording.recording && recording.frames?"rec:"+recording.file:std::string();
+            if(thumbnail_id!=thumbnail_session) {
+                thumbnails.cancel();thumbnail_session=thumbnail_id;
+                if(!thumbnail_id.empty())thumbnails.arm(playback.playing?playback.file:
+                    std::filesystem::path(recording.file).filename().string(),now);
+            }
+            if(model.scene==kestrel_ui::SceneMode::GalleryBrowse) {
+                const int first=std::max(0,model.gallery_selected)/6*6;
+                for(int i=0;i<int(model.backend.recordings.size());++i) {
+                    auto& clip=model.backend.recordings[i];
+                    clip.thumbnail=i>=first && i<first+6?thumbnails.get(clip.name,320*screen_h/1080,180*screen_h/1080):nullptr;
+                }
+            }
             model.backend.media.recording_known=true; model.backend.media.recording=recording.recording;
             model.backend.media.recording_id=recording.file;
             auto& rec=model.backend.controls["record"]; rec={};rec.known=true;rec.action=true;
