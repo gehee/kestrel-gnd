@@ -34,6 +34,7 @@ bool parse_key(const std::string& text, Key& key) {
     return false;
 }
 std::string Model::status(uint64_t now) const {
+    if (backend.media.video_monitored && backend.media.video_fresh(now)) return "RECEIVING VIDEO";
     const auto& telemetry = backend.vrx;
     if (!telemetry.fresh(now)) return telemetry.stamp_us ? "BACKEND STALE" : "WAITING FOR BACKEND";
     if (!telemetry.connected) return "NO RF LINK";
@@ -42,7 +43,9 @@ std::string Model::status(uint64_t now) const {
     return "RF CONNECTED / VIDEO UNVERIFIED";
 }
 bool Model::show_status(uint64_t now) const {
-    return !backend.vrx.link_valid(now) || (backend.media.video_monitored && !backend.media.video_fresh(now));
+    // Decoded video is independent of RF telemetry (including recorded replay).
+    // Never cover a fresh picture with the opaque idle scene.
+    return backend.media.video_monitored ? !backend.media.video_fresh(now) : !backend.vrx.link_valid(now);
 }
 RcSignal Model::rc_signal(uint64_t now) const {
     const auto& flight = backend.flight;

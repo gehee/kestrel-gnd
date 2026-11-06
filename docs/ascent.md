@@ -6,11 +6,23 @@ Annex-B assembly, and air-unit protocol. It does not depend on the stock media
 service, Rockchip MPP, FFmpeg, Cairo, EGL or GLES.
 
 The composition root is `app/ascent_main.cpp`. `platform/ascent.cpp` supplies a
-V4L2 decoder and a single-plane DRM presenter. The HUD renders to an offscreen
-ARGB surface; the presenter combines it with decoded I420 in a separate scanout
-pool, preserving decoder ownership. Completed frames are presented; partial-slice
-scanout is not supported. The presenter drops superseded pictures and blanks
-video after two seconds without a decoded frame.
+Wave5 V4L2 decoder and an atomic DRM presenter with independent planes.
+Decoded I420 buffers are exported as DMA-BUF and imported directly into the
+video plane, including the decoder's coded-height chroma offsets. LVGL publishes
+ARGB8888 to a separate UI plane. The VO display hardware performs alpha blending;
+there is no per-video-frame CPU copy, RGB conversion or software composition.
+
+Three UI scanout buffers separate uploading, pending and active ownership. UI
+uploads run on the UI thread; a stalled UI leaves its last completed buffer
+visible while video continues. One KMS thread commits the latest video and UI
+buffers and holds decoder leases through flip completion. Completed frames are
+presented; partial-slice scanout is not supported. Superseded pictures are dropped
+and video is blanked after two seconds without a decoded frame. Fresh decoded
+video is shown even when RF telemetry is unavailable.
+
+This requires fpvOS's `0018-drm-artosyn-ui-overlay.patch`. Older single-plane
+firmware produces a clear startup error; this target does not silently fall back
+to CPU blending.
 
 ## Build
 
@@ -114,14 +126,35 @@ and background. Render tests also compare incremental frames against full redraw
 during opening and closing, and check that passive counters refresh at a bounded
 rate while navigation remains immediate.
 
+## Hardware composition check
+
+Stop the receiver before running:
+
+```sh
+ascent-planes-probe /path/to/1080p-annex-b.hevc
+```
+
+The probe feeds a repeatable HEVC clip to Wave5 at 60 pictures/s, uploads one
+ARGB test surface, then sleeps its UI producer for ten seconds while counting
+scanout updates. Use HDMI capture to confirm video motion and alpha behavior;
+DRM events alone do not establish visible correctness. The probe releases both
+planes and decoder resources afterward. Its count is video presentation rate,
+not the frame rate of a stationary UI or the capture card.
+
+`--profile` on the receiver reports UI-loop cadence, redraws and HDMI updates
+separately. Rendering is included in the configured frame budget rather than
+followed by an unconditional extra sleep.
+
 ## Current limits
 
 This is an initial bring-up target, not a flight-ready receiver.
 
 - Fixed 1920x1080 I420 video and 1080p60 HDMI; resolution changes stop the decoder.
-- The current MMAP/copy presenter is substantially slower than decoding on AR9311.
-  It cannot currently sustain 1080p60 presentation. A faster buffer/composition
-  path remains necessary.
+- Hardware scanout sustained 600 video updates over a ten-second interval with
+  the UI uploaded exactly once. HDMI capture confirmed moving decoded video,
+  opaque red/white patches, half-transparent green and fully transparent pixels.
+  This verifies the video/display path at 60 updates/s; LVGL animation rendering
+  is separate and is not yet demonstrated at 60 FPS.
 - The LVGL menu, control socket, hardware decoding, buffer recycling and orderly
   shutdown have been exercised. Visible menu output is confirmed on a directly
   connected HDMI monitor and through a USB HDMI capture card. The recreated
@@ -132,13 +165,12 @@ This is an initial bring-up target, not a flight-ready receiver.
 - Live RF association works, but repeated link drops and damaged video were also
   reproduced with the fpvOS reference radio tool. Continuous live video remains
   unvalidated.
-- Menu edits currently cover visual preferences. RF/camera configuration, binding,
-  DVR/gallery, FC telemetry integration, and physical board-button acquisition are
-  still pending. [Button and beeper interfaces](ascent-input-feedback.md) have
-  been traced in stock firmware and enabled in fpvOS. Button presses and a
-  dedicated audible beeper pattern are physically validated. Kestrel
-  input/feedback integration remains. Unavailable temperature and supply
-  readings remain blank.
+- Menu edits currently cover visual preferences. RF/camera configuration,
+  DVR/gallery and FC telemetry integration remain incomplete. Physical buttons
+  and asynchronous beeper feedback are wired into Kestrel; LINK queues the
+  existing radio binding command, whose native end-to-end behavior remains
+  unvalidated. See [button and beeper interfaces](ascent-input-feedback.md).
+  Unavailable temperature and supply readings remain blank.
 - Native SDIO does not run the USB firmware's frame-clock register sampler or
   automatically restart the radio driver after errors.
 

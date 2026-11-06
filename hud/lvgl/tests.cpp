@@ -251,7 +251,11 @@ int main(int argc, char** argv) {
             }
             native.backend.media.video_stamp_us = now;
             check(!native.show_status(now), "A decoded frame clears waiting-for-video");
-            t.stamp_us = now + 2000000;
+            t.stamp_us = 0; t.connected = false;
+            check(!native.show_status(now) && native.status(now) == "RECEIVING VIDEO",
+                  "Fresh decoded video must not be hidden by missing RF telemetry");
+            check(!native.backend.vrx.link_valid(now), "Video must not invent an RF connection");
+            t.stamp_us = now + 2000000; t.connected = true;
             check(native.show_status(now + 2000000), "Video silence reopens status even with fresh RF stats");
         }
         std::puts("PASS: telemetry freshness, shared canopy/GLES geometry, projective rasterization, baked fonts and menus");
