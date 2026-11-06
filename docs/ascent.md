@@ -108,9 +108,14 @@ that primary plane in hardware while scanning out the UI at native 1280x720.
 There is no software resizing of the complete UI or camera picture. Existing
 1080p-only fpvOS firmware continues to expose only 1080p in this menu.
 
-The 720p kernel/bridge profile is still experimental: register readback and
-mode switching have been exercised, but a visible HDMI picture is required to
-validate its timing, scaler quality, and monitor compatibility before release.
+720p requires fpvOS's `0021-drm-artosyn-ascent-display-modes.patch` and the
+`ascent-60hz` board profile. Live 720p video and native UI have been checked
+on an HDMI monitor and capture device. The driver initializes the scaler
+filter before scanout and requests a modeset when the 720p primary source
+changes geometry or format. The presenter allows this transition between the
+startup/blank frame and scaled video; ordinary frame flips do not modeset.
+This avoids changing the scaler while the output pipeline is active. Other
+monitors still need testing.
 The compiled asset profiles and menu do not establish a sustained 60 FPS UI.
 
 ## Run
@@ -208,7 +213,8 @@ traces in ignored `.local/`; tracing is disabled unless explicitly requested.
 
 This is an initial bring-up target, not a flight-ready receiver.
 
-- Fixed 1920x1080 I420 video and 1080p60 HDMI; resolution changes stop the decoder.
+- Fixed 1920x1080 I420 video, with 1080p60 or 720p60 HDMI. Output mode
+  changes restart the receiver session; other refresh rates are not supported.
 - Hardware scanout sustained 600 video updates over a ten-second interval with
   the UI uploaded exactly once. HDMI capture confirmed moving decoded video,
   opaque red/white patches, half-transparent green and fully transparent pixels.

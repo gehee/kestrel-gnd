@@ -504,7 +504,14 @@ class Ar9311Screen final : public PlaneScreen {
                 a.plane(primary_, crtc_.id, video_fb, frame?frame->width:width_, frame?frame->height:height_, width_, height_);
                 a.plane(overlay_, crtc_.id, next_ui < 0 ? 0 : ui_[next_ui].fb, width_, height_, width_, height_);
                 if (frame && ltrace::on()) ltrace::rec(ltrace::kRender, clock_us(), uint32_t(frame->pts), video_fb);
-                a.commit(fd_, DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT, ++cookie);
+                // The 720p scaler needs a modeset when changing between the native
+                // black frame and scaled video. Normal frame flips stay unchanged.
+                const bool geometry_changed = bool(frame) != bool(showing) ||
+                    (frame && showing && (frame->width != showing->frame->width ||
+                                          frame->height != showing->frame->height));
+                const uint32_t flags = DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT |
+                    (geometry_changed ? DRM_MODE_ATOMIC_ALLOW_MODESET : 0);
+                a.commit(fd_, flags, ++cookie);
                 wait_flip(cookie, video_fb);
                 if (video_changed) {
                     showing = std::move(pending);
