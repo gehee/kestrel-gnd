@@ -15,6 +15,10 @@
 
 namespace {
 constexpr unsigned max_buffers = 32, packet_bytes = 4 * 1024 * 1024;
+// Native SDIO delivers several complete pictures in a single read. Capacity is
+// burst tolerance, not a playout delay: the decoder drains immediately.
+constexpr size_t pending_frames = 16, pending_bytes = 8 * 1024 * 1024;
+constexpr uint64_t pending_age_us = 150000;
 constexpr auto output_type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
 constexpr auto capture_type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
 uint64_t now_us() {
@@ -128,12 +132,6 @@ void VdecV4l2::feed_packet_to_decoder(void *data, int len, int64_t pts, uint64_t
     if (hevc ? nal > 31 : nal != 1 && nal != 5)
         return;
     key = key || (hevc ? nal >= 16 && nal <= 21 : nal == 5);
-    if (packets_.size() >= 4) {
-        packets_.clear();
-        ready_ = false;
-        ++dropped_;
-    }
-    // The source resends parameter sets with the next keyframe after a drop.
     if (!ready_ && !key) {
         ++dropped_;
         return;
@@ -155,6 +153,19 @@ void VdecV4l2::feed_packet_to_decoder(void *data, int len, int64_t pts, uint64_t
         return;
     }
     p.bytes.insert(p.bytes.end(), static_cast<uint8_t *>(data), static_cast<uint8_t *>(data) + len);
+    size_t bytes = p.bytes.size();
+    for (const auto& queued : packets_) bytes += queued.bytes.size();
+    const uint64_t age = packets_.empty() ? 0 : now_us() - packets_.front().timing.decode_start_us;
+    if (packets_.size() >= pending_frames || bytes > pending_bytes || age > pending_age_us) {
+        const auto overflows = ++overflows_;
+        if (overflows == 1 || overflows % 10 == 0)
+            fprintf(stderr, "v4l2: queue overflow=%llu pending=%zu bytes=%zu oldest=%.1fms; waiting for keyframe\n",
+                    (unsigned long long)overflows, packets_.size(), bytes, age / 1000.0);
+        dropped_ += packets_.size();
+        packets_.clear();
+        ready_ = false;
+        if (!key) { ++dropped_; return; }
+    }
     p.pts = pts;
     p.timing = {recv, now_us(), enc, proc, key, next_slice_times_};
     packets_.push_back(std::move(p));
@@ -169,8 +180,9 @@ void VdecV4l2::run_frame() {
         fprintf(stderr, "v4l2: %s\n", e.what());
     }
     sink_->request_flush();
-    printf("v4l2: decoded=%llu dropped=%llu\n", (unsigned long long)frames_.load(),
-           (unsigned long long)dropped_.load());
+    printf("v4l2: decoded=%llu dropped=%llu queue_overflows=%llu capture_errors=%llu\n",
+           (unsigned long long)frames_.load(), (unsigned long long)dropped_.load(),
+           (unsigned long long)overflows_.load(), (unsigned long long)capture_errors_.load());
 }
 void VdecV4l2::decode() {
     // Mappings outlive the device stream and any frames held by the presenter.
@@ -322,6 +334,10 @@ void VdecV4l2::decode() {
                     throw std::runtime_error("invalid capture buffer index");
                 held[b.index] = true;
                 if (b.flags & V4L2_BUF_FLAG_ERROR) {
+                    const auto errors = ++capture_errors_;
+                    if (errors == 1 || errors % 10 == 0)
+                        fprintf(stderr, "v4l2: capture errors=%llu sequence=%u; waiting for keyframe\n",
+                                (unsigned long long)errors, b.sequence);
                     ++dropped_;
                     ready_ = false;
                     continue;

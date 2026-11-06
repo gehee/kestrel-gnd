@@ -20,6 +20,11 @@ presented; partial-slice scanout is not supported. Superseded pictures are dropp
 and video is blanked after two seconds without a decoded frame. Fresh decoded
 video is shown even when RF telemetry is unavailable.
 
+Compressed input absorbs short SDIO read bursts (up to 16 pending pictures),
+with an 8 MiB byte budget and a 150 ms pending-age limit. Overflow or decoder
+errors request a fresh keyframe rather than accumulating stale video. Diagnostic
+logs distinguish queue overflow from hardware decode errors.
+
 This requires fpvOS's `0018-drm-artosyn-ui-overlay.patch`. Older single-plane
 firmware produces a clear startup error; this target does not silently fall back
 to CPU blending.
