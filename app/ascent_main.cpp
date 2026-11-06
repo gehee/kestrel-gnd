@@ -142,7 +142,7 @@ Options options(int argc, char **argv) {
     return o;
 }
 
-int run_session(Options o, Settings& settings, display::ModeTrial& mode) {
+display::SessionResult run_session(Options o, Settings& settings, display::ModeTrial& mode) {
     try {
         o.platform.display_height = mode.current;
         o.platform.display_width = mode.current == 720 ? 1280 : 1920;
@@ -163,7 +163,7 @@ int run_session(Options o, Settings& settings, display::ModeTrial& mode) {
         const int screen_w=o.platform.display_width,screen_h=o.platform.display_height;
         const auto profile=std::filesystem::path(o.assets)/(std::to_string(screen_w)+"x"+std::to_string(screen_h));
         if(std::filesystem::is_directory(profile)) o.assets=profile.string();
-        else if(screen_h!=1080)throw std::runtime_error("Install generated 720p UI assets before selecting this mode");
+        else if(screen_h!=1080)throw display::ScreenError("Install generated 720p UI assets before selecting this mode");
         const VideoCodec codec = VideoCodec::H265;
         auto receiver = platform::make_software_receiver(o.platform, codec, &stop);
         auto source_decoder=std::make_shared<hal::SourceDecoder>([&] {
@@ -504,10 +504,13 @@ int run_session(Options o, Settings& settings, display::ModeTrial& mode) {
         workers.finish();
         printf("ascent: HDMI presentations=%llu UI presentations=%llu\n",
                (unsigned long long)receiver.screen->presented(), (unsigned long long)display.presentations);
-        return source_failed || worker_failed || receiver.screen->failed() || receiver.decoder->failed() ? 1
-                                                                                                         : 0;
+        if (receiver.screen->failed()) return display::SessionResult::DisplayFailed;
+        return source_failed || worker_failed || receiver.decoder->failed() ? display::SessionResult::Failed
+                                                                           : display::SessionResult::Stopped;
+    } catch(const display::ScreenError& e) {
+        fprintf(stderr,"screen session: %s\n",e.what()); return display::SessionResult::DisplayFailed;
     } catch(const std::exception& e) {
-        fprintf(stderr,"screen session: %s\n",e.what()); return 1;
+        fprintf(stderr,"receiver session: %s\n",e.what()); return display::SessionResult::Failed;
     }
 }
 } // namespace
@@ -530,14 +533,12 @@ int main(int argc, char **argv) {
         display::ModeTrial mode(height);
         for(;;) {
             mode.restart=false;
-            const int result=run_session(o,settings,mode);
-            if(interrupted)return result;
-            if(result && mode.pending) mode.revert();
-            else if(result && mode.current!=1080) {
-                mode.current=mode.confirmed=1080; mode.restart=true;
-                fprintf(stderr,"screen: falling back to 1920x1080 @ 60 Hz\n");
-            }
-            if(!mode.restart)return result;
+            const auto result=run_session(o,settings,mode);
+            const int status=result==display::SessionResult::Stopped?0:1;
+            if(interrupted)return status;
+            if(mode.recover(result))
+                fprintf(stderr,"screen: recovering display at %dx%d @ 60 Hz\n",mode.current==720?1280:1920,mode.current);
+            if(!mode.restart)return status;
         }
     } catch (const std::exception &e) {
         fprintf(stderr, "ascent: %s\n", e.what()); return 1;

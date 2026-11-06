@@ -599,6 +599,10 @@ class Ar9311Screen final : public PlaneScreen {
 };
 } // namespace
 std::shared_ptr<PlaneScreen> make_ar9311_screen(const std::string &path, bool force, volatile bool *stop, int width, int height) {
-    return std::make_shared<Ar9311Screen>(path, force, stop, width, height);
+    try {
+        return std::make_shared<Ar9311Screen>(path, force, stop, width, height);
+    } catch (const std::exception& e) {
+        throw ScreenError(e.what());
+    }
 }
 } // namespace display

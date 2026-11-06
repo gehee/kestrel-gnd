@@ -14,5 +14,19 @@ int main() {try {
         check(trial.current==720 && !trial.pending, "Failed trial restores most recently confirmed mode");
         bool bad_mode=false;try {trial.select(800);}catch(const std::invalid_argument&) {bad_mode=true;}
         check(bad_mode && trial.current==720, "Invalid mode cannot change state");
+        trial.restart=false;
+        check(!trial.recover(display::SessionResult::Failed) && trial.current==720 && !trial.restart,
+              "A decoder or radio failure must not change a confirmed HDMI mode");
+        trial.select(1080);trial.restart=false;
+        check(!trial.recover(display::SessionResult::Failed) && trial.current==1080 && trial.pending,
+              "A non-display failure is not proof that a trial mode is invalid");
+        check(trial.recover(display::SessionResult::DisplayFailed) && trial.current==720 && !trial.pending,
+              "A failed display trial restores the confirmed mode");
+        trial.restart=false;
+        check(trial.recover(display::SessionResult::DisplayFailed) && trial.current==1080,
+              "A failed confirmed720 display can recover at1080");
+        trial.restart=false;
+        check(!trial.recover(display::SessionResult::DisplayFailed) && !trial.restart,
+              "Failed1080 display recovery cannot loop");
 
 return 0;}catch(const std::exception& e){fprintf(stderr,"%s\n",e.what());return 1;}}

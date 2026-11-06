@@ -41,6 +41,7 @@ void SourceDecoder::cleanup() {
     quit_=true;std::lock_guard<std::mutex> lock(mutex_);if(active_)active_->cleanup();
 }
 void SourceDecoder::run_frame() {
+    unsigned live_retries = 0;
     while(!quit_ && !*stop_) {
         bool session_playback;
         uint64_t session_generation;
@@ -58,7 +59,15 @@ void SourceDecoder::run_frame() {
             next->run_frame();
             {std::lock_guard<std::mutex> lock(mutex_);
              if(next->failed() && session_generation==generation_) {
-                 if(!session_playback)failed_=true;
+                 if(!session_playback) {
+                     // A stalled decoder can be recreated without restarting
+                     // RF, the recorder, UI or HDMI. Bound failures that never
+                     // produce a frame; device-open failures remain terminal.
+                     if(next->last_frame_us())live_retries=0;
+                     if(!quit_ && !*stop_ && live_retries++==0)
+                         fprintf(stderr,"decoder source: restarting failed live decoder\n");
+                     else failed_=true;
+                 }
                  else {playback_failed_=true;wanted_=false;++generation_;}
              }
              active_.reset();}

@@ -2,8 +2,13 @@
 #include "hal/vdec.hpp"
 #include "base/damage.hpp"
 #include <memory>
+#include <stdexcept>
 
 namespace display {
+class ScreenError : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
 // Video DMA-BUF and ARGB UI have independent producers. Hardware blends them
 // at scanout; the presenter retains each buffer until flip completion.
 class PlaneScreen : public hal::FrameSink {

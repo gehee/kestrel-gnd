@@ -9,10 +9,12 @@ template<class F> void wait(F f) {for(int i=0;i<2000;++i) {if(f())return;std::th
 struct Fake : Vdec {
     std::atomic<bool> quit{false},error{false},paused{false};
     std::atomic<unsigned> packets{0};
+    std::atomic<uint64_t> frame_stamp{0};
     void feed_packet_to_decoder(void*,int,int64_t,uint64_t,uint8_t,uint32_t,uint32_t,bool) override {++packets;}
     void cleanup() override {quit=true;}
     void run_frame() override {while(!quit && !error)std::this_thread::sleep_for(std::chrono::milliseconds(1));}
     bool failed() const override {return error;}
+    uint64_t last_frame_us() const override {return frame_stamp;}
     void pause_input(bool on) override {paused=on;}
 };
 }
@@ -47,7 +49,13 @@ int main() {
     wait([&]{return decoder.playback_failed() && count()==5;});check(!decoder.failed(),"Playback failure recovers live reception");
     throw_next=true;decoder.playback(true);wait([&]{return decoder.playback_failed() && count()==6;});
     check(!decoder.failed(),"Playback factory failure recovers live reception");
-    session(5)->error=true;wait([&]{return decoder.failed();});
+    session(5)->error=true;wait([&]{return count()==7 && session(6)->packets==3;});
+    check(!decoder.failed(),"Live failure recreates only the decoder with cached parameters");
+    session(6)->frame_stamp=123;session(6)->error=true;
+    wait([&]{return count()==8 && session(7)->packets==3;});
+    check(!decoder.failed(),"Decoded progress permits recovery from a later stall");
+    session(7)->error=true;wait([&]{return decoder.failed();});
+    check(count()==8,"Repeated failures without a decoded picture are bounded");
     puts("PASS: exclusive live/playback decoder ownership, parameter cache, failure recovery");return 0;
  } catch(const std::exception& e) {fprintf(stderr,"FAIL: %s\n",e.what());return 1;}
 }

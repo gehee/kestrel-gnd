@@ -122,6 +122,13 @@ A real source-size change still allows the driver's required modeset. Other
 monitors still need testing, including recovery after output-resolution changes.
 The compiled asset profiles and menu do not establish a sustained 60 FPS UI.
 
+A failed live decoder is recreated without restarting HDMI, RF reception or
+recording. Recovery replays cached HEVC parameters and requests a new keyframe
+through the existing radio path. A second failure before any decoded picture,
+or a device-open failure, remains terminal. Only display failures trigger screen
+mode rollback/fallback; a decoder or radio failure must not select another HDMI
+resolution.
+
 ## Run
 
 Stop any other DRM/radio clients first. A display-only check needs no peer:
