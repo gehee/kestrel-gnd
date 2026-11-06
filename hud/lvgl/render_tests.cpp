@@ -156,6 +156,24 @@ int main(int argc, char** argv) {
             model.backend.flight.rssi_pct = 0; ++model.backend.flight_version;
             controller.tick(now); view.update(now); lv_refr_now(display.lv_display());
             if (display.pixels()[pixel] != empty_rung) throw std::runtime_error("RC gauge did not empty when RSSI fell to zero");
+            // Static idle assets must survive theme changes and menu motion
+            // without stale regions when the live video disappears.
+            model.backend.vrx.connected = false;
+            model.backend.media.video_monitored = true;
+            model.backend.media.video_stamp_us = 0;
+            for (int theme = 0; theme < hud_theme_count(); ++theme) {
+                model.theme = theme; model.menu_open = true; model.side = theme % 2;
+                model.stage = kestrel_ui::MenuStage::Browse;
+                for (int i = 0; i < 8; ++i) {
+                    now += 40000; controller.tick(now); view.update(now); lv_refr_now(display.lv_display());
+                    check_incremental();
+                }
+                model.stage = kestrel_ui::MenuStage::Pick;
+                for (int i = 0; i < 8; ++i) {
+                    now += 40000; controller.tick(now); view.update(now); lv_refr_now(display.lv_display());
+                    check_incremental();
+                }
+            }
             std::printf("PASS: 240 frames, menu motion/tabs/themes, text LRU lifetime, stable-cache reuse; bytes=%zu rasters=%llu\n",
                         view.text_cache_bytes(), (unsigned long long)view.text_rasterizations());
         }

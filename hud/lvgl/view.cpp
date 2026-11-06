@@ -102,7 +102,7 @@ void View::draw_event(lv_event_t* e) {
     auto* self = static_cast<View*>(lv_event_get_user_data(e));
     auto* target = lv_event_get_target(e);
     auto* layer = lv_event_get_layer(e);
-    if (target == self->idle_object_) self->idle_.draw(layer, self->model_, self->now_, self->menu_progress_, self->active_menu_side_);
+    if (target == self->idle_object_) self->idle_.draw(layer, self->model_, self->now_);
     else if (target == self->dimmer_) {
         if (self->model_.menu_open || self->menu_progress_ > 0)
             rect(layer, 0, 0, self->width_, self->height_, hud_theme_at(self->model_.theme).ground,
@@ -263,7 +263,7 @@ void View::draw_menu(lv_layer_t* layer) {
 
 }
 void View::update(uint64_t now) {
-    text_.begin_frame(); idle_.begin_frame();
+    text_.begin_frame(); idle_.prepare(model_, now);
     now_ = now;
     hud_->update(controller_.hud_data(now), now);
     sync_hud_objects();
@@ -329,8 +329,10 @@ void View::update(uint64_t now) {
         }
     }
     const bool status_visible = model_.show_status(now);
-    if (appearance || moving || status_visible != old_status_ || menu || valid != old_valid_) lv_obj_invalidate(idle_object_);
-    if (appearance || moving || menu) lv_obj_invalidate(dimmer_);
+    // Static artwork stays centered behind either menu; only visibility/theme or
+    // acquisition text changes invalidate it.
+    if (appearance || status_visible != old_status_ || (valid && old_menu_ != model_.menu_open)) lv_obj_invalidate(idle_object_);
+    if (appearance || moving || old_menu_ != model_.menu_open) lv_obj_invalidate(dimmer_);
     old_status_ = status_visible;
     presented_ = t; initialized_ = true;
     old_fresh_ = fresh; old_valid_ = valid; old_theme_ = model_.theme;

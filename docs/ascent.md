@@ -46,18 +46,33 @@ HUD tools documented in the main README; stage those assets beside the receiver
 binary. `--assets` selects their directory. No hardware-specific host addresses,
 serial ports, power-controller IDs or pairing addresses belong in the build.
 
-The idle artwork is baked on the host from the same font and background used
-by the VRX Pro image. This optional step requires Python Cairo and Pillow;
-neither is needed on the receiver:
+The idle screen is one static image generated during the build from the VRX Pro
+source font/background and `hud/hud_theme.cpp`. Configure these inputs once:
 
 ```sh
-python3 tools/ui_scene_bake.py "$CHAKRA_FONT" .local/assets \
-  --background "$FPVOS_BACKGROUND_PNG"
+cmake -S . -B .local/build-ascent \
+  -DKESTREL_UI_FONT="$CHAKRA_FONT" \
+  -DKESTREL_UI_BACKGROUND="$FPVOS_BACKGROUND_PNG"
+cmake --build .local/build-ascent -j
 ```
 
-Stage `idle-fpv.kui`, `idle-os.kui` and `idle-background.kui` with the existing
-Canopy masks and font atlas. Missing idle artwork falls back to a text wordmark;
-malformed artwork is rejected. Generated files belong in `.local/`, not Git.
+The `kestrel-idle-assets` target runs automatically, including in cross builds.
+It uses a **host** C++ compiler, Cairo and Fontconfig development libraries;
+none are needed on the receiver. `tools/ui_idle_bake.cpp` defines the layout,
+wordmark, shadows and caption. Editing that source, the theme table, font or
+background rebuilds `ui-assets/idle-scenes.kui`. The default size is 1920x1080;
+`KESTREL_UI_WIDTH` and `KESTREL_UI_HEIGHT` select another software UI size.
+
+Stage `idle-scenes.kui` with the existing Canopy masks and font atlas, or use
+`cmake --install` to install the generated file under `share/kestrel/ui`.
+The bundle contains every theme; only the selected image occupies runtime RAM
+(about 8 MiB at 1080p). The artwork stays centered when either menu opens, and
+menu navigation does not regenerate it. Live acquisition messages remain
+separate. The old `idle-background.kui` / logo masks are no longer used.
+
+Builds without both artwork inputs omit the bundle; minimal installs fall back
+to a fixed text wordmark. Invalid bundles, missing themes and resolution
+mismatches are rejected. Generated files belong in `.local/`, not Git.
 
 For tests without hardware, configure the same target with a host ar_libre,
 `-DKESTREL_TESTS=ON` and `-DKESTREL_UI_TEST_ASSETS` pointing at generated assets.

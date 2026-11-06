@@ -1,6 +1,7 @@
 # The software frontend carried forward from the Ascent bring-up branch.
 # It draws normalized state; native radio/media ownership stays outside it.
 include(FetchContent)
+include("${PROJECT_SOURCE_DIR}/cmake/ui_idle_assets.cmake")
 set(KESTREL_LVGL_SOURCE_DIR "" CACHE PATH "Existing LVGL 9.2.2 source tree")
 set(LV_CONF_PATH "${CMAKE_CURRENT_SOURCE_DIR}/lv_conf.h" CACHE STRING "" FORCE)
 set(LV_CONF_BUILD_DISABLE_EXAMPLES ON CACHE BOOL "" FORCE)
