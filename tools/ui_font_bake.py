@@ -45,25 +45,31 @@ def main():
     parser.add_argument("font", type=Path, help="ChakraPetch-SemiBold.ttf, as used by the GLES OSD")
     parser.add_argument("output", type=Path, help="Output canopy-font.kuf")
     parser.add_argument("--license", type=Path, help="Font license (default: OFL.txt beside the TTF)")
+    parser.add_argument("--pixels", type=int, default=40, help="Native ink size (8..64 pixels)")
     args = parser.parse_args()
+    if not 8 <= args.pixels <= 64:
+        parser.error("pixels must be 8..64")
+    pixels = args.pixels
+    cell = math.ceil(pixels * 64 / 40)
+    baseline = round(pixels * 48 / 40)
     license_path = args.license or args.font.parent / "OFL.txt"
     if not license_path.is_file():
         parser.error("Provide the source font's OFL license with --license")
-    font = ImageFont.truetype(str(args.font), 40)
+    font = ImageFont.truetype(str(args.font), pixels)
     codes = list(range(32, 127)) + [0xB0, 0x2022, 0xE000, 0xE001]
     chars = [chr(code) for code in codes]
-    advances = [80 * 64 if code >= 0xE000 else round(font.getlength(char) * 64) for code, char in zip(codes, chars)]
-    payload = bytearray(struct.pack("<4s5I", b"KUIF", 1, 40, 64, 48, len(codes)))
+    advances = [round(80 * pixels / 40 * 64) if code >= 0xE000 else round(font.getlength(char) * 64) for code, char in zip(codes, chars)]
+    payload = bytearray(struct.pack("<4s5I", b"KUIF", 1, pixels, cell, baseline, len(codes)))
     for code, char, advance in zip(codes, chars, advances):
         if code >= 0xE000:
-            image = icon(code)
+            image = icon(code).resize((round(96 * pixels / 40), cell), Image.Resampling.LANCZOS)
             payload.extend(struct.pack("<IIi", code, image.width, advance))
             payload.extend(image.tobytes())
             continue
         box = font.getbbox(char, anchor="ls")
         width = max(16, (math.ceil(2 + max(advance / 64, box[2])) + 4 + 15) & ~15)
-        image = Image.new("L", (width, 64))
-        ImageDraw.Draw(image).text((2, 48), char, font=font, fill=255, anchor="ls")
+        image = Image.new("L", (width, cell))
+        ImageDraw.Draw(image).text((2, baseline), char, font=font, fill=255, anchor="ls")
         payload.extend(struct.pack("<IIi", code, width, advance))
         payload.extend(image.tobytes())
     for code, a, advance in zip(codes, chars, advances):
@@ -73,7 +79,7 @@ def main():
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_bytes(payload)
     shutil.copyfile(license_path, args.output.with_name("canopy-font-OFL.txt"))
-    print(f"{args.output}: {len(codes)} glyphs, 40px ink / 64px cell / baseline 48, {len(payload)} bytes")
+    print(f"{args.output}: {len(codes)} glyphs, {pixels}px ink / {cell}px cell / baseline {baseline}, {len(payload)} bytes")
 
 
 if __name__ == "__main__":

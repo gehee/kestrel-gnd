@@ -10,6 +10,7 @@ public:
     bool available() const {return !pixels_.empty();}
     void draw(lv_layer_t* layer,const std::array<uint16_t,1060>& grid,int width,int height) const;
 private:
+    int glyph_width_=36, glyph_height_=54;
     std::vector<uint32_t> pixels_;
     std::array<lv_image_dsc_t,512> glyphs_{};
 };

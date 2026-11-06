@@ -61,9 +61,9 @@ void IdleScene::draw(lv_layer_t* layer, const Model& model, uint64_t now) {
         if (!model.menu_open) {
             const std::string title = "ACQUIRING VIDEO", status = "WAITING FOR VIDEO";
             const float size = 34 * height_ / 1080.0f;
-            text_.canvas(layer, title, (width_ - text_.advance(title) * size / canopy::kFontPixels) / 2,
+            text_.canvas(layer, title, (width_ - text_.canvas_advance(title,size)) / 2,
                          height_ * 0.48f, size, false, theme.text, 1);
-            text_.canvas(layer, status, (width_ - text_.advance(status) * size * 0.5f / canopy::kFontPixels) / 2,
+            text_.canvas(layer, status, (width_ - text_.canvas_advance(status,size*.5f)) / 2,
                          height_ * 0.53f, size * 0.5f, false, theme.accent, 1);
         }
         return;

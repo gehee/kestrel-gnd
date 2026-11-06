@@ -238,7 +238,7 @@ void View::draw_event(lv_event_t* e) {
     else if (target == self->channel_) self->draw_channel(layer);
     else if (target == self->clock_) {
         const float size=24.0f*self->height_/1080;
-        const float x=(self->width_-self->text_.advance(self->clock_text_)*size/canopy::kFontPixels)/2;
+        const float x=(self->width_-self->text_.canvas_advance(self->clock_text_,size))/2;
         self->text_.canvas(layer,self->clock_text_,x,36.0f*self->height_/1080,size,false,hud_theme_at(self->model_.theme).text,.9f);
     }
     else if(target==self->bf_object_ && self->bf_visible_) self->bf_atlas_.draw(layer,self->bf_grid_,self->width_,self->height_);
@@ -373,7 +373,7 @@ View::MenuLayout View::menu_layout(const Model& menu_model,int w,int h) const {
         std::istringstream words(paragraph); std::string word, line;
         while (words >> word) {
             const auto candidate = line.empty() ? word : line + " " + word;
-            if (!line.empty() && text_.advance(candidate) * 18 * u / canopy::kFontPixels > w - 2 * pad) {
+            if (!line.empty() && text_.canvas_advance(candidate,18*u) > w - 2 * pad) {
                 help_lines.push_back(line); line.clear();
                 if (help_lines.size() >= 10) break;
             }
@@ -412,7 +412,7 @@ void View::draw_menu(lv_layer_t* layer) {
     const auto tabs = menu_model.side_tabs();
     for (int tab : tabs) {
         const std::string title = Model::tab_name(tab);
-        const int tw = int(text_.advance(title) * 21 * u / canopy::kFontPixels);
+        const int tw = int(text_.canvas_advance(title,21*u));
         text_.canvas(layer, title, tab_x, pad + 52 * u, 21 * u, false,
                       tab == menu_model.tab ? th.text : th.quiet, content_alpha, x, y);
         if (tab == menu_model.tab) rect(layer, x + tab_x, y + pad + int(61 * u), tw, std::max(1, int(3 * u)), th.accent, content_alpha);
@@ -454,8 +454,8 @@ void View::draw_menu(lv_layer_t* layer) {
             }
             ry += rh; continue;
         }
-        const float available = w - 2 * pad - text_.advance(rows[i].name) * 23 * u / canopy::kFontPixels - 16 * u;
-        const float value_width = text_.advance(rows[i].value) * 20 * u / canopy::kFontPixels;
+        const float available = w - 2 * pad - text_.canvas_advance(rows[i].name,23*u) - 16 * u;
+        const float value_width = text_.canvas_advance(rows[i].value,20*u);
         const float size = value_width > available && available > 0 ? std::max(12 * u, 20 * u * available / value_width) : 20 * u;
         text_.canvas(layer, rows[i].value + (menu_model.pending(rows[i].id) ? " *" : ""), w - pad, baseline, size, true,
                      rows[i].disabled ? th.quiet : selected ? th.accent : rows[i].editable ? th.text : th.quiet, content_alpha * (selected ? 1 : 0.85f), x, y);

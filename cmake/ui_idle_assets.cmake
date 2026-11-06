@@ -54,4 +54,22 @@ if(KESTREL_UI_FONT OR KESTREL_UI_BACKGROUND)
         DEPENDS "${_bf_tool}" "${_idle_output}" "${KESTREL_UI_FONT}" VERBATIM)
     add_custom_target(kestrel-bf-assets ALL DEPENDS "${_bf_output}")
     install(FILES "${_bf_output}" DESTINATION share/kestrel/ui)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    set(_profile_wedge "${PROJECT_BINARY_DIR}/host-tools/kestrel-ui-wedge-bake")
+    add_custom_command(OUTPUT "${_profile_wedge}"
+        COMMAND "${KESTREL_HOST_CXX}" -std=c++17 -O2 "-I${PROJECT_SOURCE_DIR}"
+            "${PROJECT_SOURCE_DIR}/hud/lvgl/assetgen.cpp" -o "${_profile_wedge}"
+        DEPENDS "${_idle_tool}" "${PROJECT_SOURCE_DIR}/hud/lvgl/assetgen.cpp"
+            "${PROJECT_SOURCE_DIR}/render/software/canopy.hpp" VERBATIM)
+    add_custom_command(OUTPUT "${PROJECT_BINARY_DIR}/ui-assets/profiles.stamp"
+        COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tools/ui_profiles_bake.py"
+            "${KESTREL_UI_FONT}" "${KESTREL_UI_BACKGROUND}" "${_idle_tool}"
+            "${_bf_tool}" "${_profile_wedge}" "${PROJECT_BINARY_DIR}/ui-assets"
+        DEPENDS "${_idle_tool}" "${_bf_tool}" "${_profile_wedge}"
+            "${PROJECT_SOURCE_DIR}/tools/ui_profiles_bake.py" "${PROJECT_SOURCE_DIR}/tools/ui_font_bake.py"
+            "${KESTREL_UI_FONT}" "${KESTREL_UI_BACKGROUND}" VERBATIM)
+    add_custom_target(kestrel-ui-profiles ALL DEPENDS "${PROJECT_BINARY_DIR}/ui-assets/profiles.stamp")
+    install(DIRECTORY "${PROJECT_BINARY_DIR}/ui-assets/1280x720"
+        "${PROJECT_BINARY_DIR}/ui-assets/1920x1080" "${PROJECT_BINARY_DIR}/ui-assets/menu-fonts"
+        DESTINATION share/kestrel/ui)
 endif()

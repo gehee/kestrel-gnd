@@ -6,12 +6,14 @@
 
 int main(int argc, char** argv) {
     using namespace kestrel_ui;
-    if (argc != 3) { std::fprintf(stderr, "usage: %s ASSETS OUTDIR\n", argv[0]); return 2; }
+    if (argc != 3 && argc != 4) { std::fprintf(stderr, "usage: %s ASSETS OUTDIR [720|1080]\n", argv[0]); return 2; }
     try {
+        const int h=argc==4?std::stoi(argv[3]):1080,w=h==720?1280:1920;
+        if(h!=720 && h!=1080)throw std::runtime_error("Unsupported UI profile");
         std::filesystem::create_directories(argv[2]); lv_init();
         {
-            Display display(1920, 1080, ""); Model model; Controller controller(model);
-            View view(controller, 1920, 1080, argv[1]); uint64_t now = monotonic_us();
+            Display display(w, h, ""); Model model; Controller controller(model);
+            View view(controller, w, h, argv[1]); uint64_t now = monotonic_us();
             auto frame = [&] {
                 now += 40000;
                 if (model.backend.vrx.connected) model.backend.vrx.stamp_us = now;

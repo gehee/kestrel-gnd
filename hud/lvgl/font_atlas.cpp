@@ -17,17 +17,20 @@ FontAtlas::FontAtlas(const std::string& path) {
 }
 FontAtlas::FontAtlas(std::istream& input) { load(input); }
 void FontAtlas::load(std::istream& input) {
-    if (u32(input) != 0x4649554b || u32(input) != 1 || u32(input) != canopy::kFontPixels ||
-        u32(input) != canopy::kTextCellHeight || u32(input) != canopy::kTextBaseline)
+    if (u32(input) != 0x4649554b || u32(input) != 1)
         throw std::runtime_error("Unsupported HUD font atlas");
+    pixels_=int(u32(input)); cell_height_=int(u32(input)); baseline_=int(u32(input));
+    if(pixels_<8 || pixels_>64 || cell_height_<pixels_ || cell_height_>104 ||
+       baseline_<pixels_ || baseline_>=cell_height_)
+        throw std::runtime_error("Invalid HUD font dimensions");
     const uint32_t count = u32(input);
     if (count < 2 || count > 256) throw std::runtime_error("Invalid HUD font glyph count");
     size_t bytes = 0;
     for (uint32_t i = 0; i < count; ++i) {
         const auto code = u32(input), width = u32(input), advance = u32(input);
-        if (code > 0x10ffff || (i && code <= glyphs_.back().code) || width < 1 || width > 128 || advance > 128 * 64)
+        if (code > 0x10ffff || (i && code <= glyphs_.back().code) || width < 1 || width > 192 || advance > 192 * 64)
             throw std::runtime_error("Invalid HUD font glyph metrics");
-        Glyph glyph{code, int(width), int(advance), std::vector<uint8_t>(width * canopy::kTextCellHeight)};
+        Glyph glyph{code, int(width), int(advance), std::vector<uint8_t>(width * cell_height_)};
         bytes += glyph.pixels.size();
         if (bytes > 1024 * 1024 || !input.read(reinterpret_cast<char*>(glyph.pixels.data()), glyph.pixels.size()))
             throw std::runtime_error("Invalid HUD font bitmap data");
@@ -79,7 +82,7 @@ canopy::AlphaSurface FontAtlas::rasterize(const std::string& text) const {
     const auto glyphs = indices(text);
     const int width = (int(std::ceil(advance(text) + 6)) + 15) & ~15;
     if (width < 1 || width > 4096) throw std::invalid_argument("HUD text bitmap exceeds 4096 pixels");
-    canopy::AlphaSurface out{0, 0, width, canopy::kTextCellHeight, std::vector<uint8_t>(size_t(width) * canopy::kTextCellHeight)};
+    canopy::AlphaSurface out{0, 0, width, cell_height_, std::vector<uint8_t>(size_t(width) * cell_height_)};
     int64_t cursor = 0;
     for (size_t i = 0; i < glyphs.size(); ++i) {
         const auto& g = glyphs_[glyphs[i]];

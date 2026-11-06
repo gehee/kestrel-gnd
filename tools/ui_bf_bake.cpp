@@ -11,15 +11,17 @@
 static void word(std::ostream& out,uint32_t v) {char b[]={char(v),char(v>>8),char(v>>16),char(v>>24)};out.write(b,4);}
 int main(int argc,char** argv) {
  try {
-    if(argc!=3) throw std::runtime_error("usage: ui-bf-bake FONT OUTPUT");
+    if(argc!=3 && argc!=4) throw std::runtime_error("usage: ui-bf-bake FONT OUTPUT [720|1080]");
     int count=0;FcPattern* pattern=FcFreeTypeQuery(reinterpret_cast<const FcChar8*>(argv[1]),0,nullptr,&count);
     if(!pattern)throw std::runtime_error("Cannot read source font");
     auto* face=cairo_ft_font_face_create_for_pattern(pattern);FcPatternDestroy(pattern);
-    constexpr int w=36,h=54;
+    const int height=argc==4?std::stoi(argv[3]):1080;
+    if(height!=720 && height!=1080)throw std::runtime_error("Unsupported glyph profile");
+    const int w=36*height/1080,h=54*height/1080;
     std::ofstream out(argv[2],std::ios::binary);out.write("KBF1",4);word(out,w);word(out,h);word(out,512);
     for(int glyph=0;glyph<512;++glyph) {
         auto* surface=cairo_image_surface_create(CAIRO_FORMAT_ARGB32,w,h);auto* cr=cairo_create(surface);
-        cairo_set_source_rgb(cr,1,1,1);cairo_set_font_face(cr,face);cairo_set_font_size(cr,40);
+        cairo_set_source_rgb(cr,1,1,1);cairo_set_font_face(cr,face);cairo_set_font_size(cr,40.0*height/1080);
         if(!BetaflightGlyphs::draw_glyph(cr,glyph,w,h) && glyph>=32 && glyph<=95) {
             char s[]={char(glyph),0};cairo_text_extents_t e{};cairo_text_extents(cr,s,&e);
             cairo_move_to(cr,(w-e.width)/2-e.x_bearing,(h-e.height)/2-e.y_bearing);cairo_show_text(cr,s);
