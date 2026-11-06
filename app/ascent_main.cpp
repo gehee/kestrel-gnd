@@ -339,7 +339,8 @@ int run_session(Options o, Settings& settings, display::ModeTrial& mode) {
             auto &telemetry = model.backend.vrx;
             telemetry.stamp_us = state.link.last_update_ms * 1000;
             telemetry.connected = state.link.active && state.link.state == gnd::kLinkUp;
-            telemetry.mcs = telemetry.connected ? state.link.mcs : -1;
+            // The video arrives on RX; link.mcs is this receiver's uplink TX MCS.
+            telemetry.mcs = telemetry.connected ? state.link.rx_mcs_val : -1;
             telemetry.frequency_mhz = state.link.tx_freq;
             flight_controller.set_motion_wanted(model.dynamic>0 && telemetry.link_valid(now));
             if(model.dynamic && telemetry.link_valid(now) && model.backend.media.video_fresh(now) && !model.menu_open) {
@@ -350,7 +351,7 @@ int run_session(Options o, Settings& settings, display::ModeTrial& mode) {
             }
             if(telemetry.link_valid(now)) {
                 char details[128];std::snprintf(details,sizeof(details),"%.0f us / %s / %s MHz / MCS %d",state.link.frame_us,
-                    state.link.frame_mode_asked==2?"SHORT":"STANDARD",gnd::bw_step_label(state.link.bw_step),state.link.mcs);
+                    state.link.frame_mode_asked==2?"SHORT":"STANDARD",gnd::bw_step_label(state.link.bw_step),state.link.rx_mcs_val);
                 model.backend.radio_debug=details;
             } else model.backend.radio_debug="";
             // Native ranging is metres; the legacy raw field is not reused.
@@ -454,9 +455,10 @@ int run_session(Options o, Settings& settings, display::ModeTrial& mode) {
                 default: break;
                 }
             }
-            controller.tick(now);
+            const auto ui_now = kestrel_ui::monotonic_us();
+            controller.tick(ui_now);
             const auto render_start = kestrel_ui::monotonic_us();
-            view.update(now);
+            view.update(ui_now);
             model.hud_pid=hud.pid();model.hud_restarts=hud.restarts();
             lv_timer_handler();
             lv_refr_now(display.lv_display());
