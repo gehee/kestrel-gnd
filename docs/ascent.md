@@ -195,7 +195,12 @@ This is an initial bring-up target, not a flight-ready receiver.
   multi-minute 5 MHz run decoded over 7,500 frames without decoder drops, queue
   overflows or capture errors, including bursts of 18 pending pictures. Long
   keyframe-recovery freezes were eliminated in this test; brief stutters remain
-  with uneven radio delivery. Long-duration RF reliability remains unvalidated.
+  with periodic transmitter keyframes. With P1's gradual-refresh encoder and
+  fpvOS's Wave5 refresh control, a subsequent 20 MHz one-minute trace delivered
+  3,600 pictures with no complete-frame arrival gap above 28 ms and no HDMI
+  flip gap above 34 ms. Reconnecting requested an IDR and resumed video.
+  Narrow-band validation of gradual refresh and long-duration RF reliability
+  remain outstanding.
 - Menu edits currently cover visual preferences. RF/camera configuration,
   DVR/gallery and FC telemetry integration remain incomplete. Physical buttons
   and asynchronous beeper feedback are wired into Kestrel; LINK queues the
