@@ -1,6 +1,8 @@
 #pragma once
 #include "system/flight_telemetry.hpp"
 #include <string>
+#include <map>
+#include <vector>
 #include <limits>
 
 namespace kestrel_ui {
@@ -56,7 +58,16 @@ struct ReceiverState {
     uint64_t flight_version = 0;
     MediaState media;
 };
+struct ReceiverChoice { int value; std::string label; };
+struct ReceiverControl {
+    int value = 0;
+    bool known = false, enabled = false, action = false;
+    std::string reason, text;
+    std::vector<ReceiverChoice> choices;
+};
 struct BackendState : ReceiverState {
+    std::map<std::string, ReceiverControl> controls;
+    std::map<std::string, std::string> air_info;
     // Transport/session metadata belongs to the service, not the platform.
     ServiceState service;
 };

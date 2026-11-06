@@ -86,7 +86,22 @@ int Model::first_row(uint64_t now) const {
 std::vector<MenuRow> Model::rows(uint64_t now) const {
     // Labels/order/help mirror hud/osd_menu_rows.cpp. Do not give a control a
     // pretend value or accept an edit when this platform cannot apply it.
-    auto unavailable = [](std::string id, std::string name, std::string help) {
+    auto unavailable = [&](std::string id, std::string name, std::string help) {
+        const auto found = backend.controls.find(id);
+        if (found != backend.controls.end()) {
+            const auto& c = found->second;
+            auto row = reading(id, name, c.known ? c.text : "--", help);
+            for (const auto& option : c.choices) row.options.push_back(option.label);
+            if (c.known && !c.choices.empty()) {
+                int index = setting(id);
+                row.value = index >= 0 && index < int(c.choices.size()) ? c.choices[index].label : std::to_string(c.value);
+            }
+            row.action = c.action && c.enabled;
+            row.editable = c.enabled && !c.action && c.choices.size() > 1;
+            row.disabled = !c.enabled;
+            if (!c.reason.empty()) row.help += " " + c.reason;
+            return row;
+        }
         auto row = reading(std::move(id), std::move(name), "UNAVAILABLE", std::move(help));
         row.disabled = true;
         row.help += " Not yet supported on Ascent.";
@@ -111,6 +126,7 @@ std::vector<MenuRow> Model::rows(uint64_t now) const {
             result.push_back(unavailable("channel", "Channel", "Where the link sits, what is on every channel and what your country allows."));
             result.push_back(unavailable("power", "TX Power", "Radio output. More reaches further and runs hotter."));
         }
+        if (backend.controls.count("max_mcs")) result.push_back(unavailable("max_mcs", "Max MCS", "The highest receive MCS allowed by Open8030."));
         result.push_back(unavailable("radio_firmware", "VRX Radio Firmware", "This VRX's own radio firmware. The air unit's is not changed."));
         if (backend.vrx.link_valid(now)) result.push_back(unavailable("standby", "Auto Standby", "The air unit's low-power standby."));
         return result;
@@ -151,17 +167,29 @@ std::vector<MenuRow> Model::rows(uint64_t now) const {
         unavailable("licence", "Amateur Licence", "Whether you hold an amateur radio licence."),
         unavailable("area", "Area", "Where you fly, starting with the part of the world."),
         unavailable("country", "Country", "The country you fly in: its rules for the radio's channels.")};
-    if (tab == 6) return {heading("AIR UNIT"),
-        reading("model", "Model", "--", "The air unit on the other end of the link, as it reports itself."),
-        reading("hw_version", "HW Version", "--", "The board's version, then the RF board's."),
-        reading("sn", "SN", "--", "The model, then the radio chip's ID."),
-        reading("sw_version", "SW Version", "--", "The Caddx firmware on the air unit, as stock shows it.")};
+    if (tab == 6) {
+        auto info = [&](const char* key) { auto it=backend.air_info.find(key); return it==backend.air_info.end()?std::string("--"):it->second; };
+        std::vector<MenuRow> rows{heading("AIR UNIT"),
+            reading("model","Model",info("model"),"The connected air unit, as it reports itself."),
+            reading("hw_version","HW Version",info("hw_version"),"Board and RF board versions."),
+            reading("sn","SN",info("sn"),"The model and radio chip identifier reported by the air unit."),
+            reading("sw_version","SW Version",info("sw_version"),"Stock firmware version reported by the air unit.")};
+        for (const auto& field : std::vector<std::pair<const char*,const char*>>{{"app","Application"},{"ver","App Version"},{"os","OS"},{"radio","Radio"},{"kernel","Kernel"},{"sensor","Sensor"}})
+            if (backend.air_info.count(field.first) && !info(field.first).empty()) rows.push_back(reading(field.first,field.second,info(field.first),"Reported by the connected air unit."));
+        return rows;
+    }
     return {heading("FLIGHT CONTROLLER"),
         reading("receiving", "Receiving", serial.fresh(now) ? "YES" : "NO", "Whether MSP frames from the flight controller are coming in now."),
         reading("frames", "Frames", std::to_string(serial.frames), "MSP frames received and understood."),
         reading("data", "Data", std::to_string(serial.bytes) + " B", "Total flight controller bytes received.")};
 }
 int Model::setting(const std::string& id) const {
+    if (const auto c = backend.controls.find(id); c != backend.controls.end()) {
+        const auto preview = receiver_preview_.find(id);
+        const int value = preview == receiver_preview_.end() ? c->second.value : preview->second;
+        for (size_t i=0;i<c->second.choices.size();++i) if (c->second.choices[i].value==value) return int(i);
+        return -1;
+    }
     if (id == "hud") return show_hud ? 1 : 0;
     if (id == "per_cell") return per_cell ? 0 : 1;
     if (id == "theme") return theme;
@@ -171,6 +199,11 @@ int Model::setting(const std::string& id) const {
     return 0;
 }
 void Model::set_setting(const std::string& id, int value) {
+    if (const auto c = backend.controls.find(id); c != backend.controls.end()) {
+        if (value >= 0 && value < int(c->second.choices.size())) receiver_preview_[id]=c->second.choices[value].value;
+        else receiver_preview_.erase(id);
+        return;
+    }
     if (id == "hud") show_hud = value != 0;
     else if (id == "per_cell") per_cell = value == 0;
     else if (id == "theme") theme = value;

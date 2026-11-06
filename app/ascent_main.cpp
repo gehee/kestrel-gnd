@@ -7,6 +7,7 @@
 #include "hud/lvgl/display.hpp"
 #include "hud/lvgl/input.hpp"
 #include "hud/lvgl/preferences.hpp"
+#include "hud/lvgl/receiver_controls.hpp"
 #include "hud/lvgl/view.hpp"
 #include <csignal>
 #include <cstdio>
@@ -23,7 +24,7 @@ void signal_handler(int signal) {
 }
 struct Options {
     platform::SoftwareSetup platform;
-    std::string trace_dir;
+    std::string trace_dir, settings_file;
     std::string assets = "/usr/share/kestrel/ui", input, control, preferences, command, screenshot;
     bool radio = true, menu = false, vector = false, profile = false;
     unsigned seconds = 0;
@@ -72,6 +73,8 @@ Options options(int argc, char **argv) {
             o.menu = true;
         else if (arg == "--trace-dir")
             o.trace_dir = value();
+        else if (arg == "--settings")
+            o.settings_file = value();
         else if (arg == "--profile")
             o.profile = true;
         else if (arg == "--vector")
@@ -102,6 +105,7 @@ Options options(int argc, char **argv) {
                  "  --send-key KEY      Send menu/up/down/left/right/enter/back/quit to that socket\n"
                  "  --preferences FILE  Save visual preferences (optional)\n"
                  "  --show-menu --vector --no-radio --seconds N\n"
+                 "  --settings FILE     Save receiver and per-air-unit settings\n"
                  "  --profile           Log UI and display timing every five seconds\n"
                  "  --trace-dir DIR     Watch DIR/ltrace.req; write frame timing to DIR/ltrace.bin\n"
                  "  --drm DEVICE --decoder DEVICE --replay FILE");
@@ -131,6 +135,11 @@ int main(int argc, char **argv) {
         signal(SIGTERM, signal_handler);
         signal(SIGUSR1, signal_handler);
         Settings settings;
+        if (o.settings_file.empty() && !o.preferences.empty()) o.settings_file=o.preferences+".receiver";
+        if (!o.settings_file.empty()) settings.load(o.settings_file);
+        o.link.max_kbps=settings.get(radio::setting::ar8030_max_kbps);
+        o.link.max_mcs=settings.get(radio::setting::ar8030_max_mcs);
+        o.link.tx_power_mw=o.link.tx_power_want_mw=settings.get(radio::setting::tx_power_mw);
         radio::Model radio_model(settings);
         bus::Waker updates;
         radio_model.radio().watch(&updates);
@@ -181,6 +190,10 @@ int main(int argc, char **argv) {
         model.backend.vrx.freshness_us = 6000000; // native full radio poll is every three seconds
         model.set_preferences(kestrel_ui::load_preferences(o.preferences));
         kestrel_ui::Controller controller(model);
+        kestrel_ui::ReceiverControls controls(radio_model.camera(),radio_model.encoder(),radio_model.air_radio(),radio_model.air_unit(),radio_model.radio());
+        controller.apply_receiver=[&](const std::string& id,int value) {
+            return controls.apply(id,value,kestrel_ui::monotonic_us());
+        };
         if (!o.preferences.empty())
             controller.save_preferences = [&](const auto &p) {
                 kestrel_ui::store_preferences(o.preferences, p);
@@ -221,6 +234,7 @@ int main(int argc, char **argv) {
             telemetry.distance_raw = kestrel_ui::Telemetry::unavailable;
             model.backend.service.connected = o.radio;
             model.backend.service.provider_connected = telemetry.fresh(now);
+            controls.update(model.backend, now);
             input.poll(controller, now);
             auto notice = [&](const char* text) {
                 if (!model.menu_open) controller.open_menu();

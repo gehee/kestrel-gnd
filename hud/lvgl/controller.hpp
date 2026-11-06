@@ -13,6 +13,7 @@ public:
     void set_scene(SceneMode scene);
     HudData hud_data(uint64_t now) const;
     std::function<void(const UiPreferences&)> save_preferences;
+    std::function<std::string(const std::string&, int)> apply_receiver;
 private:
     Model& model_;
     bool previous_ = false;

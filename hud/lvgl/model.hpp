@@ -32,7 +32,7 @@ struct MenuRow {
     bool editable = false;
     std::string id, help;
     std::vector<std::string> options;
-    bool disabled = false, heading = false;
+    bool disabled = false, heading = false, action = false;
 };
 
 // Graphics-independent menu state. Rows follow the VRX Pro UI; unsupported
@@ -78,6 +78,7 @@ private:
     int edit_tab_ = -1;
     std::string edit_id_;
     std::map<std::string, int> pending_;
+    std::map<std::string, int> receiver_preview_;
     int setting(const std::string& id) const;
     void set_setting(const std::string& id, int value);
     bool edit_intact() const;

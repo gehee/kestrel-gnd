@@ -1,8 +1,18 @@
 #include "controller.hpp"
+#include <stdexcept>
 
 namespace kestrel_ui {
 void Controller::tick(uint64_t now) {
     auto& m = model_;
+    // Pending edits belong to the connected unit. Drop them when its control
+    // disappears or loses capability, including while the menu is closed.
+    for (auto i = m.receiver_preview_.begin(); i != m.receiver_preview_.end();) {
+        const auto control = m.backend.controls.find(i->first);
+        if (control == m.backend.controls.end() || !control->second.enabled) {
+            m.pending_.erase(i->first);
+            i = m.receiver_preview_.erase(i);
+        } else ++i;
+    }
     m.visual = canopy::link_visual(m.backend.vrx.link_valid(now), now, previous_, up_, down_);
     const auto& f = m.backend.flight;
     if (f.stamp_us && now >= f.stamp_us && now - f.stamp_us < 2000000 && f.have_cell_v)
@@ -27,7 +37,8 @@ void Controller::set_scene(SceneMode scene) {
 }
 void Controller::cancel_edit() {
     auto& m = model_;
-    if (!m.edit_id_.empty()) m.set_setting(m.edit_id_, m.edit_original_);
+    if (m.backend.controls.count(m.edit_id_)) m.receiver_preview_.erase(m.edit_id_);
+    else if (!m.edit_id_.empty()) m.set_setting(m.edit_id_, m.edit_original_);
     m.pending_.erase(m.edit_id_);
     m.edit_id_.clear(); m.stage = MenuStage::Browse; m.feedback = "Change cancelled"; ++m.menu_version;
 }
@@ -61,7 +72,14 @@ void Controller::key(Key key, bool repeat) {
             }
         } else if (key == Key::Enter) {
             try {
-                if (save_preferences) {
+                if (m.backend.controls.count(m.edit_id_)) {
+                    if (!apply_receiver) throw std::runtime_error("Receiver controls are not connected");
+                    const auto& choices=m.backend.controls.at(m.edit_id_).choices;
+                    const int index=m.setting(m.edit_id_);
+                    if (index<0 || index>=int(choices.size())) throw std::runtime_error("Control choices changed");
+                    m.feedback=apply_receiver(m.edit_id_,choices[index].value);
+                    m.receiver_preview_.erase(m.edit_id_);
+                } else if (save_preferences) {
                     Model committed = m;
                     for (const auto& pending : m.pending_)
                         if (pending.first != m.edit_id_) committed.set_setting(pending.first, pending.second);
@@ -69,7 +87,8 @@ void Controller::key(Key key, bool repeat) {
                 }
                 else m.feedback.clear();
             } catch (const std::exception& error) {
-                m.set_setting(m.edit_id_, m.edit_original_);
+                if (m.backend.controls.count(m.edit_id_)) m.receiver_preview_.erase(m.edit_id_);
+                else m.set_setting(m.edit_id_, m.edit_original_);
                 m.feedback = std::string("Save failed; cancelled: ") + std::string(error.what()).substr(0, 80);
             }
             m.pending_.erase(m.edit_id_);
@@ -108,6 +127,11 @@ void Controller::key(Key key, bool repeat) {
         int index = found == tabs.end() ? 0 : int(found - tabs.begin());
         index = std::clamp(index + (key == Key::Right ? 1 : -1), 0, int(tabs.size()) - 1);
         m.remembered_tab_[m.side] = m.tab = tabs[index]; m.selected = m.first_row(monotonic_us());
+    } else if (key == Key::Enter && menu[m.selected].action) {
+        try {
+            if (!apply_receiver) throw std::runtime_error("Receiver controls are not connected");
+            m.feedback=apply_receiver(menu[m.selected].id,0);
+        } catch (const std::exception& e) { m.feedback=e.what(); }
     } else if (key == Key::Enter && menu[m.selected].editable) {
         m.edit_tab_ = m.tab; m.edit_id_ = menu[m.selected].id;
         m.edit_original_ = m.pending(m.edit_id_) ? m.pending_.at(m.edit_id_) : m.setting(m.edit_id_); m.stage = MenuStage::Edit;
