@@ -23,7 +23,7 @@ void signal_handler(int signal) {
 struct Options {
     platform::SoftwareSetup platform;
     std::string assets = "/usr/share/kestrel/ui", input, control, preferences, command, screenshot;
-    bool radio = true, menu = false, vector = false;
+    bool radio = true, menu = false, vector = false, profile = false;
     unsigned seconds = 0;
     Ar8030Config link;
 };
@@ -68,6 +68,8 @@ Options options(int argc, char **argv) {
             o.radio = false;
         else if (arg == "--show-menu")
             o.menu = true;
+        else if (arg == "--profile")
+            o.profile = true;
         else if (arg == "--vector")
             o.vector = true;
         else if (arg == "--replay")
@@ -96,6 +98,7 @@ Options options(int argc, char **argv) {
                  "  --send-key KEY      Send menu/up/down/left/right/enter/back/quit to that socket\n"
                  "  --preferences FILE  Save visual preferences (optional)\n"
                  "  --show-menu --vector --no-radio --seconds N\n"
+                 "  --profile           Log UI and display timing every five seconds\n"
                  "  --drm DEVICE --decoder DEVICE --replay FILE");
             exit(0);
         } else
@@ -188,6 +191,9 @@ int main(int argc, char **argv) {
         const auto start = kestrel_ui::monotonic_us();
         uint64_t drawn = 0;
         int previous_bind = gnd::BIND_IDLE;
+        uint64_t profile_start = start, profile_loops = 0, profile_drawn = 0, profile_presented = 0;
+        uint64_t render_us = 0, overlay_us = 0, longest_loop_us = 0;
+        uint64_t longest_render_us = 0, longest_overlay_us = 0;
         while (!interrupted && !model.quit && !source_exited && !receiver.screen->failed() &&
                !receiver.decoder->failed()) {
             const auto now = kestrel_ui::monotonic_us();
@@ -258,15 +264,43 @@ int main(int argc, char **argv) {
                 }
             }
             controller.tick(now);
+            const auto render_start = kestrel_ui::monotonic_us();
             view.update(now);
             lv_timer_handler();
             lv_refr_now(display.lv_display());
+            const auto overlay_start = kestrel_ui::monotonic_us();
             if (display.presentations != drawn) {
                 drawn = display.presentations;
                 receiver.screen->overlay(
                     std::make_shared<hal::I420Overlay>(1920, 1080, display.pixels().data()));
             }
-            usleep(1000000 / std::max(1, model.fps));
+            const auto rendered = kestrel_ui::monotonic_us();
+            // FPS is a frame budget, not an extra delay after rendering.
+            const uint64_t frame_us = 1000000 / std::max(1, model.fps);
+            if (rendered - now < frame_us)
+                usleep(frame_us - (rendered - now));
+            if (o.profile) {
+                const auto ended = kestrel_ui::monotonic_us();
+                ++profile_loops;
+                render_us += overlay_start - render_start;
+                overlay_us += rendered - overlay_start;
+                longest_loop_us = std::max(longest_loop_us, ended - now);
+                longest_render_us = std::max(longest_render_us, overlay_start - render_start);
+                longest_overlay_us = std::max(longest_overlay_us, rendered - overlay_start);
+                if (ended - profile_start >= 5000000) {
+                    const double seconds = double(ended - profile_start) / 1000000;
+                    const auto presented = receiver.screen->presented();
+                    printf("profile: target=%d loops=%.2f/s UI=%.2f fps HDMI_updates=%.2f/s "
+                           "render=%.1fms overlay=%.1fms max_loop=%.1fms max_render=%.1fms max_overlay=%.1fms\n",
+                           model.fps, profile_loops / seconds, (drawn - profile_drawn) / seconds,
+                           (presented - profile_presented) / seconds,
+                           render_us / (1000.0 * profile_loops), overlay_us / (1000.0 * profile_loops),
+                           longest_loop_us / 1000.0, longest_render_us / 1000.0, longest_overlay_us / 1000.0);
+                    profile_start = ended; profile_drawn = drawn; profile_presented = presented;
+                    profile_loops = render_us = overlay_us = longest_loop_us = 0;
+                    longest_render_us = longest_overlay_us = 0;
+                }
+            }
         }
         if (!o.screenshot.empty())
             display.dump(o.screenshot);
