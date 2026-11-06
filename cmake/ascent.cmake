@@ -45,6 +45,8 @@ if(KESTREL_TESTS)
     add_test(NAME layers COMMAND ${CMAKE_COMMAND} -DSRC=${PROJECT_SOURCE_DIR}
         -DLAYERS=${PROJECT_BINARY_DIR}/layers.txt -DNM=${CMAKE_NM} -DLIBDIR=${PROJECT_BINARY_DIR}
         -P ${PROJECT_SOURCE_DIR}/tools/check_layers.cmake)
+    add_executable(ui_damage_test tools/test/damage_test.cpp)
+    add_test(NAME ui_damage COMMAND ui_damage_test)
     add_executable(v4l2_queue_test tools/test/v4l2_queue_test.cpp)
     target_link_libraries(v4l2_queue_test PRIVATE kg_hal)
     add_test(NAME v4l2_queue COMMAND v4l2_queue_test)

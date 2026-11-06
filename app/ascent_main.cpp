@@ -278,7 +278,7 @@ int main(int argc, char **argv) {
             const auto overlay_start = kestrel_ui::monotonic_us();
             if (display.presentations != drawn) {
                 drawn = display.presentations;
-                receiver.screen->overlay(display.pixels().data(), 1920, 1080);
+                receiver.screen->overlay_damage(display.pixels().data(), 1920, 1080, display.take_damage());
             }
             const auto rendered = kestrel_ui::monotonic_us();
             // FPS is a frame budget, not an extra delay after rendering.

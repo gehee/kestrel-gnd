@@ -150,6 +150,8 @@ class Ar9311Screen final : public PlaneScreen {
     Buffer black_;
     std::array<Buffer, 3> ui_{};
     std::array<Slot, 3> slots_{};
+    std::array<base::DamageRows, 3> ui_damage_{{{1920, 1080}, {1920, 1080}, {1920, 1080}}};
+    bool first_overlay_ = true;
     Properties connector_, crtc_, primary_, overlay_;
     uint32_t mode_ = 0;
     bool active_ = false;
@@ -369,8 +371,19 @@ class Ar9311Screen final : public PlaneScreen {
         wake_.wait(lock, [this] { return done_ || !video_active_; });
     }
     void overlay(const uint32_t *argb, unsigned width, unsigned height) override {
+        overlay_damage(argb, width, height, {{0, 0, int(width), int(height)}});
+    }
+    void overlay_damage(const uint32_t *argb, unsigned width, unsigned height,
+                        const std::vector<base::Damage>& damage) override {
         if (!argb || width != 1920 || height != 1080)
             throw std::invalid_argument("UI plane geometry");
+        // This state belongs exclusively to the UI producer. Even a dropped
+        // update must remain dirty in every buffer until its next upload.
+        for (auto& dirty : ui_damage_) {
+            if (first_overlay_) dirty.all();
+            for (const auto& area : damage) dirty.add(area);
+        }
+        first_overlay_ = false;
         int slot = -1;
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -393,8 +406,13 @@ class Ar9311Screen final : public PlaneScreen {
         }
         // Upload on UI thread; display/video never waits for this copy or LVGL.
         auto &b = ui_[slot];
-        for (unsigned row = 0; row < height; ++row)
-            memcpy(b.pixels + row * b.pitch, argb + row * width, width * 4);
+        auto& dirty = ui_damage_[slot];
+        for (unsigned row = 0; row < height; ++row) {
+            const auto [left, right] = dirty.rows()[row];
+            if (left < right)
+                memcpy(b.pixels + row * b.pitch + left * 4, argb + row * width + left, (right - left) * 4);
+        }
+        dirty.clear();
         {
             std::lock_guard<std::mutex> lock(mutex_);
             for (auto &state : slots_)

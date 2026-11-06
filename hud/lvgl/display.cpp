@@ -87,6 +87,13 @@ void Display::flush_cb(lv_display_t* display, const lv_area_t* area, uint8_t* pi
 }
 void Display::flush(const lv_area_t& a, const uint8_t* source) {
     if (a.x1 < 0 || a.y1 < 0 || a.x2 >= width_ || a.y2 >= height_ || a.x2 < a.x1 || a.y2 < a.y1) return;
+    // Offscreen tools need not consume damage. Bound retained metadata and
+    // conservatively fall back to a full upload if too many regions accumulate.
+    if (damage_.size() >= 128) {
+        damage_.clear(); damage_.push_back({0, 0, width_, height_});
+    } else if (damage_.empty() || damage_.front().width != width_ || damage_.front().height != height_) {
+        damage_.push_back({a.x1, a.y1, a.x2 - a.x1 + 1, a.y2 - a.y1 + 1});
+    }
     const size_t row_bytes = size_t(a.x2 - a.x1 + 1) * 4;
     for (int y = a.y1; y <= a.y2; ++y) {
         auto* dest = pixels_.data() + size_t(y) * width_ + a.x1;

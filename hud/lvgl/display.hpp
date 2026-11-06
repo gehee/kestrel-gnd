@@ -1,5 +1,6 @@
 #pragma once
 #include "lvgl.h"
+#include "base/damage.hpp"
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -18,6 +19,7 @@ public:
     int height() const { return height_; }
     lv_display_t* lv_display() const { return display_; }
     const std::vector<uint32_t>& pixels() const { return pixels_; }
+    std::vector<base::Damage> take_damage() { auto result = std::move(damage_); damage_.clear(); return result; }
     void dump(const std::string& path) const;
     void verify_framebuffer() const;
     uint64_t flushes = 0, bytes_written = 0, presentations = 0;
@@ -29,6 +31,7 @@ private:
     size_t mapping_size_ = 0;
     lv_display_t* display_ = nullptr;
     std::vector<uint32_t> pixels_, draw_buffer_, backup_;
+    std::vector<base::Damage> damage_;
     void flush(const lv_area_t& area, const uint8_t* pixels);
     static void flush_cb(lv_display_t* display, const lv_area_t* area, uint8_t* pixels);
 };

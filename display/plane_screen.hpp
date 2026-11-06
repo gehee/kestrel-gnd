@@ -1,5 +1,6 @@
 #pragma once
 #include "hal/vdec.hpp"
+#include "base/damage.hpp"
 #include <memory>
 
 namespace display {
@@ -10,6 +11,8 @@ class PlaneScreen : public hal::FrameSink {
     // Copies into a free UI scanout buffer on the caller's thread. Never waits
     // for video or a vblank; a busy ring drops the update rather than video.
     virtual void overlay(const uint32_t *argb, unsigned width, unsigned height) = 0;
+    virtual void overlay_damage(const uint32_t *argb, unsigned width, unsigned height,
+                                const std::vector<base::Damage>&) { overlay(argb, width, height); }
     virtual void run() = 0;
     virtual uint64_t presented() const = 0;
     virtual bool failed() const = 0;
