@@ -20,11 +20,11 @@ public:
     std::shared_ptr<const media::Thumbnail> get(const std::string& name,int width,int height);
     static std::shared_ptr<media::Thumbnail> sample(const DecodedUnit&,int width,int height);
 private:
-    struct Job {std::string name,key; int width=0,height=0;std::shared_ptr<media::Thumbnail> image;std::shared_ptr<DecodedUnit> frame;};
+    struct Job {std::string name,key; int width=0,height=0;std::shared_ptr<media::Thumbnail> image;std::shared_ptr<DecodedUnit> frame;uint64_t check_generation=0;};
     struct Entry {std::shared_ptr<media::Thumbnail> image;uint64_t used=0;};
     void run();
     std::string directory_,armed_;
-    uint64_t decoded_after_us_=0,tick_=0;
+    uint64_t decoded_after_us_=0,tick_=0,generation_=0;
     std::atomic<bool> wanted_{false};
     std::mutex mutex_;
     std::condition_variable wake_;

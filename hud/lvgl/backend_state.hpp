@@ -1,6 +1,7 @@
 #pragma once
 #include "system/flight_telemetry.hpp"
 #include "system/thumbnail.hpp"
+#include "hud_data.hpp"
 #include <memory>
 #include <string>
 #include <map>
@@ -98,7 +99,13 @@ struct BackendState : ReceiverState {
     std::vector<Recording> recordings;
     bool playback_busy=false,playback_paused=false;
     uint64_t playback_position_us=0,playback_duration_us=0;
-    std::string playback_error;
+    std::string playback_error,playback_telemetry_error;
+    std::shared_ptr<const HudData> playback_hud;
+    std::array<uint16_t,53*20> playback_grid{};
+    bool playback_osd_fresh=false;
+    float playback_dx=0,playback_dy=0,playback_bank=0;
+    int playback_warning=0;
+    std::string playback_clock;
     std::array<uint16_t,53*20> bf_grid{};
     bool bf_available=false;
     float hud_dx=0,hud_dy=0,hud_bank=0;

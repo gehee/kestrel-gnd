@@ -2,6 +2,7 @@
 #include "third_party/minimp4.h"
 #include "base/time_util.h"
 #include <cerrno>
+#include <algorithm>
 #include <cstring>
 #include <fcntl.h>
 #include <stdexcept>
@@ -12,11 +13,31 @@ StreamPlayer::StreamPlayer(std::string directory,Output output,int width,int hei
     :directory_(std::move(directory)),output_(std::move(output)),width_(width),height_(height),worker_([this]{run();}) {}
 StreamPlayer::~StreamPlayer() {quit_=true;stop();worker_.join();}
 StreamPlayer::State StreamPlayer::state() const {std::lock_guard<std::mutex> lock(mutex_);auto s=state_;s.paused=paused_;return s;}
+std::shared_ptr<const media::TelemetrySample> StreamPlayer::telemetry_at(uint64_t us) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if(!state_.playing || telemetry_samples_.empty())return {};
+    auto after=std::upper_bound(telemetry_samples_.begin(),telemetry_samples_.end(),us,[](uint64_t t,const PresentedSample& s){return t<s.us;});
+    if(after==telemetry_samples_.begin())return {};
+    const auto& before=*std::prev(after);if(!before.data || us-before.us>2500000)return {};
+    std::shared_ptr<media::TelemetrySample> sample;
+    if(after!=telemetry_samples_.end() && after->data && after->us>before.us && after->us-before.us<=100000) {
+        const double a=double(us-before.us)/(after->us-before.us);
+        for(const char* key:{"motion.dx","motion.dy","motion.bank_rad"}) {
+            const auto x=before.data->sample.values.find(key);const auto y=after->data->sample.values.find(key);
+            if(x!=before.data->sample.values.end() && y!=after->data->sample.values.end() && x->second!=y->second) {
+                if(!sample)sample=std::make_shared<media::TelemetrySample>(before.data->sample);
+                sample->values[key]=x->second+(y->second-x->second)*a;
+            }
+        }
+    }
+    if(sample)return sample;
+    return std::shared_ptr<const media::TelemetrySample>(before.data,&before.data->sample);
+}
 void StreamPlayer::play(const std::string& name) {
     if(!dvr_lib::safe_name(name) || !dvr_lib::ends_with(name,".mp4"))throw std::invalid_argument("Not a recording filename");
     std::lock_guard<std::mutex> lock(mutex_);
     ++generation_;paused_=false;requested_=name;state_.busy=true;state_.playing=false;
-    state_.position_us=state_.duration_us=0;state_.error.clear();state_.file=name;wake_.notify_one();
+    state_.position_us=state_.duration_us=0;state_.error.clear();state_.telemetry_error.clear();state_.started_us=get_time_us();telemetry_samples_.clear();state_.file=name;wake_.notify_one();
 }
 void StreamPlayer::stop() {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -79,6 +100,7 @@ void StreamPlayer::play_file(const std::string& name,uint64_t generation) {
     }
     if(parameters.size()<3)throw std::runtime_error("Missing HEVC parameter sets");
     if(quit_ || generation!=generation_)return;
+    TelemetryReader telemetry(directory_+"/"+name);
     output_.select(true);
     uint64_t started=get_time_us();
     while(!output_.ready()) {
@@ -92,6 +114,7 @@ void StreamPlayer::play_file(const std::string& name,uint64_t generation) {
     MP4D_frame_offset(&mp4,track,t.sample_count-1,&size,&pts,&duration);
     {std::lock_guard<std::mutex> lock(mutex_);if(generation!=generation_)return;state_.playing=true;state_.position_us=0;
      state_.duration_us=(uint64_t(pts)+duration)*1000000/t.timescale;}
+    if(output_.started)output_.started(name);
     uint64_t origin=get_time_us();
     for(unsigned i=0;i<t.sample_count;++i) {
         if(quit_ || generation!=generation_)return;
@@ -122,7 +145,11 @@ void StreamPlayer::play_file(const std::string& name,uint64_t generation) {
             if(nal<=31) {type=nal;key|=nal>=16 && nal<=21;}
             annex.insert(annex.end(),{0,0,0,1});annex.insert(annex.end(),packet.begin()+p,packet.begin()+p+len);p+=len;
         }
-        output_.feed(annex,origin+position,type,key);
+        auto recorded=telemetry.at(position);
+        {std::lock_guard<std::mutex> lock(mutex_);if(generation!=generation_)return;
+            state_.telemetry_error=telemetry.error();telemetry_samples_.push_back({position,std::move(recorded)});
+            while(telemetry_samples_.size()>128)telemetry_samples_.pop_front();}
+        output_.feed(annex,position,type,key);
         {std::lock_guard<std::mutex> lock(mutex_);if(generation==generation_)state_.position_us=position;}
     }
     // Leave the last submitted picture enough time to reach scanout.

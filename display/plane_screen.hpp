@@ -26,6 +26,7 @@ class PlaneScreen : public hal::FrameSink {
         uint64_t stamp_us = 0;
         int width = 0, height = 0, fps = 0;
         float latency_ms = -1;
+        uint64_t pts_us = 0; // timestamp of the last completed video flip
     };
     virtual VideoStats video_stats() const { return {}; }
     virtual bool supports_mode(AscentMode mode) const { return mode == AscentMode{}; }

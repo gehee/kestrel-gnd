@@ -256,12 +256,23 @@ int main(int argc, char** argv) {
             ++model.menu_version;view.update(now);lv_refr_now(display.lv_display());
             if(display.presentations!=settled_menu)throw std::runtime_error("Unchanged menu version caused a redundant redraw");
             model.backend.recordings={{"recording_20260101_123456.mp4",12345678},{"another.mp4",4000000}};
+            auto recorded_hud=std::make_shared<kestrel_ui::HudData>(controller.hud_data(now,true));
+            recorded_hud->panels[0].primary="16.40";
+            model.backend.playback_hud=recorded_hud;
             for(auto scene:{kestrel_ui::SceneMode::GalleryBrowse,kestrel_ui::SceneMode::GalleryPlayback,kestrel_ui::SceneMode::GalleryBrowse,kestrel_ui::SceneMode::Live}) {
                 controller.set_scene(scene);
                 for(int i=0;i<20;++i) {
                     now+=20000;controller.tick(now);view.update(now);lv_refr_now(display.lv_display());check_incremental();
                 }
             }
+            controller.set_scene(kestrel_ui::SceneMode::GalleryPlayback);model.dynamic=1;
+            for(int i=0;i<12;++i) {
+                model.backend.playback_dx=float(i%4)*.005f;model.backend.playback_bank=float(i%3)*.002f;
+                model.backend.playback_warning=i>6?1:0;
+                if(i==4 || i==7)controller.key(kestrel_ui::Key::Up);
+                now+=20000;controller.tick(now);view.update(now);lv_refr_now(display.lv_display());check_incremental();
+            }
+            controller.set_scene(kestrel_ui::SceneMode::Live);model.backend.playback_hud.reset();
             model.menu_open=false; model.show_hud=true; model.show_details=false;
             model.link_edge_warning=false; model.clock=0; model.dynamic=0;
             model.backend.media.recording=false; model.backend.vrx.mcs=8;

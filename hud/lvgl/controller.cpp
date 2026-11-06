@@ -39,6 +39,7 @@ void Controller::tick(uint64_t now) {
 void Controller::open_menu() { model_.menu_open = true; model_.stage = MenuStage::Pick; model_.scene = SceneMode::Live; model_.feedback.clear(); ++model_.menu_version; }
 void Controller::set_scene(SceneMode scene) {
     if (model_.stage == MenuStage::Edit) cancel_edit();
+    if(scene==SceneMode::GalleryPlayback)model_.playback_hud_enabled=model_.show_hud;
     model_.scene = scene;
     model_.menu_open = scene == SceneMode::Menu;
     model_.stage = MenuStage::Pick;
@@ -65,6 +66,8 @@ void Controller::key(Key key, bool repeat) {
         } else if(m.scene==SceneMode::GalleryPlayback && key==Key::Enter) {
             try {if(apply_receiver) apply_receiver("playback_pause",0);}
             catch(const std::exception& e) {m.feedback=e.what();}
+        } else if(m.scene==SceneMode::GalleryPlayback && key==Key::Up) {
+            m.playback_hud_enabled=!m.playback_hud_enabled;
         } else if(m.scene==SceneMode::GalleryBrowse) {
             const auto& clips=m.backend.recordings;
             const int last=std::max(0,int(clips.size())-1);

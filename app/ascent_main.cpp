@@ -14,6 +14,7 @@
 #include "dvr/dvr_sink.hpp"
 #include "dvr/stream_recorder.hpp"
 #include "dvr/thumbnails.hpp"
+#include "app/recorded_hud.hpp"
 #include "dvr/settings.hpp"
 #include "msp/msp_osd.hpp"
 #include "motion/imu_reader.hpp"
@@ -183,12 +184,13 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
         if(o.recordings.empty()) o.recordings=settings.get(dvr::setting::dvr_dir);
         dvr::StreamRecorder recorder(o.recordings,codec,1920,1080,60);
         dvr::StreamPlayer player(o.recordings,{
-            [&](bool playing){receiver.screen->hold_video(playing);source_decoder->playback(playing);},
+            [&](bool playing){thumbnails.cancel();receiver.screen->hold_video(playing);source_decoder->playback(playing);},
             [&]{return source_decoder->playback_ready();},
             [&]{return source_decoder->playback_failed() || source_decoder->failed();},
             [&](const std::vector<uint8_t>& data,uint64_t pts,uint8_t nal,bool key) {
                 source_decoder->feed_playback(const_cast<uint8_t*>(data.data()),int(data.size()),pts,kestrel_ui::monotonic_us(),nal,key);
-            },[&](bool paused){source_decoder->pause_input(paused);}});
+            },[&](bool paused){source_decoder->pause_input(paused);},
+            [&](const std::string& name){thumbnails.arm(name,kestrel_ui::monotonic_us());}});
         DvrSink recording_sink(codec,recorder);
         Ar8030Link link(radio_model, o.link, settings, codec, receiver.decoder, &stop);
         link.add_video_sink(&recording_sink);
@@ -306,7 +308,9 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
         }
         uint64_t drawn = 0, frame_deadline=start;
         int previous_bind = gnd::BIND_IDLE;
-        std::string recording_error,thumbnail_session;
+        std::string recording_error,telemetry_error,thumbnail_session;
+        std::vector<uint8_t> playback_hud_bytes;
+        std::shared_ptr<const kestrel_ui::HudData> playback_hud;
         uint64_t profile_start = start, profile_loops = 0, profile_drawn = 0, profile_presented = 0, profile_ui_flips = 0;
         uint64_t render_us = 0, overlay_us = 0, longest_loop_us = 0;
         uint64_t longest_render_us = 0, longest_overlay_us = 0;
@@ -405,12 +409,10 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
             auto& gallery=model.backend.controls["gallery"];gallery={};gallery.known=true;gallery.enabled=true;gallery.action=true;
             gallery.text=std::to_string(playback.recordings.size())+" RECORDINGS";
             const auto recording=recorder.state();
-            const auto thumbnail_id=playback.playing?"play:"+playback.file:
-                recording.recording && recording.frames?"rec:"+recording.file:std::string();
+            const auto thumbnail_id=recording.recording && recording.frames?recording.file:std::string();
             if(thumbnail_id!=thumbnail_session) {
                 thumbnails.cancel();thumbnail_session=thumbnail_id;
-                if(!thumbnail_id.empty())thumbnails.arm(playback.playing?playback.file:
-                    std::filesystem::path(recording.file).filename().string(),now);
+                if(!thumbnail_id.empty())thumbnails.arm(std::filesystem::path(recording.file).filename().string(),now);
             }
             if(model.scene==kestrel_ui::SceneMode::GalleryBrowse) {
                 const int first=std::max(0,model.gallery_selected)/6*6;
@@ -436,6 +438,10 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
                 ++model.menu_version;
                 printf("panel: %s\n", text);
             };
+            if(recording.telemetry_error!=telemetry_error) {
+                telemetry_error=recording.telemetry_error;
+                if(!telemetry_error.empty()){notice(telemetry_error.c_str());panel.beep(platform::PanelTone::Failure);}
+            }
             if(recording.error!=recording_error) {
                 recording_error=recording.error;
                 if(!recording_error.empty()) {notice(recording_error.c_str());panel.beep(platform::PanelTone::Failure);}
@@ -484,6 +490,36 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
             }
             const auto ui_now = kestrel_ui::monotonic_us();
             controller.tick(ui_now);
+            if(recorder.is_recording()) {
+                try {recorder.set_telemetry(app::record_hud(controller,model,ui_now));}
+                catch(const std::exception& e) {
+                    recorder.set_telemetry(std::make_shared<media::TelemetrySample>());
+                    fprintf(stderr,"telemetry snapshot: %s\n",e.what());
+                }
+            }
+            model.backend.playback_hud.reset();model.backend.playback_osd_fresh=false;
+            model.backend.playback_dx=model.backend.playback_dy=model.backend.playback_bank=0;
+            model.backend.playback_warning=0;model.backend.playback_clock.clear();
+            model.backend.playback_telemetry_error=playback.telemetry_error;
+            if(playback.playing && video.stamp_us>=playback.started_us) {
+                model.backend.playback_position_us=video.pts_us;
+                if(auto sample=player.telemetry_at(video.pts_us)) {
+                    try {
+                        if(sample->hud!=playback_hud_bytes) {
+                            playback_hud=std::make_shared<kestrel_ui::HudData>(kestrel_ui::hud_ipc::decode_data(sample->hud));
+                            playback_hud_bytes=sample->hud;
+                        }
+                        model.backend.playback_hud=playback_hud;
+                        model.backend.playback_grid=sample->grid;
+                        model.backend.playback_osd_fresh=app::reading(*sample,"osd.fresh")!=0;
+                        model.backend.playback_dx=std::clamp(app::reading(*sample,"motion.dx"),-1.0,1.0);
+                        model.backend.playback_dy=std::clamp(app::reading(*sample,"motion.dy"),-1.0,1.0);
+                        model.backend.playback_bank=std::clamp(app::reading(*sample,"motion.bank_rad"),-1.0,1.0);
+                        model.backend.playback_warning=int(std::clamp(app::reading(*sample,"link.warning"),0.0,2.0));
+                        const auto clock=sample->text.find("clock");if(clock!=sample->text.end())model.backend.playback_clock=clock->second;
+                    }catch(const std::exception& e){model.backend.playback_telemetry_error=e.what();}
+                }
+            }
             const auto render_start = kestrel_ui::monotonic_us();
             view.update(ui_now);
             model.hud_pid=hud.pid();model.hud_restarts=hud.restarts();

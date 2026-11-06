@@ -366,8 +366,9 @@ void View::draw_gallery(lv_layer_t* layer) {
         label(model_.backend.playback_paused?"PAUSED":"PLAYBACK",32,42,26,theme.accent);
         label(model_.backend.media.playback_id,240,42,22,theme.text);
         const auto elapsed=model_.backend.playback_position_us/1000000,total=model_.backend.playback_duration_us/1000000;
-        label(std::to_string(elapsed)+" / "+std::to_string(total)+" s   OK: pause/resume   BACK: gallery",32,82,20,theme.text);
+        label(std::to_string(elapsed)+" / "+std::to_string(total)+" s   OK: pause/resume   BACK: gallery   UP: HUD " + std::string(!model_.backend.playback_hud?"UNAVAILABLE":model_.playback_hud_enabled?"ON":"OFF"),32,82,20,theme.text);
         if(!model_.backend.playback_error.empty())label(model_.backend.playback_error,32,145,24,theme.accent);
+        else if(!model_.backend.playback_telemetry_error.empty())label("Recorded HUD unavailable",32,145,24,theme.accent);
         return;
     }
     rect(layer,0,0,width_,height_,theme.ground,.95f);
@@ -542,27 +543,29 @@ void View::update(uint64_t now) {
         std::ostringstream signature;
         signature<<int(model_.scene)<<':'<<model_.gallery_selected<<':'<<model_.theme<<':'<<model_.feedback<<':'
             <<model_.backend.playback_position_us/1000000<<':'<<model_.backend.playback_duration_us/1000000<<':'
-            <<model_.backend.playback_paused<<':'<<model_.backend.media.playback_id<<':'<<model_.backend.playback_error;
+            <<model_.playback_hud_enabled<<bool(model_.backend.playback_hud)<<model_.backend.playback_telemetry_error<<model_.backend.playback_paused<<':'<<model_.backend.media.playback_id<<':'<<model_.backend.playback_error;
         if(model_.scene==SceneMode::GalleryBrowse) for(const auto& clip:model_.backend.recordings)signature<<clip.name<<':'<<clip.bytes<<';';
         if(signature.str()!=gallery_signature_) {gallery_signature_=signature.str();lv_obj_invalidate(gallery_);}
     }
-    const bool bf=model_.bf_osd && model_.hud_visible() && model_.backend.serial.fresh(now);
-    if(bf!=bf_visible_ || (bf && bf_grid_!=model_.backend.bf_grid)) {
+    const bool replay=model_.scene==SceneMode::GalleryPlayback;
+    const auto& grid=replay?model_.backend.playback_grid:model_.backend.bf_grid;
+    const bool bf=model_.bf_osd && model_.hud_visible() && (replay?model_.backend.playback_osd_fresh:model_.backend.serial.fresh(now));
+    if(bf!=bf_visible_ || (bf && bf_grid_!=grid)) {
         bf_visible_=bf;
         for(int row=0;row<20;++row) for(int col=0;col<53;++col) {
             const int i=row*53+col;
-            const auto glyph=bf?model_.backend.bf_grid[i]:0;
+            const auto glyph=bf?grid[i]:0;
             if(glyph==bf_grid_[i])continue;
             bf_grid_[i]=glyph;
             lv_area_t area{(6+col*36)*width_/1920,row*54*height_/1080,(6+(col+1)*36)*width_/1920,(row+1)*54*height_/1080};
             lv_obj_invalidate_area(bf_object_,&area);
         }
     }
-    const auto debug=model_.debug && model_.hud_visible() && !model_.menu_open?model_.backend.radio_debug:std::string();
+    const auto debug=!replay && model_.debug && model_.hud_visible() && !model_.menu_open?model_.backend.radio_debug:std::string();
     if(debug!=debug_text_ || old_theme_!=model_.theme) {debug_text_=debug;lv_obj_invalidate(debug_object_);}
-    auto clock=model_.clock_text(std::time(nullptr),now);
-    const auto hud_data = controller_.hud_data(now);
-    const auto recording = hud_data.enabled && hud_data.panels[0].visible && model_.hud_style != "vector" ? std::string() : controller_.recording_text(now);
+    auto clock=replay?(model_.hud_visible() && model_.clock?model_.backend.playback_clock:std::string()):model_.clock_text(std::time(nullptr),now);
+    auto hud_data = controller_.hud_data(now);
+    const auto recording = hud_data.enabled && hud_data.panels[0].visible && model_.hud_style != "vector" ? std::string() : replay?std::string():controller_.recording_text(now);
     if (recording != recording_text_) { recording_text_ = recording; lv_obj_invalidate(clock_); }
     if(clock!=clock_text_ || old_theme_!=model_.theme) {
         clock_text_=clock; lv_obj_invalidate(clock_);
@@ -571,10 +574,13 @@ void View::update(uint64_t now) {
     sync_hud_objects();
     const bool hud_changed = hud_revision_ != hud_->revision();
     const float pixels_per_world=height_/(2*std::tan(.785f/2)*3.2f);
-    const bool motion=model_.dynamic && !model_.menu_open;
-    const std::array<int,3> transform{motion?int(std::lround(model_.backend.hud_dx*pixels_per_world)):0,
-        motion?-int(std::lround(model_.backend.hud_dy*pixels_per_world)):0,
-        motion?int(std::lround(-model_.backend.hud_bank*1800/3.14159265f)):0};
+    const bool motion=model_.hud_visible() && model_.dynamic && !model_.menu_open;
+    const float dx=replay?model_.backend.playback_dx:model_.backend.hud_dx;
+    const float dy=replay?model_.backend.playback_dy:model_.backend.hud_dy;
+    const float bank=replay?model_.backend.playback_bank:model_.backend.hud_bank;
+    const std::array<int,3> transform{motion?int(std::lround(dx*pixels_per_world)):0,
+        motion?-int(std::lround(dy*pixels_per_world)):0,
+        motion?int(std::lround(-bank*1800/3.14159265f)):0};
     if(transform!=motion_transform_) {
         for(auto* object:hud_objects_) {
             if(transform[0]!=motion_transform_[0]) lv_obj_set_style_translate_x(object,transform[0],0);
@@ -590,13 +596,13 @@ void View::update(uint64_t now) {
     if(hud_changed && transform[2]) lv_obj_invalidate(screen_);
     const float dt = last_tick_ ? std::min(0.1f, float(now - last_tick_) / 1000000) : 0;
     last_tick_ = now;
-    const int warning = model_.link_edge_warning ? controller_.link_warning() : 0;
+    const int warning = model_.link_edge_warning ? (replay?model_.backend.playback_warning:controller_.link_warning()) : 0;
     const float edge_target = warning && model_.hud_visible() ? 1 : 0;
     const float edge_dt = edge_fade_ == 0 || edge_fade_ == 1 ? std::min(dt, 1.0f/60) : dt;
     edge_fade_ += std::clamp(edge_target-edge_fade_, -edge_dt/.6f, edge_dt/.15f);
     const int prior_level = edge_level_;
     if (warning) edge_level_ = warning;
-    const float pulse = edge_level_ == 2 ? .65f + .35f * (.5f + .5f * std::sin(float(now % 10000000)/1000000*7.54f)) : 1;
+    const float pulse = edge_level_ == 2 ? .65f + .35f * (.5f + .5f * std::sin(float((replay?model_.backend.playback_position_us:now) % 10000000)/1000000*7.54f)) : 1;
     const int edge_opacity = int(255 * .75f * edge_fade_ * pulse);
     if (edge_opacity != edge_opacity_ || prior_level != edge_level_) {
         edge_opacity_ = edge_opacity;

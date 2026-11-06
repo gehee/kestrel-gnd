@@ -549,7 +549,7 @@ class Ar9311Screen final : public PlaneScreen {
                         ++stats_frames_;
                         if (frame->recv_ts && stamp >= frame->recv_ts && frame->tx_processing_delay_us != kAirUnknown)
                             latency_samples_.push_back(float(stamp - frame->recv_ts + uint64_t(frame->tx_encode_delay_us) + frame->tx_processing_delay_us) / 1000);
-                        video_stats_.stamp_us = stamp;
+                        video_stats_.stamp_us = stamp;video_stats_.pts_us=frame->pts;
                         video_stats_.width = frame->width; video_stats_.height = frame->height;
                         if (stamp - stats_start_ >= 1000000) {
                             video_stats_.fps = int(std::lround(stats_frames_ * 1000000.0 / (stamp - stats_start_)));

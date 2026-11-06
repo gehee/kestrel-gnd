@@ -126,7 +126,13 @@ int main(int argc, char** argv) {
         controller.set_scene(SceneMode::GalleryBrowse);
         check(!model.hud_visible() && !controller.hud_data(2300000).enabled, "Gallery browsing hides the passive HUD");
         controller.set_scene(SceneMode::GalleryPlayback);
-        check(!model.hud_visible(), "Gallery playback hides the passive HUD");
+        check(!model.hud_visible(), "Legacy playback hides live HUD readings");
+        auto recorded=std::make_shared<HudData>();recorded->panels[0].primary="16.40";
+        model.backend.playback_hud=recorded;model.playback_hud_enabled=true;
+        check(model.hud_visible() && controller.hud_data(2300000).panels[0].primary=="16.40", "Playback uses recorded HUD values");
+        controller.key(Key::Up);check(!model.hud_visible() && !controller.hud_data(2300000).enabled,"Playback HUD can be hidden");
+        controller.key(Key::Up);check(model.hud_visible(),"Playback HUD can be restored");
+        model.backend.playback_hud.reset();
         std::string playback_action;
         controller.apply_receiver=[&](const std::string& id,int){playback_action=id;return std::string();};
         controller.key(Key::Enter);

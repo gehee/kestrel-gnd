@@ -18,12 +18,15 @@ StreamRecorder::~StreamRecorder() {
     {std::lock_guard<std::mutex> lock(mutex_);shutdown_=true;}
     wake_.notify_one(); worker_.join();
 }
-StreamRecorder::State StreamRecorder::state() const {std::lock_guard<std::mutex> lock(mutex_);return state_;}
+StreamRecorder::State StreamRecorder::state() const {std::lock_guard<std::mutex> lock(mutex_);auto s=state_;s.telemetry_error=telemetry_.error();if(!s.recording && telemetry_.pending())s.finishing=true;return s;}
+void StreamRecorder::set_telemetry(std::shared_ptr<const media::TelemetrySample> sample) {
+    std::lock_guard<std::mutex> lock(mutex_);latest_telemetry_=std::move(sample);
+}
 void StreamRecorder::toggle() {
     std::lock_guard<std::mutex> lock(mutex_);
     if(requested_) {requested_=false; Item item;item.kind=Item::Stop;queue_.push_back(std::move(item));}
     else {
-        ++session_; requested_=true;
+        ++session_; requested_=true;latest_telemetry_=std::make_shared<media::TelemetrySample>();
         Item item; item.kind=Item::Start;queue_.push_back(std::move(item));
     }
     wake_.notify_one();
@@ -41,6 +44,7 @@ void StreamRecorder::enqueue(Item item) {
         state_.error="Recording storage cannot keep up";
         requested_=false; Item stop;stop.kind=Item::Stop;queue_.push_back(std::move(stop));wake_.notify_one();return;
     }
+    if(item.kind==Item::Frame)item.telemetry=latest_telemetry_;
     queued_+=item.size();queue_.push_back(std::move(item));wake_.notify_one();
 }
 void StreamRecorder::set_parameter_sets(const std::vector<std::vector<uint8_t>>& ps) {Item i;i.kind=Item::Params;i.params=ps;enqueue(std::move(i));}
@@ -53,7 +57,7 @@ void StreamRecorder::run() {
     int fd=-1; MP4E_mux_t* mux=nullptr; mp4_h26x_writer_t video{};
     std::unique_ptr<DvrWriter> writer;
     std::vector<std::vector<uint8_t>> params;
-    uint64_t previous=0,frames=0;
+    uint64_t previous=0,frames=0,ticks=0;
     std::string file;
     auto storage=[&] {
         struct statvfs space{};
@@ -66,6 +70,7 @@ void StreamRecorder::run() {
     auto storage_time=std::chrono::steady_clock::now();
     const int nominal=90000/fps_;
     auto close=[&] {
+        if(fd>=0)telemetry_.finish();
         {std::lock_guard<std::mutex> lock(mutex_);state_.recording=false;state_.finishing=fd>=0;}
         if(mux) {MP4E_close(mux);mp4_h26x_write_close(&video);mux=nullptr;}
         if(writer && !writer->finish()) {
@@ -96,7 +101,7 @@ void StreamRecorder::run() {
             if(item.kind==Item::Stop) {close();continue;}
             if(item.kind==Item::Params) {params=std::move(item.params);header();continue;}
             if(item.kind==Item::Start) {
-                close(); previous=0;frames=0;file.clear(); video={};
+                close(); previous=0;frames=0;ticks=0;file.clear(); video={};
                 {std::lock_guard<std::mutex> lock(mutex_);state_.error.clear();state_.frames=state_.dropped=0;}
                 struct statvfs space{};
                 if(directory_.empty()) throw std::runtime_error("No recording folder configured");
@@ -110,6 +115,7 @@ void StreamRecorder::run() {
                     if(fd>=0 || errno!=EEXIST) break;
                 }
                 if(fd<0) {file.clear();throw std::runtime_error(std::string("Create recording: ")+strerror(errno));}
+                telemetry_.begin(file);
                 writer=std::make_unique<DvrWriter>(fd,8u<<20);
                 mux=MP4E_open(0,1,writer.get(),[](int64_t off,const void* p,size_t n,void* w){return static_cast<DvrWriter*>(w)->write(off,p,n);});
                 if(!mux) throw std::runtime_error("Cannot open MP4 writer");
@@ -128,6 +134,7 @@ void StreamRecorder::run() {
             previous=item.us;
             const int rc=mp4_h26x_write_nal(&video,item.bytes(),int(item.size()),duration);
             if(rc!=MP4E_STATUS_OK && rc!=MP4E_STATUS_BAD_ARGUMENTS) throw std::runtime_error("Recording write failed");
+            if(rc==MP4E_STATUS_OK){telemetry_.append(ticks*1000000/90000,item.telemetry);ticks+=duration;}
             {std::lock_guard<std::mutex> lock(mutex_);if(rc==MP4E_STATUS_OK)state_.frames=++frames;else ++state_.dropped;}
         } catch(const std::exception& e) {
             requested_=false; close();

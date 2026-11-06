@@ -19,25 +19,29 @@ int main() {
     {
         dvr::StreamRecorder recorder(path,VideoCodec::H265,64,64,60);recorder.set_parameter_sets(recording_ps);
         recorder.toggle();wait([&]{return recorder.is_recording();});
+        auto sample=std::make_shared<media::TelemetrySample>();sample->values["battery_v"]=16.4;
+        recorder.set_telemetry(sample);
         for(size_t i=0;i<recording_frames.size();++i)recorder.feed(std::make_shared<std::vector<uint8_t>>(recording_frames[i]),1000000+i*16667);
         wait([&]{return recorder.state().frames==8;});name=std::filesystem::path(recorder.state().file).filename();
         recorder.stop();wait([&]{return !recorder.state().recording && !recorder.state().finishing;});
     }
     std::atomic<bool> selected{false},failed{false};std::atomic<int> pictures{0},parameters{0};
-    std::vector<uint64_t> timestamps;std::mutex mutex;
+    std::vector<uint64_t> timestamps;std::mutex mutex;dvr::StreamPlayer* active=nullptr;
     dvr::StreamPlayer::Output output{
         [&](bool p){selected=p;},[&]{return selected.load();},[&]{return failed.load();},
         [&](const std::vector<uint8_t>& p,uint64_t ts,uint8_t nal,bool key) {
             check(selected,"Only playback source accepts playback packets");
             check(p.size()>6 && p[0]==0 && p[1]==0 && p[2]==0 && p[3]==1,"Playback packets are Annex B");
             if(nal>=32)++parameters;
-            else {std::lock_guard<std::mutex> lock(mutex);timestamps.push_back(ts);if(pictures++==0)check(key,"First picture is random access");}
+            else {if(active){auto sample=active->telemetry_at(ts);check(sample && sample->values.at("battery_v")==16.4,"Recorded telemetry accompanies video PTS");}
+                std::lock_guard<std::mutex> lock(mutex);timestamps.push_back(ts);if(pictures++==0)check(key,"First picture is random access");}
         }};
     {
-        dvr::StreamPlayer player(path,output,64,64);
+        dvr::StreamPlayer player(path,output,64,64);active=&player;
         player.play(name);wait([&]{return !player.state().busy;});
         check(player.state().error.empty(),"Valid recording plays without error");
         check(!selected && pictures==8 && parameters==3,"Playback sends eight pictures and all parameter sets then returns live");
+        check(timestamps.front()==0,"Playback PTS are relative to the MP4 timeline");
         check(timestamps.back()-timestamps.front()>116000 && timestamps.back()-timestamps.front()<117000,"Original capture pacing retained");
         pictures=0;player.play(name);wait([&]{return player.state().playing;});player.pause();
         std::this_thread::sleep_for(std::chrono::milliseconds(20));const auto paused=pictures.load();
@@ -54,6 +58,7 @@ int main() {
         pictures=0;failed=true;player.play(name);wait([&]{return !player.state().busy;});check(!player.state().error.empty() && !selected,"Decoder failure returns live with error");failed=false;
         pictures=0;player.play(name);wait([&]{return !player.state().busy;});check(player.state().error.empty() && pictures==8,"Playback recovers after failure");
     }
+    active=nullptr;
     {
         dvr::StreamPlayer player(path,output);player.play(name);wait([&]{return !player.state().busy;});
         check(player.state().error.find("dimensions")!=std::string::npos && !selected,"Unsupported geometry rejected before source switch");

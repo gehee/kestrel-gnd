@@ -19,7 +19,7 @@ int main(){try {
         std::this_thread::sleep_for(30ms);check(!std::filesystem::exists(std::string(dir)+"/.thumbs/clip.mp4.jpg"),"old frame not captured");
         frame.dec_end_ts=102;thumbnails.capture(std::make_shared<DecodedUnit>(frame));
         std::shared_ptr<const media::Thumbnail> image;
-        for(int i=0;i<1000 && !image;++i){image=thumbnails.get("clip.mp4",213,120);std::this_thread::sleep_for(2ms);}
+        for(int i=0;i<1000 && !image;++i){thumbnails.capture(std::make_shared<DecodedUnit>(frame));image=thumbnails.get("clip.mp4",213,120);std::this_thread::sleep_for(2ms);}
         check(image && image->width==213 && image->height==120,"async JPEG capture/load/resize");
         check(!thumbnails.get("../escape",320,180),"reject path traversal");
         std::ofstream(std::string(dir)+"/.thumbs/broken.mp4.jpg")<<"broken JPEG";

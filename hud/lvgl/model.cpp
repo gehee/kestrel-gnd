@@ -43,6 +43,7 @@ std::string Model::status(uint64_t now) const {
     return "RF CONNECTED / VIDEO UNVERIFIED";
 }
 bool Model::show_status(uint64_t now) const {
+    if(scene==SceneMode::GalleryPlayback)return false;
     // Decoded video is independent of RF telemetry (including recorded replay).
     // Never cover a fresh picture with the opaque idle scene.
     return backend.media.video_monitored ? !backend.media.video_fresh(now) : !backend.vrx.link_valid(now);
@@ -64,7 +65,8 @@ SceneMode Model::scene_mode() const {
 }
 bool Model::hud_visible() const {
     const auto mode = scene_mode();
-    return mode == SceneMode::Live || mode == SceneMode::Menu;
+    return mode == SceneMode::Live || mode == SceneMode::Menu ||
+        (mode == SceneMode::GalleryPlayback && playback_hud_enabled && bool(backend.playback_hud));
 }
 const char* Model::tab_name(int t) {
     static const char* names[] = {"VIDEO", "RADIO", "HUD", "DISPLAY", "DVR", "SYSTEM", "INFO", "SERIAL"};
@@ -270,7 +272,12 @@ std::string Model::describe() const {
         << " backend_connected=" << backend.service.connected << " backend_session=" << backend.service.session
         << " backend_caps=" << backend.service.capabilities << " provider_connected=" << backend.service.provider_connected
         << " msp_frames=" << backend.serial.frames << " pack_valid=" << backend.flight.have_pack_v
-        << " pack_v=" << (backend.flight.have_pack_v ? backend.flight.pack_v : -1.0f);
+        << " pack_v=" << (backend.flight.have_pack_v ? backend.flight.pack_v : -1.0f)
+        << " scene=" << int(scene_mode()) << " recording=" << backend.media.recording
+        << " playing=" << backend.media.playing << " paused=" << backend.playback_paused
+        << " playback_us=" << backend.playback_position_us << " recorded_hud=" << bool(backend.playback_hud)
+        << " playback_hud=" << playback_hud_enabled << " playback_dx=" << backend.playback_dx
+        << " playback_bank=" << backend.playback_bank << " playback_warning=" << backend.playback_warning;
     return out.str();
 }
 } // namespace kestrel_ui

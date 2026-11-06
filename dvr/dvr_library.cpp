@@ -309,6 +309,7 @@ int delete_recording(const std::string& name, const std::string& active) {
     if (stat(path.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) return ENOENT;
     if (unlink(path.c_str()) != 0) return errno;
     unlink(thumb_path(name).c_str());
+    unlink((path+".telemetry.jsonl").c_str());
     sync();
     return 0;
 }

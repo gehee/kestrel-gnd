@@ -12,7 +12,7 @@ public:
     void key(Key key, bool repeat = false);
     void open_menu();
     void set_scene(SceneMode scene);
-    HudData hud_data(uint64_t now) const;
+    HudData hud_data(uint64_t now,bool recording_snapshot=false) const;
     int link_warning() const { return warning_.level(); }
     std::string recording_text(uint64_t now) const;
     std::function<void(const UiPreferences&)> save_preferences;

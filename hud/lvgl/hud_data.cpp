@@ -16,25 +16,31 @@ std::string Controller::recording_text(uint64_t now) const {
         (unsigned long long)(seconds / 60), (unsigned long long)(seconds % 60));
     return text;
 }
-HudData Controller::hud_data(uint64_t now) const {
+HudData Controller::hud_data(uint64_t now,bool recording_snapshot) const {
     const auto& m = model_;
+    if(!recording_snapshot && m.scene==SceneMode::GalleryPlayback) {
+        auto data=m.backend.playback_hud?*m.backend.playback_hud:HudData{};
+        data.enabled=m.hud_visible();data.show_status=false;
+        data.theme=m.theme;data.text_scale=m.ui_scale;data.details=m.show_details;
+        return data;
+    }
     const auto& t = m.backend.vrx;
     const auto& f = m.backend.flight;
     const bool fresh = f.stamp_us && now >= f.stamp_us && now - f.stamp_us < 2000000;
     HudData data;
     data.text_scale=m.ui_scale;
-    data.enabled = m.hud_visible() && (m.show_hud || m.menu_open); data.details = m.show_details; data.theme = m.theme; data.simulated = m.simulated;
+    data.enabled = recording_snapshot || (m.hud_visible() && (m.show_hud || m.menu_open)); data.details = m.show_details; data.theme = m.theme; data.simulated = m.simulated;
     if (!data.enabled) { data.show_status = false; return data; }
     data.show_status = m.show_status(now); data.status = m.status(now);
     auto visual = m.visual;
-    if (!visual.visible && m.menu_open) {
+    if (!visual.visible && m.menu_open && !recording_snapshot) {
         visual.visible = true; visual.rule = visual.shade = visual.block = 1;
         visual.idle_dim = visual.rail_dim = 0.65f;
     }
     for (int side = 0; side < 2; ++side) {
         auto& p = data.panels[side];
-        p.visible = visual.visible && (m.show_hud || m.menu_open); p.fresh = fresh;
-        p.picked = m.menu_open && m.stage == MenuStage::Pick && m.side == side;
+        p.visible = visual.visible && (recording_snapshot || m.show_hud || m.menu_open); p.fresh = fresh;
+        p.picked = !recording_snapshot && m.menu_open && m.stage == MenuStage::Pick && m.side == side;
         p.shade = visual.shade; p.rule = visual.rule; p.block = visual.block;
         p.dim = visual.idle_dim; p.rail_dim = visual.rail_dim;
     }

@@ -58,6 +58,7 @@ public:
     int dynamic = 0;
     int ui_scale = 10;
     bool link_edge_warning = true;
+    bool playback_hud_enabled = true;
     bool show_details = true, key_repeat = true, show_hud = true, per_cell = true;
     MenuStage stage = MenuStage::Pick;
     uint64_t menu_version = 0, key_count = 0, rejected_inputs = 0;

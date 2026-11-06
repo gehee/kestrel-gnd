@@ -56,9 +56,11 @@ Thumbnails::Thumbnails(std::string dir):directory_(std::move(dir)),worker_([this
 Thumbnails::~Thumbnails() {{std::lock_guard<std::mutex> lock(mutex_);quit_=true;}wake_.notify_one();worker_.join();}
 void Thumbnails::arm(const std::string& name,uint64_t pts) {
     if(!dvr_lib::safe_name(name))return;
-    std::lock_guard<std::mutex> lock(mutex_);armed_=name;decoded_after_us_=pts;wanted_=true;
+    std::lock_guard<std::mutex> lock(mutex_);armed_=name;decoded_after_us_=pts;wanted_=false;
+    const auto generation=++generation_;
+    if(jobs_.size()<12){Job job;job.name=name;job.check_generation=generation;jobs_.push_front(std::move(job));wake_.notify_one();}
 }
-void Thumbnails::cancel() {std::lock_guard<std::mutex> lock(mutex_);wanted_=false;armed_.clear();}
+void Thumbnails::cancel() {std::lock_guard<std::mutex> lock(mutex_);wanted_=false;armed_.clear();++generation_;}
 std::shared_ptr<media::Thumbnail> Thumbnails::sample(const DecodedUnit& f,int w,int h) {
     if(f.early || !f.width || !f.height || w<1 || h<1 || w>320 || h>180 ||
         !f.data[0] || !f.data[1] || !f.data[2] || f.linesize[0]<int(f.width) ||
@@ -102,6 +104,12 @@ void Thumbnails::run() {
         Job job;{std::unique_lock<std::mutex> lock(mutex_);wake_.wait(lock,[&]{return quit_ || !jobs_.empty();});
             if(jobs_.empty() && quit_)return;job=std::move(jobs_.front());jobs_.pop_front();}
         try {
+        if(job.check_generation) {
+            const bool cached=bool(read(path(directory_,job.name),1,1));
+            std::lock_guard<std::mutex> lock(mutex_);
+            if(job.check_generation==generation_)wanted_=!cached;
+            continue;
+        }
         if(job.frame) {
             const auto start=std::chrono::steady_clock::now();
             job.image=sample(*job.frame,320,180);job.frame.reset();

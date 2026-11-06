@@ -24,6 +24,8 @@ int main(int argc,char** argv) {
         rec.set_parameter_sets(recording_ps);
         for(int pass=0;pass<2;++pass) {
             rec.toggle();wait([&]{return rec.state().recording;});
+            auto telemetry=std::make_shared<media::TelemetrySample>();telemetry->values["battery_v"]=16.4;
+            rec.set_telemetry(telemetry);
             for(size_t i=0;i<recording_frames.size();++i)
                 rec.feed(std::make_shared<std::vector<uint8_t>>(recording_frames[i]),1000000+i*16667);
             wait([&]{return rec.state().frames==recording_frames.size();});
@@ -65,7 +67,11 @@ int main(int argc,char** argv) {
         rec.stop();wait([&]{const auto s=rec.state();return !s.recording && !s.finishing;});
     }
     if(argc>1) std::filesystem::copy_file(files.front(),argv[1],std::filesystem::copy_options::overwrite_existing);
-    for(const auto& f:files) unlink(f.c_str());rmdir(dir);
+    {
+        dvr::TelemetryReader telemetry(files.front());const auto first=telemetry.at(0);
+        check(first && first->us==0 && first->sample.values.at("battery_v")==16.4,"Telemetry starts at first MP4 sample, independent of source clock");
+    }
+    std::filesystem::remove_all(dir);
     puts("PASS: HEVC MP4 samples/timing, collision-free names, missing/full storage, keyframe recovery");return 0;
  } catch(const std::exception& e) {fprintf(stderr,"FAIL: %s\n",e.what());return 1;}
 }
