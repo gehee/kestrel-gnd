@@ -211,6 +211,28 @@ int main(int argc, char** argv) {
             model.ui_scale=15;view.update(now);lv_refr_now(display.lv_display());check_incremental();
             if(display.pixels()==unscaled) throw std::runtime_error("UI scale did not resize HUD text");
             model.ui_scale=10;view.update(now);lv_refr_now(display.lv_display());check_incremental();
+            // UI Scaling also changes the open menu's typography and spacing.
+            // Measure the selected row, rather than merely checking for any
+            // changed pixels (the scale value itself would satisfy that).
+            model.theme=0;model.menu_open=true;model.side=0;model.tab=2;model.selected=0;
+            model.stage=kestrel_ui::MenuStage::Browse;
+            auto menu_row_height=[&](int scale) {
+                model.ui_scale=scale;++model.menu_version;
+                for(int i=0;i<20;++i) {now+=20000;controller.tick(now);view.update(now);lv_refr_now(display.lv_display());}
+                check_incremental();
+                int first=1080,last=-1;
+                for(int y=100;y<400;++y) {
+                    const auto pixel=display.pixels()[y*1920+300];
+                    if(((pixel>>16)&255)>150 && ((pixel>>8)&255)>240 && (pixel&255)<25) {
+                        first=std::min(first,y);last=y;
+                    }
+                }
+                if(last<first)throw std::runtime_error("Selected menu row was not rendered");
+                return last-first+1;
+            };
+            const auto normal_row=menu_row_height(10),small_row=menu_row_height(8);
+            if(small_row>=normal_row || normal_row-small_row<8)throw std::runtime_error("UI Scaling did not resize menu row spacing");
+            if(menu_row_height(10)!=normal_row)throw std::runtime_error("Restoring UI Scaling left stale menu geometry");
             model.backend.recordings={{"recording_20260101_123456.mp4",12345678},{"another.mp4",4000000}};
             for(auto scene:{kestrel_ui::SceneMode::GalleryBrowse,kestrel_ui::SceneMode::GalleryPlayback,kestrel_ui::SceneMode::GalleryBrowse,kestrel_ui::SceneMode::Live}) {
                 controller.set_scene(scene);

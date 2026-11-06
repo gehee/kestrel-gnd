@@ -101,7 +101,7 @@ void View::prepare_menu_snapshot() {
     }
     const auto& menu = *menu_preview_;
     std::ostringstream signature;
-    signature << menu.side << ':' << menu.tab << ':' << menu.selected << ':' << menu.theme << ':'
+    signature << menu.side << ':' << menu.tab << ':' << menu.selected << ':' << menu.theme << ':' << menu.ui_scale << ':'
               << (menu.stage == MenuStage::Edit) << ':' << menu.selected_help(now_);
     for (const auto& row : menu.rows(now_)) signature << '\n' << row.id << ':' << row.value;
     const std::string key = signature.str();
@@ -266,7 +266,7 @@ void View::draw_menu(lv_layer_t* layer) {
     const auto& th = hud_theme_at(model_.theme);
     const auto reveal = menu_reveal(menu_progress_);
     const int x = reveal.x1, y = reveal.y1, w = reveal.x2 - x + 1, h = reveal.y2 - y + 1;
-    const float u = height_ / 1080.0f;
+    const float u = height_ / 1080.0f * menu_model.ui_scale / 10.0f;
     const int pad = int(22 * u), row_h = int(50 * u);
     if (!capturing_menu_ && menu_snapshot_ && menu_progress_ == 1) {
         lv_draw_image_dsc_t d; lv_draw_image_dsc_init(&d); d.src = menu_snapshot_;

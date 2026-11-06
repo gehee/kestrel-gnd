@@ -152,7 +152,7 @@ std::vector<MenuRow> Model::rows(uint64_t now) const {
         return {choice("theme", "Theme", theme, std::move(themes), "Which hues carry which meaning."),
             reading("bg_video", "Idle Background", "STATIC", "The compiled artwork is cached and drawn only when it changes."),
             reading("picture_size", "Picture Size", "FULL", "The native display driver currently exposes fixed full-screen planes. Hardware scaling needs driver support."),
-            choice("ui_scale", "UI Scaling", ui_scale-5, scales, "Size of the HUD's type. The panels stay put."),
+            choice("ui_scale", "UI Scaling", ui_scale-5, scales, "Size of HUD type and menu contents. The menu panel stays put."),
             reading("brightness", "Brightness", "MONITOR", "Use the external monitor's brightness control. HDMI does not expose a local panel backlight."),
             heading("ADVANCED"),
             reading("frame_mode", "Frame Mode", "FULL DECODE", "The decoder receives whole pictures; only complete decoded frames are displayed.")};
