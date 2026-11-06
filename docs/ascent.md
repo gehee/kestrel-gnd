@@ -108,8 +108,12 @@ that primary plane in hardware while scanning out the UI at native 1280x720.
 There is no software resizing of the complete UI or camera picture. Existing
 1080p-only fpvOS firmware continues to expose only 1080p in this menu.
 
-720p requires fpvOS's `0021-drm-artosyn-ascent-display-modes.patch` and the
-`ascent-60hz` board profile. Live 720p video and native UI have been checked
+720p requires fpvOS's `0021-drm-artosyn-ascent-display-modes.patch`, the subsequent
+Ascent PLL divider and 720p lane-rate corrections, and the `ascent-60hz` board
+profile. The 720p mode uses matching DSI PHY timing and a lower shared transport
+clock; retaining the 1080p transport rate caused vertical duplication across
+both the UI and video after resolution changes. Live 720p video and native UI
+have been checked
 on an HDMI monitor and capture device. The driver initializes the scaler
 filter before scanout and requests a modeset when the 720p primary source
 changes geometry or format. After the native-size startup frame, the presenter
