@@ -18,6 +18,9 @@ def icon(code):
     if code == 0xE000:
         scale, ox, oy = 56 / 27.8, 2 + (80 - 56) / 2, 34 - 28
         origin = (2.1, 2.1)
+    elif code == 0xE002:
+        scale, ox, oy = 80 / 27.2, 2, 34 - 14.4 * (80 / 27.2) / 2
+        origin = (2.4, 8.8)
     else:
         scale, ox, oy = 80 / 29.6, 2, 34 - 13.6 * (80 / 29.6) / 2
         origin = (1.2, 9.2)
@@ -32,6 +35,12 @@ def icon(code):
         for x, y in [(7.5, 7.5), (24.5, 7.5), (7.5, 24.5), (24.5, 24.5)]:
             draw.ellipse((*point(x - 4.2, y - 4.2), *point(x + 4.2, y + 4.2)),
                          outline=255, width=round(2.4 * scale * supersample))
+    elif code == 0xE002:
+        line([(3.6, 10), (3.6, 22)], 2.4)
+        line([(28.4, 10), (28.4, 22)], 2.4)
+        line([(3.6, 16), (28.4, 16)], 2.2)
+        line([(10.6, 11.6), (6.4, 16), (10.6, 20.4)], 2.2)
+        line([(21.4, 11.6), (25.6, 16), (21.4, 20.4)], 2.2)
     else:
         for x in (2.4, 17.4):
             draw.rounded_rectangle((*point(x, 10.4), *point(x + 12.2, 21.6)), radius=4 * scale * supersample,
@@ -56,7 +65,7 @@ def main():
     if not license_path.is_file():
         parser.error("Provide the source font's OFL license with --license")
     font = ImageFont.truetype(str(args.font), pixels)
-    codes = list(range(32, 127)) + [0xB0, 0x2022, 0xE000, 0xE001]
+    codes = list(range(32, 127)) + [0xB0, 0x2022, 0xE000, 0xE001, 0xE002]
     chars = [chr(code) for code in codes]
     advances = [round(80 * pixels / 40 * 64) if code >= 0xE000 else round(font.getlength(char) * 64) for code, char in zip(codes, chars)]
     payload = bytearray(struct.pack("<4s5I", b"KUIF", 1, pixels, cell, baseline, len(codes)))

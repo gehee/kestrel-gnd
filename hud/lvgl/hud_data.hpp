@@ -14,6 +14,9 @@ struct HudPanelData {
     std::string primary = "--", primary_unit, secondary, secondary_unit;
     std::string state, upper_label, lower_label, detail1, detail2;
     bool detail1_quiet = false;
+    // Optional colored final reading, kept separate from the neutral row text.
+    std::string detail1_tail, detail2_tail, recording;
+    int detail1_alert = 0, detail2_alert = 0, lower_alert = 0, supply_alert = 0; // 0 normal, 1 amber, 2 red
 };
 enum class HudMetricId : uint16_t {
     Voltage = 1, Current, Rc, Mcs, FrequencyRaw, ReceiverVoltage, CpuTemperature,

@@ -237,14 +237,38 @@ This is an initial bring-up target, not a flight-ready receiver.
   flip gap above 34 ms. Reconnecting requested an IDR and resumed video.
   Narrow-band validation of gradual refresh and long-duration RF reliability
   remain outstanding.
-- Menu edits currently cover visual preferences. RF/camera configuration,
-  DVR/gallery and FC telemetry integration remain incomplete. Physical buttons
-  and asynchronous beeper feedback are wired into Kestrel; LINK queues the
+- Native menus expose supported RF/camera controls and stream DVR/gallery.
+  FC readings require a valid MSP feed; unavailable capabilities stay disabled.
+  Physical buttons and asynchronous beeper feedback are wired into Kestrel; LINK queues the
   existing radio binding command, whose native end-to-end behavior remains
   unvalidated. See [button and beeper interfaces](ascent-input-feedback.md).
-  Unavailable temperature and supply readings remain blank.
+  Unavailable temperature and supply readings display `--`.
 - Native SDIO does not run the USB firmware's frame-clock register sampler or
   automatically restart the radio driver after errors.
+
+The native Canopy carries the VRX Pro voltage/current, CELL/SAG and RC/VIDEO
+tracks, flight mode/timer, calibrated distance, standby label, VTX frequency,
+bandwidth, power and temperature, and received video/link bitrate and mode.
+Frame rate is measured at scanout; the latency figure is the median of the
+past second's capture-to-scanout measurements, available only when the air
+clock is known. Missing or expired readings display `--`. The current Ascent
+firmware exposes no validated local temperature/supply provider; P1 also
+reports its CPU temperature as unavailable. Neither is replaced with a guessed
+value. The native whole-frame decoder has no per-slice latency measurements.
+
+Recording has a red square and elapsed `REC m:ss` badge above the left wing,
+independent of the details setting. With Canopy hidden, the badge moves to the
+top strip, including when the clock is off. Its state follows the recording
+worker, so an unsuccessful start does not announce an active recording.
+
+HUD > Link Edge Warning defaults on. It follows the VRX Pro policy: MCS 1–2
+is red, 5–7 amber, and 8+ clear; a gap over 400 ms after video has started on
+the current connection also turns it red. Worsening is immediate; recovery
+must hold for two seconds. Top and bottom glows fade in over 150 ms and out
+over 600 ms; red pulses. Cached native-size alpha strips keep this animation
+independent of HUD text rasterization. A settled amber warning does not need
+continuous UI redraws. Paused gallery playback does not count as stalled live
+video.
 
 Keep experiment logs, captures, local configurations and builds in ignored
 `.local/`. Do not install this bring-up executable as an automatic boot service.

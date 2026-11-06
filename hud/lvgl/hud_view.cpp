@@ -29,8 +29,8 @@ HudView::HudView(int w, int h, const std::string& assets)
     : width_(w), height_(h), text_(assets + "/canopy-font.kuf", w, h, 512 * 1024) {
     assets_[0].load(assets + "/canopy-left.kui", w, h); assets_[1].load(assets + "/canopy-right.kui", w, h);
     layout_ = {uint32_t(w), uint32_t(h), {
-        {0, uint32_t(h * 2 / 3), uint32_t(w / 2), uint32_t(h - h * 2 / 3), hud_ipc::Role::LeftWing},
-        {uint32_t(w / 2), uint32_t(h * 2 / 3), uint32_t(w - w / 2), uint32_t(h - h * 2 / 3), hud_ipc::Role::RightWing},
+        {0, uint32_t(h * 3 / 5), uint32_t(w / 2), uint32_t(h - h * 3 / 5), hud_ipc::Role::LeftWing},
+        {uint32_t(w / 2), uint32_t(h * 3 / 5), uint32_t(w - w / 2), uint32_t(h - h * 3 / 5), hud_ipc::Role::RightWing},
         {uint32_t(w / 4), uint32_t(h / 3), uint32_t(w / 2), uint32_t(h / 5), hud_ipc::Role::Status}}};
     layout_.validate();
     // An inactive LVGL screen keeps inline test rendering isolated from the
@@ -123,6 +123,24 @@ void HudView::panel(lv_layer_t* layer, bool left) {
         text_.panel(layer, p.primary_unit, false, 14, baseline(canopy::kTextSmall), canopy::kTextSmall, true, th.text, content * 0.72f);
         text_.panel(layer, p.primary, false, 14 + text_.design_advance(p.primary_unit, canopy::kTextSmall), 512, canopy::kTextBig, true, th.text, content);
     } else text_.panel(layer, p.primary, false, 14, 512, canopy::kTextBig, true, th.quiet, content);
+    if (!left && !p.secondary.empty()) {
+        float x = 14 + digits_width(p.primary, canopy::kTextBig) + text_.design_advance(p.primary_unit, canopy::kTextSmall) + 10 * frame.U / frame.UX;
+        text_.panel(layer, "•", false, x, baseline(canopy::kTextUnit), canopy::kTextUnit, true, th.quiet, content);
+        x += text_.design_advance("•", canopy::kTextUnit) + 10 * frame.U / frame.UX;
+        text_.panel(layer, p.secondary_unit, false, x, baseline(canopy::kTextSmall), canopy::kTextSmall, true, th.text, content * .72f);
+        x += text_.design_advance(p.secondary_unit, canopy::kTextSmall);
+        text_.panel(layer, p.secondary, false, x, baseline(canopy::kTextUnit), canopy::kTextUnit, true, th.text, content * .82f);
+    }
+    constexpr float amber[] = {1, .72f, .15f}, red[] = {1, .30f, .25f};
+    auto alert_color = [&](int alert, const float* normal) { return alert == 2 ? red : alert == 1 ? amber : normal; };
+    if (left && !p.recording.empty()) {
+        const auto at = canopy::project(width_, height_, true, 14, 440);
+        const int size = std::max(4, height_ / 120);
+        lv_draw_rect_dsc_t square; lv_draw_rect_dsc_init(&square); square.bg_color = color(red);
+        lv_area_t box{int(at.x), int(at.y)-size, int(at.x)+size-1, int(at.y)-1};
+        lv_draw_rect(layer, &square, &box);
+        text_.panel(layer, p.recording, true, 30, 442, canopy::kTextRow, false, red, 1);
+    }
     const float state_width = text_.design_advance(p.state, canopy::kTextState);
     constexpr float rest[] = {0.663f, 0.706f, 0.741f};
     for (float y : {456.0f, 596.0f}) {
@@ -151,12 +169,21 @@ void HudView::panel(lv_layer_t* layer, bool left) {
     text_.panel(layer, p.upper_label, left, 14, 527, canopy::kTextLabel, !left, th.text, content);
     text_.panel(layer, p.lower_label, left, 14, 537, canopy::kTextLabel, !left, th.accent, content);
     track(layer, left, start, 271, 525, 9, 20, p.upper_level, th.data, content, p.block);
-    track(layer, left, start, 271, 534, 4, left ? 20 : 7, p.lower_level, th.accent, content, p.block);
+    track(layer, left, start, 271, 534, 4, left ? 20 : 7, p.lower_level, alert_color(p.lower_alert, th.accent), content, p.block);
     if (!p.state.empty()) text_.panel(layer, p.state, left, state_x, 456 + canopy::kTextState / frame.U / 2,
         canopy::kTextState, !left, p.armed ? th.accent : th.quiet, left ? content * p.state_opacity : p.state_opacity);
     if (!data_.details) return;
-    text_.panel(layer, p.detail1, left, 14, 560, canopy::kTextRow, !left, p.detail1_quiet ? th.quiet : th.text, content);
-    text_.panel(layer, p.detail2, left, 14, 584, canopy::kTextRow, !left, th.text, content);
+    auto row = [&](const std::string& body, const std::string& tail, float y, const float* body_color, const float* tail_color) {
+        if (left) {
+            text_.panel(layer, body, true, 14, y, canopy::kTextRow, false, body_color, content);
+            text_.panel(layer, tail, true, 14 + text_.design_advance(body, canopy::kTextRow), y, canopy::kTextRow, false, tail_color, content);
+        } else {
+            text_.panel(layer, tail, false, 14, y, canopy::kTextRow, true, tail_color, content);
+            text_.panel(layer, body, false, 14 + text_.design_advance(tail, canopy::kTextRow), y, canopy::kTextRow, true, body_color, content);
+        }
+    };
+    row(p.detail1, p.detail1_tail, 560, p.detail1_quiet ? th.quiet : th.text, alert_color(p.detail1_alert, th.text));
+    row(p.detail2, p.detail2_tail, 584, alert_color(p.detail2_alert, th.text), alert_color(p.supply_alert, th.text));
 }
 void HudView::status(lv_layer_t* layer) {
     if (!data_.show_status) return;

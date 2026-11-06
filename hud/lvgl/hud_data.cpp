@@ -1,11 +1,20 @@
 #include "controller.hpp"
 #include <cstdio>
+#include "system/gnd/radio.hpp"
+#include "system/air/power.hpp"
 
 namespace kestrel_ui {
 namespace {
 std::string number(float value, const char* format) {
     char text[80]; std::snprintf(text, sizeof(text), format, value); return text;
 }
+}
+std::string Controller::recording_text(uint64_t now) const {
+    if (!model_.backend.media.recording) return {};
+    const auto seconds = was_recording_ && now >= recording_since_ ? (now - recording_since_) / 1000000 : 0;
+    char text[40]; std::snprintf(text, sizeof(text), "REC %llu:%02llu",
+        (unsigned long long)(seconds / 60), (unsigned long long)(seconds % 60));
+    return text;
 }
 HudData Controller::hud_data(uint64_t now) const {
     const auto& m = model_;
@@ -32,7 +41,8 @@ HudData Controller::hud_data(uint64_t now) const {
     auto& left = data.panels[0]; auto& right = data.panels[1];
     left.armed = fresh && f.arm == 1;
     const bool use_cell = m.per_cell && f.have_cell_v;
-    left.upper_label = use_cell ? "CELL" : "PACK";
+    left.upper_label = "CELL";
+    left.recording = recording_text(now);
     left.lower_label = "SAG";
     if (fresh && (use_cell || f.have_pack_v)) {
         left.primary = number(use_cell ? f.cell_v : f.pack_v, "%.2f"); left.primary_unit = "V";
@@ -40,7 +50,7 @@ HudData Controller::hud_data(uint64_t now) const {
     if (fresh && f.have_amps) { left.secondary = number(f.amps, "%.1f"); left.secondary_unit = "A"; }
     if (fresh && f.arm == 0) left.state = "DISARMED";
     else if (left.armed) {
-        if (f.have_timer) { char text[24]; std::snprintf(text, sizeof(text), "%d'%02d\"", f.timer_s / 60, f.timer_s % 60); left.state = text; }
+        if (f.have_timer && now >= armed_since_ && now - armed_since_ >= 1800000) { char text[24]; std::snprintf(text, sizeof(text), "%d'%02d\"", f.timer_s / 60, f.timer_s % 60); left.state = text; }
         else left.state = "ARMED";
     }
     left.state_opacity = 1;
@@ -50,22 +60,52 @@ HudData Controller::hud_data(uint64_t now) const {
     }
     left.detail1 = fresh && f.have_mode ? std::string("\xee\x80\x80   ") +
         std::string(f.mode, std::find(f.mode, f.mode + sizeof(f.mode), '\0')) : "\xee\x80\x80   FC TELEMETRY --";
-    left.detail1_quiet = !(fresh && f.have_mode);
-    left.detail2 = "\xee\x80\x81   " + (t.fresh(now) && t.cpu_temperature_x100 != Telemetry::unavailable ? number(t.cpu_temperature_x100 / 100.0f, "VRX %.0fC") : "VRX --C");
-    if (t.fresh(now) && t.voltage_mv > 0) left.detail2 += "  \xe2\x80\xa2 " + number(t.voltage_mv / 1000.0f, "%.1fV");
+    const auto& link = m.backend.link;
+    const bool linked = t.link_valid(now);
+    const int distance = linked ? link.distance_m : -1;
+    if (distance >= 0) left.detail1 += "  • \xee\x80\x82 " + (distance >= 1000 ? number(distance / 1000.0f, "%.2fkm") : std::to_string(distance) + "m");
+    left.detail1_quiet = !(fresh && f.have_mode) && distance < 0;
+    const bool temperature = t.fresh(now) && t.cpu_temperature_x100 != Telemetry::unavailable;
+    auto temperature_alert = [](float c) { return c >= 85 ? 2 : c >= 70 ? 1 : 0; };
+    left.detail2 = "\xee\x80\x81   " + (temperature ? number(t.cpu_temperature_x100 / 100.0f, "VRX %.0fC") : "VRX --C");
+    left.detail2_alert = temperature ? temperature_alert(t.cpu_temperature_x100 / 100.0f) : 0;
+    // Local hardware readings may be absent independently of the RF link.
+    left.detail2_tail = "  • " + (t.fresh(now) && t.voltage_mv > 0 ? number(t.voltage_mv / 1000.0f, "%.1fV") : "--V");
+    if (t.fresh(now) && t.voltage_mv > 0) {
+        const float volts = t.voltage_mv / 1000.0f;
+        const int cells = volts < 9 ? 2 : volts < 13 ? 3 : volts < 17.5f ? 4 : volts < 21.5f ? 5 : 6;
+        left.supply_alert = volts / cells <= 3.3f ? 2 : volts / cells <= 3.5f ? 1 : 0;
+    }
     const auto rc = m.rc_signal(now);
     right.upper_label = rc.label(); right.upper_level = rc.level(); right.lower_label = "VIDEO";
     if (fresh && f.have_speed) { right.primary = number(f.speed_kmh, "%.0f"); right.primary_unit = "km/h"; }
-    if (visual.mark > 0) right.state = "IDLE";
-    right.state_opacity = visual.mark;
+    if (distance >= 0) { right.secondary = std::to_string(distance); right.secondary_unit = "m"; }
+    if (linked && link.standby) { right.state = "STANDBY"; right.state_opacity = 1; }
+    if (visual.mark > 0) { right.state = "IDLE"; right.state_opacity = visual.mark; }
+    right.lower_alert = warning_.level();
     constexpr int ladder[] = {1, 2, 5, 7, 8, 10, 12};
     int rung = 0;
     if (t.link_valid(now)) for (int value : ladder) if (t.mcs >= value) ++rung;
     right.lower_level = float(rung) / 7;
     const bool frequency_valid = t.link_valid(now) && (t.frequency_mhz > 0 || t.frequency_raw != Telemetry::unavailable);
     const std::string frequency = t.frequency_mhz > 0 ? std::to_string(t.frequency_mhz) + " MHz" : std::to_string(t.frequency_raw);
-    right.detail1 = (frequency_valid ? frequency : "FREQ --") + std::string("   \xee\x80\x80");
-    right.detail2 = (t.link_valid(now) ? "VRX  MCS " + std::to_string(t.mcs) : "VRX  MCS --") + std::string("   \xee\x80\x81");
+    std::string power = "--mW";
+    if (linked && link.air_power_mw > 0) {
+        power = std::to_string(link.air_power_mw) + "mW";
+        for (const auto& level : kArPwrLevels) if (level.mw == link.air_power_mw) power = level.label;
+    }
+    right.detail1 = (frequency_valid ? std::to_string(t.frequency_mhz) : "--") + "@" +
+        (linked ? gnd::bw_step_label(link.bandwidth_step) : "--") + "MHz • " + power;
+    right.detail1_tail = " • " + (linked && link.vtx_temperature_valid ? number(link.vtx_temperature_c, "%.0fC") : "--C") + "   \xee\x80\x80";
+    right.detail1_alert = linked && link.vtx_temperature_valid ? temperature_alert(link.vtx_temperature_c) : 0;
+    const auto& v = m.backend.video;
+    const bool video_fresh = v.stamp_us && now >= v.stamp_us && now - v.stamp_us < 2000000;
+    int fps = v.fps;
+    int delta = 3;
+    for (int rate : {24,25,30,48,50,60,90,100,120}) if (std::abs(v.fps - rate) < delta) { delta = std::abs(v.fps - rate); fps = rate; }
+    const std::string mode = video_fresh && v.height > 0 ? std::to_string(v.height) + "p" + (fps > 0 ? std::to_string(fps) : "--") : "--";
+    right.detail2 = (linked ? number(link.video_mbps, "%.1f") + "/" + number(link.link_mbps, "%.1fMbps") : "--/--Mbps") +
+        " • " + (video_fresh && v.latency_ms >= 0 ? number(v.latency_ms, "%.0fms") : "--ms") + " • " + mode + "   \xee\x80\x81";
     // Renderer-neutral, display-ready instruments. The passive View never
     // infers units, cell count, capacity, signal source or telemetry freshness.
     auto add = [&](HudMetricId id, const char* label, bool valid, std::string value, const char* unit = "") -> HudMetric& {

@@ -31,6 +31,7 @@ struct UiPreferences {
     bool bf_osd = false, debug = false;
     int dynamic = 0;
     int ui_scale = 10;
+    bool link_edge_warning = true;
 };
 struct MenuRow {
     std::string name, value;
@@ -56,6 +57,7 @@ public:
     bool bf_osd = false, debug = false;
     int dynamic = 0;
     int ui_scale = 10;
+    bool link_edge_warning = true;
     bool show_details = true, key_repeat = true, show_hud = true, per_cell = true;
     MenuStage stage = MenuStage::Pick;
     uint64_t menu_version = 0, key_count = 0, rejected_inputs = 0;
@@ -68,7 +70,7 @@ public:
     bool simulated = false;
     std::string hud_style = "canopy";
     canopy::LinkVisual visual;
-    UiPreferences preferences() const { return {theme, fps, show_details, key_repeat, show_hud, per_cell, clock, bf_osd, debug, dynamic, ui_scale}; }
+    UiPreferences preferences() const { return {theme, fps, show_details, key_repeat, show_hud, per_cell, clock, bf_osd, debug, dynamic, ui_scale, link_edge_warning}; }
     std::string clock_text(std::time_t wall_time, uint64_t now) const;
     void set_preferences(const UiPreferences& p);
     std::vector<int> side_tabs() const;

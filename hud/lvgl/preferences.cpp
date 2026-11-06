@@ -22,7 +22,7 @@ UiPreferences load_preferences(const std::string& path) {
     if (!std::getline(input, line) || line != "KESTREL_UI_SETTINGS=1") throw std::runtime_error("Unrecognized UI preferences file; left untouched");
     int lines = 0;
     while (std::getline(input, line)) {
-        if (++lines > 11 || line.size() > 64) throw std::runtime_error("Invalid UI preferences size");
+        if (++lines > 12 || line.size() > 64) throw std::runtime_error("Invalid UI preferences size");
         const auto equal = line.find('=');
         if (equal == std::string::npos) throw std::runtime_error("Invalid UI preference");
         const auto key = line.substr(0, equal), raw = line.substr(equal + 1);
@@ -35,6 +35,7 @@ UiPreferences load_preferences(const std::string& path) {
         else if (key == "ui_scale") result.ui_scale=value;
         else if (key == "bf_osd" && (value==0 || value==1)) result.bf_osd=value!=0;
         else if (key == "debug" && (value==0 || value==1)) result.debug=value!=0;
+        else if (key == "link_edge_warning" && (value==0 || value==1)) result.link_edge_warning=value!=0;
         else if (key == "details" && (value == 0 || value == 1)) result.details = value != 0;
         else if (key == "hud" && (value == 0 || value == 1)) result.hud = value != 0;
         else if (key == "per_cell" && (value == 0 || value == 1)) result.per_cell = value != 0;
@@ -56,7 +57,7 @@ void store_preferences(const std::string& path, const UiPreferences& p) {
         fchmod(fd, 0600);
         const std::string data = "KESTREL_UI_SETTINGS=1\ntheme=" + std::to_string(p.theme) + "\nfps=" + std::to_string(p.fps) +
                                  "\ndetails=" + std::to_string(p.details) + "\nrepeat=" + std::to_string(p.repeat) + "\nhud=" + std::to_string(p.hud) + "\nper_cell=" + std::to_string(p.per_cell) + "\nclock=" + std::to_string(p.clock) +
-                                 "\nbf_osd="+std::to_string(p.bf_osd)+"\ndebug="+std::to_string(p.debug)+"\ndynamic="+std::to_string(p.dynamic)+"\nui_scale="+std::to_string(p.ui_scale)+"\n";
+                                 "\nbf_osd="+std::to_string(p.bf_osd)+"\ndebug="+std::to_string(p.debug)+"\ndynamic="+std::to_string(p.dynamic)+"\nui_scale="+std::to_string(p.ui_scale)+"\nlink_edge_warning="+std::to_string(p.link_edge_warning)+"\n";
         size_t offset = 0;
         while (offset < data.size()) {
             const ssize_t n = write(fd, data.data() + offset, data.size() - offset);

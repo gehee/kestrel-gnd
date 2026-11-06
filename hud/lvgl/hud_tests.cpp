@@ -23,8 +23,13 @@ int main(int argc, char** argv) {
         if (argc != 3 && argc != 4) throw std::runtime_error("Usage: hud-tests ASSETS HUD_EXECUTABLE [vector]");
         const bool vector = argc == 4 && std::string(argv[3]) == "vector";
         HudData data; data.status = "NO RF LINK"; data.panels[1].upper_label = "RC RSSI"; data.panels[1].upper_level = 0.45f;
+        data.panels[0].recording = "REC 2:03";
+        data.panels[1].detail1_tail = " • 88C"; data.panels[1].detail1_alert = 2;
+        data.panels[1].lower_alert = 1;
         const auto wire = encode(data);
         check(encode(decode_data(wire)) == wire, "HUD schema round trip");
+        auto bad_alert = wire; bad_alert.back() = 3;
+        rejects([&] { decode_data(bad_alert); }, "Unknown alert rejected");
         auto short_wire = wire; short_wire.pop_back(); rejects([&] { decode_data(short_wire); }, "Truncated fields rejected");
         auto extra_wire = wire; extra_wire.push_back(0); rejects([&] { decode_data(extra_wire); }, "Trailing fields rejected");
         auto bad_flag = wire; bad_flag[0] = 2; rejects([&] { decode_data(bad_flag); }, "Non-boolean flags rejected");

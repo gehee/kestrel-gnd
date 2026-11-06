@@ -268,6 +268,65 @@ int main(int argc, char** argv) {
             t.stamp_us = now + 2000000; t.connected = true;
             check(native.show_status(now + 2000000), "Video silence reopens status even with fresh RF stats");
         }
+        {
+            auto prefs=model.preferences(); prefs.link_edge_warning=false;
+            model.set_preferences(prefs);
+            check(!model.preferences().link_edge_warning,"Edge warning preference round trip");
+        }
+        {
+            LinkWarning warning;
+            warning.update(1000000,true,8,true,0,false);
+            check(warning.level()==0,"No stall before first frame on connection");
+            warning.update(1100000,true,5,true,1100000,false);
+            check(warning.level()==1,"MCS 5 amber");
+            warning.update(1200000,true,2,true,1200000,false);
+            check(warning.level()==2,"MCS 2 immediately red");
+            warning.update(1300000,true,8,true,1300000,false);
+            warning.update(3299999,true,8,true,3299999,false);
+            check(warning.level()==2,"Recovery holds two seconds");
+            warning.update(3300000,true,8,true,3300000,false);
+            check(warning.level()==0,"Stable recovery clears warning");
+            warning.update(3700000,true,8,true,3300000,false);
+            check(warning.level()==0,"400ms boundary still healthy");
+            warning.update(3700001,true,8,true,3300000,false);
+            check(warning.level()==2,"Video stall overrides good MCS");
+            warning.update(3800000,false,-1,true,3300000,false);
+            warning.update(5900000,false,-1,true,3300000,false);
+            check(warning.level()==0,"Disconnect clears held warning");
+            warning.update(6000000,true,10,true,3300000,false);
+            check(warning.level()==0,"Old connection frame cannot trigger a new stall");
+            warning.update(6100000,true,10,true,6000000,true);
+            warning.update(7200000,true,10,true,6000000,true);
+            check(warning.level()==0,"Paused gallery is not a live video stall");
+        }
+        {
+            Model m; Controller c(m); auto& b=m.backend;
+            uint64_t now=10000000;
+            b.vrx.connected=true; b.vrx.mcs=7; b.vrx.stamp_us=now; b.vrx.frequency_mhz=5839;
+            b.link={1234,4,101,4.4f,9.7f,true,true,88};
+            b.video={now,1920,1080,59,42};
+            b.media.recording=true; b.media.recording_id="first";
+            b.flight.stamp_us=now; b.flight.arm=1; b.flight.have_timer=true; b.flight.timer_s=25;
+            c.tick(now); c.tick(now+500000);
+            auto h=c.hud_data(now+500000);
+            check(h.panels[0].recording=="REC 0:00" && h.panels[0].state=="ARMED","Recording starts immediately, arm transition held");
+            check(h.panels[0].upper_label=="CELL","Cell gauge independent of primary voltage preference");
+            check(h.panels[1].secondary=="1234" && h.panels[0].detail1.find("1.23km")!=std::string::npos,"Calibrated distance in both wings");
+            check(h.panels[1].state=="STANDBY" && h.panels[1].detail1.find("5839@20MHz")!=std::string::npos &&
+                  h.panels[1].detail1.find("100mW AUTO")!=std::string::npos,"Native link details populated");
+            check(h.panels[1].detail1_alert==2 && h.panels[1].lower_alert==1,"Temperature and link alerts independent");
+            check(h.panels[1].detail2.find("4.4/9.7Mbps")!=std::string::npos && h.panels[1].detail2.find("42ms • 1080p60")!=std::string::npos,"Measured stream statistics and snapped camera mode");
+            m.show_hud=false; m.show_details=false;
+            c.tick(now+65000000);
+            check(!c.hud_data(now+65000000).enabled && c.recording_text(now+65000000)=="REC 1:05","Recording timer survives hidden HUD/details and stale RF");
+            b.media.recording=false; c.tick(now+66000000);
+            check(c.recording_text(now+66000000).empty(),"Recording stop clears indicator");
+            b.media.recording=true; b.media.recording_id="second"; c.tick(now+67000000);
+            check(c.recording_text(now+67000000)=="REC 0:00","New recording resets timer");
+            m.show_hud=true;
+            h=c.hud_data(now+67000000);
+            check(h.panels[1].secondary.empty() && h.panels[1].detail1.find("--mW")!=std::string::npos && h.panels[1].detail2.find("--ms")!=std::string::npos,"Expired readings are not displayed as current");
+        }
         std::puts("PASS: telemetry freshness, shared canopy/GLES geometry, projective rasterization, baked fonts and menus");
         return 0;
     } catch (const std::exception& e) { std::fprintf(stderr, "FAIL: %s\n", e.what()); return 1; }

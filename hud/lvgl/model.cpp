@@ -141,6 +141,7 @@ std::vector<MenuRow> Model::rows(uint64_t now) const {
         result.push_back(unavailable("distance", "Calib Distance", "Zero the range reading where you are standing."));
         result.push_back(choice("clock", "Clock", clock, {"OFF","IDLE ONLY 12H","IDLE ONLY 24H","ON 12H","ON 24H"}, "When the time is shown at the top of the screen, and how it is written."));
         result.push_back(choice("dynamic", "Dynamic HUD", dynamic, {"OFF","SMALL","MEDIUM","EXTREME"}, "Let the panels move with the aircraft's camera IMU or flight-controller attitude."));
+        result.push_back(choice("link_edge_warning", "Link Edge Warning", link_edge_warning, {"OFF","ON"}, "Amber for a weak link, red for a very weak link or stalled video."));
         result.push_back(choice("debug", "Debug Info", debug, {"OFF","ON"}, "Show the radio's current frame and bandwidth under the right panel."));
         return result;
     }
@@ -205,6 +206,7 @@ int Model::setting(const std::string& id) const {
     if (id == "clock") return clock;
     if (id == "bf_osd") return bf_osd;
     if (id == "debug") return debug;
+    if (id == "link_edge_warning") return link_edge_warning;
     if (id == "dynamic") return dynamic;
     if (id == "ui_scale") return ui_scale-5;
     return 0;
@@ -224,6 +226,7 @@ void Model::set_setting(const std::string& id, int value) {
     else if (id == "clock") clock = std::clamp(value,0,4);
     else if (id == "bf_osd") bf_osd=value!=0;
     else if (id == "debug") debug=value!=0;
+    else if (id == "link_edge_warning") link_edge_warning=value!=0;
     else if (id == "dynamic") dynamic=std::clamp(value,0,3);
     else if (id == "ui_scale") ui_scale=std::clamp(value+5,5,20);
 }
@@ -233,7 +236,7 @@ void Model::set_preferences(const UiPreferences& p) {
     theme = p.theme; fps = p.fps; show_details = p.details; key_repeat = p.repeat; show_hud = p.hud; per_cell = p.per_cell;
     clock=p.clock;
     bf_osd=p.bf_osd;debug=p.debug;dynamic=p.dynamic;
-    ui_scale=p.ui_scale;
+    ui_scale=p.ui_scale; link_edge_warning=p.link_edge_warning;
 }
 std::string Model::clock_text(std::time_t wall_time,uint64_t now) const {
     if(!hud_visible() || !clock || (clock<=2 && !show_status(now))) return {};

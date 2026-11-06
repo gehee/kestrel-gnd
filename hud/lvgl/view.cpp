@@ -54,6 +54,23 @@ View::View(const Controller& controller, int w, int h, const std::string& assets
         lv_obj_remove_flag(object, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_add_event_cb(object, draw_event, LV_EVENT_DRAW_MAIN, this);
     }
+    // Bake native-size alpha strips once. Pulsing changes only their opacity;
+    // it neither regenerates glyphs nor asks the HUD worker to redraw wings.
+    const int depth = h * 15 / 100;
+    for (int side = 0; side < 2; ++side) {
+        auto& pixels = edge_pixels_[side]; pixels.resize(size_t(w) * depth);
+        for (int y = 0; y < depth; ++y) {
+            const float t = float(side ? depth - 1 - y : y) / std::max(1, depth - 1);
+            std::fill_n(pixels.data() + size_t(y) * w, w, uint8_t(255 * (1-t) * (1-t)));
+        }
+        auto& image = edge_images_[side]; image.header.magic = LV_IMAGE_HEADER_MAGIC;
+        image.header.cf = LV_COLOR_FORMAT_A8; image.header.w = w; image.header.h = depth;
+        image.header.stride = w; image.data_size = pixels.size(); image.data = pixels.data();
+        auto* object = edge_objects_[side] = lv_obj_create(screen_);
+        lv_obj_remove_style_all(object); lv_obj_remove_flag(object, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_pos(object, 0, side ? h-depth : 0); lv_obj_set_size(object, w, depth);
+        lv_obj_add_event_cb(object, draw_event, LV_EVENT_DRAW_MAIN, this);
+    }
     picker_ = lv_obj_create(screen_);
     lv_obj_remove_style_all(picker_);
     lv_obj_set_pos(picker_, 0, h * 58 / 100);
@@ -79,8 +96,8 @@ View::View(const Controller& controller, int w, int h, const std::string& assets
     lv_obj_add_flag(channel_,LV_OBJ_FLAG_HIDDEN);
     clock_=lv_obj_create(screen_);
     lv_obj_remove_style_all(clock_);
-    lv_obj_set_pos(clock_,w/2-w/10,0);
-    lv_obj_set_size(clock_,w/5,h/16);
+    lv_obj_set_pos(clock_,w/3,0);
+    lv_obj_set_size(clock_,w/3,h/12);
     lv_obj_remove_flag(clock_,LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(clock_,draw_event,LV_EVENT_DRAW_MAIN,this);
     bf_object_=lv_obj_create(screen_);lv_obj_remove_style_all(bf_object_);
@@ -101,6 +118,15 @@ View::View(const Controller& controller, int w, int h, const std::string& assets
     lv_obj_add_event_cb(menu_capture_,draw_event,LV_EVENT_DRAW_MAIN,this);
 }
 View::~View() { lv_obj_delete(capture_screen_);lv_obj_clean(screen_); drop_menu_snapshot(); }
+void View::draw_edge(lv_layer_t* layer, int side) {
+    if (!edge_opacity_) return;
+    lv_draw_image_dsc_t d; lv_draw_image_dsc_init(&d);
+    d.src = &edge_images_[side]; d.recolor_opa = LV_OPA_COVER;
+    d.recolor = edge_level_ == 2 ? lv_color_make(255,76,63) : lv_color_make(255,183,38);
+    d.opa = edge_opacity_;
+    const int depth = edge_images_[side].header.h, y = side ? height_-depth : 0;
+    lv_area_t area{0,y,width_-1,y+depth-1}; lv_draw_image(layer,&d,&area);
+}
 void View::drop_menu_snapshot() {
     if (!menu_snapshot_) return;
     lv_image_cache_drop(menu_snapshot_); lv_image_header_cache_drop(menu_snapshot_);
@@ -233,6 +259,8 @@ void View::draw_event(lv_event_t* e) {
             rect(layer, 0, 0, self->width_, self->height_, hud_theme_at(self->model_.theme).ground,
                  (self->model_.menu_open ? 0.10f : 0.0f) + self->menu_progress_ * 0.06f);
     }
+    else if (target == self->edge_objects_[0] || target == self->edge_objects_[1])
+        self->draw_edge(layer, target == self->edge_objects_[0] ? 0 : 1);
     else if (target == self->menu_ || target == self->menu_capture_) self->draw_menu(layer);
     else if (target == self->picker_) self->draw_picker(layer);
     else if (target == self->channel_) self->draw_channel(layer);
@@ -240,6 +268,14 @@ void View::draw_event(lv_event_t* e) {
         const float size=24.0f*self->height_/1080;
         const float x=(self->width_-self->text_.canvas_advance(self->clock_text_,size))/2;
         self->text_.canvas(layer,self->clock_text_,x,36.0f*self->height_/1080,size,false,hud_theme_at(self->model_.theme).text,.9f);
+        if (!self->recording_text_.empty()) {
+            constexpr float red[] = {1,.30f,.25f};
+            const float rx=(self->width_-self->text_.canvas_advance(self->recording_text_,size))/2;
+            const float y=(self->clock_text_.empty()?36.0f:66.0f)*self->height_/1080;
+            const int marker=std::max(4,self->height_/108);
+            rect(layer,int(rx)-marker*2,int(y)-marker,marker,marker,red,1);
+            self->text_.canvas(layer,self->recording_text_,rx,y,size,false,red,1);
+        }
     }
     else if(target==self->bf_object_ && self->bf_visible_) self->bf_atlas_.draw(layer,self->bf_grid_,self->width_,self->height_);
     else if(target==self->debug_object_) self->text_.canvas(layer,self->debug_text_,self->width_-18,self->height_-12,
@@ -506,11 +542,13 @@ void View::update(uint64_t now) {
     const auto debug=model_.debug && model_.hud_visible() && !model_.menu_open?model_.backend.radio_debug:std::string();
     if(debug!=debug_text_ || old_theme_!=model_.theme) {debug_text_=debug;lv_obj_invalidate(debug_object_);}
     auto clock=model_.clock_text(std::time(nullptr),now);
-    if(model_.backend.media.recording) clock=clock.empty()?"REC":"REC  "+clock;
+    const auto hud_data = controller_.hud_data(now);
+    const auto recording = hud_data.enabled && hud_data.panels[0].visible && model_.hud_style != "vector" ? std::string() : controller_.recording_text(now);
+    if (recording != recording_text_) { recording_text_ = recording; lv_obj_invalidate(clock_); }
     if(clock!=clock_text_ || old_theme_!=model_.theme) {
         clock_text_=clock; lv_obj_invalidate(clock_);
     }
-    hud_->update(controller_.hud_data(now), now);
+    hud_->update(hud_data, now);
     sync_hud_objects();
     const bool hud_changed = hud_revision_ != hud_->revision();
     const float pixels_per_world=height_/(2*std::tan(.785f/2)*3.2f);
@@ -533,6 +571,18 @@ void View::update(uint64_t now) {
     if(hud_changed && transform[2]) lv_obj_invalidate(screen_);
     const float dt = last_tick_ ? std::min(0.1f, float(now - last_tick_) / 1000000) : 0;
     last_tick_ = now;
+    const int warning = model_.link_edge_warning ? controller_.link_warning() : 0;
+    const float edge_target = warning && model_.hud_visible() ? 1 : 0;
+    const float edge_dt = edge_fade_ == 0 || edge_fade_ == 1 ? std::min(dt, 1.0f/60) : dt;
+    edge_fade_ += std::clamp(edge_target-edge_fade_, -edge_dt/.6f, edge_dt/.15f);
+    const int prior_level = edge_level_;
+    if (warning) edge_level_ = warning;
+    const float pulse = edge_level_ == 2 ? .65f + .35f * (.5f + .5f * std::sin(float(now % 10000000)/1000000*7.54f)) : 1;
+    const int edge_opacity = int(255 * .75f * edge_fade_ * pulse);
+    if (edge_opacity != edge_opacity_ || prior_level != edge_level_) {
+        edge_opacity_ = edge_opacity;
+        for (auto* object : edge_objects_) lv_obj_invalidate(object);
+    }
     const bool unfolded = model_.menu_open && model_.stage != MenuStage::Pick;
     // Do not rebuild on telemetry changes during motion. A bounded snapshot
     // is refreshed in the picker or when the fully opened content changes.
@@ -544,7 +594,7 @@ void View::update(uint64_t now) {
     const float next = model_.hud_visible() ? menu_progress_ + std::clamp(target - menu_progress_, -dt / 0.24f, dt / 0.24f) : 0;
     const bool moving = next != menu_progress_;
     const bool wing_visibility_changed = (menu_progress_ == 0) != (next == 0);
-    animating_ = moving || model_.visual.animating;
+    animating_ = moving || model_.visual.animating || edge_fade_ != edge_target || (edge_fade_ > 0 && edge_level_ == 2);
     menu_progress_ = next;
     if (unfolded) active_menu_side_ = model_.side;
     const bool right_side = active_menu_side_ != 0;

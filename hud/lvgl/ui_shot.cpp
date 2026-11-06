@@ -17,6 +17,7 @@ int main(int argc, char** argv) {
             auto frame = [&] {
                 now += 40000;
                 if (model.backend.vrx.connected) model.backend.vrx.stamp_us = now;
+                if (model.backend.video.height) model.backend.video.stamp_us=now;
                 controller.tick(now); view.update(now); lv_tick_inc(40); lv_refr_now(display.lv_display());
             };
             auto shot = [&](const std::string& name) {
@@ -32,6 +33,18 @@ int main(int argc, char** argv) {
             controller.key(Key::Back); controller.key(Key::Right); controller.key(Key::Enter); shot("air_unlinked");
             model.backend.vrx.connected = true; model.backend.vrx.mcs = 8;
             model.backend.media.video_monitored = false;
+            model.menu_open=false;
+            model.backend.link={1234,4,101,4.4f,9.7f,false,true,88};
+            model.backend.video={now+10000000,1920,1080,60,42};
+            model.backend.media.recording=true;
+            model.backend.media.recording_id="render-fixture";
+            model.backend.vrx.frequency_mhz=5839;
+            model.backend.vrx.mcs=5;
+            shot("canopy_amber_recording");
+            model.backend.vrx.mcs=2; shot("canopy_red_recording");
+            model.show_hud=false; shot("recording_hud_hidden");
+            model.show_hud=true; model.backend.media.recording=false;
+            model.backend.vrx.mcs=8; model.menu_open=true;
             for (int tab : {0, 1, 7, 6}) {
                 model.tab = tab; model.selected = model.first_row(now); ++model.menu_version;
                 shot(std::string("air_") + Model::tab_name(tab));

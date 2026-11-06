@@ -262,6 +262,36 @@ int main(int argc, char** argv) {
                     now+=20000;controller.tick(now);view.update(now);lv_refr_now(display.lv_display());check_incremental();
                 }
             }
+            model.menu_open=false; model.show_hud=true; model.show_details=false;
+            model.link_edge_warning=false; model.clock=0; model.dynamic=0;
+            model.backend.media.recording=false; model.backend.vrx.mcs=8;
+            auto draw=[&] {
+                now+=20000; model.backend.vrx.stamp_us=now;
+                controller.tick(now); view.update(now); lv_refr_now(display.lv_display());
+            };
+            for(int i=0;i<120;++i) draw();
+            auto red_count=[&](int x0,int y0,int x1,int y1) {
+                int count=0;
+                for(int y=y0;y<y1;++y) for(int x=x0;x<x1;++x) {
+                    auto pixel=display.pixels()[y*1920+x];
+                    const int r=(pixel>>16)&255,g=(pixel>>8)&255;
+                    if((pixel>>24)>80 && r>150 && r>g*2) ++count;
+                }
+                return count;
+            };
+            const int before=red_count(0,600,700,820);
+            model.backend.media.recording=true; model.backend.media.recording_id="pixel-test";
+            draw();
+            if(red_count(0,600,700,820)<before+30)throw std::runtime_error("Canopy REC badge missing with details hidden");
+            check_incremental();
+            model.show_hud=false; draw();
+            if(red_count(650,0,1270,90)<30)throw std::runtime_error("REC fallback missing with clock/HUD off");
+            check_incremental();
+            model.backend.media.recording=false; draw();
+            if(red_count(650,0,1270,90))throw std::runtime_error("Stopped recording left stale REC badge");
+            const auto stable=display.presentations;
+            draw();
+            if(display.presentations!=stable)throw std::runtime_error("Static hidden HUD caused unnecessary redraw");
             std::printf("PASS: 240 frames, menu motion/tabs/themes, text LRU lifetime, stable-cache reuse, channel/clock damage, static idle; bytes=%zu rasters=%llu\n",
                         view.text_cache_bytes(), (unsigned long long)view.text_rasterizations());
         }

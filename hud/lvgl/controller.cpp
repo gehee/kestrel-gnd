@@ -13,6 +13,15 @@ void Controller::tick(uint64_t now) {
             i = m.receiver_preview_.erase(i);
         } else ++i;
     }
+    const auto& media = m.backend.media;
+    warning_.update(now, m.backend.vrx.link_valid(now), m.backend.vrx.mcs,
+                    media.video_monitored, media.video_stamp_us, m.backend.playback_busy);
+    if (media.recording && (!was_recording_ || media.recording_id != recording_id_)) recording_since_ = now;
+    was_recording_ = media.recording; recording_id_ = media.recording_id;
+    const bool armed = m.backend.flight.arm == 1 && m.backend.flight.stamp_us &&
+        now >= m.backend.flight.stamp_us && now - m.backend.flight.stamp_us < 2000000;
+    if (armed && !was_armed_) armed_since_ = now;
+    was_armed_ = armed;
     m.visual = canopy::link_visual(m.backend.vrx.link_valid(now), now, previous_, up_, down_);
     const auto& f = m.backend.flight;
     if (f.stamp_us && now >= f.stamp_us && now - f.stamp_us < 2000000 && f.have_cell_v)

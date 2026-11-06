@@ -67,7 +67,13 @@ private:
     uint64_t last_tick_ = 0;
     lv_obj_t* channel_ = nullptr;
     lv_obj_t* clock_ = nullptr;
-    std::string clock_text_;
+    std::string clock_text_, recording_text_;
+    std::array<lv_obj_t*,2> edge_objects_{};
+    std::array<std::vector<uint8_t>,2> edge_pixels_;
+    std::array<lv_image_dsc_t,2> edge_images_{};
+    float edge_fade_ = 0;
+    int edge_level_ = 0, edge_opacity_ = 0;
+    void draw_edge(lv_layer_t*, int side);
     uint64_t channel_revision_ = 0;
     bool old_channel_ = false;
     lv_obj_t *screen_ = nullptr, *menu_ = nullptr, *picker_ = nullptr, *idle_object_ = nullptr, *dimmer_ = nullptr;
