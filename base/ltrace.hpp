@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <string>
 
 // Per-frame latency trace, for working out where the time between the air
 // unit's camera and the goggle's screen goes.
@@ -49,8 +50,9 @@ void rec(uint8_t ev, uint64_t t, uint32_t a, uint64_t b,
          const void* d = nullptr, size_t n = 0);
 uint64_t now_us();
 
-// Starts the thread that watches for /tmp/ltrace.req. Once, from main().
-void start();
+// Starts the thread watching directory/ltrace.req and writing directory/ltrace.bin.
+// The caller supplies an existing directory. Call once, from main().
+void start(const std::string& directory = "/tmp");
 
 }  // namespace ltrace
 

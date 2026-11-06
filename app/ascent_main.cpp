@@ -1,4 +1,5 @@
 // Native Ascent composition root: existing radio, software HUD, platform media.
+#include "base/ltrace.hpp"
 #include "platform/software.hpp"
 #include "platform/ascent_panel.hpp"
 #include "kestrel_gnd_config.h"
@@ -22,6 +23,7 @@ void signal_handler(int signal) {
 }
 struct Options {
     platform::SoftwareSetup platform;
+    std::string trace_dir;
     std::string assets = "/usr/share/kestrel/ui", input, control, preferences, command, screenshot;
     bool radio = true, menu = false, vector = false, profile = false;
     unsigned seconds = 0;
@@ -68,6 +70,8 @@ Options options(int argc, char **argv) {
             o.radio = false;
         else if (arg == "--show-menu")
             o.menu = true;
+        else if (arg == "--trace-dir")
+            o.trace_dir = value();
         else if (arg == "--profile")
             o.profile = true;
         else if (arg == "--vector")
@@ -99,6 +103,7 @@ Options options(int argc, char **argv) {
                  "  --preferences FILE  Save visual preferences (optional)\n"
                  "  --show-menu --vector --no-radio --seconds N\n"
                  "  --profile           Log UI and display timing every five seconds\n"
+                 "  --trace-dir DIR     Watch DIR/ltrace.req; write frame timing to DIR/ltrace.bin\n"
                  "  --drm DEVICE --decoder DEVICE --replay FILE");
             exit(0);
         } else
@@ -120,6 +125,8 @@ int main(int argc, char **argv) {
             puts(kestrel_ui::send_control(o.control, o.command).c_str());
             return 0;
         }
+        if (!o.trace_dir.empty())
+            ltrace::start(o.trace_dir);
         signal(SIGINT, signal_handler);
         signal(SIGTERM, signal_handler);
         signal(SIGUSR1, signal_handler);

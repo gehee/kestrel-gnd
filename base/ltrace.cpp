@@ -39,15 +39,18 @@ void rec(uint8_t ev, uint64_t t, uint32_t a, uint64_t b, const void* d, size_t n
     if (n) memcpy(r.d, d, n);
 }
 
-static void run() {
+static void run(std::string directory) {
+    const auto request = directory + "/ltrace.req";
+    const auto output = directory + "/ltrace.bin";
+    const auto temporary = output + ".tmp";
     for (;;) {
         usleep(200000);
-        FILE* f = fopen("/tmp/ltrace.req", "r");
+        FILE* f = fopen(request.c_str(), "r");
         if (!f) continue;
         int secs = 0;
         if (fscanf(f, "%d", &secs) != 1) secs = 10;
         fclose(f);
-        unlink("/tmp/ltrace.req");
+        unlink(request.c_str());
         if (secs < 1) secs = 1;
         if (secs > 300) secs = 300;
 
@@ -64,20 +67,20 @@ static void run() {
 
         size_t n = g_idx.load();
         if (n > g_buf.size()) n = g_buf.size();
-        FILE* o = fopen("/tmp/ltrace.bin.tmp", "wb");
+        FILE* o = fopen(temporary.c_str(), "wb");
         if (o) {
             fwrite(g_buf.data(), sizeof(Rec), n, o);
             fclose(o);
-            rename("/tmp/ltrace.bin.tmp", "/tmp/ltrace.bin");
+            rename(temporary.c_str(), output.c_str());
         }
-        printf("ltrace: wrote %zu events to /tmp/ltrace.bin\n", n);
+        printf("ltrace: wrote %zu events to %s\n", n, output.c_str());
         std::vector<Rec>().swap(g_buf);
     }
 }
 
-void start() {
+void start(const std::string& directory) {
     static_assert(sizeof(Rec) == 56, "Rec layout is read by scripts/ltrace.py");
-    std::thread(run).detach();
+    std::thread(run, directory).detach();
 }
 
 }  // namespace ltrace

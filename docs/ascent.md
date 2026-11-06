@@ -166,6 +166,14 @@ not the frame rate of a stationary UI or the capture card.
 separately. Rendering is included in the configured frame budget rather than
 followed by an unconditional extra sleep.
 
+For frame timing, create a writable diagnostic directory and pass
+`--trace-dir DIR`. Writing `20` to `DIR/ltrace.req` records twenty seconds of
+radio arrival, decoder submission/completion and DRM flip events in memory,
+then saves `DIR/ltrace.bin`. Copy that file to the development host and run
+`python3 tools/ltrace.py FILE`. Capture-to-arrival values are relative to their
+minimum because the camera and receiver clocks are not synchronized. Keep
+traces in ignored `.local/`; tracing is disabled unless explicitly requested.
+
 ## Current limits
 
 This is an initial bring-up target, not a flight-ready receiver.

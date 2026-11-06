@@ -1,5 +1,6 @@
 // Native AR9311: independent DMA-BUF video and ARGB UI planes, blended by VO.
 #include "display/ar9311_screen.hpp"
+#include "base/ltrace.hpp"
 #include <array>
 #include <cerrno>
 #include <chrono>
@@ -239,7 +240,7 @@ class Ar9311Screen final : public PlaneScreen {
         if (!rgb)
             memset(b.pixels, 16, 1920 * 1080);
     }
-    void wait_flip(uint64_t cookie) {
+    void wait_flip(uint64_t cookie, uint32_t fb) {
         pollfd p{fd_, POLLIN, 0};
         int r;
         do {
@@ -254,8 +255,12 @@ class Ar9311Screen final : public PlaneScreen {
             if (e->length < sizeof(*e) || e->length > size_t(n) - at)
                 break;
             if (e->type == DRM_EVENT_FLIP_COMPLETE && e->length >= sizeof(drm_event_vblank) &&
-                reinterpret_cast<drm_event_vblank *>(e)->user_data == cookie)
+                reinterpret_cast<drm_event_vblank *>(e)->user_data == cookie) {
+                auto* vblank = reinterpret_cast<drm_event_vblank *>(e);
+                if (ltrace::on()) ltrace::rec(ltrace::kFlipDone, clock_us(), fb,
+                    uint64_t(vblank->tv_sec) * 1000000 + vblank->tv_usec);
                 return;
+            }
             at += e->length;
         }
         throw std::runtime_error("missing matching HDMI flip completion");
@@ -441,8 +446,9 @@ class Ar9311Screen final : public PlaneScreen {
                 Atomic a;
                 a.plane(primary_, crtc_.id, video_fb);
                 a.plane(overlay_, crtc_.id, next_ui < 0 ? 0 : ui_[next_ui].fb);
+                if (frame && ltrace::on()) ltrace::rec(ltrace::kRender, clock_us(), uint32_t(frame->pts), video_fb);
                 a.commit(fd_, DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT, ++cookie);
-                wait_flip(cookie);
+                wait_flip(cookie, video_fb);
                 if (video_changed) {
                     showing = std::move(pending);
                     ++video_updates_;

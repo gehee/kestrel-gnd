@@ -1,5 +1,6 @@
 #include "hal/v4l2/vdec_v4l2.hpp"
 #include "base/time_util.h"
+#include "base/ltrace.hpp"
 #include <algorithm>
 #include <array>
 #include <cerrno>
@@ -263,7 +264,9 @@ void VdecV4l2::decode() {
                 stamps[stamp] = p.timing;
                 if (stamps.size() > 128)
                     stamps.clear();
+                const auto submit = now_us();
                 queue(dev.fd, output_type, i, out[i]->size, p.bytes.size(), stamp);
+                if (ltrace::on()) ltrace::rec(ltrace::kDecPut, submit, uint32_t(p.pts), now_us());
                 busy[i] = true;
                 if (!dev.output_on) {
                     auto t = output_type;
@@ -388,6 +391,7 @@ void VdecV4l2::decode() {
                     frame->slices = st.slices;
                     stamps.erase(at);
                 }
+                if (ltrace::on()) ltrace::rec(ltrace::kDecOut, frame->dec_end_ts, uint32_t(frame->pts), 0);
                 last_frame_us_ = frame->dec_end_ts;
                 sink_->queue_frame(frame);
                 ++frames_;
