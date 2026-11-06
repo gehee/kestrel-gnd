@@ -4,7 +4,8 @@ The Gnd485 stock firmware polls an external I²C ADC for the menu keys, a
 separate GPIO for LINK, and drives the beeper through PWM. These are different
 board connections from the RK3568 VRX Pro and the AR9311 VR04 goggles.
 
-This is a firmware-derived interface map, not a completed hardware validation.
+This firmware-derived interface map has been confirmed through physical button
+presses and audible beeper feedback on native fpvOS.
 The physical SoC package pad, PCB net and beeper transistor polarity have not
 been established. No unidentified GPIO was driven during this investigation.
 
@@ -37,24 +38,28 @@ code = (word >> 4) & 0xff
 millivolts = trunc(code * 3300 / 256)
 ```
 
-The nominal Gnd485 ladder centres are:
+The nominal Gnd485 ladder centres and observed physical presses are:
 
-| Key | Millivolts |
-| --- | ---: |
-| REC | 400 |
-| UP | 800 |
-| LEFT | 1000 |
-| RIGHT | 1200 |
-| OK | 1400 |
-| DOWN | 1600 |
-| ESC | 1800 |
+| Key | Nominal mV | Observed mV |
+| --- | ---: | ---: |
+| REC | 400 | 386 |
+| UP | 800 | 786 |
+| LEFT | 1000 | 992 |
+| RIGHT | 1200 | 1185–1198 |
+| OK | 1400 | 1392 |
+| DOWN | 1600 | 1585–1598 |
+| ESC | 1800 | 1778 |
 
 The stock matching window is ±89 mV. Its board-485 branch replaces the generic
 ladder's MATCH entry with ESC at 1800 mV and limits the table to seven entries;
 LINK is read separately. Do not use the generic table's ESC value of 600 mV.
 Stock collects ten usable readings and removes the minimum and maximum before
-averaging; it also applies a configured `key_adc_offset`. Neither that offset
-nor the ladder readings have been measured on native fpvOS yet. The external
+averaging; it also applies a configured `key_adc_offset`. The observed readings
+above use no offset and all fall within the stock windows. Idle reads zero.
+A single 464 mV sample occurred while releasing LEFT, inside the REC window;
+the input layer must debounce transitions rather than emit every decoded sample.
+LINK independently changed from high to low during its press and returned high
+on release, with the ADC remaining zero. The external
 ADC part number remains unidentified; no SoC SAR ADC channel is implicated by
 this code path.
 
@@ -78,8 +83,10 @@ callers are:
 
 These call sites establish available tone settings; not every caller's product
 meaning has been reconstructed. The startup script separately pulses channel 0
-at 1 kHz, 10% duty for 5 ms. None of these sounds has yet been acoustically
-verified under native fpvOS. Duty controls electrical drive; it is not a linear
+at 1 kHz, 10% duty for 5 ms. Under native fpvOS, two 100 ms pulses at 1 kHz,
+10% duty, separated by 250 ms, were heard and confirmed by the operator.
+Hardware readback after release showed the channel disabled. Other stock tone
+patterns remain untested. Duty controls electrical drive; it is not a linear
 calibrated loudness scale.
 
 ## Integration boundary
@@ -108,16 +115,13 @@ transport:
    Kestrel. Kestrel must release the PWM before the updater takes over; two
    processes must not concurrently schedule beeps on the same channel.
 
-The inspected native fpvOS build has only I²C1 enabled in the board DT,
-`CONFIG_I2C_CHARDEV=m`, and `CONFIG_PWM` disabled. Loading `i2c-dev` alone cannot
-create I²C3 or PWM. The running receiver likewise has no I²C3 platform device
-or PWM class. Consequently physical input and audible feedback are still
-pending; the firmware map does not mean they are hooked up.
-
-After enabling the platform interfaces, validate idle and each held/released
-key, LINK polarity, read-error recovery, and a short bounded tone before
-connecting binding or upgrade actions. Preserve the working HDMI/radio/USB
-configuration while adding these providers.
+fpvOS commit `edd9790` enables I²C3, built-in `i2c-dev` and the Artosyn PWM
+provider. The installed image passed update readback, a cold boot, PWM range
+and polarity checks, and decoder/platform regression checks. The physical
+press/release and audible tests above confirm the hardware interfaces.
+Kestrel acquisition, debounce/repeat, read-error recovery and notification
+scheduling still need implementation before these inputs drive the menu,
+binding or upgrade actions.
 
 ## Reproducible firmware evidence
 

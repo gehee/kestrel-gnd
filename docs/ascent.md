@@ -135,8 +135,9 @@ This is an initial bring-up target, not a flight-ready receiver.
 - Menu edits currently cover visual preferences. RF/camera configuration, binding,
   DVR/gallery, FC telemetry integration, and physical board-button acquisition are
   still pending. [Button and beeper interfaces](ascent-input-feedback.md) have
-  been traced in stock firmware; native platform enablement and hardware
-  validation remain. Unavailable temperature and supply readings remain blank.
+  been traced in stock firmware, enabled in fpvOS and physically validated.
+  Kestrel input/feedback integration remains. Unavailable temperature and supply
+  readings remain blank.
 - Native SDIO does not run the USB firmware's frame-clock register sampler or
   automatically restart the radio driver after errors.
 
