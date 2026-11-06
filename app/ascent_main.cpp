@@ -1,5 +1,6 @@
 // Native Ascent composition root: existing radio, software HUD, platform media.
 #include "platform/software.hpp"
+#include "platform/ascent_panel.hpp"
 #include "kestrel_gnd_config.h"
 #include "radio/ar8030_link.hpp"
 #include "hud/lvgl/display.hpp"
@@ -175,7 +176,8 @@ int main(int argc, char **argv) {
                 kestrel_ui::store_preferences(o.preferences, p);
             };
         kestrel_ui::Input input(o.input, o.control, false);
-        model.input_sources = input.sources();
+        platform::AscentPanel panel;
+        model.input_sources = input.sources() + panel.sources();
         model.control_path = o.control;
         model.hud_style = o.vector ? "vector" : "canopy";
         kestrel_ui::InlineHud hud(1920, 1080, o.assets,
@@ -185,6 +187,7 @@ int main(int argc, char **argv) {
             controller.open_menu();
         const auto start = kestrel_ui::monotonic_us();
         uint64_t drawn = 0;
+        int previous_bind = gnd::BIND_IDLE;
         while (!interrupted && !model.quit && !source_exited && !receiver.screen->failed() &&
                !receiver.decoder->failed()) {
             const auto now = kestrel_ui::monotonic_us();
@@ -206,6 +209,54 @@ int main(int argc, char **argv) {
             model.backend.service.connected = o.radio;
             model.backend.service.provider_connected = telemetry.fresh(now);
             input.poll(controller, now);
+            auto notice = [&](const char* text) {
+                if (!model.menu_open) controller.open_menu();
+                model.feedback = text;
+                ++model.menu_version;
+                printf("panel: %s\n", text);
+            };
+            for (const auto& event : panel.take()) {
+                if (event.repeat && !model.key_repeat) continue;
+                printf("panel: key=%s%s\n", bsp::ascent_panel::name(event.key), event.repeat ? " repeat" : "");
+                if (event.key == platform::PanelKey::Rec) {
+                    notice("Recording is not available yet");
+                    panel.beep(platform::PanelTone::Failure);
+                } else if (event.key == platform::PanelKey::Upgrade) {
+                    notice("Button-triggered upgrade is not available yet");
+                    panel.beep(platform::PanelTone::Failure);
+                } else if (event.key == platform::PanelKey::Link) {
+                    if (o.radio && o.link.replay_path.empty()) {
+                        radio_model.radio().bind();
+                        notice("Binding request sent");
+                        panel.beep();
+                    } else {
+                        notice("Binding requires a running radio");
+                        panel.beep(platform::PanelTone::Failure);
+                    }
+                } else {
+                    kestrel_ui::Key key;
+                    if (kestrel_ui::parse_key(bsp::ascent_panel::name(event.key), key)) {
+                        controller.key(key, event.repeat);
+                        if (!event.repeat) panel.beep();
+                    }
+                }
+            }
+            if (state.bind_state != previous_bind) {
+                previous_bind = state.bind_state;
+                switch (state.bind_state) {
+                case gnd::BIND_RUNNING:
+                    notice("Binding: press LINK again to cancel");
+                    panel.beep(platform::PanelTone::Notice); break;
+                case gnd::BIND_OK:
+                    notice("Binding succeeded");
+                    panel.beep(platform::PanelTone::Success); break;
+                case gnd::BIND_FAILED:
+                    notice("Binding failed");
+                    panel.beep(platform::PanelTone::Failure); break;
+                case gnd::BIND_IDLE: notice("Binding ended"); break;
+                default: break;
+                }
+            }
             controller.tick(now);
             view.update(now);
             lv_timer_handler();

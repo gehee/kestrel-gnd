@@ -126,9 +126,34 @@ fpvOS commit `edd9790` enables I²C3, built-in `i2c-dev` and the Artosyn PWM
 provider. The installed image passed update readback, a cold boot, PWM range
 and polarity checks, and decoder/platform regression checks. Physical button
 press/release and the dedicated audible beeper pattern are confirmed.
-Kestrel acquisition, debounce/repeat, read-error recovery and notification
-scheduling still need implementation before these inputs drive the menu,
-binding or upgrade actions.
+Kestrel now acquires the panel in `platform/ascent_panel.cpp`, using facts in
+`bsp/ascent_panel.hpp`. The ADC and LINK are sampled on a worker at 50 Hz,
+with 40 ms stability and a clean release required between keys. Startup-held
+keys, read errors and sampling gaps over 100 ms disarm input until stable idle.
+Direction keys repeat after 450 ms, every 140 ms, respecting the UI repeat
+preference. A bounded queue drops events older than 250 ms rather than replaying
+stale actions after a rendering stall.
+
+The native composition root maps arrows, OK and BACK into the existing LVGL
+controller. A short LINK release queues the existing radio binding command
+when a live radio is running; a second press uses its cancellation behavior.
+Binding notices and tones follow reported radio state. REC and LINK holds of
+at least eight seconds show unavailable notices; neither recording nor upgrade
+execution is implemented here. Native radio binding still needs an end-to-end
+hardware test, including persistence after reboot.
+
+A separate worker owns PWM channel 0, coalesces clicks and lets notifications
+interrupt them. Clicks use 60 ms at the verified 1 kHz/20% electrical settings;
+binding-start uses two 150 ms pulses, success adds a 500 ms third pulse, and
+failure uses one 500 ms pulse, with 350 ms gaps. Direction repeats are silent.
+Only the earlier dedicated short-short-long pattern has acoustic confirmation
+so far. An already exported PWM is left alone; owned PWM is disabled and
+unexported on normal shutdown. Missing providers do not disable other UI inputs.
+The ADC also takes an advisory exclusive lock; the GPIO line has kernel ownership.
+
+Host tests cover captured key values, release transients, startup-held input,
+read-error recovery, sampling stalls, directional repeats and short/long LINK
+release. The native build and all eight host checks pass.
 
 ## Reproducible firmware evidence
 
