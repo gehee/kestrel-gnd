@@ -43,7 +43,8 @@ target_link_libraries(kestrel-gnd PRIVATE kg_platform kg_radio kg_lvgl_view kg_d
 # The native ar_libre API is intentionally linked, including optional fast-path
 # symbols when packaged as a static archive; no SDK runtime interposition needed.
 target_link_options(kestrel-gnd PRIVATE -Wl,-u,arlink_version)
-install(TARGETS kestrel-gnd RUNTIME DESTINATION bin)
+add_dependencies(kestrel-gnd kestrel-hud kestrel-hud-vector)
+install(TARGETS kestrel-gnd kestrel-hud kestrel-hud-vector RUNTIME DESTINATION bin)
 if(KESTREL_TESTS)
     add_executable(stream_player_test tools/test/stream_player_test.cpp)
     target_link_libraries(stream_player_test PRIVATE kg_dvr)

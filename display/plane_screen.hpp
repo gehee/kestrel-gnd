@@ -18,6 +18,8 @@ class PlaneScreen : public hal::FrameSink {
     virtual void hold_video(bool) {}
     virtual void run() = 0;
     virtual uint64_t presented() const = 0;
+    // Completed flips which replaced the UI buffer, independently of video.
+    virtual uint64_t overlay_presented() const { return 0; }
     virtual bool failed() const = 0;
 };
 } // namespace display

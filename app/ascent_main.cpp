@@ -17,7 +17,9 @@
 #include "hal/source_decoder.hpp"
 #include "dvr/stream_player.hpp"
 #include "hud/lvgl/view.hpp"
+#include "render/software/frame_cadence.hpp"
 #include <csignal>
+#include <filesystem>
 #include <cstdio>
 #include <stdexcept>
 #include <thread>
@@ -252,8 +254,12 @@ int main(int argc, char **argv) {
         model.input_sources = input.sources() + panel.sources();
         model.control_path = o.control;
         model.hud_style = o.vector ? "vector" : "canopy";
-        kestrel_ui::InlineHud hud(1920, 1080, o.assets,
-                                  o.vector ? kestrel_ui::HudStyle::Vector : kestrel_ui::HudStyle::Canopy);
+        // Passive HUD telemetry can rebuild large canopy images. Keep that
+        // work off the menu thread; completed shared-memory images are leased
+        // until the UI has finished drawing them.
+        const auto hud_executable=std::filesystem::read_symlink("/proc/self/exe").parent_path() /
+            (o.vector ? "kestrel-hud-vector" : "kestrel-hud");
+        kestrel_ui::HudClient hud(1920,1080,o.assets,hud_executable.string());
         kestrel_ui::View view(controller, 1920, 1080, o.assets, &hud);
         model.backend.bf_available=view.betaflight_available();
         uint32_t bf_version=~uint32_t(0);
@@ -262,10 +268,10 @@ int main(int argc, char **argv) {
         if (o.menu)
             controller.open_menu();
         const auto start = kestrel_ui::monotonic_us();
-        uint64_t drawn = 0;
+        uint64_t drawn = 0, frame_deadline=start;
         int previous_bind = gnd::BIND_IDLE;
         std::string recording_error;
-        uint64_t profile_start = start, profile_loops = 0, profile_drawn = 0, profile_presented = 0;
+        uint64_t profile_start = start, profile_loops = 0, profile_drawn = 0, profile_presented = 0, profile_ui_flips = 0;
         uint64_t render_us = 0, overlay_us = 0, longest_loop_us = 0;
         uint64_t longest_render_us = 0, longest_overlay_us = 0;
         while (!interrupted && !model.quit && !source_exited && !receiver.screen->failed() &&
@@ -412,6 +418,7 @@ int main(int argc, char **argv) {
             controller.tick(now);
             const auto render_start = kestrel_ui::monotonic_us();
             view.update(now);
+            model.hud_pid=hud.pid();model.hud_restarts=hud.restarts();
             lv_timer_handler();
             lv_refr_now(display.lv_display());
             const auto overlay_start = kestrel_ui::monotonic_us();
@@ -420,10 +427,11 @@ int main(int argc, char **argv) {
                 receiver.screen->overlay_damage(display.pixels().data(), 1920, 1080, display.take_damage());
             }
             const auto rendered = kestrel_ui::monotonic_us();
-            // FPS is a frame budget, not an extra delay after rendering.
+            // Keep an absolute phase: sleep/wakeup overhead must not lower
+            // a 60 Hz target on every frame. Skip stale deadlines on overruns.
             const uint64_t frame_us = 1000000 / std::max(1, model.fps);
-            if (rendered - now < frame_us)
-                usleep(frame_us - (rendered - now));
+            frame_deadline=kestrel_ui::next_frame_deadline(frame_deadline,rendered,frame_us);
+            usleep(frame_deadline-rendered);
             if (o.profile) {
                 const auto ended = kestrel_ui::monotonic_us();
                 ++profile_loops;
@@ -435,13 +443,14 @@ int main(int argc, char **argv) {
                 if (ended - profile_start >= 5000000) {
                     const double seconds = double(ended - profile_start) / 1000000;
                     const auto presented = receiver.screen->presented();
-                    printf("profile: target=%d loops=%.2f/s UI=%.2f fps HDMI_updates=%.2f/s "
+                    const auto ui_flips=receiver.screen->overlay_presented();
+                    printf("profile: target=%d loops=%.2f/s UI=%.2f fps UI_scanout=%.2f/s HDMI_updates=%.2f/s "
                            "render=%.1fms overlay=%.1fms max_loop=%.1fms max_render=%.1fms max_overlay=%.1fms\n",
                            model.fps, profile_loops / seconds, (drawn - profile_drawn) / seconds,
-                           (presented - profile_presented) / seconds,
+                           (ui_flips-profile_ui_flips)/seconds, (presented - profile_presented) / seconds,
                            render_us / (1000.0 * profile_loops), overlay_us / (1000.0 * profile_loops),
                            longest_loop_us / 1000.0, longest_render_us / 1000.0, longest_overlay_us / 1000.0);
-                    profile_start = ended; profile_drawn = drawn; profile_presented = presented;
+                    profile_start = ended; profile_drawn = drawn; profile_presented = presented;profile_ui_flips=ui_flips;
                     profile_loops = render_us = overlay_us = longest_loop_us = 0;
                     longest_render_us = longest_overlay_us = 0;
                 }

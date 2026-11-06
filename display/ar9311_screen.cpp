@@ -163,7 +163,8 @@ class Ar9311Screen final : public PlaneScreen {
     std::atomic<uint64_t> presented_{0};
     std::atomic<bool> failed_{false};
     std::atomic<bool> hold_video_{false};
-    uint64_t video_updates_ = 0, ui_updates_ = 0;
+    uint64_t video_updates_ = 0;
+    std::atomic<uint64_t> ui_updates_{0};
 
     void destroy(Buffer &b) {
         if (b.pixels)
@@ -424,6 +425,7 @@ class Ar9311Screen final : public PlaneScreen {
         wake_.notify_all();
     }
     uint64_t presented() const override { return presented_.load(); }
+    uint64_t overlay_presented() const override { return ui_updates_.load(); }
     void hold_video(bool on) override { hold_video_=on;wake_.notify_all(); }
     bool failed() const override { return failed_.load(); }
     void run() override {
@@ -509,7 +511,7 @@ class Ar9311Screen final : public PlaneScreen {
         }
         wake_.notify_all();
         printf("display: video updates=%llu UI updates=%llu hardware composition\n",
-               (unsigned long long)video_updates_, (unsigned long long)ui_updates_);
+               (unsigned long long)video_updates_, (unsigned long long)ui_updates_.load());
     }
 };
 } // namespace
