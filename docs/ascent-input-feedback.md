@@ -184,3 +184,18 @@ The stripped UI's beeper helper is identified by its error strings at
 `0x487110`; callers at `0x4844c8`, `0x4845d0`, and `0x484608` select channel,
 period, duty and duration. The stock `usrdata/run.sh` independently confirms
 the startup PWM pulse and GPIOA2 pairing input.
+
+
+## Native Kestrel integration validation
+
+The platform smoke test on native fpvOS acquired ADC, LINK and PWM, and a
+second instance could not claim them. Sysfs readback confirmed the 60 ms click
+returned to disabled state and the success sequence produced three completed
+pulses at the expected timings. Destroying the platform while a 500 ms tone
+was active disabled and unexported PWM; hardware readback confirmed it off.
+These checks verify scheduling and resource cleanup, not acoustic perception.
+
+The integrated receiver starts with all three providers ready, reports the
+panel input sources, and leaves PWM disabled at idle. Physical menu navigation
+and the new 60 ms click tone await operator confirmation. Binding remains
+untested with a live native radio; the current menu test runs with radio off.
