@@ -286,12 +286,10 @@ void View::draw_event(lv_event_t* e) {
 void View::sync_hud_objects() {
     if (hud_layout_ == hud_->layout()) return;
     for (auto* object : hud_objects_) lv_obj_delete(object);
-    hud_objects_.clear(); hud_layout_ = hud_->layout(); motion_transform_={};
+    hud_objects_.clear(); hud_layout_ = hud_->layout(); motion_offset_={};
     for (size_t i = 0; i < hud_layout_.regions.size(); ++i) {
         const auto& r = hud_layout_.regions[i]; auto* object = lv_obj_create(screen_);
         lv_obj_remove_style_all(object); lv_obj_remove_flag(object, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_style_transform_pivot_x(object,width_/2-int(r.x),0);
-        lv_obj_set_style_transform_pivot_y(object,height_/2-int(r.y),0);
         lv_obj_set_pos(object, r.x, r.y); lv_obj_set_size(object, r.width, r.height);
         lv_obj_add_event_cb(object, draw_event, LV_EVENT_DRAW_MAIN, this);
         // HUD is below picker/menu, including when a worker reconnects.
@@ -577,24 +575,18 @@ void View::update(uint64_t now) {
     const bool motion=model_.hud_visible() && model_.dynamic && !model_.menu_open;
     const float dx=replay?model_.backend.playback_dx:model_.backend.hud_dx;
     const float dy=replay?model_.backend.playback_dy:model_.backend.hud_dy;
-    const float bank=replay?model_.backend.playback_bank:model_.backend.hud_bank;
-    const std::array<int,3> transform{motion?int(std::lround(dx*pixels_per_world)):0,
-        motion?-int(std::lround(dy*pixels_per_world)):0,
-        motion?int(std::lround(-bank*1800/3.14159265f)):0};
-    if(transform!=motion_transform_) {
+    // The native software HUD moves without resampling its cached images.
+    // Preserve bank telemetry for recording, but keep live and replay panels level.
+    const std::array<int,2> offset{motion?int(std::lround(dx*pixels_per_world)):0,
+        motion?-int(std::lround(dy*pixels_per_world)):0};
+    if(offset!=motion_offset_) {
         for(auto* object:hud_objects_) {
-            if(transform[0]!=motion_transform_[0]) lv_obj_set_style_translate_x(object,transform[0],0);
-            if(transform[1]!=motion_transform_[1]) lv_obj_set_style_translate_y(object,transform[1],0);
-            if(transform[2]!=motion_transform_[2]) lv_obj_set_style_transform_rotation(object,transform[2],0);
+            if(offset[0]!=motion_offset_[0]) lv_obj_set_style_translate_x(object,offset[0],0);
+            if(offset[1]!=motion_offset_[1]) lv_obj_set_style_translate_y(object,offset[1],0);
         }
-        const bool rotated=transform[2] || motion_transform_[2];
-        motion_transform_=transform;
-        // LVGL's software transform samples relative to its clipped layer.
-        // Keep its sampling origin stable while rotation is active or clears.
-        // Pure translation uses LVGL's old/new object bounds for damage.
-        if(rotated)lv_obj_invalidate(screen_);
+        // LVGL invalidates both the old and new bounds; no full-screen damage.
+        motion_offset_=offset;
     }
-    if(hud_changed && transform[2]) lv_obj_invalidate(screen_);
     const float dt = last_tick_ ? std::min(0.1f, float(now - last_tick_) / 1000000) : 0;
     last_tick_ = now;
     const int warning = model_.link_edge_warning ? (replay?model_.backend.playback_warning:controller_.link_warning()) : 0;

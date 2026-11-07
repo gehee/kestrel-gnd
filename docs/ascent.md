@@ -206,6 +206,24 @@ and background. Render tests also compare incremental frames against full redraw
 during opening and closing, and check that passive counters refresh at a bounded
 rate while navigation remains immediate.
 
+## Dynamic HUD movement
+
+At 720p and 1080p, Dynamic HUD moves the cached panels horizontally and vertically
+while keeping them level. OFF centers them; SMALL, MEDIUM and EXTREME retain the
+existing live movement strengths. Opening a menu centers the HUD. Playback uses
+recorded offsets with the same translation-only rendering, and pause holds the
+recorded pose. There is no synthetic movement when telemetry is unavailable.
+
+Movement reuses the existing ARGB overlay buffers and invalidates the old and
+new panel bounds. Video decoding and hardware video/UI composition remain
+independent. No GDC driver or additional DMA surfaces are required. Rotation
+telemetry is still recorded, but the native LVGL frontend does not apply it.
+
+With live video, the translation benchmark measured about 58 distinct HUD
+updates/s at 720p with a 60 Hz loop, and about 30 updates/s at 1080p. These rates
+are distinct from HDMI refresh and vary with content and movement. A stationary
+HUD is redrawn only when its content changes.
+
 ## Hardware composition check
 
 Stop the receiver before running:

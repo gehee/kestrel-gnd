@@ -113,6 +113,21 @@ int main(int argc, char** argv) {
         check(saved.hud && saved.theme == 1 && pending_model.pending("hud"), "Applying Theme does not save pending HUD OFF");
         pending_controller.key(Key::Left); pending_controller.key(Key::Enter); pending_controller.key(Key::Enter);
         check(!saved.hud && saved.theme == 1 && !pending_model.pending("hud"), "A pending row is applied independently");
+        Model motion_model; Controller motion_controller(motion_model);
+        motion_model.dynamic=2;
+        UiPreferences motion_saved;int motion_saves=0;
+        motion_controller.save_preferences=[&](const UiPreferences& p){motion_saved=p;++motion_saves;};
+        motion_controller.key(Key::Enter);motion_controller.key(Key::Enter);
+        const auto motion_rows=motion_model.rows(2300000);
+        const auto dynamic_row=std::find_if(motion_rows.begin(),motion_rows.end(),[](const auto& row){return row.id=="dynamic";});
+        check(dynamic_row!=motion_rows.end(),"Dynamic HUD setting is present");
+        motion_model.selected=int(dynamic_row-motion_rows.begin());
+        motion_controller.key(Key::Enter);motion_controller.key(Key::Up);motion_controller.key(Key::Up);
+        check(motion_model.dynamic==0,"Dynamic HUD OFF previews through menu input");
+        motion_controller.key(Key::Enter);motion_controller.key(Key::Back);motion_controller.key(Key::Back);
+        check(motion_model.dynamic==0 && motion_saved.dynamic==0 && motion_saves==1,"Dynamic HUD OFF commits and stays disabled after closing menu");
+        Model reloaded_motion;reloaded_motion.set_preferences(motion_saved);
+        check(reloaded_motion.dynamic==0,"Reloading preferences preserves Dynamic HUD OFF");
         Model failure;
         Controller failure_controller(failure);
         failure_controller.save_preferences = [](const UiPreferences&) { throw std::runtime_error("read-only config"); };
@@ -177,9 +192,11 @@ int main(int argc, char** argv) {
         std::vector<char> settings_directory(settings_pattern.begin(), settings_pattern.end()); settings_directory.push_back('\0');
         if (!mkdtemp(settings_directory.data())) throw std::runtime_error("Cannot create preferences test directory");
         const std::string settings_path = std::string(settings_directory.data()) + "/ui.conf";
-        store_preferences(settings_path, {2, 30, false, false, false, false});
+        UiPreferences persisted{2, 30, false, false, false, false};persisted.dynamic=0;
+        store_preferences(settings_path, persisted);
         const auto loaded = load_preferences(settings_path);
         check(loaded.theme == 2 && loaded.fps == 30 && !loaded.details && !loaded.repeat && !loaded.hud && !loaded.per_cell, "Local preferences round trip");
+        check(loaded.dynamic==0,"Dynamic HUD OFF survives storage round trip");
         { std::ofstream invalid(settings_path); invalid << "UNRELATED_USER_FILE=1\n"; }
         bool invalid_settings = false;
         try { load_preferences(settings_path); } catch (const std::runtime_error&) { invalid_settings = true; }

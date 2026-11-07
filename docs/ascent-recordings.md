@@ -80,6 +80,12 @@ Malformed or unsupported sidecars disable the recorded HUD while video continues
 A truncated final JSON line is ignored; a missing telemetry tail expires after
 2.5 seconds rather than remaining falsely current.
 
+Ascent's Dynamic HUD applies recorded horizontal and vertical offsets while
+keeping the panels level, matching live display behavior at both 720p and 1080p.
+The selected Dynamic HUD setting must be enabled for playback movement; OFF
+centers the panels. `motion.bank_rad` remains in the sidecar for compatibility
+and other consumers, but does not rotate the native software HUD.
+
 The sidecar reader keeps checkpoint offsets for backward lookup. The current
 player exposes pause/resume and stop, not a video-seeking control. Ordinary
 external players display clean video; burning the HUD into an export is not

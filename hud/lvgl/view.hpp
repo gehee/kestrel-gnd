@@ -40,7 +40,7 @@ private:
     std::array<uint16_t,1060> bf_grid_{};
     bool bf_visible_=false;
     std::string debug_text_;
-    std::array<int,3> motion_transform_{};
+    std::array<int,2> motion_offset_{};
     lv_obj_t* gallery_=nullptr;
     std::string gallery_signature_;
     std::array<lv_image_dsc_t,6> thumbnail_images_{};

@@ -206,8 +206,8 @@ int main(int argc, char** argv) {
                 model.backend.hud_dx=.04f*std::sin(i*.3f);model.backend.hud_dy=.02f*std::cos(i*.3f);model.backend.hud_bank=.03f*std::sin(i*.3f);
                 controller.tick(now);view.update(now);lv_refr_now(display.lv_display());check_incremental();
             }
-            // Moving an unrotated HUD must damage both its old and new bounds.
-            // Enter from the rotated state above and compare against full redraw.
+            // Translation must damage both old and new bounds, independently
+            // of the bank telemetry exercised above. Compare with full redraw.
             for(int i=0;i<24;++i) {
                 now+=16667;model.backend.vrx.stamp_us=now;
                 model.backend.hud_dx=.12f*std::sin(i*.3f);
