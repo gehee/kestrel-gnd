@@ -305,6 +305,7 @@ if(KESTREL_TESTS)
     kestrel_test(canvas_test render)
     kestrel_test(platform_test platform)
     kestrel_test(air_clock_test radio)
+    kestrel_test(display_lock_test)
     kestrel_test(gallery_stats_test hud)
     kestrel_test(link_view_test hud)
     kestrel_test(power_test)   # system/air/power.hpp: header only
