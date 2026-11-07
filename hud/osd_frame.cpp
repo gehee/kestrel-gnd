@@ -158,7 +158,28 @@ bool OSD::frame_begin(Frame& f) {
 // does not run under it, so with these there a trial outlived its 10 or 15 s
 // for as long as the gallery stayed open.
 void OSD::frame_timers() {
+    const int arm = msp_osd.get_telem().arm;   // its own lock, before ours
     pthread_mutex_lock(&osd_mutex);
+    // Armed: the menu gets out of the way, wherever it is - a blade picked,
+    // a row, a value being changed, the channel page. Only on the arming
+    // itself, so it can still be opened while armed (on the bench). A screen
+    // mode on trial is kept rather than restarting the app in the air.
+    if (arm == 1 && arm_seen_ != 1 && menu_open) {
+        if (screen_confirm_) {
+            screen_confirm_ = false;
+            settings_.set(display::setting::screen_mode(screen_id_),
+                screen_confirm_mode_ == "auto" ? std::string() : screen_confirm_mode_);
+            printf("menu: screen mode %s kept for %s (armed)\n", screen_confirm_mode_.c_str(),
+                   screen_id_.empty() ? "this screen" : screen_id_.c_str());
+        }
+        menu_open = false;
+        menu_scan_open = false;
+        ui_stage_ = 0;
+        menu_focus = 0;
+        printf("menu: closed - armed\n");
+        render_requested = true;
+    }
+    arm_seen_ = arm;
     // SYSTEM > Time Zone, picked in the menu or from a phone: its TZ goes into
     // force here, on the thread that draws the clock (setenv() must not race
     // the time functions), and the menu's mirror follows a change made elsewhere.

@@ -609,6 +609,7 @@ class OSD : public display::VideoListener {
             kSysHdrZone, kSysLicence, kSysArea, kSysCountry, kSysTimezone
         };
         int  menu_licence_ = 0;   // SYSTEM > Amateur Licence's mirror (zones::licensed())
+        int  arm_seen_ = -1;      // the arm state last frame (frame_timers closes the menu on arming)
         // One step on the Area, Country or Timezone row: the zone it lands on.
         // Timezone is only listed for a country with more than one zone.
         int  menu_step_zone(int row, int dir);
