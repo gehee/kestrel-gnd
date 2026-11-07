@@ -25,7 +25,7 @@ namespace {
 const uint64_t kWindowUs = 2000000;       // arrivals looked at: the last 2 s
 const size_t kMinSamples = 50;
 const double kStayUs = 30;                // a better position by less than this is not worth a move
-const double kFreeShorter = 0.005;        // FOLLOW: frames at most this much shorter than the mode's
+const double kFreeShorter = display::kFollowShorter;   // FOLLOW: frames at most this much shorter than the mode's
 // A picture past the deadline is not shown a refresh late: the next one
 // overtakes it and it is dropped, a visible stutter. Weighed as this much
 // wait, a position with 1 fewer of 200 dropped is worth 0.5 ms more wait for

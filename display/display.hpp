@@ -5,6 +5,8 @@
 // (platform/platform.hpp): display/drm (DrmDevice, KMS) on every box today,
 // with the renderer (display/renderer) that puts the decoded pictures on it.
 // The HUD's frames reach it through a layer of their own (display/hud_layer.hpp).
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -60,6 +62,18 @@ struct RefreshSync {
     bool holding = false;       // it holds the screen in step now
     const char* why = nullptr;  // if not, why (its log line)
 };
+
+// FOLLOW's refresh, for a mode of mode_us and a camera frame of camera_us:
+// one refresh per camera frame - or per half, third... of one, where the mode
+// is that many times faster (a 60 fps camera on a 120 Hz mode: two) - each at
+// most kFollowShorter shorter than the mode's (display/display_lock). 0 where
+// FOLLOW does not hold (the camera faster than the mode).
+constexpr double kFollowShorter = 0.005;
+inline double follow_period_us(double mode_us, double camera_us) {
+    if (mode_us <= 0 || camera_us <= 0 || camera_us < mode_us * (1 - kFollowShorter)) return 0;
+    const double k = std::max(1.0, std::floor(camera_us / mode_us + 1e-6));
+    return std::max(camera_us / k, mode_us * (1 - kFollowShorter));
+}
 
 // The HUD frames the video flips picked up, and those replaced before one did
 // (profiling: a replaced frame is a step of an animation the screen never shows).

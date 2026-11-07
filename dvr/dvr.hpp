@@ -128,6 +128,7 @@ class DVR {
         std::string comment_with(const char* kind, int w, int h, int fps) const;
         int  enc_max_bps = 0;    // > 0: variable rate, never above this
         int  enc_fps_cap = 60;   // the screen sampled at most this often
+        double screen_fps_exact = 0;   // a file's slots a second, as measured (it may be stamped a usual rate)
         // The RGA recorder's slots: composited pictures (idx into the
         // encoder's inputs, -1 for the screen of the slot before), queued
         // from the sampler to the encoding thread.
