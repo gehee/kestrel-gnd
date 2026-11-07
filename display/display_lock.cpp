@@ -25,6 +25,7 @@ namespace {
 const uint64_t kWindowUs = 2000000;       // arrivals looked at: the last 2 s
 const size_t kMinSamples = 50;
 const double kStayUs = 30;                // a better position by less than this is not worth a move
+const double kFreeShorter = 0.005;        // FREE: frames at most this much shorter than the mode's
 // A picture past the deadline is not shown a refresh late: the next one
 // overtakes it and it is dropped, a visible stutter. Weighed as this much
 // wait, a position with 1 fewer of 200 dropped is worth 0.5 ms more wait for
@@ -113,14 +114,15 @@ bool DisplayLock::map_register() {
 // screen able to keep in step at all.
 // ON: the refresh a whole multiple of the camera's frame rate - otherwise the
 // pictures sweep through the refresh far faster than a line a frame follows.
-// FREE: the screen's mode no slower than the camera (frames are only made
-// longer than the mode's), and no more than twice as fast.
+// FREE: the screen's mode no more than 0.5% slower than the camera (frames
+// made shorter than the mode's by at most that, kFreeShorter), and no more
+// than twice as fast.
 bool DisplayLock::usable(int lock, double Pm, double Pc, const char **why) {
     if (!lock) { *why = "off"; return false; }
     if (dev_->vrr_active()) { *why = "not with VRR"; return false; }
     if (Pc <= 0) { *why = "waiting for the camera's frame rate"; return false; }
     if (lock == 2) {
-        if (Pc < Pm * 0.999) { *why = "the camera is faster than the screen's mode"; return false; }
+        if (Pc < Pm * (1 - kFreeShorter)) { *why = "the camera is faster than the screen's mode"; return false; }
         return true;
     }
     const double k = std::round(Pc / Pm);
@@ -355,13 +357,14 @@ void DisplayLock::run() {
         }
 
         // The grid the vblank is held to: the mode's refresh (ON), or one
-        // refresh per camera frame, or per half, third... of one, never shorter
-        // than the mode's (FREE): B lines more than the mode's each frame.
+        // refresh per camera frame, or per half, third... of one (FREE): B
+        // lines more than the mode's each frame - fewer, by up to 0.5%, where
+        // the camera is a little faster (60.03 fps on a 60.000 Hz mode).
         double Pt = Pm, B = 0;
         if (free) {
             const double k = std::max(1.0, std::floor(Pc / Pm + 1e-6));
             Pt = Pc / k;
-            B = std::max(0.0, Pt / line - mode.vtotal + trim);
+            B = std::max(-kFreeShorter * mode.vtotal, Pt / line - mode.vtotal + trim);
             Pt = (mode.vtotal + B) * line;
         }
 
@@ -418,7 +421,9 @@ void DisplayLock::run() {
             // frame: the fraction of a line left over comes back the same way.
             const double e = wrap(target - G, Pt);
             const int c = std::fabs(e) < 0.5 * line ? 0 : (int)std::max(-20.0, std::min(20.0, std::round(e / line)));
-            want = std::max(0, std::min((int)mode.vtotal, (int)std::lround(B) + c));
+            // Never shorter than the grid's own (a pull-in the long way round
+            // instead), and never shorter than the mode's when it is longer.
+            want = std::max(std::min(0, (int)std::floor(B)), std::min((int)mode.vtotal, (int)std::lround(B) + c));
             // Frames that keep coming out longer or shorter than the grid's
             // mean the camera's frame is not quite the period measured: that
             // difference (lines used less lines meant, not the correction on

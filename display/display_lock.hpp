@@ -49,8 +49,9 @@ namespace hal { class FrameLength; }
 //  FREE (2): the screen takes any frame length (the CPO1F41 shows 118 Hz, 100
 //      Hz... as the total changes, and keeps its picture): each frame is made
 //      as long as one camera frame (lines added to the screen's fastest mode,
-//      which keeps its quick scan-out), and the phase is moved up to 20 lines
-//      a frame either way.
+//      which keeps its quick scan-out, or taken off one up to 0.5% slower than
+//      the camera - a 60.000 Hz mode against 60.03 fps), and the phase is
+//      moved up to 20 lines a frame either way.
 class DisplayLock {
 public:
     // cutoff_us: how long before a vblank a picture has to be there to go up
