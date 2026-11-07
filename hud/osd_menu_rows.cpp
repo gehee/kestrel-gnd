@@ -270,6 +270,15 @@ int OSD::hud_row(int shown) const {
     return (!voltage_listed && shown >= kHudRowVoltage) ? shown + 1 : shown;
 }
 
+int OSD::video_row(int shown) const {
+    if (shown == 0) return 0;     // Video Mode
+    if (shown == 1) return 10;    // Max Bitrate
+    const int e = (air_feat_.load() & kAirMaxExpFeat) ? 1 : 0;
+    if (e && shown == 2) return 11;          // Max Exposure
+    const int first = 2 + e;                 // Rotate, the first camera row
+    return shown >= first && shown < first + 9 ? shown - first + 1 : -1;
+}
+
 int OSD::disp_row(int shown) const {
     if (shown < kDispRefreshSync) return shown;
     if (!platform::caps().phase_lock) return shown + (kDispFrameMode - kDispRefreshSync);
@@ -422,7 +431,7 @@ static const char kAirCapsHelp[] =
     "Radio Clock: pictures stamped on the radio's clock. Frame Clock: its radio's frame, for exact latency. "
     "Sensor Timing: readout and exposure, for STATS. Intra Refresh: no keyframe spikes. "
     "Camera IMU: the camera's gyro with the video. FC IMU: the flight controller's gyro instead. "
-    "Bandwidth Cap: takes the VRX's limit. "
+    "Bandwidth Cap: takes the VRX's limit. Exposure Cap: takes VIDEO > Max Exposure. "
     "TX Power Levels, TX Power 400mW: the levels TX Power offers it besides Caddx's. "
     "864p120, 864p144: Video Mode offers a 1536x864 window at 120 or 144 fps.";
 
@@ -476,6 +485,15 @@ std::vector<OSD::MenuItem> OSD::menu_items(int tab) const {
                 // only holds goggle-local drawing settings.
                 {"Focus Mode", 1}
             };
+            // After Max Bitrate, Max Exposure (row 11): listed only where the
+            // air unit's kestrel-air takes it while it runs (the P1 Air) - not
+            // at all otherwise (video_row skips it then).
+            if (air_feat_.load() & kAirMaxExpFeat)
+                items.insert(items.begin() + 2,
+                             MenuItem{"Max Exposure", 1, "Longest exposure the camera's auto exposure may use. "
+                                                         "Shorter: less motion blur and a fresher picture, the "
+                                                         "gain making up the light, so more grain when dark. "
+                                                         "OFF: the camera's own (10 ms indoors)."});
         }
     } else if (tab == 1) { // RF Tab
         // Bind and Channel are actions (type 3): Enter does the thing, the
@@ -953,6 +971,10 @@ void OSD::menu_apply_change(int tab, int index, int dir) {
            case 8: menu_cam_3dnr    = menu_step(menu_cam_3dnr, dir, kDnrCount); break;
            case 9: menu_cam_focus = menu_step(menu_cam_focus ? 1 : 0, dir, 2) != 0; break;
            case 10: menu_ar_maxbr = menu_step(menu_ar_maxbr, dir, kArMaxBrCount); break;
+           case 11:
+               if (air_feat_.load() & kAirMaxExpFeat)
+                   menu_ar_maxexp = menu_step(menu_ar_maxexp, dir, kArMaxExpCount);
+               break;
            default: break;
        }
     } else if (menu_tab == 1) {
@@ -1230,6 +1252,7 @@ void OSD::menu_value_text(int tab, int i, char* val_buf, size_t cap) {
                 if (air_stock_) snprintf(val_buf, cap, "FPVOS AIR ONLY");
                 else snprintf(val_buf, cap, "< %s >", kArMaxBrLabels[menu_ar_maxbr]);
                 break;
+            case 11: snprintf(val_buf, cap, "< %s >", kArMaxExpLabels[menu_ar_maxexp]); break;
             default: break;
         }
     } else if (menu_tab == 1) { // AR8030 RF items

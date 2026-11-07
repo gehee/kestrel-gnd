@@ -103,6 +103,7 @@ struct FakeCamera : Fake<air::Camera> {
 };
 struct FakeEncoder : Fake<air::Encoder> {
     Ticket set_max_bitrate(int kbps) override { return ask(kbps); }
+    Ticket set_max_exposure(int us) override { return ask(us); }
 };
 struct FakeAirRadio : Fake<air::Radio> {
     Ticket set_tx_power(int mw) override { return ask(mw); }

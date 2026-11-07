@@ -325,6 +325,10 @@ static void commands_test(Rig& b, HudLike& h) {
     b.model.encoder().set_max_bitrate(4321);
     b.model.radio().set_firmware(1);
     CHECK(st.get(rs::ar8030_max_kbps) == 4321 && st.text(rs::ar8030_firmware) == "1");
+    // Max Exposure: saved too, 4 ms until asked.
+    CHECK(st.get(rs::ar8030_max_exp_us) == 4000);
+    const Ticket te = b.model.encoder().set_max_exposure(2000);
+    CHECK(te.value == 2000 && st.get(rs::ar8030_max_exp_us) == 2000);
     b.model.take_commands(f);
     // The air unit's info: published by the radio, read without its lock,
     // its capabilities named.

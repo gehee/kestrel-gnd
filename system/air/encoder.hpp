@@ -1,5 +1,6 @@
 #pragma once
-// The air unit's video encoder: the cap on its bitrate.
+// The air unit's video encoder: the cap on its bitrate, and the one on its
+// camera's exposure (kestrel-air's two caps on the picture it sends).
 #include <cstdint>
 
 #include "system/part.hpp"
@@ -8,6 +9,7 @@ namespace air {
 
 struct EncoderState {
     int max_kbps = 0;              // 0: none
+    int max_exp_us = 0;            // 0: none
     uint32_t taken = 0;            // the last change carried out (Ticket::seq)
 };
 
@@ -25,10 +27,23 @@ static inline int ar_maxbr_index(int kbps) {
     for (int i = 0; i < kArMaxBrCount; i++) if (kArMaxBrVals[i] == kbps) return i;
     return 0;
 }
+// Max Exposure: the longest exposure the air unit's auto exposure may use, us
+// (0, OFF: its camera's own - 10 ms indoors on the P1, 16.5 in the dark). Past
+// it the gain makes up the rest: less blur and a fresher picture, more grain
+// in low light. A kestrel-air that says maxexp=1 in its info takes it live.
+static const int kArMaxExpVals[]     = { 1000, 2000, 3000, 4000, 5000, 6000, 8000, 10000, 0 };
+static const char* kArMaxExpLabels[] = { "1 ms", "2 ms", "3 ms", "4 ms", "5 ms", "6 ms", "8 ms",
+                                         "10 ms", "OFF" };
+static const int kArMaxExpCount = 9;
+static inline int ar_maxexp_index(int us) {
+    for (int i = 0; i < kArMaxExpCount; i++) if (kArMaxExpVals[i] == us) return i;
+    return 3;   // 4 ms
+}
 
 class Encoder : public Part<EncoderState> {
 public:
     virtual Ticket set_max_bitrate(int kbps) = 0;   // RADIO > Max Bitrate (kestrel-air takes it)
+    virtual Ticket set_max_exposure(int us) = 0;    // VIDEO > Max Exposure (a kestrel-air that says maxexp=1)
 };
 
 }  // namespace air

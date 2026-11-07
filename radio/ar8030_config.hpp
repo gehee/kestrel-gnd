@@ -55,6 +55,7 @@ struct Ar8030Config {
     int prj_rf_pwr_mw = -1;          // (stock: 500)
     int air_bw = -1;                 // air-side bandwidth, sky cmd 0x24, UNVERIFIED units; -1 disables
     int max_kbps = 0;                // ar8030_max_kbps: the video bitrate cap sent at link-up, 0 = none
+    int max_exp_us = 4000;           // ar8030_max_exp_us: the exposure cap, sent once its info says maxexp=1
     bool air_logs = false;           // hud_debug: the air unit's flight logs, sent at link-up
     // Pictures decoded from their first slice (Vdec::stream_supported): on
     // unless KESTREL_STREAM_DECODE=0 or stream_decode 0.

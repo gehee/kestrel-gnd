@@ -19,6 +19,7 @@ LinkView link_view(const gnd::RadioState& r, const air::RadioState& a, const air
     v.tx_power_want_mw = a.tx_power_want_mw;
     v.resend_known = a.resend_known;
     v.max_kbps = shown(asked.kbps, e.max_kbps, e.taken);
+    v.max_exp_us = shown(asked.exp, e.max_exp_us, e.taken);
     return v;
 }
 

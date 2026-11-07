@@ -188,6 +188,7 @@ void OSD::handle_key(int key) {
              menu_ar_standby = air_standby;   // start the row at the air's real state
              menu_ar_hop = rs.chan_auto;
              menu_ar_maxbr = ar_maxbr_index(rs.max_kbps);
+             menu_ar_maxexp = ar_maxexp_index(rs.max_exp_us);
              menu_ar_maxbw = ar_maxbw_index(rs.max_bw_mhz);
              menu_ar_frame = ar_frame_index(rs.frame_mode);
              menu_ar_maxmcs = rs.max_mcs < 0 ? 0 : rs.max_mcs + 1;
@@ -399,6 +400,11 @@ void OSD::handle_key(int key) {
                     case 9: parts_.camera.set(air::CameraField::FOCUS, menu_cam_focus ? 1 : 0); break;
                     // Max Bitrate: saved, and sent again at every link-up.
                     case 10: asked_.kbps = parts_.encoder.set_max_bitrate(kArMaxBrVals[menu_ar_maxbr]); break;
+                    // Max Exposure: saved, and sent to an air unit that takes it, live.
+                    case 11:
+                        if (air_feat_.load() & kAirMaxExpFeat)
+                            asked_.exp = parts_.encoder.set_max_exposure(kArMaxExpVals[menu_ar_maxexp]);
+                        break;
                     default: break;
                 }
             } else if (menu_tab == 1) {

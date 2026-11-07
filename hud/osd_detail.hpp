@@ -77,6 +77,11 @@ static const char* kArChanLabels[] = { "AUTO", "5740", "5770", "5805", "5839" };
 static const int kArChanCount = 5;
 // Max Bitrate's choices: system/air/encoder.hpp (the Ascent's menu offers them too).
 using air::kArMaxBrVals; using air::kArMaxBrLabels; using air::kArMaxBrCount; using air::ar_maxbr_index;
+// Max Exposure's choices: system/air/encoder.hpp; a kestrel-air that says
+// maxexp=1 in its info takes it live (the radio's Ar8030Link::kAirFeatMaxExp
+// in the unit's features).
+using air::kArMaxExpVals; using air::kArMaxExpLabels; using air::kArMaxExpCount; using air::ar_maxexp_index;
+static const uint16_t kAirMaxExpFeat = 0x1000;   // = Ar8030Link::kAirFeatMaxExp
 // Max Bandwidth: how wide the video link may go. The goggle's radio widens it
 // by itself on a good link (bw_auto), to 40 MHz with fpvOS's radio config -
 // more throughput and a shorter frame, less range - or 20 with its 20 MHz one
@@ -134,12 +139,7 @@ static inline int freq_to_channel(int freq) {
     return 0; 
 }
 
-// The Video tab's rows as the handlers below number them, from where they sit
-// on screen: Max Bitrate (10) is listed second, right after Video Mode.
-static inline int video_row(int shown) {
-    if (shown == 1) return 10;
-    return shown >= 2 && shown <= 10 ? shown - 1 : shown;
-}
+// The Video tab's rows: OSD::video_row() (osd_menu_rows.cpp).
 
 // The radio's MCS rungs, and the SNR margin each needs before it steps down
 // (dB; measure_link and the arena's LINK row).

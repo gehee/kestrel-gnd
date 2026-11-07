@@ -60,6 +60,7 @@ class EncoderPart final : public detail::Held<air::Encoder> {
 public:
     using Held::Held;
     Ticket set_max_bitrate(int kbps) override;
+    Ticket set_max_exposure(int us) override;
 };
 
 class AirRadioPart final : public detail::Held<air::Radio> {

@@ -342,6 +342,11 @@ class OSD : public display::VideoListener {
         std::vector<std::string> video_mode_names;
         std::vector<uint16_t> video_mode_needs;  // per mode: the air features it takes
         std::atomic<uint16_t> air_feat_{0};
+        // VIDEO: the row the handlers number a listed index as - Max Bitrate
+        // (10) and Max Exposure (11) right after Video Mode, Max Exposure
+        // listed only where it can be had, then the camera rows 1-9; -1 past
+        // them.
+        int video_row(int shown) const;
         std::atomic<bool> air_stock_{false};
         // AR8030 camera menu: the VIDEO tab shows the camera's own settings
         // instead of the kestrel-air encoder knobs, which do not apply here.
@@ -505,6 +510,7 @@ class OSD : public display::VideoListener {
         float    serial_bps_ = 0;               // bytes a second
         float    serial_rate_ = 0;             // frames a second
         int menu_ar_maxbr = 0;     // index into kArMaxBrVals (0 = AUTO, no cap)
+        int menu_ar_maxexp = 3;    // index into kArMaxExpVals (3 = 4 ms)
         int menu_ar_maxbw = 4;     // index into kArMaxBwVals (0 = AUTO, 4 = 40 MHz)
         int menu_ar_frame = 0;     // index into kArFrameVals (0 = SHORT, mode 2)
         int menu_ar_maxmcs = 0;    // RADIO > Max MCS: 0 AUTO, n = MCS n-1 (Open8030)

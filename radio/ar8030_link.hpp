@@ -167,7 +167,7 @@ class Ar8030Link : public radio::Link, private radio::VideoOut::Source {
         // kestrel-air's capabilities, named for the INFO tab, by the feature bit
         // (or AirInfo::said bit) that says the air unit has it on.
         struct AirCap { uint16_t bit; const char *key; const char *name; };
-        static const AirCap kAirCaps[12];
+        static const AirCap kAirCaps[13];
         // What the air unit has on, by name: its feature bits and what it said.
         static std::vector<std::string> cap_names(const AirInfo &a);
         int air_floor_us;       // fastest capture -> first slice (air_floor_ms), see air_delay_for
@@ -188,6 +188,7 @@ class Ar8030Link : public radio::Link, private radio::VideoOut::Source {
         // MHz or a bb_bandwidth_e gear is not established. -1 disables.
         int  air_bw;
         std::atomic<int>  max_kbps;   // ar8030_max_kbps: the video bitrate cap sent at link-up, 0 = none
+        std::atomic<int>  max_exp_us; // ar8030_max_exp_us: the exposure cap, sent when its info says maxexp=1
         std::atomic<bool> air_logs;   // hud_debug: the air unit's flight logs, sent at link-up
         bool stream_decode;   // KESTREL_STREAM_DECODE / stream_decode: 0 (default on)
         std::atomic<int>  max_bw_mhz; // ar8030_max_bw_mhz: the video link bandwidth cap sent at link-up, 5/10/20/40, 0 AUTO (stock: 20 or 40)
@@ -504,6 +505,9 @@ class Ar8030Link : public radio::Link, private radio::VideoOut::Source {
         static constexpr uint16_t kAirFeat864p144 = 0x100;
         // And pwr400=1: TX power takes 400 mW (25 dBm) and its AUTO (401).
         static constexpr uint16_t kAirFeatPwr400 = 0x800;
+        // ... and maxexp=1: it takes VIDEO > Max Exposure (sky 0x43) while it runs.
+        static constexpr uint16_t kAirFeatMaxExp = 0x1000;
+        static constexpr uint16_t kAirInfoFeats = kAirFeat864p144 | kAirFeatPwr400 | kAirFeatMaxExp;
         // No feature bits, only AirInfo::said, for the INFO tab: its frame
         // (KA_MSG_FRAME) came, and its info says the sensor's readout.
         static constexpr uint16_t kAirSaidFrameClock = 0x200;

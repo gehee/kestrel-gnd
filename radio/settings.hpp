@@ -15,6 +15,8 @@ namespace radio::setting {
 inline constexpr Setting<int> ar8030_chan_mhz{"ar8030_chan_mhz", 0};
 inline constexpr Setting<int> ar8030_chan_hop{"ar8030_chan_hop", 0};
 inline constexpr Setting<int> ar8030_max_kbps{"ar8030_max_kbps", 0};
+// VIDEO > Max Exposure: the air unit's auto exposure goes no longer, us (0 none).
+inline constexpr Setting<int> ar8030_max_exp_us{"ar8030_max_exp_us", 4000};
 inline constexpr Setting<int> ar8030_max_bw_mhz{"ar8030_max_bw_mhz", 40};
 inline constexpr Setting<int> ar8030_max_mcs{"ar8030_max_mcs", -1};
 inline constexpr Setting<int> ar8030_steady{"ar8030_steady", 0};

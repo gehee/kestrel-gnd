@@ -20,7 +20,7 @@ void Ar8030Link::publish_air_info() {
     model_.air_info(a);
 }
 
-const Ar8030Link::AirCap Ar8030Link::kAirCaps[12] = {
+const Ar8030Link::AirCap Ar8030Link::kAirCaps[13] = {
     { kAirFeatLatInfo,      "air-timing",    "Air Timing" },
     { kAirFeatApClock,      "radio-clock",   "Radio Clock" },
     { kAirSaidFrameClock,   "frame-clock",   "Frame Clock" },
@@ -33,6 +33,7 @@ const Ar8030Link::AirCap Ar8030Link::kAirCaps[12] = {
     { kAirFeat864p144,      "864p144",       "864p144" },
     { kAirFeatPwrLvl,       "power-levels",  "TX Power Levels" },
     { kAirFeatPwr400,       "power-400",     "TX Power 400mW" },
+    { kAirFeatMaxExp,       "exposure-cap",  "Exposure Cap" },
 };
 
 std::vector<std::string> Ar8030Link::cap_names(const AirInfo &a) {
@@ -716,6 +717,7 @@ void Ar8030Link::apply_pending_settings() {
             case CAM_MAX_KBPS:  cmd = sky::CMD_KA_MAX_BITRATE; name = "video bitrate cap"; break;
             case CAM_MAX_BW:    cmd = sky::CMD_KA_MAX_BW;      name = "video link bandwidth cap MHz"; break;
             case CAM_AIR_LOGS:  cmd = sky::CMD_KA_LOGS;        name = "air flight logs"; break;
+            case CAM_MAX_EXP_US: cmd = sky::CMD_KA_MAX_EXP;    name = "exposure cap us"; break;
             case CAM_WORK_LIST: cmd = sky::CMD_SET_WORK_CHAN_LIST; name = "work channels"; break;
             case CAM_HOP_ON:    cmd = sky::CMD_SET_BB_FREQ;    name = "own hopping on, from kHz"; break;
             case CAM_HOP_OFF:   cmd = sky::CMD_SET_BB_FREQ;    name = "own hopping off, at kHz"; break;
@@ -728,6 +730,12 @@ void Ar8030Link::apply_pending_settings() {
         if ((item.first == CAM_MAX_KBPS || item.first == CAM_MAX_BW || item.first == CAM_AIR_LOGS) && !air_kestrel_) {
             printf("ar8030: %s = %d kept for a kestrel-air (this air unit %s)\n", name, item.second,
                    air_ver_seen_ ? "is the stock app" : "has not said what it is yet");
+            continue;
+        }
+        // Max Exposure only to an air unit whose info says it takes it
+        // (maxexp=1): the info sends it then (u32 us, the default below).
+        if (item.first == CAM_MAX_EXP_US && !(air_info_feat_ & kAirFeatMaxExp)) {
+            printf("ar8030: %s = %d kept for an air unit that takes it\n", name, item.second);
             continue;
         }
         // ar_ldy_gnd 0x89060 builds this one as {cmd 0x23, len 1}: a single
@@ -881,16 +889,21 @@ void Ar8030Link::note_air_info(const uint8_t *pl, size_t n) {
         for (const auto &e : kv) {
             if (e.first == "864p144" && e.second == "1") xf |= kAirFeat864p144;
             if (e.first == "pwr400" && e.second == "1") xf |= kAirFeatPwr400;
+            if (e.first == "maxexp" && e.second == "1") xf |= kAirFeatMaxExp;
         }
         const bool first = !air_info_seen_;
         air_info_seen_ = true;
         if (first || xf != air_info_feat_) {
             const bool pwr = (xf ^ air_info_feat_) & kAirFeatPwr400;
+            const bool new_maxexp = (xf & kAirFeatMaxExp) && (first || !(air_info_feat_ & kAirFeatMaxExp));
             air_info_feat_ = xf;
             const uint16_t f = air_kestrel_ ? (uint16_t)(air_feat_ | xf) : 0;
             model_.update_unit([&](air::UnitState &a) { a.features = f; });
             check_air_modes();
             if (pwr) refit_air_power();   // 400 mW chosen: held to 316 until it says it takes it
+            // Max Exposure: once a link, when its info first says it takes it
+            // (it keeps the launcher's until then).
+            if (new_maxexp) request_setting(CAM_MAX_EXP_US, max_exp_us.load());
         }
     }
     // The sensor's readout and exposure: ours, they change as it runs, so not
@@ -915,7 +928,7 @@ void Ar8030Link::note_air_info(const uint8_t *pl, size_t n) {
         std::lock_guard<bus::PiMutex> g(air_info_mtx_);
         // For the INFO tab's capabilities: 864p144 as the info says it now; a
         // readout said once in this link stays said (a new mode's comes late).
-        air_info_.said = (uint16_t)((air_info_.said & ~(kAirFeat864p144 | kAirFeatPwr400)) | air_info_feat_ |
+        air_info_.said = (uint16_t)((air_info_.said & ~kAirInfoFeats) | air_info_feat_ |
                                     (air_readout_us_ ? kAirSaidSensorTiming : 0));
         same = got.kv_n == air_info_.kv_n;
         for (int i = 0; same && i < got.kv_n; i++)

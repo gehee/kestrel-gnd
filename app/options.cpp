@@ -281,6 +281,8 @@ int read_start_options(int argc, char** argv, Settings& settings, StartOptions& 
 	ar_cfg.air_bw        = settings.get(radio::setting::air_bw);
 	// The cap on kestrel-air's video bitrate (RF menu, Max Bitrate), kbps, 0 = none.
 	ar_cfg.max_kbps      = settings.get(radio::setting::ar8030_max_kbps);
+	// The cap on the air unit's auto exposure (VIDEO menu, Max Exposure), us, 0 = none.
+	ar_cfg.max_exp_us    = settings.get(radio::setting::ar8030_max_exp_us);
 	// The cap on the video link's bandwidth (RF menu, Max Bandwidth): 20 or 40 MHz,
 	// with Open8030 here also AUTO (0: nothing sent), 5 or 10.
 	{
