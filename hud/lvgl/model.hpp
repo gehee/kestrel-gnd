@@ -25,7 +25,7 @@ enum class Key { Menu, Up, Down, Left, Right, Enter, Back, Quit, Record };
 enum class MenuStage { Pick, Browse, Edit };
 enum class SceneMode { Live, Menu, GalleryBrowse, GalleryPlayback };
 struct UiPreferences {
-    int theme = 0, fps = 25;
+    int theme = 0, fps = 60;
     bool details = true, repeat = true, hud = true, per_cell = true;
     int clock = 0;
     bool bf_osd = false, debug = false;
@@ -54,7 +54,7 @@ public:
     std::string gallery_delete_name;
     bool gallery_delete_chosen=false;
     int tab = 0, selected = 0, theme = 0;
-    int side = 0, fps = 25;
+    int side = 0, fps = 60;
     int clock = 0;
     bool bf_osd = false, debug = false;
     int dynamic = 0;
