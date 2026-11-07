@@ -760,14 +760,20 @@ struct modeset_output *modeset_output_create(int fd, drmModeRes *res, drmModeCon
 		for (int i = 0; i < conn->count_modes; i++ ) {
 			printf( "%d : %dx%d@%d%s\n",i, conn->modes[i].hdisplay, conn->modes[i].vdisplay , conn->modes[i].vrefresh,
 				(conn->modes[i].flags & DRM_MODE_FLAG_INTERLACE) ? " [interlaced - skipped]" : "" );
+			// "@60" is 60.000 and 59.94 alike (vrefresh is whole Hz): the
+			// faster, so a camera's 60.03 is the nearer and FREE can lengthen it.
 			if (conn->modes[i].hdisplay == mode_width &&
 			conn->modes[i].vdisplay == mode_height &&
 			conn->modes[i].vrefresh == mode_vrefresh
 			&& !(conn->modes[i].flags & DRM_MODE_FLAG_INTERLACE)
+			&& (fc < 0 || modeset_mode_hz(&conn->modes[i]) > modeset_mode_hz(&conn->modes[fc]))
 			) {
 				fc = i;
 			}
 		}
+		if (fc >= 0)
+			printf("Screen Mode: %dx%d@%d (%.3f Hz)\n", conn->modes[fc].hdisplay, conn->modes[fc].vdisplay,
+			       conn->modes[fc].vrefresh, modeset_mode_hz(&conn->modes[fc]));
 		if (fc < 0) {
             // The requested mode is not on offer, so take the nearest thing the
             // sink says it can do.
@@ -790,7 +796,9 @@ struct modeset_output *modeset_output_create(int fd, drmModeRes *res, drmModeCon
                 if (conn->modes[i].hdisplay == mode_width &&
                     conn->modes[i].vdisplay == mode_height &&
                     (int)conn->modes[i].vrefresh <= (int)mode_vrefresh &&
-                    (int)conn->modes[i].vrefresh > best_rate) {
+                    ((int)conn->modes[i].vrefresh > best_rate ||
+                     ((int)conn->modes[i].vrefresh == best_rate &&
+                      modeset_mode_hz(&conn->modes[i]) > modeset_mode_hz(&conn->modes[best])))) {
                     best = i; best_rate = conn->modes[i].vrefresh;
                 }
             }
