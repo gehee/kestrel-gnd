@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cctype>
 #include <cmath>
+#include <deque>
 #include <unistd.h>
 
 // CRC8 lookup table for MSP V2 (same as TX side)
@@ -48,10 +49,36 @@ void MspOsd::parse_bytes(const uint8_t* p, size_t size) {
     }
 }
 
+// The largest MSP v2 payload taken: a whole screen in the air unit's batched
+// DisplayPort (function 182) is 53 x 20 cells and their record headers, a few
+// KB at most. A bigger size is a header damaged by a lost byte - it used to
+// eat up to 64 KB of what came next.
+static constexpr uint16_t kMaxV2Payload = 8192;
+
+// A frame that turns out bad - a byte lost on the way, so its size or its
+// checksum is wrong - may have swallowed the start of the next one: its bytes
+// after the '$' are parsed again, one at a time (never recursively). Each bad
+// frame gives up at least its '$', so this ends.
 void MspOsd::parse_byte(uint8_t b) {
+    if (!step(b)) return;
+    std::deque<uint8_t> again(raw_.begin() + 1, raw_.end());
+    raw_.clear();
+    while (!again.empty()) {
+        const uint8_t c = again.front();
+        again.pop_front();
+        if (step(c)) {
+            again.insert(again.begin(), raw_.begin() + 1, raw_.end());
+            raw_.clear();
+        }
+    }
+}
+
+bool MspOsd::step(uint8_t b) {
+    auto bad = [this] { state = 0; return true; };   // raw_ kept for parse_byte
+    if (state != 0) raw_.push_back(b);
     switch (state) {
         case 0: // $
-            if (b == '$') state = 1;
+            if (b == '$') { state = 1; raw_.assign(1, b); }
             break;
         case 1: // X (V2) or M (V1)
             if (b == 'X') {
@@ -63,7 +90,7 @@ void MspOsd::parse_byte(uint8_t b) {
                 checksum_v1 = 0;
                 is_v2 = false;
             } else {
-                state = 0;
+                return bad();
             }
             break;
             
@@ -76,7 +103,7 @@ void MspOsd::parse_byte(uint8_t b) {
                 crc = 0;
                 state = 2;
             } else {
-                state = 0;
+                return bad();
             }
             break;
 
@@ -104,6 +131,7 @@ void MspOsd::parse_byte(uint8_t b) {
         case 6: // Size H
             payload_size |= (b << 8);
             crc = crc8_dvb_s2(crc, b);
+            if (payload_size > kMaxV2Payload) return bad();
             payload_buf.clear();
             payload_buf.reserve(payload_size);
             if (payload_size == 0) state = 8; // No payload
@@ -117,12 +145,10 @@ void MspOsd::parse_byte(uint8_t b) {
             }
             break;
         case 8: // CRC
-            if (crc == b) {
-                handle_msp_frame(function, payload_buf.data(), payload_size);
-            } else {
-               // printf("MSP V2 CRC Error\n");
-            }
+            if (crc != b) return bad();
+            handle_msp_frame(function, payload_buf.data(), payload_size);
             state = 0;
+            raw_.clear();
             break;
 
         // --- MSP V1 States ---
@@ -130,7 +156,7 @@ void MspOsd::parse_byte(uint8_t b) {
             if (b == '>' || b == '<') {
                 state = 21;
             } else {
-                state = 0;
+                return bad();
             }
             break;
         case 21: // Size
@@ -154,18 +180,18 @@ void MspOsd::parse_byte(uint8_t b) {
             }
             break;
         case 24: // Checksum
-            if (checksum_v1 == b) {
-                handle_msp_frame(function, payload_buf.data(), payload_size);
-            } else {
-                // printf("MSP V1 Checksum Error\n");
-            }
+            if (checksum_v1 != b) return bad();
+            handle_msp_frame(function, payload_buf.data(), payload_size);
             state = 0;
+            raw_.clear();
             break;
 
         default:
             state = 0;
+            raw_.clear();
             break;
     }
+    return false;
 }
 
 // // void MspOsd::handle_msp_frame(uint16_t function, const uint8_t* payload, size_t size) {

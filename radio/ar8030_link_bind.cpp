@@ -3,6 +3,8 @@
 #include "radio/ar8030_link_detail.hpp"
 #include "radio/native_pairing.hpp"
 
+#include <fcntl.h>
+
 using namespace radio;
 
 // Parse the paired air-unit MACs out of /factory/user_cfg.json. The file is a
@@ -393,6 +395,7 @@ bool Ar8030Link::save_paired_mac(const uint8_t mac[4]) {
                 i, ring[i][0], ring[i][1], ring[i][2], ring[i][3]);
     }
     fprintf(f, "\n}\n");
+    fchmod(fileno(f), 0600);          // stock ships it owner-only
     // The identity file is the one thing that must never end up truncated, so
     // it is written beside the original and moved over it only once complete.
     bool ok = (fflush(f) == 0) && (fsync(fileno(f)) == 0);
@@ -402,8 +405,11 @@ bool Ar8030Link::save_paired_mac(const uint8_t mac[4]) {
         unlink(kTmp);
         return false;
     }
-    chmod(kPath, 0600);               // stock ships it owner-only
-    sync();                           // stock sync()s after saving; so do we
+    // The move on disk too: its directory synced. Stock sync()s, which here
+    // (the radio thread) waited for every file being written - a recording
+    // on the card too.
+    const int dfd = open("/factory", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (dfd >= 0) { fsync(dfd); close(dfd); }
     printf("ar8030: saved %02X:%02X:%02X:%02X at ring slot %d (next %d)\n",
            mac[0], mac[1], mac[2], mac[3], save_pos, next_pos);
     return true;

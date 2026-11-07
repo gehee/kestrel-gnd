@@ -1,3 +1,4 @@
+#include <atomic>
 #pragma once
 #include "hal/vdec.hpp"
 #include "base/video_codec.hpp"
@@ -10,7 +11,7 @@
 // submits complete access units into a bounded queue and never waits for it.
 class VdecV4l2 final : public Vdec {
   public:
-    VdecV4l2(VideoCodec codec, std::string device, std::shared_ptr<hal::FrameSink> sink, volatile bool *stop);
+    VdecV4l2(VideoCodec codec, std::string device, std::shared_ptr<hal::FrameSink> sink, std::atomic<bool> *stop);
     ~VdecV4l2();
     void feed_packet_to_decoder(void *, int, int64_t, uint64_t, uint8_t, uint32_t, uint32_t,
                                 bool = false) override;
@@ -33,7 +34,7 @@ class VdecV4l2 final : public Vdec {
     VideoCodec codec_;
     std::string device_;
     std::shared_ptr<hal::FrameSink> sink_;
-    volatile bool *stop_;
+    std::atomic<bool> *stop_;
     std::mutex mutex_;
     std::deque<Packet> packets_;
     std::array<std::vector<uint8_t>, 3> parameters_;

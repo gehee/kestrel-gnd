@@ -1,3 +1,4 @@
+#include <atomic>
 // On-device integration probe. Real Wave5 decode + two KMS planes; no UI ticks
 // during the measurement interval. Run only when no receiver owns the display.
 #include "display/ar9311_screen.hpp"
@@ -43,11 +44,11 @@ int main(int argc, char **argv) {
         }
         if (nals.empty())
             throw std::runtime_error("no Annex-B NALs");
-        volatile bool stop = false;
+        std::atomic<bool> stop = false;
         auto screen = display::make_ar9311_screen("/dev/dri/card0", true, &stop);
         VdecV4l2 decoder(VideoCodec::H265, "/dev/video0", screen, &stop);
         struct Workers {
-            volatile bool &stop;
+            std::atomic<bool> &stop;
             std::thread display, decode, feed;
             ~Workers() { finish(); }
             void finish() {

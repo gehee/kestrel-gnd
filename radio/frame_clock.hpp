@@ -50,6 +50,7 @@
 #include <cstdio>
 #include <functional>
 #include <mutex>
+#include <pthread.h>
 #include <random>
 #include <thread>
 #include <time.h>
@@ -63,6 +64,22 @@ struct FrameStampInfo {
     int32_t residual_us;
     uint32_t width, frame_mode, sent;
     uint32_t retries, steady, retry_steps;   // blocks sent again, steady mode, its steps down
+    // The air radio's resend map on our radio's frames (Open8030 329de3c on):
+    // the newest known frame (our IRQ 5 count), frames known and stalled ones
+    // since start, the last 64 frames back from it, two bits each (0..2 blocks
+    // sent again, 3 none confirmed) and a bit each where known.
+    uint32_t retry_frame, retry_known_frames, retry_stalls;
+    uint32_t retry_map[4], retry_known[2];
+    // Each of our radio's last 64 frames as its header came (Open8030 3b2ceaa
+    // on): q_word[k] is frame q_frame - k - [7:0] SNR in quarter dB, [15:8]
+    // and [23:16] the AGC gains, [27:24] the MCS (internal, stock + 2),
+    // [29:28] the width code - 2, [30] known, [31] the decoder's error flag.
+    uint32_t q_frame, q_word[64];
+    // Open8030 708365e+ with its link policy: the correction it learned (dB x
+    // 10 the link is worse than its readings), flags (bit 0 the policy runs,
+    // bit 1 a resend test under way), its tests so far (mod 256).
+    int16_t link_learn;
+    uint8_t link_flags, link_tests;
 };
 
 // The air radio's clock from its frame stamps: 32 bits of us (71.6 min),
@@ -323,6 +340,7 @@ private:
             return false;
         }
         const double sTt = best.frame_ticks * FE_TICK_US;
+        radio_Tt_ = sTt;
         take_air_clock(best.ap_us_lo, best_mid);
         Count c;
         // The IRQ 5 on our clock, less its usual lead on our edge: the time the
@@ -349,6 +367,10 @@ private:
     }
 
     void loop() {
+        // Started by the radio thread, whose SCHED_FIFO it would inherit: a
+        // search is tens of ms of CPU, not real-time work (each read is timed).
+        struct sched_param sp = {};
+        pthread_setschedparam(pthread_self(), SCHED_OTHER, &sp);
         std::vector<fe_read> buf;
         std::mt19937 rng((unsigned)mono_us());
         uint64_t last_fail_log = 0;
@@ -380,8 +402,11 @@ private:
                     else std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 }
                 const double rate = last.Tm / last.Tt;
-                for (int i = -1; i < 6; i++) {
-                    const double T = (i < 0 ? last.Tt : fe_frames[i]) * rate;
+                // First the frame our radio says it runs (Open8030's frame
+                // info: any slot length, e.g. its mode 3 uplink), then the table.
+                for (int i = -2; i < 6; i++) {
+                    if (i == -2 && radio_Tt_ <= 0) continue;
+                    const double T = (i == -2 ? radio_Tt_ : i < 0 ? last.Tt : fe_frames[i]) * rate;
                     double e, p;
                     if (fe_phase(buf.data(), (int)buf.size(), T, &e, &p) == 0 && p > pur) { pur = p; E = e; Tm = T; rc = 0; }
                 }
@@ -635,6 +660,7 @@ private:
     std::mutex mu_;
     bool valid_ = false, air_known_ = false, air_said_ = false, recount_ = false, following_ = false;
     double Tm_ = 1, air_Tt_ = 0, air_phi_ = 0;
+    double radio_Tt_ = 0;                 // our radio's frame by its last frame info (us), 0: none
     // The clock (publish()): good until until_.
     double cE_ = 0, cTm_ = 1, cTt_ = 0, cphi_ = 0, until_ = 0;
     // The frame stamps' clock unwrapped (us; it wraps at 2^32), and where its IRQ 5 falls from our edge.

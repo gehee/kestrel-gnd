@@ -65,16 +65,14 @@ around them, for latency.
   camera...) comes back as a `Ticket`: its number in the order every change
   was asked, and the value as the part will hold it. A part that sends
   something as it comes (the FC's bytes, the IMU samples, the channel scan,
-  the video rate) has `take()`, in order, for its one reader.
+  the video rate, the resends) has `take()`, in order, for its one reader.
 - **The parts** are in `system/air/` (`Camera`, `Encoder`, `Radio`, `Unit`,
   `Fc`, `Imu`) and `system/gnd/` (`Radio`, `Timing`); the HUD is handed them
   as `hud::Parts`. What crosses threads is the implementation's business:
   the hand-offs are in `base/bus.hpp` - a seqlock slot for a state, a ring
   for a stream, a futex waker - and no caller sees them.
 - **`radio::Model`** (`radio/model.hpp`) implements the parts the radio
-  carries: each part's state from what the radio reports, the logic that is
-  the link's rather than the chip's (the distance less HUD > Calib
-  Distance's offset, per air unit), and the changes asked - normalized, the settings
+  carries: each part's state from what the radio reports, and the changes asked - normalized, the settings
   among them saved as they are asked, numbered and queued for the radio. No
   thread of its own: the radio's threads and the askers run it.
 - **`radio::Link`** (`radio/link.hpp`) is what any radio is: `run()`,
@@ -107,7 +105,7 @@ starts and stops the DVR directly.
 | Part | What it holds or sends | Who reads it |
 |---|---|---|
 | `gnd::Radio` | the link's figures (SNR, MCS, rates, frequency, distance), its settings as held, the RF controls it accepted, the pairing window; the channel scan's samples and the video received each second, every one | the HUD, woken |
-| `air::Radio` | the air unit's TX power (as chosen and as it runs), its power levels | the HUD, woken |
+| `air::Radio` | the air unit's TX power (as chosen and as it runs, as it announces it), its power levels; the frames it sent blocks of again (Open8030), every one | the HUD, woken; the resends wake no one (the stats screen's history) |
 | `air::Encoder` | the cap on its bitrate | the HUD, woken |
 | `air::Unit` | what it is (AIR UNIT > INFO: versions, board, sensor, capabilities), its state (in standby or not, temperature), its standby mode as it reports it | the HUD, woken |
 | `air::Camera` | its settings and video mode as it reports them, each report counted, so the menu follows it once | the HUD, woken |
@@ -151,8 +149,8 @@ screen recording and the web view's live feed; the web view's gallery
 serves the recordings.
 
 The radio thread does none of its readers' work, and nothing calls into
-the radio. It still takes the settings file's lock on rare events (a
-Calib Distance offset for a new air unit, a newly paired air unit, a restart).
+the radio. It still takes the settings file's lock on rare events (a newly
+paired air unit, a restart).
 
 **Checking the video path.** `video_replay_check FILE` (a PC build with
 `-DKESTREL_TESTS=ON`) runs a recorded stream - what `--debug-replay` plays -

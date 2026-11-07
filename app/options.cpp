@@ -149,9 +149,10 @@ int read_start_options(int argc, char** argv, Settings& settings, StartOptions& 
 	mode_height = 0;
 	mode_vrefresh = 0;
 	// The display mode belongs to the screen: screen_mode_<ID>, by the ID in
-	// its EDID (display/screen_id.h), and unset means Auto - the highest refresh
-	// it offers. screen_mode is for a screen with no ID, and --screen-mode.
-	// A mode picked in SYSTEM > Screen Mode is only on trial the first time:
+	// its EDID (display/screen_id.h), and unset means Auto - the fastest 1080p
+	// above 60 Hz, else 720p above 60 Hz, else 1080p60 (display/kms/
+	// mode_follow.h). screen_mode is for a screen with no ID, and --screen-mode.
+	// A mode picked in DISPLAY > Screen Mode is only on trial the first time:
 	// screen_mode_try names the screen and the mode, and is read and removed
 	// here, so a mode that leaves the screen black is gone at the next start
 	// even if nobody could see the prompt to reject it (see OSD, confirm).
@@ -166,7 +167,7 @@ int read_start_options(int argc, char** argv, Settings& settings, StartOptions& 
 	{
 		const int v = have_screen_id
 			? settings.get(display::setting::display_lock(screen_id_buf)) : 0;
-		o.sync_mode = v >= 0 && v <= 2 ? v : 0;   // OFF, ON, FREE
+		o.sync_mode = v >= 0 && v <= 2 ? v : 0;   // OFF, NUDGE, FOLLOW
 	}
 	o.sync_slice = settings.get(display::setting::display_lock_slice) == 2 ? 2 : 1;
 	{
@@ -177,7 +178,10 @@ int read_start_options(int argc, char** argv, Settings& settings, StartOptions& 
 	{
 		const std::string t = settings.get(display::setting::screen_mode_try);
 		if (!t.empty()) {
+			// On disk before the display is brought up: a trial mode that
+			// crashes the app or blanks the screen must not come back.
 			settings.remove(display::setting::screen_mode_try);
+			settings.flush();
 			const size_t sp = t.find(' ');
 			const std::string id = sp == std::string::npos ? "" : t.substr(0, sp);
 			const std::string mode = sp == std::string::npos ? "" : t.substr(sp + 1);
@@ -234,9 +238,10 @@ int read_start_options(int argc, char** argv, Settings& settings, StartOptions& 
 	if (dvr_format_str == "mp4") dvr_format = DvrFormat::MP4;
 	else if (dvr_format_str == "raw") dvr_format = DvrFormat::RAW;
 	
-	// The channel is the air unit's to decide: the goggle always starts by
-	// searching for it (chan_auto), and a channel picked in the menu lasts
-	// for the session. Only --ar8030-chan-manual starts it pinned.
+	// The goggle always starts by searching for the air unit (chan_auto); a
+	// channel picked on the channel page is saved (ar8030_chan_mhz) and the
+	// link moves back there at every link-up. Only --ar8030-chan-manual starts
+	// it pinned.
 	// Decode was flag-gated because it was being isolated while chasing the
 	// decode freeze; for normal use it belongs on. Settings-backed so a bare
 	// "kestrel-gnd" works on hardware where the config says ar8030: 1.
@@ -284,6 +289,9 @@ int read_start_options(int argc, char** argv, Settings& settings, StartOptions& 
 		const int mcs = settings.get(radio::setting::ar8030_max_mcs);
 		ar_cfg.max_mcs = mcs >= 0 && mcs <= 11 ? mcs : -1;   // the menu's range, AUTO + MCS 0..11
 		ar_cfg.steady = settings.get(radio::setting::ar8030_steady) == 1 ? 1 : 0;
+		ar_cfg.chan_hop = settings.get(radio::setting::ar8030_chan_hop) == 1 ? 1 : 0;
+		const int fixed = settings.get(radio::setting::ar8030_chan_mhz);
+		ar_cfg.chan_fixed_mhz = fixed >= 2000 && fixed <= 7000 ? fixed : 0;
 	}
 	// RADIO > VRX Radio Firmware: Open8030 when its image is on the unit, unless
 	// the menu said STOCK (0) - as bb_only.sh decides what it uploads.
@@ -309,7 +317,9 @@ int read_start_options(int argc, char** argv, Settings& settings, StartOptions& 
 
 	codec = VideoCodec::H265;
 
-	// Load console arguments
+	// Load console arguments. Each is for this run only and never saved:
+	// one run by hand with --no-osd or --no-display must not change every
+	// later start (the menu's choices are what the settings file keeps).
 	__BeginParseConsoleArguments__(printHelp) 
 
 	__OnArgument("--codec") {
@@ -319,13 +329,11 @@ int read_start_options(int argc, char** argv, Settings& settings, StartOptions& 
 			printf("unsupported video codec");
 			return -1;
 		}
-		settings.set(app::setting::codec, codec_str);
 		continue;
 	}
 
 	__OnArgument("--dvr-framerate") {
 		dvr_framerate = atoi(__ArgValue);
-		settings.set(dvr::setting::dvr_framerate, dvr_framerate);
 		continue;
 	}
 
@@ -336,34 +344,28 @@ int read_start_options(int argc, char** argv, Settings& settings, StartOptions& 
     	} else if (!strcmp(fmt, "raw")) {
          dvr_format = DvrFormat::RAW;
     	}
-    	settings.set(dvr::setting::dvr_format, fmt);
 		continue;
 	}
 
 	__OnArgument("--osd") {
 		enable_osd = 1;
 		osd_zpos = 2;
-		settings.set(hud::setting::enable_osd, 1);
-		settings.set(hud::setting::osd_zpos, 2);
 		continue;
 	}
 
 	__OnArgument("--decoder-name") {
 		char* name = const_cast<char*>(__ArgValue);
 		decoder_name = std::string(name);
-		settings.set(app::setting::decoder_name, decoder_name);
 		continue;
 	}
 
 	__OnArgument("--osd-refresh") {
 		osd_refresh_frequency_ms = atoi(__ArgValue);
-		settings.set(hud::setting::osd_refresh, osd_refresh_frequency_ms);
 		continue;
 	}
 	
 	__OnArgument("--screen-mode") {
 		char* mode = const_cast<char*>(__ArgValue);
-		std::string mode_copy = mode;
 		char* pt = strtok(mode, "x");
 		if (pt) mode_width = atoi(pt);
 		
@@ -372,22 +374,18 @@ int read_start_options(int argc, char** argv, Settings& settings, StartOptions& 
 		
 		pt = strtok(NULL, "@");
 		if (pt) mode_vrefresh = atoi(pt);
-
-		settings.set(display::setting::screen_mode(""), mode_copy);
 		continue;
 	}
 
 	__OnArgument("--vsync") {
 		vsync_flag = true;
 		render_mode = Atomic;
-		settings.set(display::setting::vsync, true);
 		continue;
 	}
 	
 	__OnArgument("--no-display") {
 		no_display_flag = true;
 		render_mode = Disable;
-		settings.set(display::setting::no_display, true);
 		continue;
 	}
 
@@ -424,7 +422,6 @@ int read_start_options(int argc, char** argv, Settings& settings, StartOptions& 
 			printf("--link: unknown source '%s' (only 'ar8030' is supported)\n", spec.c_str());
 			return 1;
 		}
-		settings.set(app::setting::link, spec);
 		continue;
 	}
 
@@ -434,19 +431,16 @@ int read_start_options(int argc, char** argv, Settings& settings, StartOptions& 
 
 	__OnArgument("--stats") {
 		console_stats = true;
-		settings.set(hud::setting::stats, true);
 		continue;
 	}
 	
 	__OnArgument("--disable-vrr") {
 		enable_vrr = false;
-		settings.set(display::setting::enable_vrr, false);
 		continue;
 	}
 
 	__OnArgument("--ui-scale") {
 		ui_scale = atof(__ArgValue);
-		settings.set(hud::setting::ui_scale, ui_scale);
 		continue;
 	}
 
@@ -554,7 +548,6 @@ int read_start_options(int argc, char** argv, Settings& settings, StartOptions& 
 	__OnArgument("--no-osd") {
 		enable_osd = 0;
 		g_disable_gl = true;   // skip EGL/GLES entirely - GPU stays idle
-		settings.set(hud::setting::enable_osd, 0);
 		continue;
 	}
 

@@ -19,13 +19,13 @@ int main() {
     const std::string conf=std::string(dir)+"/receiver.conf";
     const Setting<int> mode{"screen_height",1080};
     {
-        Settings settings; settings.load(conf,true); settings.set(mode,720); settings.flush();
-        Settings restored; restored.load(conf,true); check(restored.get(mode)==720);
+        Settings settings; settings.load(conf); settings.set(mode,720); settings.flush();
+        Settings restored; restored.load(conf); check(restored.get(mode)==720);
         // A failed replacement must leave the last complete configuration intact.
-        std::filesystem::create_directory(conf+".new");
+        std::filesystem::create_directory(conf+".tmp");
         settings.set(mode,1080); settings.flush();
-        Settings intact; intact.load(conf,true); check(intact.get(mode)==720);
-        std::filesystem::remove(conf+".new");
+        Settings intact; intact.load(conf); check(intact.get(mode)==720);
+        std::filesystem::remove(conf+".tmp");
     }
     std::filesystem::remove_all(dir);
 }

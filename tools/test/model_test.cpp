@@ -3,10 +3,10 @@
 // reaches each part's reader on its terms - each part's state as its newest
 // value (defaults before the first), its watcher woken when it changes and
 // not otherwise, the air unit's reports counted, the video rate and the scans
-// every one in order and waking, the FC serial bridge's bytes with the
-// screen's restart in order between them, the air unit's IMU samples with the
-// camera angle in order - the distance has Calib Distance's offset (per air
-// unit) taken off, the changes asked of the
+// every one in order and waking, the resends every one without a wake, the FC
+// serial bridge's bytes with the screen's restart in order between them, the
+// air unit's IMU samples with the camera angle in order - the distance is
+// the radio's reading, armed or not, the changes asked of the
 // parts reach the radio numbered and normalized, in order, their tickets
 // carrying the value as it will be held, and the settings among them are
 // saved as they are asked; the radio's threads and a reader can run at once
@@ -46,6 +46,7 @@ struct FakeLink : radio::Link {
         if (const auto* m = std::get_if<radio::cmd::MaxBitrate>(&c)) h.max_kbps = m->kbps;
         if (const auto* m = std::get_if<radio::cmd::MaxBandwidth>(&c)) h.max_bw_mhz = m->mhz;
         if (const auto* m = std::get_if<radio::cmd::Firmware>(&c)) h.radio_fw = m->firmware;
+        if (const auto* m = std::get_if<radio::cmd::ChannelHop>(&c)) h.chan_hop = m->hop;
         if (const auto* m = std::get_if<radio::cmd::ScanScreen>(&c)) scan = m->open;
     }
     radio::State held() const override { return h; }
@@ -117,10 +118,10 @@ static void state_test(Rig& b, HudLike& h) {
     radio::State st;
     st.max_kbps = 5;
     st.tx_power_want_mw = 200;
-    st.steady = 1;
+    st.chan_hop = 1;
     b.model.held(st);
     CHECK(h.take_changed() && b.model.encoder().state().max_kbps == 5 &&
-          b.model.air_radio().state().tx_power_want_mw == 200 && radio_of(b).steady == 1);
+          b.model.air_radio().state().tx_power_want_mw == 200 && radio_of(b).chan_hop == 1);
     b.model.held(st);
     CHECK(!h.take_changed());
     // The link's state, as the poll repeats it: published when it changes.
@@ -132,11 +133,11 @@ static void state_test(Rig& b, HudLike& h) {
     while (h.w.wait(1000)) {}
     gnd::ScanSample sc{};
     sc.chan_num = 3;
-    sc.power_dbm[1] = -80;
+    sc.usable[1] = 1;
     b.model.scan(sc);
     CHECK(h.w.wait(1000));                      // each scan wakes it
     gnd::ScanSample got{};
-    CHECK(b.model.radio().take_scan(got) && got.chan_num == 3 && got.power_dbm[1] == -80 && !got.power_dbm[0]);
+    CHECK(b.model.radio().take_scan(got) && got.chan_num == 3 && got.usable[1] && !got.usable[0]);
     // The video rate: every second's, in order, and the radio's figure.
     b.model.video_bandwidth(12.5f);
     b.model.video_bandwidth(13.0f);
@@ -144,6 +145,14 @@ static void state_test(Rig& b, HudLike& h) {
     CHECK(b.model.radio().take_rate(m) && m == 12.5f && b.model.radio().take_rate(m) && m == 13.0f &&
           !b.model.radio().take_rate(m));
     CHECK(radio_of(b).video_mbps == 13.0f);
+    // The resends: every one, without a wake.
+    while (h.w.wait(1000)) {}
+    b.model.resend({100, 1});
+    b.model.resend({200, 3});
+    CHECK(!h.w.wait(1000));
+    air::Resend rr{};
+    air::Radio& ar = b.model.air_radio();
+    CHECK(ar.take_resend(rr) && rr.t_us == 100 && ar.take_resend(rr) && rr.v == 3 && !ar.take_resend(rr));
 }
 
 static void drain(Rig& b) {
@@ -201,27 +210,20 @@ static void fc_full_test() {
 }
 
 static void distance_test(Rig& b) {
-    // Calib Distance: stock's 115 until one is made, then per air unit.
     b.model.link_stats(linked("AA:BB:CC:01"));
     drain(b);
-    b.model.distance(300);
-    CHECK(radio_of(b).dist_raw == 300 && radio_of(b).dist_offset == 115 && radio_of(b).dist_m == 185);
     b.model.distance(100);
-    CHECK(radio_of(b).dist_m == 0);                   // never below zero
-    b.model.radio().set_dist_offset(90);              // calibrated here
-    CHECK(radio_of(b).dist_m == 10 && b.settings.get(radio::setting::dist_offset) == 90);
-    b.model.low_power(true);
-    CHECK(unit_of(b).low_power && radio_of(b).dist_m == 10);
-    b.model.low_power(false);
-    CHECK(!unit_of(b).low_power);
-    // Another aircraft starts from the last calibration made; each keeps its own.
-    b.model.link_stats(linked("AA:BB:CC:02"));
-    CHECK(radio_of(b).dist_offset == 90);
-    b.model.radio().set_dist_offset(70);
-    b.model.link_stats(linked("AA:BB:CC:01"));
-    CHECK(radio_of(b).dist_offset == 90);
-    b.model.distance(-1);
-    CHECK(radio_of(b).dist_m == -1);                  // no reading
+    CHECK(radio_of(b).dist_raw == 100 && radio_of(b).dist_m == 100);   // the reading itself
+    b.model.low_power(true);                          // standby
+    CHECK(unit_of(b).low_power && radio_of(b).dist_m == 100);
+    b.model.low_power(false);                         // an arming changes nothing
+    b.model.distance(150);
+    CHECK(!unit_of(b).low_power && radio_of(b).dist_m == 150);
+    b.model.distance(-1);                             // no reading
+    CHECK(radio_of(b).dist_m == -1);
+    b.model.link_stats(linked("AA:BB:CC:02"));        // another aircraft: the same
+    b.model.distance(7);
+    CHECK(radio_of(b).dist_m == 7);
 }
 
 // An SEI with one kestrel-air IMU message: n samples 1 ms apart from t0.
@@ -292,22 +294,21 @@ static void commands_test(Rig& b, HudLike& h) {
     // it asked until the part's taken passes it).
     const Ticket t1 = b.model.encoder().set_max_bitrate(5000);
     const Ticket t2 = b.model.radio().set_max_mcs(40);      // out of range: none
-    // A channel for the session: no setting, so no ticket (it is the next one carried out).
-    CHECK(b.model.radio().set_channel(5805).seq == 0);
-    const uint32_t t3 = t2.seq + 1;
-    CHECK(t1.seq > 0 && t2.seq == t1.seq + 1);
-    CHECK(t1.value == 5000 && t2.value == -1);
+    const Ticket t3 = b.model.radio().set_channel(5805);    // FIXED: AUTO HOP off with it
+    CHECK(t1.seq > 0 && t2.seq == t1.seq + 1 && t3.seq == t2.seq + 1);
+    CHECK(t1.value == 5000 && t2.value == -1 && t3.value == 0);
     CHECK(f.applied.empty() && b.model.encoder().state().taken < t1.seq);
     h.take_changed();
     b.model.take_commands(f);                         // the radio's thread, between its steps
     CHECK(f.applied.size() == 3 && std::get<radio::cmd::MaxBitrate>(f.applied[0]).kbps == 5000);
-    CHECK(std::get<radio::cmd::MaxMcs>(f.applied[1]).mcs == -1 && std::get<radio::cmd::RfControl>(f.applied[2]).value == 5805000);
-    CHECK(b.model.encoder().state().taken == t3 && b.model.radio().state().taken == t3 &&
+    CHECK(std::get<radio::cmd::MaxMcs>(f.applied[1]).mcs == -1 && std::get<radio::cmd::RfControl>(f.applied[2]).fixed_mhz == 5805);
+    CHECK(b.model.encoder().state().taken == t3.seq && b.model.radio().state().taken == t3.seq &&
           b.model.encoder().state().max_kbps == 5000);
     CHECK(h.take_changed());                    // what took effect: the HUD woken
     // Max Bandwidth: 0 (no cap), 5, 10, 20 or 40; the rest on or off.
     CHECK(b.model.radio().set_max_bandwidth(30).value == 40 && b.model.radio().set_max_bandwidth(0).value == 0);
     CHECK(b.model.radio().set_frame(1).value == 2 && b.model.radio().set_firmware(3).value == 0);
+    CHECK(b.model.radio().set_channel(0).seq == 0);   // no channel: AUTO HOP not touched
     b.model.take_commands(f);
     // The scan screen's: carried out like the others.
     b.model.radio().scan_screen(true);
@@ -317,7 +318,10 @@ static void commands_test(Rig& b, HudLike& h) {
     Settings& st = b.settings;
     namespace rs = radio::setting;
     b.model.radio().set_max_mcs(7);
-    CHECK(st.get(rs::ar8030_max_mcs) == 7);
+    b.model.radio().set_channel_auto(true);
+    CHECK(st.get(rs::ar8030_max_mcs) == 7 && st.text(rs::ar8030_chan_mhz) == "0" && st.get(rs::ar8030_chan_hop) == 1);
+    b.model.radio().set_channel(5865);
+    CHECK(st.get(rs::ar8030_chan_mhz) == 5865 && st.text(rs::ar8030_chan_hop) == "0");
     b.model.encoder().set_max_bitrate(4321);
     b.model.radio().set_firmware(1);
     CHECK(st.get(rs::ar8030_max_kbps) == 4321 && st.text(rs::ar8030_firmware) == "1");

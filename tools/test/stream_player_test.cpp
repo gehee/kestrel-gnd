@@ -9,8 +9,9 @@
 #include <sys/stat.h>
 namespace {
 void check(bool v,const char* s) {if(!v)throw std::runtime_error(s);}
-template<class F> void wait(F f) {for(int i=0;i<2000;++i) {if(f())return;std::this_thread::sleep_for(std::chrono::milliseconds(2));}throw std::runtime_error("Player timeout");}
+template<class F> void wait_at(F f,int line) {for(int i=0;i<2000;++i) {if(f())return;std::this_thread::sleep_for(std::chrono::milliseconds(2));}throw std::runtime_error("Player timeout at line "+std::to_string(line));}
 }
+#define wait(...) wait_at(__VA_ARGS__,__LINE__)
 int main() {
  try {
     char path[]="stream-player-test-XXXXXX";check(mkdtemp(path),"Create test folder");

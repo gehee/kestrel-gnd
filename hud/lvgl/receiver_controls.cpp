@@ -66,7 +66,7 @@ void ReceiverControls::update(BackendState& state, uint64_t now) {
     for(int kbps : {6000,8000,10000,12000,15000,18000,20000,22000,25000,30000,35000,40000})
         rates.push_back({kbps,std::to_string(kbps/1000)+" Mbps"});
     choice("Max Bitrate",e.max_kbps,true,u.info.kestrel,rates,"Requires an fpvOS air unit.");
-    auto offer=ar_pwr_offered(a.prj); std::vector<ReceiverChoice> powers;
+    auto offer=ar_pwr_offered(a.prj,a.fine); std::vector<ReceiverChoice> powers;
     for(int i=0;i<offer.n;++i) powers.push_back({offer.mw[i],kArPwrLevels[ar_pwr_index(offer.mw[i])].label});
     choice("power",a.tx_power_want_mw,a.tx_power_want_mw>0,g.rf_caps & gnd::RF_CAP_POWER,powers,"The radio does not expose power control.");
     choice("standby",u.standby,u.standby_n,true,{{0,"OFF"},{1,"ON"}});
@@ -80,8 +80,6 @@ void ReceiverControls::update(BackendState& state, uint64_t now) {
     if(g.bind_state==gnd::BIND_RUNNING) bind.reason="Binding: "+std::to_string(g.bind_secs_left)+" seconds remaining.";
     else if(g.bind_state==gnd::BIND_FAILED) bind.reason="No air unit found. Press OK to retry.";
     else if(g.bind_state==gnd::BIND_OK) bind.reason="Binding succeeded.";
-    auto& distance=controls_["distance"]; distance.known=g.dist_raw>=0; distance.enabled=linked && distance.known; distance.action=true;
-    distance.text="ENTER: ZERO HERE"; distance.reason="Current offset: "+std::to_string(g.dist_offset)+" m.";
     state.controls=controls_;
     state.air_info.clear();
     if(linked && u.info.version) {
@@ -101,7 +99,6 @@ std::string ReceiverControls::apply(const std::string& id,int value,uint64_t now
     if(!at->second.action && std::none_of(at->second.choices.begin(),at->second.choices.end(),[&](const auto& x){return x.value==value;}))
         throw std::invalid_argument("Unsupported control value");
     if(id=="bind") {ground_.bind();return "Binding requested";}
-    if(id=="distance") {ground_.set_dist_offset(ground_.state().dist_raw);return "Distance calibration requested";}
     if(id=="Max Bitrate") encoder_.set_max_bitrate(value);
     else if(id=="power") air_.set_tx_power(value);
     else if(id=="standby") unit_.set_standby(value!=0);

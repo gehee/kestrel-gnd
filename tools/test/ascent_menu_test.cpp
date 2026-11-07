@@ -19,10 +19,11 @@ struct Radio : gnd::Radio {
     Ticket set_max_bandwidth(int) override {return {};}
     Ticket set_steady(bool) override {return {};}
     Ticket set_channel(int f) override {changed=f;return {1,f};}
+    Ticket set_channel_auto(bool) override {return {};}
+    void region_changed() override {}
     void search_channels() override {changed=0;}
     void scan_screen(bool v) override {fast=v;}
     void bind() override {}
-    void set_dist_offset(int) override {}
     bool take_scan(gnd::ScanSample& s) override {if(!have)return false;s=sample;have=false;return true;}
     bool take_rate(float&) override {return false;}
     uint64_t dropped() const override {return 0;}

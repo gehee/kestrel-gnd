@@ -1,3 +1,4 @@
+#include <atomic>
 // Native Ascent composition root: existing radio, software HUD, platform media.
 #include "base/ltrace.hpp"
 #include "display/mode_trial.hpp"
@@ -164,7 +165,7 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
         motion::ImuReader imu_reader(radio_model.imu());
         MspOsd flight_controller;
         // Resources outlive every thread, including when creating one fails.
-        volatile bool stop = false;
+        std::atomic<bool> stop = false;
         const auto assets_root = std::filesystem::path(o.assets);
         const int screen_w=o.platform.display_width,screen_h=o.platform.display_height;
         const auto profile=std::filesystem::path(o.assets)/(std::to_string(screen_w)+"x"+std::to_string(screen_h));
@@ -207,7 +208,7 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
         link.add_video_sink(&recording_sink);
         std::atomic<bool> source_exited{false}, worker_failed{false};
         struct Join {
-            volatile bool &stop;
+            std::atomic<bool> &stop;
             std::thread display, decoder, radio;
             ~Join() { finish(); }
             void finish() {
@@ -626,7 +627,7 @@ int main(int argc, char **argv) {
         signal(SIGINT, signal_handler); signal(SIGTERM, signal_handler); signal(SIGUSR1, signal_handler);
         Settings settings;
         if (o.settings_file.empty() && !o.preferences.empty()) o.settings_file=o.preferences+".receiver";
-        if (!o.settings_file.empty()) settings.load(o.settings_file,true);
+        if (!o.settings_file.empty()) settings.load(o.settings_file);
         display::AscentMode selected = o.explicit_mode ?
             display::AscentMode{o.platform.display_height,o.platform.display_hz} :
             display::AscentMode{settings.get(display::setting::ascent_screen_height),settings.get(display::setting::ascent_screen_hz)};

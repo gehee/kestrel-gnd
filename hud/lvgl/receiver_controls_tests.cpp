@@ -19,7 +19,7 @@ struct Camera : Fake<air::Camera,air::CameraState> {
     Ticket set_mode(int v) override { return request(v); }
 };
 struct Encoder : Fake<air::Encoder,air::EncoderState> { Ticket set_max_bitrate(int v) override { return request(v); } };
-struct Air : Fake<air::Radio,air::RadioState> { Ticket set_tx_power(int v) override { return request(v); } };
+struct Air : Fake<air::Radio,air::RadioState> { bool take_resend(air::Resend&) override {return false;} uint64_t resends_dropped() const override {return 0;} Ticket set_tx_power(int v) override { return request(v); } };
 struct Unit : Fake<air::Unit,air::UnitState> {
     Ticket set_standby(bool v) override { return request(v); }
     Ticket set_logs(bool v) override { return request(v); }
@@ -31,10 +31,11 @@ struct Ground : Fake<gnd::Radio,gnd::RadioState> {
     Ticket set_max_bandwidth(int v) override {return request(v);}
     Ticket set_steady(bool v) override {return request(v);}
     Ticket set_channel(int v) override {return request(v);}
+    Ticket set_channel_auto(bool) override {return {};}
+    void region_changed() override {}
     void search_channels() override {request(0);}
     void scan_screen(bool) override {}
     void bind() override {request(0);}
-    void set_dist_offset(int v) override {request(v);}
     bool take_scan(gnd::ScanSample&) override {return false;}
     bool take_rate(float&) override {return false;}
     uint64_t dropped() const override {return 0;}

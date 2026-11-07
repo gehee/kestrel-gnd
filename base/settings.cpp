@@ -1,13 +1,17 @@
 #include "base/settings.hpp"
-#include <fcntl.h>
-#include <unistd.h>
-#include <cstdio>
 #include <fstream>
 #include <sstream>
 #include <iostream>
 #include <algorithm>
+#include <cerrno>
+#include <climits>
+#include <cstdlib>
+#include <cstring>
+#include <fcntl.h>
 #include <pthread.h>
 #include <sched.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 std::string Settings::trim(const std::string& str) {
     size_t first = str.find_first_not_of(" \t\r\n");
@@ -18,10 +22,9 @@ std::string Settings::trim(const std::string& str) {
     return str.substr(first, (last - first + 1));
 }
 
-void Settings::load(const std::string& filename, bool atomic) {
+void Settings::load(const std::string& filename) {
     std::lock_guard<std::mutex> lock(_mutex);
     _filename = filename;
-    _atomic = atomic;
     _settings.clear();
     _saved_gen = _gen;   // what is in memory now is what the file holds
 
@@ -63,7 +66,8 @@ Settings::~Settings() {
 void Settings::mark_dirty() {
     // The first change of a burst sets the deadline; later ones ride on it,
     // so a steady stream of sets still reaches the disk every kSaveDelay.
-    if (_gen == _saved_gen) _due = std::chrono::steady_clock::now() + kSaveDelay;
+    // After a failed write, the next change starts a burst of its own.
+    if (_gen == _saved_gen || _gen == _failed_gen) _due = std::chrono::steady_clock::now() + kSaveDelay;
     _gen++;
     if (!_saver.joinable() && !_saver_stop) _saver = std::thread(&Settings::saver_run, this);
     _saver_cv.notify_one();
@@ -77,7 +81,7 @@ void Settings::saver_run() {
     pthread_setschedparam(pthread_self(), SCHED_OTHER, &sp);
     std::unique_lock<std::mutex> lock(_mutex);
     while (!_saver_stop) {
-        if (_gen == _saved_gen) {
+        if (_gen == _saved_gen || _gen == _failed_gen) {   // nothing new to write
             _saver_cv.wait(lock);
             continue;
         }
@@ -105,42 +109,92 @@ void Settings::write_snapshot() {
         gen = _gen;
     }
 
-    if (_atomic) {
-        // Native deployment owns this regular file. Never expose a truncated
-        // receiver configuration if power disappears during a save.
-        const auto tmp=filename+".new";
-        FILE* f=fopen(tmp.c_str(),"w");
-        bool ok=f!=nullptr;
-        if(f) {
-            for(const auto& pair:snap)
-                if(fprintf(f,"%s: %s\n",pair.first.c_str(),pair.second.c_str())<0)ok=false;
-            if(fflush(f) || fsync(fileno(f)))ok=false;
-            if(fclose(f))ok=false;
-        }
-        if(ok && rename(tmp.c_str(),filename.c_str())==0) {
-            const auto slash=filename.find_last_of('/');
-            const auto parent=slash==std::string::npos?".":filename.substr(0,slash?slash:1);
-            const int fd=open(parent.c_str(),O_RDONLY|O_DIRECTORY|O_CLOEXEC);
-            if(fd>=0) { fsync(fd); close(fd); }
-        } else {
-            unlink(tmp.c_str());
-            std::cerr << "Failed to replace settings file: " << filename << std::endl;
-        }
-    } else {
-        // Legacy boards may use symlinks into vendor writable partitions.
-        std::ofstream file(filename);
-        if(!file.is_open())std::cerr << "Failed to open settings file: " << filename << std::endl;
-        else for(const auto& pair:snap)file << pair.first << ": " << pair.second << "\n";
-    }
+    std::string text;
+    for (const auto& pair : snap) text += pair.first + ": " + pair.second + "\n";
+    std::string err;
+    const bool ok = write_file(filename, text, err);
 
-    // Marked done even when the open failed: a read-only file stays read-only,
-    // and retrying it on every change would only repeat the message.
+    // A failed write stays unsaved, so the next change (or a flush()) tries
+    // again; said once, not at every change of a read-only file.
     std::lock_guard<std::mutex> lock(_mutex);
-    if (gen > _saved_gen) _saved_gen = gen;
+    if (ok) {
+        if (gen > _saved_gen) _saved_gen = gen;
+        if (_write_failed) std::cerr << "settings: " << filename << " written again" << std::endl;
+        _write_failed = false;
+    } else {
+        if (!_write_failed) std::cerr << "settings: cannot write " << filename << ": " << err << std::endl;
+        _write_failed = true;
+        _failed_gen = gen;
+    }
+}
+
+// A new file beside the real one, on disk, then renamed over it: a power cut,
+// a kill or a full disk mid-write leaves the old file whole, never an empty
+// or a partial one. A link is followed first (the file may be a link into a
+// writable partition), so the link stays and its target is what is replaced.
+bool Settings::write_file(const std::string& filename, const std::string& text, std::string& err) {
+    std::string target = filename;
+    if (char* real = realpath(filename.c_str(), nullptr)) {
+        target = real;
+        free(real);
+    } else {
+        // Not there yet; or a link to a file not made yet, which is made.
+        char link[PATH_MAX];
+        const ssize_t n = readlink(filename.c_str(), link, sizeof link - 1);
+        if (n > 0) {
+            link[n] = 0;
+            const size_t slash = filename.rfind('/');
+            target = link[0] == '/' || slash == std::string::npos
+                ? std::string(link) : filename.substr(0, slash + 1) + link;
+        }
+    }
+    const size_t slash = target.rfind('/');
+    const std::string dir = slash == std::string::npos ? "." : slash == 0 ? "/" : target.substr(0, slash);
+    const std::string tmp = target + ".tmp";
+    struct stat st;
+    const mode_t mode = stat(target.c_str(), &st) == 0 ? (st.st_mode & 07777) : 0644;
+
+    // On any failure: why, and no .tmp left behind.
+    auto fail = [&](const char* what, int fd) {
+        err = std::string(what) + " " + tmp + ": " + strerror(errno);
+        if (fd >= 0) close(fd);
+        unlink(tmp.c_str());
+        return false;
+    };
+    const int fd = open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, mode);
+    if (fd < 0) return fail("open", -1);
+    for (size_t w = 0; w < text.size();) {
+        const ssize_t r = ::write(fd, text.data() + w, text.size() - w);
+        if (r < 0 && errno == EINTR) continue;
+        if (r <= 0) {
+            if (r == 0) errno = ENOSPC;
+            return fail("write", fd);
+        }
+        w += (size_t)r;
+    }
+    if (fsync(fd) != 0) return fail("fsync", fd);
+    if (close(fd) != 0) return fail("close", -1);
+    if (rename(tmp.c_str(), target.c_str()) != 0) return fail("rename", -1);
+    // The rename on disk too. Not a failure when it cannot be (a filesystem
+    // that does not sync directories): the new file is in place either way,
+    // and at worst a power cut brings back the old one, whole.
+    const int dfd = open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (dfd >= 0) {
+        fsync(dfd);
+        close(dfd);
+    }
+    return true;
 }
 
 void Settings::flush() {
     write_snapshot();
+}
+
+std::string Settings::all_text() {
+    std::lock_guard<std::mutex> lock(_mutex);
+    std::string text;
+    for (const auto& pair : _settings) text += pair.first + ": " + pair.second + "\n";
+    return text;
 }
 
 std::string Settings::getString(const std::string& key, const std::string& def) {

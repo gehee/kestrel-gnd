@@ -3,6 +3,8 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <functional>
+#include <string>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -20,6 +22,8 @@
 class DvrWriter {
     public:
         explicit DvrWriter(int fd, size_t max_queued = 64u << 20);
+        DvrWriter(int fd, std::string dir, std::string name,
+                  std::function<void(const char*)> on_fail, size_t max_queued = 64u << 20);
         ~DvrWriter();       // writes out everything queued, then syncs
         // Queue a write; 1 once any write has failed, as minimp4 expects.
         int write(int64_t offset, const void* buf, size_t size);
@@ -27,9 +31,14 @@ class DvrWriter {
         bool finish();
     private:
         void run();
+        uint64_t headroom() const;
         struct Chunk { int64_t offset; std::vector<uint8_t> data; };
         const int fd_;
         const size_t max_queued_;
+        const std::string dir_, name_;
+        const std::function<void(const char*)> on_fail_;
+        uint64_t written_ = 0, checked_at_ = 0;
+        uint64_t start_us_ = 0, checked_us_ = 0;
         std::mutex m_;
         std::condition_variable work_, room_;
         std::deque<Chunk> q_;
@@ -39,3 +48,7 @@ class DvrWriter {
         std::thread t_;
 };
 
+
+// Make room for recordings, preserving the named active file.
+uint64_t purge_oldest_recordings(const std::string& dir, uint64_t min_free_bytes,
+                                 const std::string& keep = "");

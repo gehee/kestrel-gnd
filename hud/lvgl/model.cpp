@@ -141,7 +141,6 @@ std::vector<MenuRow> Model::rows(uint64_t now) const {
                 reading("bf_osd","Betaflight OSD","ASSETS MISSING","Install the generated Betaflight glyph atlas.")};
         if (show_hud && hud_style != "vector") result.push_back(choice("per_cell", "Canopy Voltage", per_cell ? 0 : 1, {"PER CELL", "PACK"},
             "The canopy's headline voltage: per cell reads the same on any pack size."));
-        result.push_back(unavailable("distance", "Calib Distance", "Zero the range reading where you are standing."));
         result.push_back(choice("clock", "Clock", clock, {"OFF","IDLE ONLY 12H","IDLE ONLY 24H","ON 12H","ON 24H"}, "When the time is shown at the top of the screen, and how it is written."));
         result.push_back(choice("dynamic", "Dynamic HUD", dynamic, {"OFF","SMALL","MEDIUM","EXTREME"}, "Move the panels horizontally and vertically with the aircraft's camera IMU or flight-controller attitude, while keeping them level."));
         result.push_back(choice("link_edge_warning", "Link Edge Warning", link_edge_warning, {"OFF","ON"}, "Amber for a weak link, red for a very weak link or stalled video."));

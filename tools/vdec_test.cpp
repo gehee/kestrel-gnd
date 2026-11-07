@@ -46,7 +46,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    volatile bool should_stop = false;
+    std::atomic<bool> should_stop{false};
     auto renderer = std::make_shared<MockRenderer>();
     VdecFfmpeg vdec(VideoCodec::H265, decoder_name.c_str(), renderer, &should_stop);
 

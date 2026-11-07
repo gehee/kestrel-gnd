@@ -13,6 +13,6 @@ struct SoftwareReceiver {
     std::shared_ptr<display::PlaneScreen> screen;
     std::shared_ptr<Vdec> decoder;
 };
-SoftwareReceiver make_software_receiver(const SoftwareSetup &, VideoCodec, volatile bool *stop);
-std::shared_ptr<Vdec> make_software_decoder(const SoftwareSetup&,VideoCodec,std::shared_ptr<hal::FrameSink>,volatile bool* stop);
+SoftwareReceiver make_software_receiver(const SoftwareSetup &, VideoCodec, std::atomic<bool> *stop);
+std::shared_ptr<Vdec> make_software_decoder(const SoftwareSetup&,VideoCodec,std::shared_ptr<hal::FrameSink>,std::atomic<bool>* stop);
 } // namespace platform

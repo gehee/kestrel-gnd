@@ -28,7 +28,6 @@ namespace {
 constexpr int kVisibleMax = 16;
 
 // Tab names: AR8030 is the radio, and on the air unit's blade it says so.
-constexpr const char* kTabNames[8] = { "VIDEO", "RADIO", "HUD", "DISPLAY", "DVR", "SYSTEM", "INFO", "SERIAL" };
 
 // Keep the selection in the middle of the window where the list is long enough
 // to allow it, and pinned at the ends where it is not.
@@ -183,7 +182,7 @@ void OSD::draw_side_panel(int side, float x, float y, float w, float h, float u)
     // joins the network from the first code and opens the page from the
     // second. Above the help; the rows stop above them.
     float list_bottom = help_top - 20 * u;
-    if (n && menu_tab == kTabSystem && sel == 4 && !editing && !menu_dirty[kTabSystem][4] && wifi_ap_on()) {
+    if (n && menu_tab == kTabSystem && sel == kSysWifi && !editing && !menu_dirty[kTabSystem][kSysWifi] && wifi_ap_on()) {
         static Qr qr_join, qr_page;
         // The network's name and password from their file, once a second.
         static std::string join_text, page_url;
@@ -342,14 +341,15 @@ void OSD::draw_side_panel(int side, float x, float y, float w, float h, float u)
 void OSD::draw_canopy_ui(int W, int H, const CanopyIn& geo) {
     const float fh = geo.frustum_h;
     // VIDEO needs a link: unlinked, the air unit's side holds RADIO (Bind) only.
+    // Under the lock the keys take, the clamp too: menu_tab and menu_index are theirs as well.
+    pthread_mutex_lock(&osd_mutex);
     if (osd_vars.radio_link.state != 2 && menu_tab == 0) {
-        pthread_mutex_lock(&osd_mutex);
         menu_tab = ui_side_tab_[1] = 1;
         menu_index = menu_first_selectable_row(menu_tab);
         menu_refresh_options();
-        pthread_mutex_unlock(&osd_mutex);
     }
     if (menu_index < 0) menu_index = 0;
+    pthread_mutex_unlock(&osd_mutex);
 
     const HudTheme& T = hud_theme_current();
     int px, py, pw, ph;

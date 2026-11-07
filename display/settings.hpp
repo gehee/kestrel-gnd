@@ -19,7 +19,7 @@ inline MadeSetting<std::string> screen_mode(const std::string& screen_id) {
     return {screen_id.empty() ? std::string("screen_mode") : "screen_mode_" + screen_id, ""};
 }
 inline constexpr Setting<std::string> screen_mode_try{"screen_mode_try", ""};
-// DISPLAY > Refresh Sync, the screen's own too: 0 OFF, 1 ON, 2 FREE.
+// DISPLAY > Refresh Sync, the screen's own too: 0 OFF, 1 NUDGE (was ON), 2 FOLLOW (was FREE).
 inline MadeSetting<int> display_lock(const std::string& screen_id) {
     return {screen_id.empty() ? std::string("display_lock") : "display_lock_" + screen_id, 0};
 }
@@ -32,9 +32,6 @@ inline constexpr Setting<int> display_lock_margin_ms{"display_lock_margin_ms", 0
 inline MadeSetting<float> camera_period(int lines, int fps) {
     return {"camera_period_us_" + std::to_string(lines) + "p" + std::to_string(fps), 0.0f};
 }
-// The camera's rate and lines last followed.
-inline constexpr Setting<int> camera_fps{"camera_fps", 0};
-inline constexpr Setting<int> camera_lines{"camera_lines", 0};
 
 // The renderer: each commit this long before the vblank it is for, and a
 // picture less than the slack from one waits for the next; off, a commit

@@ -1,3 +1,4 @@
+#include <atomic>
 #include "hal/source_decoder.hpp"
 #include <chrono>
 #include <stdexcept>
@@ -20,7 +21,7 @@ struct Fake : Vdec {
 }
 int main() {
  try {
-    volatile bool stop=false;std::mutex mutex;std::vector<std::shared_ptr<Fake>> sessions;
+    std::atomic<bool> stop=false;std::mutex mutex;std::vector<std::shared_ptr<Fake>> sessions;
     std::atomic<bool> throw_next{false};
     hal::SourceDecoder decoder([&]() -> std::shared_ptr<Vdec> {
         if(throw_next.exchange(false))throw std::runtime_error("Test factory failure");

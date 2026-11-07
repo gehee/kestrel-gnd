@@ -17,7 +17,7 @@ bool has_refresh_sync() { return true; }   // the VOP2's frame length
 bool hardware_decoder(const std::string& name) { return name == "rkmpp"; }
 
 std::shared_ptr<Vdec> make_decoder(VideoCodec codec, const std::string& name, std::shared_ptr<hal::FrameSink> sink,
-                                   std::shared_ptr<display::Display> display, volatile bool* stop) {
+                                   std::shared_ptr<display::Display> display, std::atomic<bool>* stop) {
     if (hardware_decoder(name)) return std::make_shared<VdecRK>(codec, sink, display, stop);
     return std::make_shared<VdecFfmpeg>(codec, name, sink, stop);
 }
@@ -25,7 +25,7 @@ std::shared_ptr<Vdec> make_decoder(VideoCodec codec, const std::string& name, st
 bool has_background_decoder() { return true; }
 
 std::unique_ptr<Vdec> make_background_decoder(VideoCodec codec, std::shared_ptr<hal::Scanout> scanout,
-                                              volatile bool* stop,
+                                              std::atomic<bool>* stop,
                                               std::function<void(std::shared_ptr<DecodedUnit>)> sink) {
     std::unique_ptr<VdecRK> v(new VdecRK(codec, nullptr, scanout, stop));
     v->set_output_timeout(100);   // ms, so run_frame can notice a stop

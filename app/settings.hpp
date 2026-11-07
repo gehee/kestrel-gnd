@@ -1,6 +1,7 @@
 #pragma once
-// main()'s own settings: command-line options it saves (see Setting,
-// base/settings.hpp).
+// main()'s own settings (see Setting, base/settings.hpp). The command line
+// overrides them for its run only. codec and link are no longer used (files
+// written before may still hold them).
 
 #include <string>
 

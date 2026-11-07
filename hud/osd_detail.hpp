@@ -57,6 +57,9 @@ std::string osd_asset(const char* name);
 #include "bsp/bsp.hpp"
 #include "platform/platform.hpp"
 
+// The menu's sections, by menu_tab: drawn on the tab strip, named in the log.
+inline constexpr const char* kTabNames[8] = { "VIDEO", "RADIO", "HUD", "DISPLAY", "DVR", "SYSTEM", "INFO", "SERIAL" };
+
 // AR8030 RF menu. The rows are Channel (the channel page, where AUTO is the
 // old Channel Hop), TX Power and Standby Mode; MCS, Bandwidth and LNA Mode were
 // removed - see ar_rf_items().
@@ -118,7 +121,7 @@ static const char* kArFwLabels[] = { "STOCK", "OPEN8030" };
 static const int kArFwCount = 2;
 // DISPLAY > Refresh Sync's values (display::RefreshSync::mode).
 static inline const char *refresh_sync_label(int v) {
-    return v == 2 ? "FREE" : v == 1 ? "ON" : "OFF";
+    return v == 2 ? "FOLLOW" : v == 1 ? "NUDGE" : "OFF";
 }
 
 // AR8030 camera menu option tables. EV, the mode list and the anti-flicker

@@ -1,10 +1,12 @@
 #include "dvr/dvr_library.hpp"
+#include "base/shell.hpp"
 
 #include <cerrno>
 #include <dirent.h>
 #include <fcntl.h>
 #include <pthread.h>
 #include <sched.h>
+#include <signal.h>
 #include <spawn.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -196,8 +198,14 @@ double mp4_duration(const std::string& path) {
                         });
                     }
                 });
-                if (secs < 0 && fragmented && track_scale)
-                    secs = last_fragment_end(fd, (uint64_t)st.st_size, track_scale, trex_duration);
+                // A fragmented moov's mvhd is written before the fragments,
+                // and minimp4 puts its first picture's length there, not 0:
+                // an unfinished recording showed 0:00. Its length is where
+                // its last fragment ends.
+                if (fragmented && track_scale) {
+                    const double end = last_fragment_end(fd, (uint64_t)st.st_size, track_scale, trex_duration);
+                    if (end > 0) secs = end;
+                }
                 break;
             }
             off += size;
@@ -228,10 +236,34 @@ bool run_ffmpeg_thumb(const std::string& in, const std::string& out, const char*
                           "-ss", at, "-i", in.c_str(), "-frames:v", "1", "-vf", vf.c_str(),
                           "-q:v", "6", "-y", out.c_str(), nullptr};
     pid_t pid;   // ::environ comes from <unistd.h> (g++ defines _GNU_SOURCE)
-    if (posix_spawnp(&pid, "nice", nullptr, nullptr, const_cast<char* const*>(argv), ::environ) != 0)
+    // None of kestrel's descriptors (the decoder's buffers among them) for ffmpeg.
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    if (spawn_close_descriptors(&fa)) {
+        posix_spawn_file_actions_destroy(&fa);
         return false;
+    }
+    const int err = posix_spawnp(&pid, "nice", &fa, nullptr, const_cast<char* const*>(argv), ::environ);
+    posix_spawn_file_actions_destroy(&fa);
+    if (err != 0)
+        return false;
+    // An ffmpeg that hangs (a damaged file, a card going) is killed: waited
+    // on for ever, it held up every thumbnail after it. One takes about a
+    // second on the goggle.
+    constexpr int kTimeoutMs = 30000;
     int st = 0;
-    waitpid(pid, &st, 0);
+    for (int waited = 0;; waited += 50) {
+        const pid_t r = waitpid(pid, &st, WNOHANG);
+        if (r == pid) break;
+        if (r < 0 && errno != EINTR) return false;
+        if (waited >= kTimeoutMs) {
+            kill(pid, SIGKILL);
+            waitpid(pid, &st, 0);
+            printf("dvr: ffmpeg still at %s after %d s - stopped\n", in.c_str(), kTimeoutMs / 1000);
+            return false;
+        }
+        usleep(50000);
+    }
     struct stat o;
     return WIFEXITED(st) && WEXITSTATUS(st) == 0 && stat(out.c_str(), &o) == 0 && o.st_size > 0;
 }
@@ -310,7 +342,13 @@ int delete_recording(const std::string& name, const std::string& active) {
     if (unlink(path.c_str()) != 0) return errno;
     unlink(thumb_path(name).c_str());
     unlink((path+".telemetry.jsonl").c_str());
-    sync();
+    // Made lasting (a power cut would bring it back) on the recordings'
+    // partition alone: sync() wrote out the whole system.
+    const int dfd = open(dir().c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (dfd >= 0) {
+        syncfs(dfd);
+        close(dfd);
+    }
     return 0;
 }
 

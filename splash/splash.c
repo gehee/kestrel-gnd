@@ -56,6 +56,20 @@ static volatile sig_atomic_t g_handoff = 0;
 static void on_signal(int s)  { (void)s; g_stop = 1; }
 static void on_handoff(int s) { (void)s; g_handoff = 1; }
 
+// S12splash writes it, S70kestrel and kestrel-gnd signal the pid in it. Gone
+// with us, however we end (an early error return too): a pid left in it is
+// some later process's, which S70kestrel's SIGUSR1 or kestrel-gnd's SIGTERM
+// would kill. Only if it is still ours - a restarted splash writes its own.
+#define PIDFILE "/var/run/kestrel-splash.pid"
+static void remove_pidfile(void) {
+    FILE* f = fopen(PIDFILE, "r");
+    if (!f) return;
+    int pid = 0;
+    const int ok = fscanf(f, "%d", &pid);
+    fclose(f);
+    if (ok == 1 && pid == (int)getpid()) unlink(PIDFILE);
+}
+
 typedef struct {
     uint32_t fb_id, handle;
     uint8_t* map;
@@ -105,33 +119,22 @@ static void page_flip_handler(int fd, unsigned int frame, unsigned int sec,
 // screen genuinely goes dark while the panel relocks to the new signal.
 // Falls back to {0,0,0} (caller keeps its own default) if the setting is
 // missing or unparsable - matching main.cpp's own fallback to "whatever the
-// connector prefers" when screen_mode is unset. *fps: the camera's frame
-// rate last seen ("camera_fps"), which Auto follows, 0 if none - or if the
-// screen has Refresh Sync FREE ("display_lock_<ID>: 2"), whose Auto is the
-// fastest mode (DrmDevice::check_follow_camera).
-static void read_gnd_screen_mode(uint16_t* w, uint16_t* h, uint32_t* vr, uint32_t* fps) {
-    *w = 0; *h = 0; *vr = 0; *fps = 0;
-    int free_sync = 0;
+// connector prefers" when screen_mode is unset.
+static void read_gnd_screen_mode(uint16_t* w, uint16_t* h, uint32_t* vr) {
+    *w = 0; *h = 0; *vr = 0;
     // The screen's own entry, screen_mode_<ID>, as main.cpp reads it: unset
     // is auto. screen_mode is only for a screen with no ID. A mode on trial
     // (screen_mode_try) is not the splash's business: kestrel-gnd drops it at
     // start unless it was a restart, and a restart does not show the splash.
-    char id[16], key[40], lock_key[48];
-    if (screen_id(id, sizeof(id))) {
+    char id[16], key[40];
+    if (screen_id(id, sizeof(id)))
         snprintf(key, sizeof(key), "screen_mode_%s:", id);
-        snprintf(lock_key, sizeof(lock_key), "display_lock_%s:", id);
-    } else {
-        // No EDID ID: Refresh Sync starts off for it (main.cpp), so no lock key.
+    else
         snprintf(key, sizeof(key), "screen_mode:");
-        lock_key[0] = 0;
-    }
     FILE* f = fopen("/etc/kestrel/kestrel-gnd.yaml", "r");
     if (!f) return;
     char line[128];
     while (fgets(line, sizeof(line), f)) {
-        unsigned u;
-        if (sscanf(line, "camera_fps: %u", &u) == 1) { *fps = u; continue; }
-        if (lock_key[0] && !strncmp(line, lock_key, strlen(lock_key))) { free_sync = atoi(line + strlen(lock_key)) == 2; continue; }
         if (strncmp(line, key, strlen(key)) != 0) continue;
         char* p = line + strlen(key);
         while (*p == ' ' || *p == '"') p++;
@@ -139,7 +142,6 @@ static void read_gnd_screen_mode(uint16_t* w, uint16_t* h, uint32_t* vr, uint32_
         if (sscanf(p, "%ux%u@%u", &pw, &ph, &pr) == 3) { *w = pw; *h = ph; *vr = pr; }
     }
     fclose(f);
-    if (free_sync) *fps = 0;
 }
 
 // Ported from display/kms/drm.c's modeset_output_create() - not reimplemented from
@@ -150,14 +152,15 @@ static void read_gnd_screen_mode(uint16_t* w, uint16_t* h, uint32_t* vr, uint32_
 // three cases, same order, same tie-breaks:
 //   1. screen_mode is set and exactly on offer - use it.
 //   2. screen_mode is set but not on offer - the highest refresh at that
-//      resolution not exceeding what was asked, else the sink's own
-//      preferred mode, else the first.
-//   3. screen_mode is unset - auto: in step with the camera's last frame
-//      rate (display/kms/mode_follow.h, shared), else the highest refresh, resolution
-//      only as a tie-break between modes tied on refresh.
+//      resolution not exceeding what was asked, else Auto's mode, else the
+//      first.
+//   3. screen_mode is unset - Auto (display/kms/mode_follow.h, shared):
+//      1080p above 60 Hz, 720p above 60 Hz, 1080p60, 720p60, the fastest
+//      first. kestrel-gnd moves on from a mode the kernel refuses; so does
+//      the splash, at the same size (see main).
 // Interlaced modes are skipped throughout, same as drm.c.
 static int pick_mode_index(drmModeConnector* conn, uint16_t mode_width,
-                            uint16_t mode_height, uint32_t mode_vrefresh, uint32_t camera_fps) {
+                            uint16_t mode_height, uint32_t mode_vrefresh) {
     if (mode_width > 0 && mode_height > 0 && mode_vrefresh > 0) {
         for (int i = 0; i < conn->count_modes; i++) {
             if (conn->modes[i].hdisplay == mode_width &&
@@ -167,10 +170,9 @@ static int pick_mode_index(drmModeConnector* conn, uint16_t mode_width,
                 return i;
             }
         }
-        int best = -1, best_rate = -1, pref = -1;
+        int best = -1, best_rate = -1;
         for (int i = 0; i < conn->count_modes; i++) {
             if (conn->modes[i].flags & DRM_MODE_FLAG_INTERLACE) continue;
-            if (conn->modes[i].type & DRM_MODE_TYPE_PREFERRED) pref = i;
             if (conn->modes[i].hdisplay == mode_width &&
                 conn->modes[i].vdisplay == mode_height &&
                 (int)conn->modes[i].vrefresh <= (int)mode_vrefresh &&
@@ -178,22 +180,11 @@ static int pick_mode_index(drmModeConnector* conn, uint16_t mode_width,
                 best = i; best_rate = conn->modes[i].vrefresh;
             }
         }
-        return (best >= 0) ? best : ((pref >= 0) ? pref : 0);
+        if (best >= 0) return best;
     }
 
-    int fc = modeset_pick_follow(conn, camera_fps, 0, 0);
-    if (fc >= 0) return fc;
-    fc = 0;
-    uint32_t max_refresh = 0, max_area = 0;
-    for (int i = 0; i < conn->count_modes; i++) {
-        if (conn->modes[i].flags & DRM_MODE_FLAG_INTERLACE) continue;
-        uint32_t refresh = conn->modes[i].vrefresh;
-        uint32_t area    = (uint32_t)conn->modes[i].hdisplay * conn->modes[i].vdisplay;
-        if (refresh > max_refresh || (refresh == max_refresh && area > max_area)) {
-            max_refresh = refresh; max_area = area; fc = i;
-        }
-    }
-    return fc;
+    int fc = modeset_pick_auto(conn);
+    return fc >= 0 ? fc : 0;
 }
 
 // The "fpvOS" wordmark - same font, shadow treatment and "OS" colour as
@@ -291,6 +282,14 @@ int main(int argc, char** argv) {
     signal(SIGINT,  on_signal);
     signal(SIGUSR1, on_handoff);
     signal(SIGALRM, on_signal);   // safety net - see the header comment
+    atexit(remove_pidfile);
+    // Blocked while the stop flag is tested before waiting, and let in only by
+    // the wait itself (sigsuspend), so a SIGTERM between the two is not missed.
+    sigset_t stop_sigs, unblocked;
+    sigemptyset(&stop_sigs);
+    sigaddset(&stop_sigs, SIGTERM);
+    sigaddset(&stop_sigs, SIGINT);
+    sigaddset(&stop_sigs, SIGALRM);
 
     int fd = open(card, O_RDWR | O_CLOEXEC);
     if (fd < 0) { perror("kestrel-splash: open card"); return 1; }
@@ -315,9 +314,9 @@ int main(int argc, char** argv) {
     }
     if (!conn) { fprintf(stderr, "kestrel-splash: no connected connector\n"); return 1; }
 
-    uint16_t want_w, want_h; uint32_t want_vr, camera_fps;
-    read_gnd_screen_mode(&want_w, &want_h, &want_vr, &camera_fps);
-    drmModeModeInfo mode = conn->modes[pick_mode_index(conn, want_w, want_h, want_vr, camera_fps)];
+    uint16_t want_w, want_h; uint32_t want_vr;
+    read_gnd_screen_mode(&want_w, &want_h, &want_vr);
+    drmModeModeInfo mode = conn->modes[pick_mode_index(conn, want_w, want_h, want_vr)];
     int W = mode.hdisplay, H = mode.vdisplay;
 
     // Resolve a usable CRTC for this connector.
@@ -361,8 +360,26 @@ int main(int argc, char** argv) {
 
     // Scan out fbs[0] first - the loop below always draws into whichever
     // buffer is NOT on screen, so it must know which one that is.
+    // A mode the kernel refuses gives way to the next of Auto's order at the
+    // same size (the buffers are that size), as kestrel-gnd's does
+    // (modeset_settle_mode).
     int shown = 0;
-    drmModeSetCrtc(fd, crtc_id, fbs[shown].fb_id, 0, 0, &conn->connector_id, 1, &mode);
+    if (drmModeSetCrtc(fd, crtc_id, fbs[shown].fb_id, 0, 0, &conn->connector_id, 1, &mode)) {
+        int order[128];
+        const int n = modeset_auto_order(conn, order, 128);
+        for (int k = 0; k < n; k++) {
+            const drmModeModeInfo* m = &conn->modes[order[k]];
+            if (m->hdisplay != W || m->vdisplay != H || !memcmp(m, &mode, sizeof(mode)))
+                continue;
+            fprintf(stderr, "kestrel-splash: %dx%d@%d refused, trying %dx%d@%d\n", mode.hdisplay,
+                    mode.vdisplay, mode.vrefresh, m->hdisplay, m->vdisplay, m->vrefresh);
+            if (!drmModeSetCrtc(fd, crtc_id, fbs[shown].fb_id, 0, 0, &conn->connector_id, 1,
+                                (drmModeModeInfo*)m)) {
+                mode = *m;
+                break;
+            }
+        }
+    }
 
     drmEventContext evctx = {0};
     evctx.version = DRM_EVENT_CONTEXT_VERSION;
@@ -387,7 +404,9 @@ int main(int argc, char** argv) {
             // rather than going black. See the header comment for the rest
             // of the handshake.
             if (!dropped_master) { drmDropMaster(fd); alarm(30); dropped_master = 1; }
-            pause();
+            sigprocmask(SIG_BLOCK, &stop_sigs, &unblocked);
+            if (!g_stop) sigsuspend(&unblocked);
+            sigprocmask(SIG_SETMASK, &unblocked, NULL);
             continue;
         }
 

@@ -499,6 +499,16 @@ void MP4E_set_full_frame_rate(MP4E_mux_t *mux);
 int MP4E_set_finalize(MP4E_mux_t *mux);
 
 /**
+*   fpvOS: in fragmented mode, write the picture held back for its
+*   continuations (see MP4E_put_sample) now, as its fragment. For a stream
+*   whose every sample is a whole picture - the web view's - it otherwise
+*   waits for the next picture: one picture of latency.
+*
+*   return error code MP4E_STATUS_*
+*/
+int MP4E_flush(MP4E_mux_t *mux);
+
+/**
 *   fpvOS: the HEVC decoder configuration (hvcC) fields an SPS determines:
 *   the 12 bytes of general profile, tier, compatibility, constraint flags and
 *   level, then the chroma format and bit depths. sps is one NAL unit, header
@@ -1188,6 +1198,13 @@ static int mp4e_flush_fragment(MP4E_mux_t *mux)
     tr->pending_sample.bytes = 0;
     mux->frag_track = -1;
     return MP4E_STATUS_OK;
+}
+
+int MP4E_flush(MP4E_mux_t *mux)
+{
+    if (!mux || !mux->enable_fragmentation)
+        return MP4E_STATUS_BAD_ARGUMENTS;
+    return mp4e_flush_fragment(mux);
 }
 
 int MP4E_put_sample(MP4E_mux_t *mux, int track_num, const void *data, int data_bytes, int duration, int kind)

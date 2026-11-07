@@ -114,8 +114,13 @@ int Renderer::get_or_create_display_buffer(DecodedUnit* du, DisplayBufferInfo& o
     if (render_mode == FrontBuffer) {
         int slot_idx = 0;
         if(display_buffers[slot_idx].drm_fb_id != 0) {
-            out_info = display_buffers[slot_idx];
-            return slot_idx;
+            // A new picture size needs a buffer of its own: copied into the
+            // old one, a bigger picture ran past the end of its mapping.
+            if (display_buffers[slot_idx].width == du->width && display_buffers[slot_idx].height == du->height) {
+                out_info = display_buffers[slot_idx];
+                return slot_idx;
+            }
+            cleanup_display_buffer(display_buffers[slot_idx]);
         }
         // Fallthrough to create SW buffer at index 0
         // We trick the subsequent logic by temporarily clearing has_prime_fd if it's set
@@ -195,9 +200,14 @@ int Renderer::get_or_create_display_buffer(DecodedUnit* du, DisplayBufferInfo& o
     }
 
     if(display_buffers[slot_idx].drm_fb_id != 0) {
-        // buffer has already been created, reuse.
-        out_info = display_buffers[slot_idx];
-        return slot_idx;
+        // buffer has already been created, reuse - if it is this picture's size
+        // (a bigger one would be copied past the end of it).
+        if (display_buffers[slot_idx].width == du->width && display_buffers[slot_idx].height == du->height &&
+            display_buffers[slot_idx].sw_base) {
+            out_info = display_buffers[slot_idx];
+            return slot_idx;
+        }
+        cleanup_display_buffer(display_buffers[slot_idx]);
     }
 
     // Determine DRM format based on input frame pixel format
@@ -237,6 +247,7 @@ int Renderer::get_or_create_display_buffer(DecodedUnit* du, DisplayBufferInfo& o
     sw_buf.height = du->height;
     sw_buf.stride = out.stride; // driver-aligned dumb-buffer pitch (matches the FB)
     sw_buf.sw_base = base;
+    sw_buf.sw_size = out.size;
 
     // Calculate offsets based on format (in terms of the aligned pitch, so the
     // copy lands exactly where drmModeAddFB2 expects each plane).
@@ -400,6 +411,13 @@ void Renderer::cleanup_display_buffer(DisplayBufferInfo& buffer_info) {
     if (buffer_info.drm_fb_id != 0) {
         drmModeRmFB(dev->drm_fd, buffer_info.drm_fb_id);
         buffer_info.drm_fb_id = 0;
+    }
+    // A software buffer's mapping (get_or_create_display_buffer), which was
+    // left behind with every buffer let go.
+    if (buffer_info.sw_base) {
+        munmap(buffer_info.sw_base, buffer_info.sw_size);
+        buffer_info.sw_base = nullptr;
+        buffer_info.sw_size = 0;
     }
     if (buffer_info.gem_handle != 0) {
         // struct drm_gem_close args = { .handle = buffer_info.gem_handle };
@@ -1610,6 +1628,11 @@ void Renderer::update_stats(DecodedUnit *du, uint64_t display_start_ts) {
         printf("renderer: latency samples in 5 s: %u timed slice by slice, %u as whole pictures, "
                "%u pictures up again not counted again, %u taken at 100 ms with a slice missing\n",
                samples_sliced_, samples_whole_, samples_again_, slice_timeouts_);
+        // The stats screen's SHOWN/DECODED, here too: a screen recording
+        // (REC) loads the display enough to change it.
+        printf("renderer: %u pictures shown in 5 s, %u never shown (overtaken before their refresh)\n",
+               samples_sliced_ + samples_whole_, skipped_5s_);
+        skipped_5s_ = 0;
         samples_sliced_ = samples_whole_ = samples_again_ = slice_timeouts_ = 0;
         slice_log_.slowest[0] = slice_log_.slowest[1] = slice_log_.slowest[2] = 0;
         slice_log_.since = now;
@@ -1639,6 +1662,7 @@ void Renderer::add_latency_sample(uint64_t tx_enc, uint64_t tx_proc, uint64_t de
                                   uint64_t disp_lat, uint64_t total_lat, bool key, unsigned skipped,
                                   const float* slice_ms, int nslices, const SliceLatency* waits,
                                   const SliceStages* sl, uint64_t shown_us, uint64_t cap_us, bool air) {
+    skipped_5s_ += skipped;
     if (stats_.frame_counter >= Stats::kMaxFrames) return;
     const uint64_t now = get_time_us();
     uint64_t pace_lat = (stats_.last_frame_ts > 0 && now > stats_.last_frame_ts) ? now - stats_.last_frame_ts : 0;

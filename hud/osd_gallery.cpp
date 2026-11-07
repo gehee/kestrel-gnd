@@ -205,13 +205,16 @@ void OSD::stats_history_update(uint64_t now) {
     const uint64_t cutoff = now > keep_us ? now - keep_us : 0;
     static std::vector<StatsFrame> fresh;
     static std::vector<display::FlipSample> fresh_flips;
+    static std::vector<StatsResend> fresh_resends;
     fresh.clear();
     fresh_flips.clear();
+    fresh_resends.clear();
 
     // Not looked at for longer than the history reaches: start over.
     if (stats_frames_t_ && now > stats_frames_t_ + keep_us) {
         stats_frames_.clear(); stats_frames_head_ = 0; stats_frames_t_ = 0;
         stats_flips_.clear();  stats_flips_head_ = 0;  stats_flips_t_ = 0;
+        stats_resends_.clear(); stats_resends_head_ = 0; stats_resends_t_ = 0;
     }
     pthread_mutex_lock(&osd_mutex);
     drain_latency_frames();
@@ -226,11 +229,18 @@ void OSD::stats_history_update(uint64_t now) {
         sf.wait[0] = f.processing_wait_ms; sf.wait[1] = f.net_wait_ms;
         sf.wait[2] = f.dec_wait_ms; sf.wait[3] = f.disp_wait_ms;
         sf.video_mbps = f.video_mbps; sf.link_mbps = f.rf_mbps;
-        sf.lost = f.lost; sf.snr = f.snr; sf.mcs = f.mcs; sf.bw = f.bw_idx; sf.air = f.air; sf.key = f.key; sf.skipped = f.skipped;
+        sf.lost = f.lost; sf.snr = f.snr; sf.mcs = f.mcs; sf.bw = f.bw_idx; sf.air_dbm = f.air_dbm; sf.freq_mhz = f.freq_mhz; sf.dist_m = f.dist_m; sf.air = f.air; sf.key = f.key; sf.skipped = f.skipped;
         sf.shown_us = f.shown_us; sf.cap_us = f.cap_us;
         sf.nslices = f.nslices;
         for (int s = 0; s < kLatSlices; s++) { sf.slice_ms[s] = f.slice_ms[s]; sf.sl[s] = f.sl[s]; }
         fresh.push_back(sf);
+    }
+    // The air radio's resends since the newest held: the HUD keeps them as
+    // the radio publishes them (sync_radio).
+    {
+        size_t i = resend_hist_.size();
+        while (i > 0 && resend_hist_[i - 1].t_us > stats_resends_t_) i--;
+        fresh_resends.insert(fresh_resends.end(), resend_hist_.begin() + (long)i, resend_hist_.end());
     }
     pthread_mutex_unlock(&osd_mutex);
     if (!fresh.empty()) {
@@ -243,6 +253,15 @@ void OSD::stats_history_update(uint64_t now) {
         stats_flips_.reserve(stats_flips_.size() + fresh_flips.size());
         for (const auto& f : fresh_flips) stats_flips_.push_back({ f.t_us, f.gap_us });
     }
+    if (!fresh_resends.empty()) {
+        stats_resends_t_ = fresh_resends.back().t_us;
+        stats_resends_.insert(stats_resends_.end(), fresh_resends.begin(), fresh_resends.end());
+    }
+    // A first fill (an open, after gallery_release) takes minutes at once: that
+    // much scratch is not kept for the tenths of a second that follow.
+    if (fresh.capacity() > 4096) std::vector<StatsFrame>().swap(fresh);
+    if (fresh_flips.capacity() > 4096) std::vector<display::FlipSample>().swap(fresh_flips);
+    if (fresh_resends.capacity() > 4096) std::vector<StatsResend>().swap(fresh_resends);
     // Forget what is older than any window shows.
     while (stats_frames_head_ < stats_frames_.size() && stats_frames_[stats_frames_head_].t_us < cutoff) stats_frames_head_++;
     while (stats_flips_head_ < stats_flips_.size() && stats_flips_[stats_flips_head_].t_us < cutoff) stats_flips_head_++;
@@ -253,6 +272,11 @@ void OSD::stats_history_update(uint64_t now) {
     if (stats_flips_head_ > 4096 && stats_flips_head_ * 2 > stats_flips_.size()) {
         stats_flips_.erase(stats_flips_.begin(), stats_flips_.begin() + (long)stats_flips_head_);
         stats_flips_head_ = 0;
+    }
+    while (stats_resends_head_ < stats_resends_.size() && stats_resends_[stats_resends_head_].t_us < cutoff) stats_resends_head_++;
+    if (stats_resends_head_ > 4096 && stats_resends_head_ * 2 > stats_resends_.size()) {
+        stats_resends_.erase(stats_resends_.begin(), stats_resends_.begin() + (long)stats_resends_head_);
+        stats_resends_head_ = 0;
     }
 }
 
@@ -278,12 +302,29 @@ void OSD::stats_refresh(int window_idx, uint64_t now) {
     const StatsFlip* lb = stats_flips_.data() + stats_flips_head_;
     const size_t ln = stats_flips_.size() - stats_flips_head_;
     const StatsFlip* l0 = std::lower_bound(lb, lb + ln, t0, [](const StatsFlip& f, uint64_t t) { return f.t_us < t; });
+    const StatsResend* rb = stats_resends_.data() + stats_resends_head_;
+    const size_t rn = stats_resends_.size() - stats_resends_head_;
+    const StatsResend* r0 = std::lower_bound(rb, rb + rn, t0, [](const StatsResend& r, uint64_t t) { return r.t_us < t; });
     build_stats(f0, (size_t)(fb + fn - f0), l0, (size_t)(lb + ln - l0), now, ws, dev->flips_are_frames(), stats_view_,
-                dev->frame_period_us());
+                dev->frame_period_us(), r0, (size_t)(rb + rn - r0));
+    stats_view_.resend_known = link_view().resend_known;
     stats_view_.freq_mhz = osd_vars.radio_link.state == 2 ? osd_vars.radio_link.tx_freq : 0;
     stats_view_.bw_idx = osd_vars.radio_link.state == 2 ? osd_vars.radio_link.bw_step : -1;
+    stats_view_.frame_us = osd_vars.radio_link.state == 2 ? osd_vars.radio_link.frame_us : 0;
     stats_view_.vtx_temp_c = vtx_temp_valid && osd_vars.radio_link.state == 2 ? vtx_cpu_c.load() : -1;
     stats_view_.vrx_temp_c = vrx_temp_cached_ > 0 ? vrx_temp_cached_ : -1;
+    {
+        // The screen: its mode with the mode's exact refresh, and the refresh
+        // it really runs at - measured from its flips, the frame period's (the
+        // mode's, or Refresh Sync's) without them.
+        const display::Mode md = dev->mode();
+        const double period = dev->frame_period_us();
+        const float hz = dev->measured_refresh_hz();
+        stats_view_.screen_w = md.w;
+        stats_view_.screen_h = md.h;
+        stats_view_.screen_mode_hz = (float)dev->mode_refresh_hz();
+        stats_view_.screen_hz = hz > 0 ? hz : period > 0 ? (float)(1e6 / period) : 0.0f;
+    }
     stats_view_window_ = ws;
     stats_view_us_ = now;
     if (stats_shown_us_ == 0 || now - stats_shown_us_ >= 500000 || stats_shown_.window_s != ws) {
@@ -376,6 +417,27 @@ void OSD::gallery_capture_frame(int W, int H) {
     signal_render(prof::kWakeAnim);
 }
 
+// The gallery has closed: what it holds goes - the thumbnails (up to 24 at
+// 640x360), the two screen-size textures (the copy of the screen it opened on,
+// the stats screen's slow layer) and the stats history, about 40 MB at 1080p
+// that stayed for the rest of the session. The next open makes them again.
+void OSD::gallery_release() {
+    for (auto& th : gallery_thumbs_) canvas_->free_image(th.second.tex);
+    gallery_thumbs_.clear();
+    canvas_->free_image(gallery_snap_tex_);
+    gallery_snap_tex_ = 0;
+    gallery_snap_valid_ = false;
+    canvas_->free_image(stats_layer_tex_);
+    stats_layer_tex_ = 0;
+    stats_layer_valid_ = false;
+    std::vector<StatsFrame>().swap(stats_frames_);
+    std::vector<StatsFlip>().swap(stats_flips_);
+    std::vector<StatsResend>().swap(stats_resends_);
+    stats_frames_head_ = stats_flips_head_ = stats_resends_head_ = 0;
+    stats_frames_t_ = stats_flips_t_ = stats_resends_t_ = 0;
+    stats_view_window_ = -1;   // rebuilt at once from what is topped up again
+}
+
 void OSD::gallery_prewarm() {
     static const char* const words[] = {
         "GALLERY", "LIVE", "LAST FRAME", "NO VIDEO", "NO PREVIEW YET", "READING THE CARD",
@@ -387,10 +449,10 @@ void OSD::gallery_prewarm() {
         "CANCEL", "DELETE",
         "STATS", "Latency, frame pacing and link, live", "LATENCY", "SMOOTH", "SHOWN/DECODED", "fps", "LOST",
         "MCS / SNR", "VIDEO", "LINK USE", "VTX TEMP", "VRX TEMP", "worst", "latency distribution",
-        "Exp", "Read", "Enc", "RF", "Dec", "Disp", "ms", "I", "Mb", "link", "p50", "p99", "now",
+        "Exp", "Read", "Enc", "RF", "Dec", "Disp", "ms", "I", "Mb", "link", "p50", "p99", "now", "air power", "bandwidth", "channel", "frame spacing", "a frame late",
         "0", "20", "40", "60", "80", "100", "-10 s", "-1 min", "-3 min", "WAITING FOR VIDEO",
-        "frame spacing", "n/a (needs vsync)", "skipped", "--", "slices timelines", "slice timeline",
-        "| vblank  : mid-screen",
+        "frame spacing", "n/a (needs vsync)", "skipped", "resent", "RESENT", "--", "slices timelines", "slice timeline",
+        "| vblank  : mid-screen", "SCREEN MODE", "CURRENT",
         "1080p", "720p",
     };
     for (const char* w : words) canvas_->cache_text(w);
@@ -429,7 +491,8 @@ bool OSD::render_gallery(int W, int H) {
     const bool animating = gallery_.update(now);
     const Gallery::Snapshot s = gallery_.snapshot();
     service_clip_player(s);
-    if (!gallery_.active() || !s.items) return false;
+    if (!gallery_.active()) { gallery_release(); return false; }
+    if (!s.items) return false;
 
     const auto& items = *s.items;
     const int n = (int)items.size();
@@ -464,7 +527,8 @@ bool OSD::render_gallery(int W, int H) {
     // the gallery was up stayed in TRANSITION, and the live tile stayed empty, until
     // Back. The HUD finishes the transition when it is drawn again.
     const bool live_pic = (vs == VideoState::LIVE || vs == VideoState::TRANSITION);
-    const bool live_fresh = live_pic && now - last_frame_us < 1500000ULL;
+    // A picture stamped after `now` was read is fresh (the age would wrap).
+    const bool live_fresh = live_pic && (now <= last_frame_us || now - last_frame_us < 1500000ULL);
 
     int px, py, pw, ph;
     dev->picture_rect(W, H, px, py, pw, ph);
@@ -569,8 +633,10 @@ bool OSD::render_gallery(int W, int H) {
     static const char* const kWinTime[5]   = { "-2 s", "-5 s", "-10 s", "-1 min", "-3 min" };
     float stats_fr = 0.0f;       // how far the chart has scrolled past its last rebuild, in columns
     const float lime[3]  = { 0.70f, 1.00f, 0.00f };
+    const float violet[3] = { 0.78f, 0.58f, 1.00f };   // the air unit's TX power
     const float amber[3] = { 0.95f, 0.79f, 0.30f };
     const float red[3]   = { 1.00f, 0.30f, 0.30f };
+    const float magenta[3] = { 1.00f, 0.42f, 0.86f };  // blocks the air radio sent again
     const float white[3] = { 1.0f, 1.0f, 1.0f };
     const float panel[3] = { ground[0] * 0.45f, ground[1] * 0.45f, ground[2] * 0.45f };
 
@@ -619,8 +685,9 @@ bool OSD::render_gallery(int W, int H) {
     };
 
     // Positions in the screen's box, shared by the two layers.
-    const float kx0 = 42, kx1 = 418, kchY = 86, kchH = 128, kbase = kchY + kchH;   // latency chart
-    const float klb = 352, klh = 58;                                              // link lane
+    const float kx0 = 42, kx1 = 418, kchY = 84, kchH = 128, kbase = kchY + kchH;   // latency chart
+    const float klb = 300, klh = 46;                                              // link lane, under the chart
+    const float krow = klb + 6, krh = 11, krp = 13;                               // link settings rows under it (MCS, channel, bandwidth, power)
     const float khx = 464, khy = 156, khw = 208, khh = 56;                        // histogram
 
     // ---- the layer that changes twice a second ----
@@ -658,13 +725,22 @@ bool OSD::render_gallery(int W, int H) {
         if (sh.freq_mhz > 0) snprintf(b, sizeof(b), "%d / %d", ar_mcs_label(sh.mcs_now), (int)sh.snr_now);
         else snprintf(b, sizeof(b), "--");
         chip(262, "MCS / SNR", b);
-        // The channel, and how wide the video link is on it now.
+        // The channel, how wide the video link is on it now, and the radio's
+        // TDD frame (a picture waits for its video blocks in it).
         if (sh.freq_mhz > 0) snprintf(b, sizeof(b), "%d", sh.freq_mhz); else snprintf(b, sizeof(b), "--");
         chip(338, "CHANNEL", b);
+        float cx = X(338) + text_width(b, 16 * fs);
         if (sh.freq_mhz > 0 && sh.bw_idx >= 0) {
             char w[24];
             snprintf(w, sizeof(w), "%s MHz", gnd::bw_step_label(sh.bw_idx));
-            text(w, X(338) + text_width(b, 16 * fs) + 4 * m, Yd(40), 11 * fs, 0, quiet, A);
+            text(w, cx + 4 * m, Yd(40), 11 * fs, 0, quiet, A);
+            cx += 4 * m + text_width(w, 11 * fs);
+        }
+        if (sh.freq_mhz > 0 && sh.frame_us > 0) {
+            char w[24];
+            snprintf(w, sizeof(w), "%.2f ms", sh.frame_us / 1000.0f);
+            text("RF FRAME", cx + 8 * m, Yd(16), 11 * fs, 0, quiet, A);
+            text(w, cx + 8 * m, Yd(40), 11 * fs, 0, ink, A);
         }
         // A second row under them, a label and its value each: the link's use
         // and losses from the left edge, the two units' temperatures to the
@@ -689,6 +765,15 @@ bool OSD::render_gallery(int W, int H) {
             fig(kx0, "LINK USE", b);
             snprintf(b, sizeof(b), "%u", (unsigned)sh.lost_total);
             fig(104, "LOST", b);
+            // Blocks the air radio sent again in the window (Open8030 at both
+            // ends), and the frames it stalled in, if any.
+            {
+                const float rx = 104 + (text_width("LOST", rf2) + text_width(b, rf2)) / m + 3 + 16;
+                if (!sh.resend_known) snprintf(b, sizeof(b), "--");
+                else if (sh.stall_frames) snprintf(b, sizeof(b), "%u, %u stalled", (unsigned)sh.resent_blocks, (unsigned)sh.stall_frames);
+                else snprintf(b, sizeof(b), "%u", (unsigned)sh.resent_blocks);
+                fig(rx, "RESENT", b, sh.resend_known && sh.stall_frames ? red : nullptr);
+            }
             const float vrx = temp(kx1, "VRX TEMP", sh.vrx_temp_c);
             temp(vrx - 16, "VTX TEMP", sh.vtx_temp_c);
         }
@@ -708,49 +793,43 @@ bool OSD::render_gallery(int W, int H) {
             snprintf(b, sizeof(b), "%d", ms);
             text(b, X(kx0 - 5), Yl((float)ms) + 3.2f * m, 8.5f * fs, 2, quiet, A);
         }
-        text("ms", X(kx0 - 5), Yd(80), 11 * fs, 2, quiet, A);    // the axis's unit, over it
-        text("I", X(kx0 - 5), Yd(227), 11 * fs, 2, quiet, A);
-        // Frame spacing: each picture shown by how long after the one before it
-        // went up, in ranges around the source's spacing S (gallery_stats.hpp),
-        // a bar each - its height the root of its share, so a few in a thousand
-        // still show beside nine in ten on target - and the share over it.
-        text("frame spacing", X(kx0), Yd(240), 11 * fs, 0, quiet, A);
-        if (sh.pacing && sh.sp_n && sh.sp_src_ms > 0) {
-            const float S = sh.sp_src_ms;
-            snprintf(b, sizeof(b), "source %.1f fps   target %.2f +/- 0.3 ms", 1000.0f / S, S);
-            text(b, X(kx0) + text_width("frame spacing", 11 * fs) + 8 * m, Yd(240), 9 * fs, 0, quiet, A);
-            snprintf(b, sizeof(b), "on target %.1f%%", sh.on_target_pct);
-            text(b, X(kx1), Yd(240), 11 * fs, 2, ink, A);
-            const int nb = StatsView::kSpBins;
-            const float bw = (kx1 - kx0) / (float)nb, by = 266, bh = 13;
-            const float e[7] = { S - 1.5f, S - 0.3f, S + 0.3f, S + 1.5f, 1.5f * S, 2.5f * S, 3.5f * S };
-            const float* const col[StatsView::kSpBins] = { red, amber, lime, amber, amber, red, red, red };
-            fill(X(kx0), Yd(by), (kx1 - kx0) * m, 0.6f * m, quiet, 0.5f * A);
-            for (int k = 0; k < nb; k++) {
-                const float xc = kx0 + (k + 0.5f) * bw;
-                const float share = (float)sh.sp[k] / (float)sh.sp_n;
-                const float h = sh.sp[k] ? std::max(0.8f, bh * std::sqrt(share)) : 0.0f;
-                if (h > 0) fill(X(xc - 0.42f * bw), Yd(by - h), 0.84f * bw * m, h * m, col[k], A);
-                const float* tc = k == StatsView::kSpTarget ? ink : quiet;
-                snprintf(b, sizeof(b), "%.1f%%", 100.0f * share);
-                text(b, X(xc), Yd(251), 8.5f * fs, 1, tc, A);
-                if (k == 0) snprintf(b, sizeof(b), "< %.1f", e[0]);
-                else if (k == nb - 1) snprintf(b, sizeof(b), "> %.1f", e[6]);
-                else snprintf(b, sizeof(b), "%.1f-%.1f", e[k - 1], e[k]);
-                text(b, X(xc), Yd(275), 8 * fs, 1, tc, A);
+        text("ms", X(kx0 - 5), Yd(kchY - 6), 11 * fs, 2, quiet, A);    // the axis's unit, over it
+        text("I", X(kx0 - 5), Yd(kbase + 13), 11 * fs, 2, quiet, A);
+        // Frame spacing, one line of words over the chart: each picture
+        // shown by how long after the one before it went up, against the
+        // source's spacing S (gallery_stats.hpp) - on target (S +- 0.3 ms),
+        // early, late (up to 1.5 S), a frame late (about 2 S) and later.
+        {
+            float x = X(kx0);
+            auto put = [&](const char* t, const float* col) { text(t, x, Yd(kchY - 6), 9 * fs, 0, col, A); x += text_width(t, 9 * fs) + 7 * m; };
+            put("frame spacing", quiet);
+            if (sh.pacing && sh.sp_n && sh.sp_src_ms > 0) {
+                const float n = (float)sh.sp_n;
+                auto pct = [&](uint32_t c) { return 100.0f * (float)c / n; };
+                snprintf(b, sizeof(b), "on target %.1f%%", sh.on_target_pct);
+                put(b, ink);
+                snprintf(b, sizeof(b), "early %.1f%%   late %.1f%%   a frame late %.1f%%   later %.1f%%   at %.0f fps",
+                         pct(sh.sp[0] + sh.sp[1]), pct(sh.sp[3] + sh.sp[4]), pct(sh.sp[5]), pct(sh.sp[6] + sh.sp[7]),
+                         1000.0f / sh.sp_src_ms);
+                put(b, quiet);
+            } else {
+                put("n/a (needs vsync)", quiet);
             }
-        } else {
-            text("n/a (needs vsync)", X(kx0) + text_width("frame spacing", 11 * fs) + 8 * m, Yd(240), 9 * fs, 0, quiet, A);
         }
         // What the stems over the chart are, and the ticks along its top.
         {
             const float kw = text_width("keyframe", 11 * fs) / m;
-            text("keyframe", X(kx1), Yd(100), 11 * fs, 2, quiet, A);
-            fill(X(kx1 - kw - 8.5f), Yd(100 - 7), 1.0f * m, 7 * m, amber, 0.7f * A);
-            fill(X(kx1 - kw - 11), Yd(100 - 10.5f), 6 * m, 4 * m, amber, A);
+            text("keyframe", X(kx1), Yd(kchY + 14), 11 * fs, 2, quiet, A);
+            fill(X(kx1 - kw - 8.5f), Yd(kchY + 14 - 7), 1.0f * m, 7 * m, amber, 0.7f * A);
+            fill(X(kx1 - kw - 11), Yd(kchY + 14 - 10.5f), 6 * m, 4 * m, amber, A);
             const float sx = kx1 - kw - 20, sw = text_width("skipped", 11 * fs) / m;
-            text("skipped", X(sx), Yd(100), 11 * fs, 2, quiet, A);
-            fill(X(sx - sw - 6), Yd(100 - 8), 1.6f * m, 8 * m, red, A);
+            text("skipped", X(sx), Yd(kchY + 14), 11 * fs, 2, quiet, A);
+            fill(X(sx - sw - 6), Yd(kchY + 14 - 8), 1.6f * m, 8 * m, red, A);
+            if (sh.resend_known) {      // the ticks up from the chart's foot
+                const float rx = sx - sw - 20;
+                text("resent", X(rx), Yd(kchY + 14), 11 * fs, 2, quiet, A);
+                fill(X(rx - text_width("resent", 11 * fs) / m - 6), Yd(kchY + 14 - 8), 1.6f * m, 8 * m, magenta, A);
+            }
         }
 
         // the link lane: what it means, said in words - the scale in Mbps (a line at the
@@ -760,15 +839,16 @@ bool OSD::render_gallery(int W, int H) {
         {
             // A step every 5 Mbps (every 10 or 20 once the scale is too big for the lane to
             // hold that many labels), the round ones a little stronger.
-            const int step = lmx <= 40.5f ? 5 : lmx <= 80.5f ? 10 : 20;
+            // (The lane is 46 high: a line every 10 Mbps, a figure every 20.)
+            const int step = lmx <= 40.5f ? 10 : lmx <= 80.5f ? 20 : 40;
             for (int mb = step; mb <= (int)(lmx + 0.5f); mb += step)
                 if (mb % 20) dashed_h(X(kx0), X(kx1), Yk((float)mb), 0.8f * m, 3 * m, 5 * m);
             flush(kTriangles, quiet, 0.2f * A);
             for (int mb = step; mb <= (int)(lmx + 0.5f); mb += step)
                 if (mb % 20 == 0) dashed_h(X(kx0), X(kx1), Yk((float)mb), 1.0f * m, 3 * m, 5 * m);
             flush(kTriangles, quiet, 0.4f * A);
-            text("Mbps", X(kx0 - 5), Yd(287), 11 * fs, 2, quiet, A);   // the axis's unit, over it
-            for (int mb = 0; mb <= (int)(lmx + 0.5f); mb += step) {
+            text("Mbps", X(kx0 - 5), Yd(klb - klh - 7), 11 * fs, 2, quiet, A);   // the axis's unit, over it
+            for (int mb = 0; mb <= (int)(lmx + 0.5f); mb += 2 * step) {
                 snprintf(b, sizeof(b), "%d", mb);
                 text(b, X(kx0 - 5), Yk((float)mb) + 3.2f * m, 9 * fs, 2, quiet, A);
             }
@@ -778,47 +858,68 @@ bool OSD::render_gallery(int W, int H) {
             // Names only: the figures are where the lines end.
             auto key = [&](const char* label, const float* col, int shape) {
                 // shape 0: a filled swatch (an area), 1: a line, 2: a tick
-                if (shape == 0)      fill(X(kx), Yd(279), 10 * m, 8 * m, col, 0.55f * A);
-                else if (shape == 1) fill(X(kx), Yd(282.5f), 10 * m, 1.6f * m, col, A);
-                else                 fill(X(kx + 4), Yd(278), 2.4f * m, 9 * m, col, A);
-                text(label, X(kx + 14), Yd(287), 11 * fs, 0, ink, A);
+                if (shape == 0)      fill(X(kx), Yd(klb - klh - 15), 10 * m, 8 * m, col, 0.55f * A);
+                else if (shape == 1) fill(X(kx), Yd(klb - klh - 11.5f), 10 * m, 1.6f * m, col, A);
+                else                 fill(X(kx + 4), Yd(klb - klh - 16), 2.4f * m, 9 * m, col, A);
+                text(label, X(kx + 14), Yd(klb - klh - 7), 11 * fs, 0, ink, A);
                 kx += 14 + text_width(label, 11 * fs) / m + 4 + 14;
             };
             key("video rate", data, 0);
             key("link capacity", white, 1);
-            key("lost packets", red, 2);
-            if (sh.bw_mhz_max > 0 && kx + 14 + text_width("bandwidth", 11 * fs) / m <= kx1) key("bandwidth", lime, 1);
+            key("lost pictures", red, 2);
+            key("distance", violet, 1);
         }
         {
             // Each line carries its figure where it ends, with its unit as the
             // bandwidth's does, pushed down if it meets the one above. "Mb", not
             // "Mbps": "44.9 Mb" ends before the right column, "31.4 Mbps" did not.
-            const float yl = Yk(std::max(sh.link_now, 0.0f)) + 4 * m;
-            const float yv = std::max(Yk(std::max(sh.video_now, 0.0f)) + 4 * m, yl + 12 * m);
-            auto figure = [&](float mbps, char* out, size_t n) {
-                snprintf(out, n, "%.1f Mb", std::max(mbps, 0.0f));
-            };
-            char fl[24], fv[24];
-            figure(sh.link_now, fl, sizeof(fl));
-            figure(sh.video_now, fv, sizeof(fv));
-            text(fl, X(kx1 + 4), yl, 11 * fs, 0, white, A);
-            text(fv, X(kx1 + 4), std::min(yv, Yd(klb) + 4 * m), 11 * fs, 0, data, A);
-            // The bandwidth's figure where its line ends, clear of the two names.
-            if (sh.bw_idx >= 0) {
-                snprintf(b, sizeof(b), "%s MHz", gnd::bw_step_label(sh.bw_idx));
-                static const float kMhz[6] = { 1.25f, 2.5f, 5, 10, 20, 40 };
-                float yw = Yk(kMhz[std::min(5, sh.bw_idx)]) + 4 * m;
-                const float lv = std::min(yv, Yd(klb) + 4 * m);
-                for (int k = 0; k < 2; k++)
-                    if (std::fabs(yw - yl) < 12 * m || std::fabs(yw - lv) < 12 * m) yw = std::min(yl, lv) - 12 * m;
-                text(b, X(kx1 + 4), yw, 11 * fs, 0, lime, A);
+            // The distance's too, on its own scale (the right axis, below).
+            const float dmx = std::max(1.0f, stats_dmax_);
+            struct Fig { float y; char t[24]; const float* col; } fg[3];
+            int nf = 0;
+            fg[nf].y = Yk(std::max(sh.link_now, 0.0f)) + 4 * m; fg[nf].col = white;
+            snprintf(fg[nf++].t, sizeof(fg[0].t), "%.1f Mb", std::max(sh.link_now, 0.0f));
+            fg[nf].y = Yk(std::max(sh.video_now, 0.0f)) + 4 * m; fg[nf].col = data;
+            snprintf(fg[nf++].t, sizeof(fg[0].t), "%.1f Mb", std::max(sh.video_now, 0.0f));
+            if (sh.dist_now >= 0) {
+                fg[nf].y = Yd(klb - std::min((float)sh.dist_now, dmx) / dmx * klh) + 4 * m; fg[nf].col = violet;
+                snprintf(fg[nf++].t, sizeof(fg[0].t), "%d m", sh.dist_now);
             }
+            std::sort(fg, fg + nf, [](const Fig& a, const Fig& b) { return a.y < b.y; });
+            // Pushed down where they meet; the last one no lower than the lane's foot, the others up from it.
+            for (int i = 1; i < nf; i++) fg[i].y = std::max(fg[i].y, fg[i - 1].y + 12 * m);
+            float foot = Yd(klb) + 4 * m;
+            for (int i = nf - 1; i >= 0; i--) { fg[i].y = std::min(fg[i].y, foot); foot = fg[i].y - 12 * m; }
+            for (int i = 0; i < nf; i++) text(fg[i].t, X(kx1 + 4), fg[i].y, 11 * fs, 0, fg[i].col, A);
+            // The right axis: the distance's scale, at the top and halfway, inside the lane's right edge.
+            char db[16];
+            snprintf(db, sizeof(db), "%d m", (int)std::lround(dmx));
+            text(db, X(kx1 - 2), Yd(klb - klh) + 9 * m, 9 * fs, 2, violet, 0.85f * A);
+            snprintf(db, sizeof(db), "%d", (int)std::lround(dmx / 2));
+            text(db, X(kx1 - 2), Yd(klb - klh * 0.5f) + 3.2f * m, 9 * fs, 2, violet, 0.85f * A);
         }
         text(kWinTime[wi], X(kx0), Yd(370), 11 * fs, 0, quiet, A);
         text("now", X(kx1), Yd(370), 11 * fs, 2, quiet, A);
 
         // right column, under the live picture: the latency's distribution
         // (its p50 and p99 are under the slices' table, per slice)
+        // The screen, under the live picture: its mode as it is named
+        // (1080p@120), then the refresh it runs at now.
+        if (sh.screen_w > 0) {
+            const float sf = 10 * fs, y = Yd(140.5f);
+            if (sh.screen_mode_hz > 0) snprintf(b, sizeof(b), "%dp@%ld", sh.screen_h, std::lround(sh.screen_mode_hz));
+            else snprintf(b, sizeof(b), "%dp", sh.screen_h);
+            float x = X(khx);
+            text("SCREEN MODE", x, y, sf, 0, quiet, A);
+            x += text_width("SCREEN MODE", sf) + 3 * m;
+            text(b, x, y, sf, 0, ink, A);
+            x += text_width(b, sf) + 10 * m;
+            if (sh.screen_hz > 0) {
+                snprintf(b, sizeof(b), "%.1f Hz", sh.screen_hz);
+                text("CURRENT", x, y, sf, 0, quiet, A);
+                text(b, x + text_width("CURRENT", sf) + 3 * m, y, sf, 0, ink, A);
+            }
+        }
         text("latency distribution", X(khx), Yd(khy - 4), 11 * fs, 0, quiet, A);
         {
             uint32_t hm = 1;
@@ -1060,27 +1161,87 @@ bool OSD::render_gallery(int W, int H) {
         auto Yl = [&](float ms) { return Yd(kbase - std::min(ms, mx) / mx * kchH); };
         const float lmx = stats_lmax_;
         auto Yk = [&](float mbps) { return Yd(klb - std::min(mbps, lmx) / lmx * klh); };
-
-        // the link's MCS over the top, a band per run (named after the geometry)
-        struct Label { float x; int mcs; } mlab[16];
-        int nlab = 0;
+        // The link's settings under the chart, a row each - MCS, channel,
+        // bandwidth, the air unit's power: a segment per run of one value,
+        // the value written in it (the newest one beside the chart if it is
+        // too short to hold it). A row's colour follows its value, not the
+        // run, so a segment keeps its colour as the chart scrolls.
+        // A column without a picture (in the 2 s window a column is 8 ms,
+        // shorter than a frame) holds the last one before it, up to 250 ms:
+        // the rows, the rates and the distance are not cut by it, a longer
+        // gap (a lost link) still cuts them.
+        int held[StatsView::kCols];
         {
+            const int hold = v.col_us ? (int)(250000 / v.col_us) : 0;
+            int last = -1;
+            for (int i = 0; i < StatsView::kCols; i++) {
+                if (v.have[i]) last = i;
+                held[i] = last >= 0 && i - last <= hold ? last : -1;
+            }
+        }
+        struct SegLabel { float xa, xb, y; char t[16]; bool last, light; } seglab[160];   // 4 rows x up to 40 runs
+        int nseg = 0;
+        auto row = [&](int r, bool bridge, auto value, auto paint, auto name) {
+            const float y = krow + r * krp;
             int i = 0;
             while (i < Cd) {
-                if (!v.have[i]) { i++; continue; }
+                const int val = value(i);
+                if (!val) { i++; continue; }
                 int j = i;
-                while (j + 1 < Cd && (!v.have[j + 1] || v.mcs[j + 1] == v.mcs[i])) j++;
-                const float xa = i == 0 ? kx0 : std::max(kx0, cxu(i) - 0.5f * colw);     // the ends are the chart's
+                // (MCS bridges the columns it is not known in, as it always has.)
+                while (j + 1 < Cd && (value(j + 1) == val || (bridge && !value(j + 1)))) j++;
+                const float xa = i == 0 ? kx0 : std::max(kx0, cxu(i) - 0.5f * colw);   // the ends are the chart's
                 const float xb = j == Cd - 1 ? kx1 : std::min(kx1, cxu(j) + 0.5f * colw);
                 if (xb > xa) {
-                    // The colour follows the rate, not the run, so a band keeps its colour as the chart scrolls.
-                    rect_v(X(xa), Yd(70), (xb - xa - 0.6f) * m, 12 * m);
-                    flush(kTriangles, (v.mcs[i] & 1) ? amber : lime, 0.22f * A);
-                    if (xb - xa > 36 && nlab < 16) mlab[nlab++] = { xa, v.mcs[i] };
+                    // a bright body, a lighter sheen along its top
+                    float col[3], sheen[3];
+                    paint(val, col);
+                    for (int c = 0; c < 3; c++) sheen[c] = 0.45f + 0.55f * col[c];
+                    rect_v(X(xa), Yd(y), (xb - xa - 0.8f) * m, krh * m);
+                    flush(kTriangles, col, A);
+                    rect_v(X(xa), Yd(y), (xb - xa - 0.8f) * m, 1.4f * m);
+                    flush(kTriangles, sheen, 0.75f * A);
+                    if (nseg < 160) {
+                        SegLabel& l = seglab[nseg++];
+                        l.xa = xa; l.xb = xb; l.y = y + 8.5f; l.last = j == Cd - 1;
+                        l.light = 0.299f * col[0] + 0.587f * col[1] + 0.114f * col[2] > 0.55f;   // dark text on it
+                        name(val, l.t, sizeof(l.t));
+                    }
                 }
                 i = j + 1;
             }
-        }
+        };
+        // Each row in one of the latency chart's colours, a shade of it per
+        // value: t from -1 (deeper) to 1 (lighter). Kept lively: the colour
+        // pushed a quarter further from grey, never darkened much (dark
+        // shades of these go muddy).
+        auto shade = [](const float* base, float t, float* out, float deep = 0.18f) {
+            t = std::max(-1.0f, std::min(1.0f, t));
+            const float g = (base[0] + base[1] + base[2]) / 3;
+            for (int c = 0; c < 3; c++) {
+                float x = std::max(0.0f, std::min(1.0f, g + (base[c] - g) * 1.25f));
+                out[c] = t >= 0 ? x + (1 - x) * 0.32f * t : x * (1 + deep * t);
+            }
+        };
+        auto ramp = [](float x, float lo, float hi) { return 2 * std::max(0.0f, std::min(1.0f, (x - lo) / (hi - lo))) - 1; };
+        // Every row: the higher the value, the deeper the shade.
+        // MCS: the RF stage's green, deeper as the rate climbs
+        row(0, true, [&](int i) { return held[i] >= 0 ? v.mcs[held[i]] + 1 : 0; },
+            [&](int val, float* c) { shade(kStageCol[1], -ramp((float)(val - 1), 0, 13), c, 0.42f); },
+            [&](int val, char* t, size_t n) { snprintf(t, n, "MCS %d", ar_mcs_label(val - 1)); });
+        // channel: the first stage's red, deeper as the frequency climbs (5650-5900 MHz)
+        row(1, false, [&](int i) { return held[i] >= 0 ? (int)v.freq[held[i]] : 0; },
+            [&](int val, float* c) { shade(kStageCol[0], -ramp((float)val, 5650, 5900), c, 0.42f); },
+            [&](int val, char* t, size_t n) { snprintf(t, n, "%d", val); });
+        // bandwidth: the decode stage's gold, deeper as it widens (5 to 40 MHz)
+        row(2, false, [&](int i) { return held[i] >= 0 ? (int)(v.bw_mhz[held[i]] + 0.5f) : 0; },
+            [&](int val, float* c) { shade(kStageCol[2], -ramp(std::log2((float)val), std::log2(5.0f), std::log2(40.0f)), c, 0.42f); },
+            [&](int val, char* t, size_t n) { snprintf(t, n, "%d MHz", val); });
+        // power: the display stage's orange, deeper as it climbs (the air
+        // unit's stock 13-26 dBm)
+        row(3, false, [&](int i) { return held[i] >= 0 ? (int)(v.air_dbm[held[i]] + 0.5f) : 0; },
+            [&](int val, float* c) { shade(kStageCol[3], -ramp((float)val, 13, 26), c, 0.42f); },
+            [&](int val, char* t, size_t n) { snprintf(t, n, "%d mW", ar_air_mw_from_dbm(val)); });
         // the stages stacked, the total over them
         {
             float acc[StatsView::kCols];
@@ -1143,7 +1304,7 @@ bool OSD::render_gallery(int W, int H) {
         float worst_x = 0;
         if (worst) {
             worst_x = colx(v.worst_col);
-            dashed_v(worst_x, Yd(82), Yd(kbase), 1.2f * m, 4 * m, 3 * m);
+            dashed_v(worst_x, Yd(kchY - 4), Yd(kbase), 1.2f * m, 4 * m, 3 * m);
             flush(kTriangles, red, A);
         }
         // keyframes
@@ -1152,47 +1313,56 @@ bool OSD::render_gallery(int W, int H) {
             int keys = 0, have_cols = 0;
             for (int i = 0; i < C; i++) { keys += v.key[i] ? 1 : 0; have_cols += v.have[i] ? 1 : 0; }
             if (keys * 10 < have_cols * 7)
-                for (int i = 0; i < C; i++) if (v.key[i]) rect_c(colx(i) - 1.0f * m, colx(i) + 1.0f * m, Yd(220), 7 * m);
+                for (int i = 0; i < C; i++) if (v.key[i]) rect_c(colx(i) - 1.0f * m, colx(i) + 1.0f * m, Yd(kbase + 6), 7 * m);
         }
         flush(kTriangles, quiet, A);
         // pictures never shown: a tick along the chart's top in their column
         for (int i = 0; i < C; i++) if (v.skip[i]) rect_c(colx(i) - 0.8f * m, colx(i) + 0.8f * m, Yd(kchY), 6 * m);
         flush(kTriangles, red, A);
+        // blocks the air radio sent again: a tick up from the chart's foot in their
+        // column (taller for more than one), right under the latency they cost; a
+        // frame it stalled in, a red one taller still
+        for (int i = 0; i < C; i++) if (v.resent[i]) {
+            const float h = v.resent[i] > 1 ? 10.0f : 6.0f;
+            rect_c(colx(i) - 0.8f * m, colx(i) + 0.8f * m, Yd(kbase - h), h * m);
+        }
+        flush(kTriangles, magenta, A);
+        for (int i = 0; i < C; i++) if (v.stall[i]) rect_c(colx(i) - 0.8f * m, colx(i) + 0.8f * m, Yd(kbase - 14), 14 * m);
+        flush(kTriangles, red, A);
         // the link: the video's rate against what the link carries, and the packets it lost
         for (int i = 0; i < Cd; i++) {
-            const float y = v.have[i] ? Yk(v.video[i]) : Yd(klb);
+            const float y = held[i] >= 0 ? Yk(v.video[held[i]]) : Yd(klb);
             if (i == 0)      { vtx(X(kx0), y); vtx(X(kx0), Yd(klb)); }
             vtx(colx(i), y); vtx(colx(i), Yd(klb));
             if (i == Cd - 1) { vtx(X(kx1), y); vtx(X(kx1), Yd(klb)); }
         }
         flush(kStrip, data, 0.5f * A);
         for (int i = 0; i < Cd; i++) {
-            const float y = v.have[i] ? Yk(v.link[i]) : Yd(klb);
+            const float y = held[i] >= 0 ? Yk(v.link[held[i]]) : Yd(klb);
             if (i == 0)      { vtx(X(kx0), y - 0.5f * m); vtx(X(kx0), y + 0.5f * m); }
             vtx(colx(i), y - 0.5f * m); vtx(colx(i), y + 0.5f * m);
             if (i == Cd - 1) { vtx(X(kx1), y - 0.5f * m); vtx(X(kx1), y + 0.5f * m); }
         }
         flush(kStrip, white, 0.7f * A);
-        // the link's bandwidth (MHz, on the lane's scale: 40 MHz at its 40), a
-        // step per change, cut where it is not known
+        // the distance (the right axis, 0 to stats_dmax_), a line cut where it is not known
         {
+            const float dmx = std::max(1.0f, stats_dmax_);
+            auto Ym = [&](float metres) { return Yd(klb - std::min(metres, dmx) / dmx * klh); };
+            auto known = [&](int k) { return held[k] >= 0 && v.dist_have[held[k]]; };
             int i = 0;
             while (i < Cd) {
-                if (!v.have[i] || v.bw_mhz[i] <= 0) { i++; continue; }
+                if (!known(i)) { i++; continue; }
                 int j = i;
-                while (j + 1 < Cd && v.have[j + 1] && v.bw_mhz[j + 1] == v.bw_mhz[i]) j++;
-                const float xa = i == 0 ? kx0 : std::max(kx0, cxu(i) - 0.5f * colw);
-                const float xb = j == Cd - 1 ? kx1 : std::min(kx1, cxu(j) + 0.5f * colw);
-                const float y = Yk(v.bw_mhz[i]);
-                if (xb > xa) rect_v(X(xa), y - 0.6f * m, (xb - xa) * m, 1.2f * m);
-                // the step to the next run
-                if (j + 1 < Cd && v.have[j + 1] && v.bw_mhz[j + 1] > 0) {
-                    const float y2 = Yk(v.bw_mhz[j + 1]);
-                    rect_c(X(xb) - 0.6f * m, X(xb) + 0.6f * m, std::min(y, y2) - 0.6f * m, std::fabs(y2 - y) + 1.2f * m);
+                while (j + 1 < Cd && known(j + 1)) j++;
+                for (int k = i; k <= j; k++) {
+                    const float y = Ym(v.dist[held[k]]);
+                    if (k == 0)      { vtx(X(kx0), y - 0.6f * m); vtx(X(kx0), y + 0.6f * m); }
+                    vtx(colx(k), y - 0.6f * m); vtx(colx(k), y + 0.6f * m);
+                    if (k == Cd - 1) { vtx(X(kx1), y - 0.6f * m); vtx(X(kx1), y + 0.6f * m); }
                 }
+                flush(kStrip, violet, 0.95f * A);
                 i = j + 1;
             }
-            flush(kTriangles, lime, 0.9f * A);
         }
         for (int i = 0; i < C; i++) if (v.lost[i]) rect_c(colx(i) - 1.5f * m, colx(i) + 1.5f * m, Yd(klb - 8), 8 * m);
         flush(kTriangles, red, A);
@@ -1206,9 +1376,43 @@ bool OSD::render_gallery(int W, int H) {
         }
         gflush();
         // what is written over the data
-        for (int i = 0; i < nlab; i++) {
-            snprintf(b, sizeof(b), "MCS %d", ar_mcs_label(mlab[i].mcs));
-            text(b, X(mlab[i].x + 5), Yd(80), 11 * fs, 0, quiet, A);
+        // Each segment's value: whole if it fits ("MCS 11", "20 MHz"), the
+        // number alone if that fits, else the number on a dark tag over the
+        // segments after it - so even a short run says what it went to -
+        // unless the row's label before it is still there (then it is
+        // skipped; a closer window, Up, spreads the runs out). The newest
+        // one beside the chart when it does not fit.
+        {
+            static const float dark[3] = { 0.06f, 0.07f, 0.10f };   // the screen's own dark
+            float row_end[4] = { 0, 0, 0, 0 };                      // where each row's last label ends (box units)
+            for (int i = 0; i < nseg; i++) {
+                const SegLabel& l = seglab[i];
+                const int r = std::max(0, std::min(3, (int)((l.y - 8.5f - krow) / krp + 0.5f)));
+                const char* num = l.t;
+                while (*num && !(*num >= '0' && *num <= '9')) num++;
+                char sh[16];
+                int k = 0;
+                while (num[k] && num[k] != ' ' && k < 15) { sh[k] = num[k]; k++; }
+                sh[k] = 0;
+                const float wf = text_width(l.t, 9 * fs) / m, ws = text_width(sh, 9 * fs) / m;
+                const float x0 = std::max(l.xa + 4, row_end[r] + 3);   // clear of a tag reaching into it
+                if (l.xb - x0 >= wf + 4) {
+                    text(l.t, X(x0), Yd(l.y), 9 * fs, 0, l.light ? dark : white, A);
+                    row_end[r] = x0 + wf;
+                } else if (l.xb - x0 >= ws + 3) {
+                    text(sh, X(x0), Yd(l.y), 9 * fs, 0, l.light ? dark : white, A);
+                    row_end[r] = x0 + ws;
+                } else if (l.last) {
+                    text(l.t, X(kx1 + 4), Yd(l.y), 9 * fs, 0, ink, A);
+                } else if (l.xa >= row_end[r] + 2 && l.xa + ws + 6 <= kx1) {
+                    rect_v(X(l.xa), Yd(l.y - 8.5f), (ws + 6) * m, krh * m);
+                    flush(kTriangles, dark, 0.85f * A);
+                    rect_v(X(l.xa), Yd(l.y - 8.5f), 0.8f * m, krh * m);   // its edge: where the run starts
+                    flush(kTriangles, white, A);
+                    text(sh, X(l.xa + 3), Yd(l.y), 9 * fs, 0, white, A);
+                    row_end[r] = l.xa + ws + 6;
+                }
+            }
         }
         text("p50", X(kx1 + 4), Yl(stats_p50_) + 4 * m, 11 * fs, 0, data, A);
         text("p99", X(kx1 + 4), Yl(stats_p99_) + 4 * m, 11 * fs, 0, amber, A);
@@ -1318,6 +1522,11 @@ bool OSD::render_gallery(int W, int H) {
             stats_p99_ = stats_p99_ <= 0 ? stats_shown_.p99 : stats_p99_ + (stats_shown_.p99 - stats_p99_) * ease;
             stats_ymax_ = stats_ymax_ <= 0 ? ytgt : stats_ymax_ + (ytgt - stats_ymax_) * ease;
             stats_lmax_ = stats_lmax_ <= 0 ? ltgt : stats_lmax_ + (ltgt - stats_lmax_) * ease;
+            // The distance's: the farthest in the window, up to the next 1-2-5 step (10 m at least).
+            float dtgt = 10.0f;
+            for (float step : { 10.0f, 20.0f, 50.0f, 100.0f, 200.0f, 500.0f, 1000.0f, 2000.0f, 5000.0f, 10000.0f, 20000.0f })
+                if (step >= v.dist_max) { dtgt = step; break; }
+            stats_dmax_ = stats_dmax_ <= 0 ? dtgt : stats_dmax_ + (dtgt - stats_dmax_) * ease;
         }
         const bool zoomed = stats_sel && pt > 0.003f;
         const float dist = std::min(1.0f, std::fabs((float)stats_i - s.scroll));
@@ -1472,7 +1681,10 @@ bool OSD::render_gallery(int W, int H) {
         }
         text(l1, W * 0.5f, 0.82f * H, 40 * u, 1, ink, words_a);
         text(l2, W * 0.5f, 0.82f * H + 40 * u, 28 * u, 1, quiet, words_a);
-        if (n == 1 && !s.loading)
+        // The strip always holds the live and stats tiles: none of the rest.
+        const bool none = std::none_of(items.begin(), items.end(),
+                                       [](const Gallery::Item& x) { return !x.live && !x.stats; });
+        if (none && !s.loading)
             text("NO RECORDINGS YET", W * 0.5f, 0.82f * H + 76 * u, 24 * u, 1, quiet, words_a);
 
         const float cy = 0.42f * H;

@@ -68,6 +68,9 @@ struct ScanSample {
     int work_chan = 0;          // the channel it is on now
     int freq_mhz[64] = {0};
     int power_dbm[64] = {0};
+    // Whether AUTO may take each where the pilot is, at the width the link
+    // runs (the radio's rules: the country, Max Bandwidth).
+    uint8_t usable[64] = {0};
     uint64_t last_update_ms = 0;      // 0: never
 };
 
@@ -84,11 +87,11 @@ enum RfCap { RF_CAP_POWER = 1, RF_CAP_MCS = 2, RF_CAP_LNA = 4,
 struct RadioState {
     LinkStats link{};
     float video_mbps = 0;      // received video, the last second (0 while none comes)
+    uint32_t frames_lost = 0;  // pictures the air unit sent that never came (gaps in its counter), since start
     int dist_raw = -1;         // its ranging reading, metres (-1: none)
-    // HUD > Calib Distance: the reading with the units side by side, for the
-    // air unit linked (by its radio MAC); subtracted from the reading.
-    int dist_offset = 0;
-    int dist_m = -1;           // the distance shown: metres, the offset off (-1: no reading)
+    // The distance shown, metres (-1: no reading): the reading itself, the
+    // radio's delays already off (Ar8030Link::current_distance).
+    int dist_m = -1;
     // Its settings as it holds them.
     int radio_fw = 0;          // its firmware: 0 stock, 1 Open8030
     int max_mcs = -1;
@@ -96,7 +99,9 @@ struct RadioState {
     int max_bw_mhz = 0;
     int steady = 0;
     bool chan_auto = false;    // channel adaptation on
+    int chan_hop = 0;          // AUTO HOP (1) or AUTO (0)
     unsigned rf_caps = 0;      // RfCap: the RF controls it accepted
+    int live_dbm = 0;          // its TX power as it last said it (Open8030 event 14), dBm; 0: not known
     // Its pairing window.
     int bind_state = 0;        // BindState
     int bind_secs_left = 0;
@@ -111,16 +116,15 @@ public:
     virtual Ticket set_max_mcs(int mcs) = 0;          // -1: none
     virtual Ticket set_max_bandwidth(int mhz) = 0;    // 0: no cap
     virtual Ticket set_steady(bool on) = 0;           // RADIO > Steady Latency
-    // The channel page. A channel picked: both ends move there, for the
-    // session (the next start searches again). Search (AUTO): from a picked
-    // channel, the radio searches and hops by itself again.
+    // The channel page. A channel picked: both ends move there, FIXED from
+    // then on. AUTO or AUTO HOP: its pick is made now. Search: from a picked
+    // channel, the ground searches again.
     virtual Ticket set_channel(int mhz) = 0;
+    virtual Ticket set_channel_auto(bool hop) = 0;
     virtual void search_channels() = 0;
     virtual void scan_screen(bool open) = 0;          // the scan polled fast while it is open
     virtual void bind() = 0;                          // the pairing window
-    // HUD > Calib Distance: the reading subtracted from now on, saved for the
-    // air unit linked (and as the start for one never calibrated).
-    virtual void set_dist_offset(int raw) = 0;
+    virtual void region_changed() = 0;                // AUTO's channels: the country, licence or time zone
     // What it sends as it comes, every item, each waking the watcher: the
     // channel scan, and the video received each second (Mbit/s).
     virtual bool take_scan(ScanSample& s) = 0;

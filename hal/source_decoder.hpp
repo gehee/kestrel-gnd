@@ -10,7 +10,7 @@ namespace hal {
 class SourceDecoder : public Vdec {
 public:
     using Factory=std::function<std::shared_ptr<Vdec>()>;
-    SourceDecoder(Factory factory,volatile bool* stop) : factory_(std::move(factory)),stop_(stop) {}
+    SourceDecoder(Factory factory,std::atomic<bool>* stop) : factory_(std::move(factory)),stop_(stop) {}
     void playback(bool on);
     void restart_playback();
     void pause_input(bool on) override;
@@ -24,7 +24,7 @@ public:
     bool failed() const override {return failed_;}
     uint64_t last_frame_us() const override;
 private:
-    Factory factory_;volatile bool* stop_;
+    Factory factory_;std::atomic<bool>* stop_;
     mutable std::mutex mutex_;
     std::shared_ptr<Vdec> active_;
     std::array<std::vector<uint8_t>,3> live_parameters_;

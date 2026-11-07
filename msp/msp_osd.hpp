@@ -46,6 +46,10 @@ class MspOsd {
         uint16_t payload_size;
         std::vector<uint8_t> payload_buf;
         uint8_t crc;
+        // The frame being parsed, from its '$': looked at again from the
+        // byte after it when it turns out bad (parse_byte).
+        std::vector<uint8_t> raw_;
+        bool step(uint8_t b);   // one byte through the parser; true: its frame is bad
         
         bool is_v2 = false;
         uint8_t checksum_v1 = 0;

@@ -62,9 +62,6 @@ private:
 
     int osd_zpos = 0;
     pthread_mutex_t osd_mutex;
-    // true = stock's blocking atomic commit (no completion event); false = the
-    // original non-blocking commit + PAGE_FLIP_EVENT. See page_flip().
-    bool blocking_flip = false;
     uint32_t pending_osd_fb_id = 0;   // rendered, waiting for a commit to carry it
     uint32_t current_osd_fb_id = 0;   // in the last commit made
     // The OSD fb the last in-flight video flip carried, and the one the display
@@ -89,7 +86,22 @@ private:
     pthread_t event_thread;
     std::atomic<bool> event_thread_exit{false};
     std::atomic<bool> flip_pending{false};  // Atomic to prevent races with event thread
-    uint64_t flip_submit_us = 0;            // watchdog: when the pending flip was submitted
+    std::atomic<uint64_t> flip_submit_us{0};   // watchdog: when the pending flip was submitted
+    // Each flip's number goes to the kernel with it and comes back with its
+    // event: only the event of the flip waited for (pending_flip_seq_, 0 for
+    // none) completes it. A flip given up as lost whose event comes after all
+    // must not complete the next one.
+    std::atomic<uint64_t> flip_seq_{0};
+    std::atomic<uint64_t> pending_flip_seq_{0};
+    // A flip with no event this long after it was submitted is taken as lost.
+    static constexpr uint64_t kFlipLostUs = 250000;
+    // Pending, and not yet taken as lost.
+    bool flip_in_flight(uint64_t now_us) const {
+        if (!flip_pending) return false;
+        const uint64_t t = flip_submit_us.load();
+        return now_us < t || now_us - t < kFlipLostUs;
+    }
+    void expire_lost_flip(uint64_t now_us);
 
     pthread_mutex_t stats_mutex;
     pthread_mutex_t flip_mutex;
@@ -253,7 +265,6 @@ public:
     // Whether an OSD fb may still be read by the display: pending, in flight
     // or on screen. The OSD releases its buffers by this, not by count.
     bool osd_fb_in_use(uint32_t fb_id);
-    void set_blocking_flip(bool on) { blocking_flip = on; }
 
     // Hardware picture controls on the HDMI connector (brightness, contrast,
     // saturation, hue - all 0..100, default 50). These act on the whole display
@@ -300,6 +311,17 @@ public:
         const double now = frame_period_now_us_.load(std::memory_order_relaxed);
         return now > 0 ? now : mode_period_us();
     }
+    float measured_refresh_hz() const override;
+    double mode_refresh_hz() const override {
+        const double p = mode_period_us();
+        return p > 0 ? 1e6 / p : 0;
+    }
+    // The event thread's: a flip landed on vblank vbl at t_us (kernel time).
+    void note_refresh(uint32_t vbl, uint64_t t_us);
+    uint32_t refresh_vbl0_ = 0;            // where the measure started (event thread)
+    uint64_t refresh_t0_us_ = 0;
+    std::atomic<float> refresh_hz_{0};     // the last measure, and when
+    std::atomic<uint64_t> refresh_at_us_{0};
     // One refresh of a mode, in microseconds.
     static double period_of(const drmModeModeInfo& m) {
         return m.clock ? (double)m.htotal * m.vtotal * 1000.0 / m.clock : 0;
@@ -314,19 +336,15 @@ public:
     // The ID (display/screen_id.h) of the screen this was set up for, "" if it
     // had none. A different one plugged in later restarts kestrel-gnd.
     std::string display_id;
-    // Screen Mode Auto: the refresh follows the camera's frame rate - set
-    // before init, with the rate last seen ("camera_fps") for the first mode.
-    // A different rate in the stream later (g_camera_fps) changes the mode at
-    // the same size, the highest whole multiple of it the screen offers. No
-    // phase lock: the two clocks still drift apart by their tolerances.
+    // Screen Mode Auto: the first mode is the screen's alone (mode_follow.h);
+    // the camera's frame rate in the stream (g_camera_fps) then sets the
+    // refresh at that size (check_follow_camera). No phase lock: the two
+    // clocks still drift apart by their tolerances.
     bool follow_camera = false;
-    uint32_t follow_fps = 0;
-    // ... and its lines ("camera_lines").
-    uint32_t follow_lines = 0;
     // The display lock sets each frame's length (Refresh Sync): how long the
     // one being scanned out is, us, 0 for the mode's own (frame_period_us).
     void set_frame_period(double us) { frame_period_now_us_.store(us, std::memory_order_relaxed); }
-    // Refresh Sync changed (FREE wants the fastest mode): Auto chooses again.
+    // Refresh Sync changed (FOLLOW wants the fastest mode): Auto chooses again.
     void refollow() override { refollow_.store(true); }
     // Held while the CRTC's mode changes (Auto following the camera, a hotplug
     // modeset), and by the display lock (display_lock.hpp) around its register
@@ -336,8 +354,8 @@ public:
     // set_crtc_mode, and never held across anything else: a leaf.
     mutable std::mutex mode_copy_m_;
     // Video variables
-	uint32_t video_frm_width;
-	uint32_t video_frm_height;
+	uint32_t video_frm_width = 0;    // 0 until the first picture (set_osd_fb: no video yet)
+	uint32_t video_frm_height = 0;
 	int video_fb_x, video_fb_y, video_fb_width, video_fb_height;
 	int video_pfd;
     uint64_t video_ts;

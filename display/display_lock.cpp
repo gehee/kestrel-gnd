@@ -1,4 +1,5 @@
 #include "display/display_lock.hpp"
+#include "display/lock_step.hpp"
 #include "display/settings.hpp"
 #include "display/drm.hpp"
 #include "hal/frame_length.hpp"
@@ -24,6 +25,12 @@ namespace {
 const uint64_t kWindowUs = 2000000;       // arrivals looked at: the last 2 s
 const size_t kMinSamples = 50;
 const double kStayUs = 30;                // a better position by less than this is not worth a move
+const double kFreeShorter = 0.005;        // FOLLOW: frames at most this much shorter than the mode's
+// A picture past the deadline is not shown a refresh late: the next one
+// overtakes it and it is dropped, a visible stutter. Weighed as this much
+// wait, a position with 1 fewer of 200 dropped is worth 0.5 ms more wait for
+// the rest (minimizing the wait alone kept ~5% past it, 20 MHz worse).
+const double kDroppedUs = 100000;
 
 double wrap(double x, double P) {         // into [-P/2, P/2)
     x = std::fmod(x, P);
@@ -105,16 +112,17 @@ bool DisplayLock::map_register() {
 
 // Whether to hold the phase now: turned on for this screen, no VRR, and the
 // screen able to keep in step at all.
-// ON: the refresh a whole multiple of the camera's frame rate - otherwise the
+// NUDGE: the refresh a whole multiple of the camera's frame rate - otherwise the
 // pictures sweep through the refresh far faster than a line a frame follows.
-// FREE: the screen's mode no slower than the camera (frames are only made
-// longer than the mode's), and no more than twice as fast.
+// FOLLOW: the screen's mode no more than 0.5% slower than the camera (frames
+// made shorter than the mode's by at most that, kFreeShorter), and no more
+// than twice as fast.
 bool DisplayLock::usable(int lock, double Pm, double Pc, const char **why) {
     if (!lock) { *why = "off"; return false; }
     if (dev_->vrr_active()) { *why = "not with VRR"; return false; }
     if (Pc <= 0) { *why = "waiting for the camera's frame rate"; return false; }
     if (lock == 2) {
-        if (Pc < Pm * 0.999) { *why = "the camera is faster than the screen's mode"; return false; }
+        if (Pc < Pm * (1 - kFreeShorter)) { *why = "the camera is faster than the screen's mode"; return false; }
         return true;
     }
     const double k = std::round(Pc / Pm);
@@ -153,13 +161,14 @@ void DisplayLock::release() {
 
 // Where the vblank should be, as a shift on the same reference as the samples:
 // each picture shows at the first vblank at least cutoff_us after it arrives,
-// and the expected wait to it is least with the deadline just after one of
-// them (between those points it only grows), so those are the candidates. Of
-// the ones within kStayUs of the best, the nearest to G. Also the expected
-// wait and the share of pictures past the deadline where the vblank is now.
+// and the cost (the expected wait to it, a dropped one as kDroppedUs) is least
+// with the deadline just after one of them (between those points it only
+// grows), so those are the candidates. Of the ones within kStayUs of the
+// best, the nearest to G. Also the expected wait and the share of pictures
+// past the deadline where the vblank is now.
 double DisplayLock::target_offset(double P, double G, double *wait_now, double *late_now) {
     const double C = P - cutoff_us_;
-    auto cost = [&](double g, double *late) {
+    auto cost = [&](double g, double *wait, double *late) {
         double w = 0;
         int n_late = 0;
         for (const Sample &s : win_) {
@@ -167,20 +176,21 @@ double DisplayLock::target_offset(double P, double G, double *wait_now, double *
             if (x <= C + 0.01) w += P - x;
             else { w += 2 * P - x; n_late++; }
         }
+        if (wait) *wait = w / win_.size();
         if (late) *late = (double)n_late / win_.size();
-        return w / win_.size();
+        return (w + n_late * kDroppedUs) / win_.size();
     };
-    *wait_now = cost(G, late_now);
+    const double now = cost(G, wait_now, late_now);
     std::vector<double> gs, ws;
     double best = 1e18;
     for (const Sample &s : win_) {
         const double g = mod(s.u + cutoff_us_, P);
-        const double w = cost(g, nullptr);
+        const double w = cost(g, nullptr, nullptr);
         gs.push_back(g);
         ws.push_back(w);
         if (w < best) best = w;
     }
-    if (*wait_now <= best + kStayUs) return G;
+    if (now <= best + kStayUs) return G;
     double pick = G, dist = 1e18;
     for (size_t i = 0; i < gs.size(); i++) {
         if (ws[i] > best + kStayUs) continue;
@@ -204,10 +214,11 @@ void DisplayLock::run() {
     uint64_t log_t = 0, cam_t = 0;
     double moved_us = 0;              // since the last log line
     double pc_last = 0, pc_known = 0; // the camera's period: last measured, and in use
-    double trim = 0;                  // FREE: lines learned on top of the period's (its error)
+    double trim = 0;                  // FOLLOW: lines learned on top of the period's (its error)
     double aim_us = 0;                // test: the vblank this much earlier than the best (A/B)
     uint64_t aim_t = 0;
     int pc_mode = -1;                 // (lines << 16) | fps pc_known is of
+    int dir_said = 0;                 // NUDGE: the way frames were last said to move (1 longer, -1 shorter)
     std::vector<uint64_t> in;
 
     while (run_.load(std::memory_order_relaxed)) {
@@ -312,6 +323,7 @@ void DisplayLock::run() {
                 fflush(stdout);
                 why_said = why;
                 locked_said = false;
+                dir_said = 0;
             }
             std::lock_guard<std::mutex> lk(m_);
             arrivals_in_.clear();
@@ -322,7 +334,7 @@ void DisplayLock::run() {
         if (why_said) {
             why_said = nullptr;
             printf("display lock: on (%s) - holding the vblank just after the pictures arrive\n",
-                   free ? "FREE: each frame as long as the camera's" : "one line at a time");
+                   free ? "FOLLOW: each frame as long as the camera's" : "NUDGE: one line at a time");
             fflush(stdout);
         }
 
@@ -344,14 +356,15 @@ void DisplayLock::run() {
             released_ = d_ == 0 && !seen.held;
         }
 
-        // The grid the vblank is held to: the mode's refresh (ON), or one
-        // refresh per camera frame, or per half, third... of one, never shorter
-        // than the mode's (FREE): B lines more than the mode's each frame.
+        // The grid the vblank is held to: the mode's refresh (NUDGE), or one
+        // refresh per camera frame, or per half, third... of one (FOLLOW): B
+        // lines more than the mode's each frame - fewer, by up to 0.5%, where
+        // the camera is a little faster (60.03 fps on a 60.000 Hz mode).
         double Pt = Pm, B = 0;
         if (free) {
             const double k = std::max(1.0, std::floor(Pc / Pm + 1e-6));
             Pt = Pc / k;
-            B = std::max(0.0, Pt / line - mode.vtotal + trim);
+            B = std::max(-kFreeShorter * mode.vtotal, Pt / line - mode.vtotal + trim);
             Pt = (mode.vtotal + B) * line;
         }
 
@@ -408,7 +421,9 @@ void DisplayLock::run() {
             // frame: the fraction of a line left over comes back the same way.
             const double e = wrap(target - G, Pt);
             const int c = std::fabs(e) < 0.5 * line ? 0 : (int)std::max(-20.0, std::min(20.0, std::round(e / line)));
-            want = std::max(0, std::min((int)mode.vtotal, (int)std::lround(B) + c));
+            // Never shorter than the grid's own (a pull-in the long way round
+            // instead), and never shorter than the mode's when it is longer.
+            want = std::max(std::min(0, (int)std::floor(B)), std::min((int)mode.vtotal, (int)std::lround(B) + c));
             // Frames that keep coming out longer or shorter than the grid's
             // mean the camera's frame is not quite the period measured: that
             // difference (lines used less lines meant, not the correction on
@@ -424,22 +439,29 @@ void DisplayLock::run() {
                 fflush(stdout);
             }
         } else {
-            // Later only: frames made longer, never shorter (the BOE1080 blanked
-            // with them shortened for long). A vblank a little late comes back
-            // with the drift if the screen is the faster; one far too late goes
-            // round the other way, up to a refresh later.
-            double e = wrap(target - G, Pt);
-            if (e < -Pt / 4) e += Pt;
-            if (!moving && e > 3 * line) moving = true;
-            if (moving && e < 0.5 * line) {
+            // A line at a time, one way only (lock_step.hpp): longer where the
+            // screen is the faster, shorter where it is the slower (60.000 Hz
+            // against the Lite+'s 60.03 fps) - longer only, there, went round a
+            // whole refresh every 12 s. Never both ways: the drift brings the
+            // vblank back the other way, so a line one way is all it needs.
+            // Until the camera's period is measured it is the mode's: longer.
+            const double k = std::max(1.0, std::round(Pc / Pm));
+            const bool shorter = k * Pm > Pc * (1 + 1e-6);
+            if ((shorter ? -1 : 1) != dir_said) {
+                dir_said = shorter ? -1 : 1;
                 moving = false;
-                if (!locked_said) {
-                    locked_said = true;
-                    printf("display lock: in step\n");
-                    fflush(stdout);
-                }
+                printf("display lock: frames made only %s (the screen %s than the camera)\n",
+                       shorter ? "shorter" : "longer", shorter ? "slower" : "no slower");
+                fflush(stdout);
             }
-            want = moving && e > 0 ? 1 : 0;
+            const display::LineStep s = display::line_step(wrap(target - G, Pt), Pt, line, shorter, moving);
+            moving = s.moving;
+            if (s.arrived && !locked_said) {
+                locked_said = true;
+                printf("display lock: in step\n");
+                fflush(stdout);
+            }
+            want = s.lines;
         }
         if (want != d_) write_lines(want, vb, Pm);
         else if (want == 0 && !released_) release();

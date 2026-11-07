@@ -52,9 +52,13 @@ constexpr uint32_t kNonSync = 0x00010000;
 
 struct Trex { uint32_t duration = 0, size = 0, flags = 0; };
 
-// The samples of one moof at file offset `at`, appended to `out`; false if
-// it holds anything this cannot place.
-bool read_moof(const uint8_t* b, size_t n, uint64_t at, const Trex& trex, std::vector<Sample>& out) {
+// A run holds no more samples than this (the DVR writes one a fragment).
+constexpr uint32_t kMaxRunSamples = 1u << 20;
+
+// The samples of one moof at file offset `at` in a file of file_size bytes,
+// appended to `out`; false if it holds anything this cannot place.
+bool read_moof(const uint8_t* b, size_t n, uint64_t at, uint64_t file_size, const Trex& trex,
+               std::vector<Sample>& out) {
     bool ok = true, any = false;
     each_box(b, n, [&](const std::string& type, const uint8_t* b, size_t n) {
         if (type != "traf") return;
@@ -77,6 +81,16 @@ bool read_moof(const uint8_t* b, size_t n, uint64_t at, const Trex& trex, std::v
                 uint32_t first_flags = 0;
                 if (flags & 0x001) { if (f + 4 > n) { ok = false; return; } off = base + (int32_t)be32(b + f); f += 4; }
                 if (flags & 0x004) { if (f + 4 > n) { ok = false; return; } first_flags = be32(b + f); f += 4; }
+                // No more samples than can be there: the box's per-sample
+                // fields, or with none, the file's bytes at the default size.
+                // A garbage count with none was billions of samples pushed,
+                // then bad_alloc - an abort at every start.
+                const size_t per = 4 * (!!(flags & 0x100) + !!(flags & 0x200) + !!(flags & 0x400) + !!(flags & 0x800));
+                const uint64_t left = file_size > off ? file_size - off : 0;
+                if (count > kMaxRunSamples || (per ? count > (n - f) / per : (!def.size || count > left / def.size))) {
+                    ok = false;
+                    return;
+                }
                 for (uint32_t i = 0; i < count; i++) {
                     Sample s{off, def.size, def.duration, false};
                     uint32_t sflags = (i == 0 && (flags & 0x004)) ? first_flags : def.flags;
@@ -284,7 +298,7 @@ bool dvr_finalize_fragmented(const std::string& path) {
                 moof.resize(size - 8);
                 std::vector<Sample> frag;
                 if (!pread_all(fd, moof.data(), moof.size(), off + 8) ||
-                    !read_moof(moof.data(), moof.size(), off, trex, frag))
+                    !read_moof(moof.data(), moof.size(), off, file_size, trex, frag))
                     break;
                 bool whole = true;
                 for (const Sample& x : frag) whole = whole && x.off >= off + size && x.off + x.size <= file_size;

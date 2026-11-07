@@ -38,6 +38,7 @@ struct DisplayBufferInfo {
 
     // Optional: for SW buffers:
     uint8_t* sw_base = nullptr; // Y base
+    size_t sw_size = 0;         // its mapping's size
     uint32_t sw_u_offset = 0;   // Offset to U plane (for YUV420)
     uint32_t sw_v_offset = 0;   // Offset to V plane (for YUV420)
     uint32_t sw_uv_offset = 0;  // Offset to UV plane (for NV12)
@@ -106,7 +107,7 @@ class Renderer : public display::Presenter {
         std::function<void(int, int)> on_frame_size;
         std::shared_ptr<display::VideoListener> osd;
 
-        volatile bool *should_stop;
+        std::atomic<bool>* should_stop;
         Queue* decoded_unit_queue;
 
         RenderMode render_mode = Disable;
@@ -242,11 +243,12 @@ class Renderer : public display::Presenter {
         unsigned skipped_pending_ = 0;     // pictures never shown, for the next sample
         unsigned slice_fail_[6] = {0, 0, 0, 0, 0, 0};   // why a shown picture had no latency (5 s)
         unsigned samples_sliced_ = 0, samples_whole_ = 0, samples_again_ = 0, slice_timeouts_ = 0;   // 5 s
+        unsigned skipped_5s_ = 0;   // pictures never shown (overtaken before their refresh), 5 s
         int64_t last_whole_sample_pts_ = -1;
 
         Renderer(RenderMode rmode,  std::shared_ptr<DrmDevice> dev_, Settings& settings,
                  std::function<void(int, int)> on_frame_size_,
-                 std::shared_ptr<display::VideoListener> osd_, volatile bool* stop_signal, bool cstats = false) : 
+                 std::shared_ptr<display::VideoListener> osd_, std::atomic<bool>* stop_signal, bool cstats = false) : 
             dev(dev_), settings_(settings), on_frame_size(std::move(on_frame_size_)), osd(osd_), should_stop(stop_signal),
             render_mode(rmode), console_stats(cstats) {
                 // Increased queue size to allow decoder to run ahead, 

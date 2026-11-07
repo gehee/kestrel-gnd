@@ -13,8 +13,9 @@ void OSD::handle_key(int key) {
     pthread_mutex_lock(&osd_mutex);
     sync_radio();   // the menu acts on the radio as it is now
 
-    // Refresh Sync on trial: Enter, anywhere in the menu, keeps it.
-    if (sync_confirm_ && (key == 13 || key == '\n')) {
+    // Refresh Sync on trial: Enter, anywhere in the menu, keeps it. Not in the
+    // gallery: there Enter plays a recording, and the trial runs out as it would.
+    if (sync_confirm_ && !gallery_.active() && (key == 13 || key == '\n')) {
         sync_confirm_ = false;
         settings_.set(display::setting::display_lock(screen_id_), refresh_sync().mode);
         printf("menu: refresh sync %s kept for %s\n", refresh_sync_label(refresh_sync().mode),
@@ -24,8 +25,8 @@ void OSD::handle_key(int key) {
         pthread_mutex_unlock(&osd_mutex);
         return;
     }
-    // A screen mode on trial: Enter, anywhere in the menu, keeps it.
-    if (screen_confirm_ && (key == 13 || key == '\n')) {
+    // A screen mode on trial: Enter, anywhere in the menu, keeps it (not in the gallery).
+    if (screen_confirm_ && !gallery_.active() && (key == 13 || key == '\n')) {
         screen_confirm_ = false;
         settings_.set(display::setting::screen_mode(screen_id_),
             screen_confirm_mode_ == "auto" ? std::string() : screen_confirm_mode_);
@@ -37,7 +38,25 @@ void OSD::handle_key(int key) {
         pthread_mutex_unlock(&osd_mutex);
         return;
     }
-    
+    // Back turns it down at once: the previous mode, as when the 10 s run out
+    // (osd_frame.cpp).
+    if (screen_confirm_ && menu_open && (key == kKeyBack || key == 27)) {
+        screen_confirm_ = false;
+        printf("menu: screen mode %s turned down - restarting in the previous one\n",
+               screen_confirm_mode_.c_str());
+        kestrel_request_restart();
+        pthread_mutex_unlock(&osd_mutex);
+        return;
+    }
+    // ...and until then the menu stays on its question, DISPLAY > Screen Mode
+    // (osd_frame.cpp opens it there): every other key does nothing - no
+    // closing, no other row, tab or value - so "Keep this mode?" stays on
+    // screen.
+    if (screen_confirm_ && menu_open) {
+        pthread_mutex_unlock(&osd_mutex);
+        return;
+    }
+
     // The buttons. On the live picture the D-pad's Enter opens the menu and Back
     // opens the gallery. With the menu open they are what they were: Enter
     // applies, Back closes (as M does). With the gallery open they are its keys.
@@ -99,13 +118,15 @@ void OSD::handle_key(int key) {
              // The canopy wakes with a blade picked - the one used last - and
              // nothing unfolded yet.
              ui_stage_ = 0;
-             // SYSTEM > Screen Mode lists what the connector offers at this
+             // DISPLAY > Screen Mode lists what the connector offers at this
              // open: a display plugged in since brings modes of its own. A
              // choice staged against the old list goes with it.
-             screen_modes_.clear();
+             // The HUD's thread makes the list again (refill_screen_modes): it
+             // reads it while drawing, without the lock this holds.
+             screen_modes_stale_ = true;
              menu_screen_mode = -1;
-             menu_dirty[kTabSystem][3] = false;
-             menu_pending_from[kTabSystem][3][0] = '\0';
+             menu_dirty[3][kDispScreenMode] = false;
+             menu_pending_from[3][kDispScreenMode][0] = '\0';
              menu_opt_tab_ = -1;
              // Focus opens on the section column (menu_focus = 0, below) so
              // the first press goes somewhere useful, the same on every open
@@ -135,7 +156,6 @@ void OSD::handle_key(int key) {
                  menu_focus = 0;
              }
              menu_scan_open = false;
-             menu_synced = false;
              unknown_command(0xe, 0);
              memset(menu_dirty, 0, sizeof(menu_dirty));   // re-seeded = nothing pending
              menu_bf_osd = bf_osd;
@@ -189,7 +209,7 @@ void OSD::handle_key(int key) {
     // The canopy (osd.hpp, ui_*). Picking: Left and Right are the two blades,
     // OK unfolds one. Unfolded: Left and Right walk its sections; Up and Down
     // its rows; OK on a setting starts changing it (Up/Down) and OK again
-    // applies it; OK on an action (Bind, Calib Distance, Channel) does it.
+    // applies it; OK on an action (Bind, Channel) does it.
     {
         const bool up    = (key == 'w' || key == 'W' || key == KEY_UP    || key == 0x101);
         const bool down  = (key == 's' || key == 'S' || key == KEY_DOWN  || key == 0x102);
@@ -237,6 +257,7 @@ void OSD::handle_key(int key) {
             std::vector<MenuItem> rows = menu_items(menu_tab);
             const int type = (menu_index >= 0 && menu_index < (int)rows.size()) ? rows[menu_index].type : 0;
             if (type == 1) {                          // a setting: start changing it
+                menu_log_applied("edit");             // what it was
                 menu_focus = 2;
                 menu_edit_tab_ = menu_tab;
                 menu_edit_label_ = rows[menu_index].label ? rows[menu_index].label : "";
@@ -259,7 +280,7 @@ void OSD::handle_key(int key) {
 
     if (key == 9) {
        menu_tab = (menu_tab + 1) % kMenuTabs;
-       menu_index = -1;
+       menu_index = menu_first_selectable_row(menu_tab);   // a real row, as every other tab change
        render_requested = true;
        hud_wake_.poke();
        pthread_mutex_unlock(&osd_mutex);
@@ -313,6 +334,7 @@ void OSD::handle_key(int key) {
             // highlight follows the key: UP is the entry above, which is
             // the one before it in the row's order.
             if (!ro) menu_apply_change(menu_tab, menu_index, -dir);
+            if (!ro && !tracked) menu_log_applied("live");
             if (from) {
                 char now[32];
                 menu_plain_value(menu_tab, menu_index, now, sizeof(now));
@@ -348,6 +370,7 @@ void OSD::handle_key(int key) {
     if (key == 13 || key == '\n') { // Enter
         if (menu_open) {
             menu_mark_dirty(false);      // committing is what clears the marker
+            menu_log_applied("enter");
             if (menu_tab == 0) {
                 // 0x01 = video mode (routed to SET_CHN_RES in main); 0x300+n are
                 // the AR8030 camera settings, kept out of the kestrel-air id space.
@@ -389,9 +412,10 @@ void OSD::handle_key(int key) {
                         case 5:
                             chan_open();
                             break;
-                        case 1: {   // saved per air unit there; nothing before it is known
+                        case 1:     // the level and the mode are one value: saved per air unit
+                        case 16: {  // there; nothing before it is known
                             const int prj = air_radio_.prj;
-                            if (prj > 0) parts_.air_radio.set_tx_power(ar_pwr_fit(prj, menu_ar_power));
+                            if (prj > 0) parts_.air_radio.set_tx_power(ar_pwr_fit(prj, menu_ar_power, air_radio_.fine));
                             break;
                         }
                         case 8:
@@ -435,27 +459,12 @@ void OSD::handle_key(int key) {
                         default: break;
                     }
                 }
-            } else if (menu_tab == 2) { // HUD - see menu_items() and hud_row()
-                // Only Calib Distance has anything for Enter to do. Every
-                // other row applies and saves as the arrows move it.
-                if (hud_row(menu_index) == kHudRowCalib) {
-                    // Zero the ranging: with the units side by side, Enter
-                    // captures the current reading as the new base value. The
-                    // arrows nudge the same offset by hand.
-                    const int raw = link_distance_raw.load();
-                    if (raw >= 0) {
-                        dist_offset_ = raw;
-                        parts_.radio.set_dist_offset(raw);
-                        printf("[OSD] distance calibrated for air unit %s: offset = %d\n",
-                               osd_vars.radio_link.peer_mac[0] ? osd_vars.radio_link.peer_mac : "?", dist_offset_);
-                    }
-                }
             } else if (menu_tab == 3) { // DISPLAY
                 // Brightness, UI Scaling, Theme and Picture Size all apply and
                 // save as they are nudged. Background Video is the one row
                 // here Enter still owns, because switching it starts or stops
                 // a player rather than changing a number.
-                if (menu_index == kDispBgVideo) {
+                if (disp_row(menu_index) == kDispBgVideo) {
                     bg_video_enabled = menu_bg_video;
                     settings_.set(hud::setting::bg_video_enabled, bg_video_enabled);
                     // Only start the player if we are still in idle (BACKGROUND) state -
@@ -463,18 +472,7 @@ void OSD::handle_key(int key) {
                     do_start_player = bg_video_enabled && (video_state_ == VideoState::BACKGROUND);
                     do_stop_player  = !bg_video_enabled;
                 }
-            } else if (menu_tab == kTabDvr) {
-                if (menu_index == 0) {
-                    // Just a mode flag now. The REC button owns starting and
-                    // stopping; this used to spin up a second DVR of its own the
-                    // moment it was switched on, which recorded to a fixed
-                    // dvr_screen.mp4 and had nothing to do with the REC button.
-                    dvr_screen = menu_dvr_source > 0;
-                    settings_.set(dvr::setting::dvr_screen, dvr_screen);
-                    DvrRecorder::instance().set_screen_mode(dvr_screen);
-                }
-            } else if (menu_tab == kTabSystem) {
-                if (menu_index == 3 && screen_mode_menu() != screen_mode_saved()) {
+                if (disp_row(menu_index) == kDispScreenMode && screen_mode_menu() != screen_mode_saved()) {
                     // Only a trial: main.cpp applies it at the restart and asks
                     // (begin_screen_mode_confirm); the screen's screen_mode is
                     // written once it is kept.
@@ -488,7 +486,18 @@ void OSD::handle_key(int key) {
                     printf("menu: screen mode %s on trial - restarting to apply it\n", v);
                     kestrel_request_restart();
                 }
-                if (menu_index == 4 && platform::caps().wifi_ap) {
+            } else if (menu_tab == kTabDvr) {
+                if (menu_index == 0) {
+                    // Just a mode flag now. The REC button owns starting and
+                    // stopping; this used to spin up a second DVR of its own the
+                    // moment it was switched on, which recorded to a fixed
+                    // dvr_screen.mp4 and had nothing to do with the REC button.
+                    dvr_screen = menu_dvr_source > 0;
+                    settings_.set(dvr::setting::dvr_screen, dvr_screen);
+                    DvrRecorder::instance().set_screen_mode(dvr_screen);
+                }
+            } else if (menu_tab == kTabSystem) {
+                if (menu_index == kSysWifi && platform::caps().wifi_ap) {
                     wifi_ap_set(menu_wifi_ap != 0);   // for this session only
                 }
             }

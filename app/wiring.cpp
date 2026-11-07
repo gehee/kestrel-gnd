@@ -9,7 +9,7 @@
 
 void run_radio(radio::Model& model, const Ar8030Config& cfg, Settings& settings,
                const VideoCodec& codec, std::shared_ptr<Vdec> vdec,
-               std::shared_ptr<OSD> osd, volatile bool* stop, int slot, int port) {
+               std::shared_ptr<OSD> osd, std::atomic<bool>* stop, int slot, int port) {
     // The radio: the AR8030, reporting to its model, writing its streams.
     auto link = std::make_shared<Ar8030Link>(model, cfg, settings, codec, vdec, stop, "127.0.0.1", 50000,
                                              slot, port);

@@ -1,3 +1,4 @@
+#include <atomic>
 #include "hal/v4l2/vdec_v4l2.hpp"
 #include "base/time_util.h"
 #include "base/ltrace.hpp"
@@ -117,7 +118,7 @@ void queue(int fd, v4l2_buf_type type, unsigned index, size_t size, size_t used,
 }
 } // namespace
 VdecV4l2::VdecV4l2(VideoCodec codec, std::string device, std::shared_ptr<hal::FrameSink> sink,
-                   volatile bool *stop)
+                   std::atomic<bool> *stop)
     : codec_(codec), device_(std::move(device)), sink_(std::move(sink)), stop_(stop) {}
 VdecV4l2::~VdecV4l2() { cleanup(); }
 void VdecV4l2::cleanup() { quit_ = true; }

@@ -51,8 +51,22 @@ int main(int argc,char** argv) {
     }
     {
         int fd=open("/dev/full",O_WRONLY);check(fd>=0,"Open failing storage");
-        DvrWriter writer(fd,1024);uint8_t b[16]{};writer.write(0,b,sizeof(b));
-        check(!writer.finish(),"Storage failures propagate after asynchronous drain");close(fd);
+        int failures=0; std::string reason;
+        DvrWriter writer(fd,"","",[&](const char* why){++failures;reason=why;},1024);
+        uint8_t b[16]{};writer.write(0,b,sizeof(b));
+        check(!writer.finish(),"Storage failures propagate after asynchronous drain");
+        check(failures==1 && reason=="CARD FULL","Shared writer reports one failure to the recorder");
+        check(writer.write(0,b,sizeof(b))!=0,"Failed writer rejects further data");close(fd);
+    }
+    {
+        const auto storage=std::filesystem::path(dir)/"cleanup";
+        std::filesystem::create_directory(storage);
+        for(const char* name:{"fpvOS_old.mp4","kestrel_old.h265","fpvOS_active.mp4","fpvOS_radio.log","other.mp4"}) {
+            FILE* f=fopen((storage/name).c_str(),"w");check(f,"Create storage fixture");fputs("data",f);fclose(f);
+        }
+        check(purge_oldest_recordings(storage.string(),UINT64_MAX,"fpvOS_active.mp4")==8,"Reclaim only finished recordings");
+        check(std::filesystem::exists(storage/"fpvOS_active.mp4") && std::filesystem::exists(storage/"fpvOS_radio.log") &&
+              std::filesystem::exists(storage/"other.mp4"),"Keep active video, radio logs and unrelated files");
     }
     // The shared stream sink asks for a keyframe and never starts a file on P frames.
     {

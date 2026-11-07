@@ -1,3 +1,4 @@
+#include <atomic>
 // Native AR9311: independent DMA-BUF video and ARGB UI planes, blended by VO.
 #include "display/ar9311_screen.hpp"
 #include "display/ascent_kms_mode.hpp"
@@ -164,7 +165,7 @@ class Ar9311Screen final : public PlaneScreen {
     Properties connector_, crtc_, primary_, overlay_;
     uint32_t mode_ = 0;
     bool active_ = false;
-    volatile bool *stop_;
+    std::atomic<bool> *stop_;
     mutable std::mutex mutex_;
     VideoStats video_stats_;
     uint64_t stats_start_ = 0, stats_frames_ = 0;
@@ -284,7 +285,7 @@ class Ar9311Screen final : public PlaneScreen {
     }
 
   public:
-    Ar9311Screen(const std::string &device, bool force, volatile bool *stop, int width, int height, int hz) : width_(width), height_(height), ui_damage_{{{width,height},{width,height},{width,height}}}, stop_(stop) {
+    Ar9311Screen(const std::string &device, bool force, std::atomic<bool> *stop, int width, int height, int hz) : width_(width), height_(height), ui_damage_{{{width,height},{width,height},{width,height}}}, stop_(stop) {
         try {
             if (!AscentMode{height,hz}.valid() || AscentMode{height,hz}.width()!=width)
                 throw std::invalid_argument("Unsupported Ascent screen mode");
@@ -610,7 +611,7 @@ class Ar9311Screen final : public PlaneScreen {
     }
 };
 } // namespace
-std::shared_ptr<PlaneScreen> make_ar9311_screen(const std::string &path, bool force, volatile bool *stop, int width, int height, int hz) {
+std::shared_ptr<PlaneScreen> make_ar9311_screen(const std::string &path, bool force, std::atomic<bool> *stop, int width, int height, int hz) {
     try {
         return std::make_shared<Ar9311Screen>(path, force, stop, width, height, hz);
     } catch (const std::exception& e) {

@@ -9,11 +9,18 @@ using namespace radio;
 // baseband, and Artosyn's client library is not known to take concurrent
 // requests (ar_libre's does).
 static std::mutex g_bb_req_mu;
+// Requests waiting for it. A std::mutex hands over to no one: the frame
+// clock's search (1.5 s of reads back to back) took it again before a waiting
+// thread had woken, and the radio thread's requests and the stats' waited out
+// the search. Its reads (ar_ioctl_yield) let one waiting go first.
+static std::atomic<int> g_bb_req_waiting{0};
 
 int ar_ioctl(bb_dev_handle_t *dev, uint32_t request, const void *in, void *out) {
     int rc;
     {
+        g_bb_req_waiting.fetch_add(1);
         std::lock_guard<std::mutex> one_at_a_time(g_bb_req_mu);
+        g_bb_req_waiting.fetch_sub(1);
         rc = bb_ioctl_ex(dev, request, in, out, kIoctlTimeoutMs);
     }
     if (rc != 0) {
@@ -36,6 +43,11 @@ int ar_ioctl(bb_dev_handle_t *dev, uint32_t request, const void *in, void *out) 
         }
     }
     return rc;
+}
+
+int ar_ioctl_yield(bb_dev_handle_t *dev, uint32_t request, const void *in, void *out) {
+    for (int i = 0; i < 100 && g_bb_req_waiting.load() > 0; i++) usleep(50);   // a few ms at most
+    return ar_ioctl(dev, request, in, out);
 }
 
 // Events stock subscribes to before touching a socket (capture: class 03 01,
@@ -75,13 +87,14 @@ void Ar8030Link::on_link_event(const uint8_t* p) {
     if (p[1] == 2 && video_bw_idx_.load() < 0) video_bw_idx_.store(2);
     else if (p[1] == 0 && now_ms() - bw_change_ms_.load() > 2000) {
         video_bw_idx_.store(-1);
+        link_bw_mhz = 20;          // the next link starts narrow
         air_prj.store(0);          // the next air unit says what it is
         model_.update_air_radio([](air::RadioState& r) { r.prj = 0; });
         clear_air_info();
     }
     printf("ar8030: event: link state %u -> %u\n", p[2], p[1]);
     if (p[1] == 2) frame_clock_.reframe();   // a new link, its own frame
-    if (p[1] == 2) caps_due.store(true);     // the menu's caps again on it
+    if (p[1] == 2) caps_now(false);          // the menu's caps again on it
     report_link_state(p[1]);
 }
 
@@ -117,10 +130,32 @@ void Ar8030Link::on_mcs_event(const uint8_t* p) {
 // logged. A bandwidth change is also timed - the radio re-forms the link to
 // change to 40 MHz, and that brief drop is not a new link (see the video loop).
 void Ar8030Link::on_logged_event(int ev, const uint8_t* p) {
+    // The distance (Open8030, event 15): {slot, 1 known / 0 not, metres low,
+    // high}, pushed as it changes - up to ten a second, so not logged; the
+    // stats thread shows the latest every pass and stops asking for it.
+    if (ev == 15) {
+        const int m = p[1] ? (int)(p[2] | p[3] << 8) : -1;
+        stat_dist_.store(m);
+        dist_pushed_ms_.store(now_ms());
+        return;
+    }
     printf("ar8030: event %d: %02X %02X %02X %02X\n", ev, p[0], p[1], p[2], p[3]);
+    // TX power (Open8030, event 14): {slot, 0 the air unit's / 1 ours, dBm
+    // now, dBm before}, 0 = not known. Shown at once.
+    if (ev == 14) {
+        if (p[1] == 0) air_live_dbm_ = p[2]; else gnd_live_dbm_ = p[2];
+        model_.update_air_radio([&](air::RadioState& r) { r.live_dbm = air_live_dbm_; });
+        model_.update_ground([&](gnd::RadioState& r) { r.live_dbm = gnd_live_dbm_; });
+        return;
+    }
     if (ev == 12) {
         bw_change_ms_.store(now_ms());
         if (p[2] <= 5) video_bw_idx_.store(p[2]);
+        // AUTO's channels are judged at the link's width: a step to or from
+        // 40 MHz changes which are allowed.
+        const int was = link_bw_mhz.load();
+        link_bw_mhz = p[2] == 5 ? 40 : 20;
+        if (link_bw_mhz.load() != was) region_changed();
         // Only a step to or from 40 MHz (gear 5) changes the radio's frame: 5,
         // 10 and 20 MHz share theirs, and a search across a step only fails.
         if (p[2] == 5 || p[3] == 5) frame_clock_.reframe();
@@ -149,6 +184,20 @@ void Ar8030Link::subscribe_events() {
         }
         printf("ar8030: subscribe event %d -> %d\n", evts[i],
                ar_ioctl(dev, BB_SET_EVENT_SUBSCRIBE, &ev, NULL));
+    }
+    // Open8030's own: TX power changes (event 14). Only there - a stock
+    // radio has no such event.
+    if (on_ar_libre() && radio_fw == 1) {
+        bb_set_event_callback_t ev;
+        memset(&ev, 0, sizeof(ev));
+        ev.event = (bb_event_e)14;
+        ev.callback = ar_event_log_cb<14>;
+        ev.user = this;
+        printf("ar8030: subscribe event 14 (TX power) -> %d\n", ar_ioctl(dev, BB_SET_EVENT_SUBSCRIBE, &ev, NULL));
+        // And the distance, pushed (event 15; an Open8030 without it refuses).
+        ev.event = (bb_event_e)15;
+        ev.callback = ar_event_log_cb<15>;
+        printf("ar8030: subscribe event 15 (distance) -> %d\n", ar_ioctl(dev, BB_SET_EVENT_SUBSCRIBE, &ev, NULL));
     }
 }
 
@@ -262,6 +311,11 @@ void Ar8030Link::configure_link() {
     int rc_cm = ar_ioctl(dev, BB_SET_CHAN_MODE, &cm, NULL);
     printf("ar8030: BB_SET_CHAN_MODE(auto=%d) -> %d\n", cm.auto_mode, rc_cm);
     if (rc_cm == 0) rf_caps |= gnd::RF_CAP_CHAN;
+    // Open8030 measures only the work list's channels (the rest read 0, which
+    // the channel page drew as the busiest there is), and keeps it across a
+    // kestrel-gnd restart: an earlier manual pick could have left it at one.
+    if (radio_fw == 1)
+        printf("ar8030: work list = every channel (the scan's list) -> %d\n", work_list_all());
 
     enable_ranging();
 
@@ -639,7 +693,7 @@ bool Ar8030Link::connect_bb() {
     // itself (note_air_announce): the stock air app does not know them.
 
     if (skip_handshake) printf("ar8030: handshake SKIPPED (--debug-no-handshake)\n");
-    else send_air_handshake();
+    else send_air_handshake(true);
 
     // Bandwidth, again. The call in configure_link() answers -7 because the
     // link is not up yet; post-handshake every gear 0-5 is accepted (verified
@@ -695,7 +749,14 @@ void Ar8030Link::disconnect_bb() {
     if (sockfd >= 0) { bb_socket_close(sockfd); sockfd = -1; }
     SHUT_STEP("closing control socket");
     if (ctrl_sockfd >= 0) { bb_socket_close(ctrl_sockfd); ctrl_sockfd = -1; }
+    // --debug-msp-bb-port's: opened again at the next bring-up (drain_msp_socket).
+    if (msp_sockfd >= 0) { SHUT_STEP("closing MSP socket"); bb_socket_close(msp_sockfd); msp_sockfd = -1; }
     sky_ack_ = SkyAckWait();             // its ack will not come on this socket
+    // The work channel lists queued with those settings go with them (in the
+    // same order); the ones of settings parked since stay. Kept, AUTO HOP's
+    // next list went out as one of the link that ended.
+    for (const auto& q : settings_q_)
+        if (q.first == CAM_WORK_LIST && !region_q_lists_.empty()) region_q_lists_.pop_front();
     settings_q_.clear();
     // Hand the device back before letting go of the handle.
     //

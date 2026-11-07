@@ -1,3 +1,4 @@
+#include <atomic>
 #include "hal/v4l2/vdec_v4l2.hpp"
 #include <cstdio>
 #include <stdexcept>
@@ -8,7 +9,7 @@
 static void check(bool ok, const char* what) { if (!ok) throw std::runtime_error(what); }
 int main() {
     try {
-        volatile bool stop = false;
+        std::atomic<bool> stop = false;
         // No decode worker/device: emulate a radio read delivering a burst
         // before the consumer gets scheduled, then test bounded recovery.
         VdecV4l2 decoder(VideoCodec::H265, "", {}, &stop);

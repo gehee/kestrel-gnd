@@ -172,10 +172,11 @@ void OSD::draw_arena_left(Frame& f) {
     // the resolution/fps/bitrate line. current_ly grows upward, so drawing it
     // after that line's advance puts it above on screen. Driven straight off
     // DvrRecorder, which owns the writer's lifetime.
-    if (canopy.rec_active) {   // measure_link
+    if (canopy.rec_active || canopy.rec_failed[0]) {   // measure_link
         const unsigned secs = canopy.rec_secs;
         float dot_x = bx + hud_margin_l;
-        sprintf(buf, "   REC  %u:%02u", secs / 60, secs % 60);
+        if (canopy.rec_active) sprintf(buf, "   REC  %u:%02u", secs / 60, secs % 60);
+        else snprintf(buf, sizeof(buf), "   %s", canopy.rec_failed);   // why it went off by itself
         if (legacy_panels) {
             canvas_->poly({{dot_x, current_ly + 0.012f},
                        {dot_x + 0.018f * s, current_ly + 0.012f},
