@@ -79,25 +79,23 @@ until their next update. Pause holds the picture, readings, motion, and warning
 pulse time. Current live receiver readings are never substituted for a missing
 recorded HUD.
 
-LEFT/RIGHT seek backward/forward five seconds; held arrows repeat when key repeat
-is enabled. The timeline shows the current position and the requested position
-while seeking. Requests clamp to the beginning or last frame, and repeated
-requests accumulate while a seek is pending. A paused seek displays the target
-frame and stays paused; a playing seek continues playback.
+LEFT/RIGHT request a five-second move, then jump directly to a keyframe in that
+direction, matching VRX Pro. RIGHT lands on the keyframe at or after the requested
+time; LEFT lands on the keyframe at or before it. Actual jumps can be much larger
+in recordings with sparse keyframes. If there is no later keyframe, RIGHT leaves
+playback unchanged; LEFT clamps to the first keyframe.
 
-Forward seeks retain the current hardware decoder and reference pictures when
-that is closer to the target than the preceding HEVC random-access frame.
-Repeated requests can extend an in-flight seek without restarting its decoder.
-Backward seeks, and jumps with a closer random-access frame, recreate only the
-decoder, preserving the HDMI mode and UI. The player indexes sample offsets
-once per clip and caches keyframe locations as it reads them.
+The timeline shows the actual keyframe destination while seeking. Held arrows
+repeat when key repeat is enabled, and requests accumulate from the pending
+keyframe destination. A paused seek displays that keyframe and stays paused;
+a playing seek continues playback. The player indexes sample offsets and scans
+NAL headers once per clip, so arrow handling only searches keyframe timestamps.
 
-Pre-roll runs as fast as hardware decode permits with at most six outstanding
-frames; intermediate pictures stay hidden until the exact target. Clips with
-long gaps between keyframes still take longer to seek backward because their
-reference frames must decode. No extra decoder or decoded-frame cache is used.
-The telemetry reader restores the matching recorded state, including backward
-seeks, and old playback HUD data is hidden during the transition.
+Seeking resets only the decoder when needed, preserving the HDMI mode and UI.
+It does not decode the intervening pictures to reach an exact five-second target.
+No extra decoder or decoded-frame cache is used. The telemetry reader restores
+the recorded state at the destination, including backward jumps, and old
+playback HUD data stays hidden during the transition.
 
 DOWN hides or shows the playback top bar and progress timeline together, without
 changing the recorded HUD. Seeking and pause controls remain active while the

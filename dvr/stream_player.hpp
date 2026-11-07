@@ -17,7 +17,6 @@ public:
         std::function<void(const std::string&)> started;
         std::function<void(uint64_t)> seek; // reset decoder; suppress frames before this PTS
         std::function<uint64_t()> decoded; // last completed PTS + 1, zero after reset
-        std::function<void(uint64_t)> advance; // suppress pre-roll without resetting the decoder
     };
     struct State {
         bool busy=false,playing=false,paused=false,seeking=false,deleting=false;
@@ -34,6 +33,7 @@ public:
     void play(const std::string& name);
     void stop();
     void pause();
+    // Snap the requested time to a keyframe in the requested direction.
     void seek_relative(int seconds,uint64_t presented_us);
     void erase(const std::string& name);
     State state() const;
@@ -49,6 +49,7 @@ private:
     std::atomic<uint64_t> seek_revision_{0};
     struct PresentedSample {uint64_t us;std::shared_ptr<const media::TimedTelemetry> data;};
     std::deque<PresentedSample> telemetry_samples_;
+    std::vector<uint64_t> keyframes_us_;
     std::thread worker_;
 };
 }

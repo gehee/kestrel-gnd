@@ -201,8 +201,7 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
             },[&](bool paused){source_decoder->pause_input(paused);},
             [&](const std::string& name){thumbnails.arm(name,kestrel_ui::monotonic_us());},
             [&](uint64_t pts){preview_sink->playback_floor=pts;source_decoder->restart_playback();},
-            [&]{return preview_sink->decoded_pts.load();},
-            [&](uint64_t pts){preview_sink->playback_floor=pts;}});
+            [&]{return preview_sink->decoded_pts.load();}});
         DvrSink recording_sink(codec,recorder);
         Ar8030Link link(radio_model, o.link, settings, codec, receiver.decoder, &stop);
         link.add_video_sink(&recording_sink);

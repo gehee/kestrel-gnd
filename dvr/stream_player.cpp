@@ -39,7 +39,7 @@ void StreamPlayer::play(const std::string& name) {
     std::lock_guard<std::mutex> lock(mutex_);
     if(state_.deleting)throw std::runtime_error("Wait for recording deletion to finish");
     ++generation_;seek_revision_=0;state_.seeking=false;paused_=false;requested_=name;state_.busy=true;state_.playing=false;
-    state_.position_us=state_.duration_us=state_.present_from_us=0;state_.error.clear();state_.telemetry_error.clear();state_.started_us=get_time_us();telemetry_samples_.clear();state_.file=name;wake_.notify_one();
+    state_.position_us=state_.duration_us=state_.present_from_us=0;state_.error.clear();state_.telemetry_error.clear();state_.started_us=get_time_us();telemetry_samples_.clear();keyframes_us_.clear();state_.file=name;wake_.notify_one();
 }
 void StreamPlayer::stop() {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -52,10 +52,18 @@ void StreamPlayer::pause() {
 }
 void StreamPlayer::seek_relative(int seconds,uint64_t presented_us) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if(!state_.busy || !state_.duration_us || !output_.seek)return;
+    if(!state_.playing || keyframes_us_.empty() || !seconds || !output_.seek)return;
     const uint64_t base=state_.seeking?state_.seek_target_us:presented_us;
     const int64_t target=int64_t(std::min(base,state_.duration_us))+int64_t(seconds)*1000000;
-    state_.seek_target_us=uint64_t(std::clamp<int64_t>(target,0,state_.duration_us-1));
+    const uint64_t want=uint64_t(std::max<int64_t>(target,0));
+    // Match Pro: forward lands at/after the requested time, backward at/before.
+    // With no later keyframe, keep playing (or keep the paused picture).
+    auto key=seconds>0?std::lower_bound(keyframes_us_.begin(),keyframes_us_.end(),want)
+                      :std::upper_bound(keyframes_us_.begin(),keyframes_us_.end(),want);
+    if(seconds>0) {if(key==keyframes_us_.end())return;}
+    else if(key!=keyframes_us_.begin())--key;
+    if(*key==base)return;
+    state_.seek_target_us=*key;
     state_.seeking=true;++seek_revision_;wake_.notify_one();
 }
 void StreamPlayer::erase(const std::string& name) {
@@ -156,15 +164,9 @@ void StreamPlayer::play_file(const std::string& name,uint64_t generation) {
     {std::lock_guard<std::mutex> lock(mutex_);if(output_.pause)output_.pause(paused_);}
     for(const auto& p:parameters) output_.feed(p,0,(p[4]>>1)&63,false);
     const auto last=t.sample_count-1;
-    {std::lock_guard<std::mutex> lock(mutex_);if(generation!=generation_)return;state_.playing=true;state_.position_us=0;
-     state_.duration_us=(uint64_t(t.timestamp[last])+t.duration[last])*1000000/t.timescale;}
-    if(output_.started)output_.started(name);
-    // Inspect only NAL headers when locating random access: no second decoder
-    // or whole-file video scan. MP4 sample offsets/timestamps are already indexed.
-    std::vector<int8_t> access(t.sample_count,-1);
+    // Inspect NAL headers without reading/decoding the picture payloads.
+    // MP4 sample offsets/timestamps are already indexed.
     auto random_access=[&](unsigned index) {
-        auto& cached=access[index];
-        if(cached>=0)return cached!=0;
         const auto bytes=t.entry_size[index];
         const auto offset=offsets[index];
         unsigned at=0;
@@ -175,16 +177,28 @@ void StreamPlayer::play_file(const std::string& name,uint64_t generation) {
             uint32_t len=0;for(unsigned j=0;j<length_bytes;++j)len=(len<<8)|header[j];
             if(len<2 || len>bytes-at-length_bytes)throw std::runtime_error("Invalid seek NAL length");
             const auto nal=(header[length_bytes]>>1)&63;
-            if(nal<=31) {cached=nal>=16 && nal<=21;return cached!=0;}
+            if(nal<=31)return nal>=16 && nal<=21;
             at+=length_bytes+len;
         }
-        cached=0;return false;
+        return false;
     };
     auto timestamp=[&](unsigned index) {
         return uint64_t(t.timestamp[index])*1000000/t.timescale;
     };
+    // Index random-access timestamps once. Arrow handling then needs only a
+    // binary search, and the UI can show the actual landing point immediately.
+    std::vector<uint64_t> keyframes;
+    for(unsigned i=0;i<t.sample_count;++i) {
+        if(quit_ || generation!=generation_)return;
+        if(random_access(i))keyframes.push_back(timestamp(i));
+    }
+    if(keyframes.empty())throw std::runtime_error("Recording has no random access frame");
+    {std::lock_guard<std::mutex> lock(mutex_);if(generation!=generation_)return;keyframes_us_=std::move(keyframes);}
+    {std::lock_guard<std::mutex> lock(mutex_);if(generation!=generation_)return;state_.playing=true;state_.position_us=0;
+     state_.duration_us=(uint64_t(t.timestamp[last])+t.duration[last])*1000000/t.timescale;}
+    if(output_.started)output_.started(name);
     uint64_t origin=get_time_us(),base_position=0,seek_revision=0;
-    std::deque<uint64_t> preroll;
+    std::deque<uint64_t> outstanding;
     auto wait_decoded=[&](uint64_t pts) {
         const auto start=get_time_us();
         while(output_.decoded && output_.decoded()<=pts) {
@@ -194,7 +208,7 @@ void StreamPlayer::play_file(const std::string& name,uint64_t generation) {
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
     };
-    bool priming=false,seek_reused=false;unsigned target_frame=0,next_sample=0,seek_first=0;
+    bool priming=false;unsigned target_frame=0;
     uint64_t seek_begin=0;
     for(unsigned i=0;i<t.sample_count;) {
         if(seek_revision!=seek_revision_) {
@@ -204,43 +218,26 @@ void StreamPlayer::play_file(const std::string& name,uint64_t generation) {
             while(low<high) {const auto mid=low+(high-low)/2;if(timestamp(mid)<=target)low=mid+1;else high=mid;}
             target_frame=low?low-1:0;i=target_frame;
             seek_begin=get_time_us();
-            // Keep the current reference pictures when they are closer than
-            // the next random-access point. next_sample is the first sample
-            // not submitted, including when a newer seek interrupts pre-roll.
-            const bool can_continue=output_.advance && output_.decoded && next_sample>0 && target_frame>=next_sample;
-            const unsigned lower=can_continue?next_sample:0;
-            while(i>lower && !random_access(i)) {
-                if(quit_ || generation!=generation_ || seek_revision!=seek_revision_)break;
-                --i;
+            // The requested destination is already an indexed keyframe.
+            // Reset references and submit that picture directly, with no pre-roll.
+            outstanding.clear();
+            output_.seek(timestamp(target_frame));
+            const auto restart=get_time_us();
+            while(!output_.ready()) {
+                if(quit_ || generation!=generation_)return;
+                if(seek_revision!=seek_revision_)break;
+                if(output_.failed() || get_time_us()-restart>5000000)throw std::runtime_error("Hardware seek decoder did not start");
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
             }
-            seek_reused=can_continue && i==next_sample;
-            if(quit_ || generation!=generation_)return;
             if(seek_revision!=seek_revision_)continue;
-            if(!seek_reused && !random_access(i))
-                throw std::runtime_error("Recording has no preceding random access frame");
-            if(seek_reused) {
-                output_.advance(timestamp(target_frame));
-            } else {
-                next_sample=0;preroll.clear();
-                output_.seek(timestamp(target_frame));
-                const auto restart=get_time_us();
-                while(!output_.ready()) {
-                    if(quit_ || generation!=generation_)return;
-                    if(seek_revision!=seek_revision_)break;
-                    if(output_.failed() || get_time_us()-restart>5000000)throw std::runtime_error("Hardware seek decoder did not start");
-                    std::this_thread::sleep_for(std::chrono::milliseconds(2));
-                }
-                if(seek_revision!=seek_revision_)continue;
-                for(const auto& p:parameters)output_.feed(p,0,(p[4]>>1)&63,false);
-                next_sample=i;
-            }
+            for(const auto& p:parameters)output_.feed(p,0,(p[4]>>1)&63,false);
             {std::lock_guard<std::mutex> lock(mutex_);
                 if(generation!=generation_)return;
                 state_.started_us=get_time_us();telemetry_samples_.clear();
                 state_.present_from_us=timestamp(target_frame);
                 if(output_.pause)output_.pause(paused_);
             }
-            priming=true;seek_first=i;base_position=timestamp(i);origin=get_time_us();
+            priming=true;base_position=timestamp(i);origin=get_time_us();
         }
         if(quit_ || generation!=generation_)return;
         const auto offset=offsets[i];
@@ -255,17 +252,17 @@ void StreamPlayer::play_file(const std::string& name,uint64_t generation) {
         }
         if(seek_revision!=seek_revision_)continue;
         if(output_.failed())throw std::runtime_error("Hardware playback decode failed");
-        // Decode pre-roll as fast as the hardware allows, but never build a
-        // compressed queue large enough to trigger the live decoder's drop policy.
+        // Bound outstanding pictures so playback never triggers the live
+        // decoder's compressed-queue drop policy.
         if(output_.decoded) {
             const auto completed=output_.decoded();
-            while(!preroll.empty() && preroll.front()<completed)preroll.pop_front();
+            while(!outstanding.empty() && outstanding.front()<completed)outstanding.pop_front();
         }
-        if(output_.decoded && preroll.size()>=6) {
-            wait_decoded(preroll.front());
+        if(output_.decoded && outstanding.size()>=6) {
+            wait_decoded(outstanding.front());
             if(quit_ || generation!=generation_)return;
             if(seek_revision!=seek_revision_)continue;
-            preroll.pop_front();
+            outstanding.pop_front();
         }
         std::vector<uint8_t> packet(size);size_t got=0;
         while(got<size) {
@@ -283,24 +280,21 @@ void StreamPlayer::play_file(const std::string& name,uint64_t generation) {
             if(nal<=31) {type=nal;key|=nal>=16 && nal<=21;}
             annex.insert(annex.end(),{0,0,0,1});annex.insert(annex.end(),packet.begin()+p,packet.begin()+p+len);p+=len;
         }
-        access[i]=key;
         auto recorded=telemetry.at(position);
         {std::lock_guard<std::mutex> lock(mutex_);if(generation!=generation_)return;
             state_.telemetry_error=telemetry.error();telemetry_samples_.push_back({position,std::move(recorded)});
             while(telemetry_samples_.size()>128)telemetry_samples_.pop_front();}
         if(seek_revision!=seek_revision_)continue;
         output_.feed(annex,position,type,key);
-        next_sample=i+1;
         if(output_.decoded) {
-            preroll.push_back(position);
+            outstanding.push_back(position);
             if(priming && i>=target_frame)wait_decoded(position);
         }
         {std::lock_guard<std::mutex> lock(mutex_);if(generation==generation_ && seek_revision==seek_revision_) {
             state_.position_us=position;
             if(priming && i>=target_frame) {
-                fprintf(stderr,"playback: seek %.3fs from %.3fs (%s, %u frames) in %.1fms\n",
-                        position/1000000.0,timestamp(seek_first)/1000000.0,seek_reused?"continue":"reset",
-                        i-seek_first+1,(get_time_us()-seek_begin)/1000.0);
+                fprintf(stderr,"playback: keyframe jump %.3fs in %.1fms\n",
+                        position/1000000.0,(get_time_us()-seek_begin)/1000.0);
                 priming=false;state_.seeking=false;origin=get_time_us();base_position=position;
             }
         }}

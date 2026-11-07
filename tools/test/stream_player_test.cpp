@@ -96,18 +96,19 @@ int main() {
         player.play(seek_name);wait([&]{return player.state().playing;});player.pause();
         player.seek_relative(5,0);
         wait([&]{return !player.state().seeking && player.state().position_us>=4900000;});
-        check(player.state().paused && visible>=4900000 && visible<=5000000,"Paused forward seek displays requested frame");
+        check(player.state().paused && visible>5000000 && visible<5140000,"Paused forward seek snaps to the following keyframe");
         const auto held=visible.load();std::this_thread::sleep_for(std::chrono::milliseconds(30));
         check(visible==held,"Seek preserves a paused picture");
         player.seek_relative(-5,held);wait([&]{return !player.state().seeking;});
         check(visible==0 && player.state().paused,"Backward seek restores beginning and recorded telemetry");
         player.seek_relative(5,0);player.seek_relative(5,0);
         wait([&]{return !player.state().seeking;});
-        check(visible>=9900000 && visible<=10000000,"Rapid requests accumulate from pending target");
+        check(visible>10000000 && visible<10200000,"Rapid requests accumulate from pending keyframe");
+        const auto before_end=visible.load();const auto before_resets=resets.load();
         player.seek_relative(100,visible);wait([&]{return !player.state().seeking;});
-        check(player.state().busy && player.state().paused && visible>15900000,"Seek clamps to last frame and stays paused");
+        check(player.state().busy && player.state().paused && visible==before_end && resets==before_resets,"No later keyframe preserves paused picture without resetting");
         player.seek_relative(-100,visible);wait([&]{return !player.state().seeking;});
-        check(visible==0 && resets>=5,"Backward boundary clamps to zero");
+        check(visible==0 && resets>=4,"Backward boundary clamps to zero");
         player.pause();wait([&]{return visible>100000;});
         player.seek_relative(5,visible);wait([&]{return !player.state().seeking;});
         check(!player.state().paused && visible>5000000,"Playing seek stays playing");
@@ -134,8 +135,8 @@ int main() {
         check(path_rejected,"Deletion rejects path traversal");
     }
     {
-        // Long GOP metadata with a fake decoder: forward seeks must retain
-        // references and never resubmit a sample after interrupted pre-roll.
+        // Sparse keyframes with a fake decoder: seeking must submit only the
+        // destination keyframe, never the intervening dependent pictures.
         // This tests scheduling, not the validity of the repeated P-picture payload.
         dvr::StreamRecorder recorder(path,VideoCodec::H265,64,64,60);
         recorder.set_parameter_sets(recording_ps);recorder.toggle();wait([&]{return recorder.is_recording();});
@@ -144,14 +145,14 @@ int main() {
                 auto sample=std::make_shared<media::TelemetrySample>();sample->values["group"]=i/30;
                 recorder.set_telemetry(sample);
             }
-            recorder.feed(std::make_shared<std::vector<uint8_t>>(recording_frames[i?1:0]),1000000+i*16667);
+            recorder.feed(std::make_shared<std::vector<uint8_t>>(recording_frames[i%480?1:0]),1000000+i*16667);
             if(i%30==29) {wait([&]{const auto state=recorder.state();if(!state.error.empty())throw std::runtime_error(state.error);return state.frames+state.dropped==i+1;});check(recorder.state().dropped==0,"Long GOP fixture has no rejected NALs");}
         }
         const auto long_name=std::filesystem::path(recorder.state().file).filename().string();
         recorder.stop();wait([&]{return !recorder.state().recording && !recorder.state().finishing;});
         std::atomic<bool> selected{false},expect_key{true};
         std::atomic<uint64_t> floor{0},visible{0},decoded{0};
-        std::atomic<unsigned> resets{0},advances{0},pictures{0};
+        std::atomic<unsigned> resets{0},pictures{0};
         uint64_t last=0;
         dvr::StreamPlayer* continuing=nullptr;
         dvr::StreamPlayer player(path,{
@@ -170,29 +171,28 @@ int main() {
                 }
                 decoded=pts+1;
             },{},{},[&](uint64_t target){floor=target;decoded=0;expect_key=true;++resets;},
-            [&]{return decoded.load();},[&](uint64_t target){floor=target;++advances;}
+            [&]{return decoded.load();}
         },64,64);continuing=&player;
         player.play(long_name);wait([&]{return pictures>0;});player.pause();
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        const auto before=pictures.load();
         player.seek_relative(5,0);wait([&]{return !player.state().seeking;});
-        check(player.state().error.empty() && advances==1 && resets==0 && visible==5000000,
-              "Forward seek reuses long-GOP decoder at exact target");
-        check(player.state().paused,"Continuing seek preserves pause");
-        check(player.state().present_from_us==visible,"Pending old scanout cannot supply target HUD");
+        check(player.state().error.empty() && resets==1 && visible==8000000 && pictures==before+1,
+              "Sparse forward seek decodes only the next keyframe");
+        check(player.state().paused,"Keyframe jump preserves pause");
+        check(player.state().present_from_us==visible && player.state().seek_target_us==visible,
+              "HUD floor and timeline use the actual keyframe destination");
+        player.seek_relative(5,visible);wait([&]{return !player.state().seeking;});
+        check(resets==1 && visible==8000000 && pictures==before+1,"No later keyframe is a no-op");
         player.seek_relative(-5,visible);wait([&]{return !player.state().seeking;});
-        check(resets==1 && visible==0,"Backward seek resets to random access");
+        check(resets==2 && visible==0 && pictures==before+2,"Backward jump decodes only preceding keyframe");
         check(player.state().present_from_us==0,"Backward seek restores HUD presentation floor");
-        player.seek_relative(5,0);wait([&]{return advances>=2 && decoded>100000;});
-        player.seek_relative(5,0);wait([&]{return !player.state().seeking;});
-        check(advances>=3 && resets==1 && visible==10000000 && player.state().error.empty(),
-              "New forward target continues in-flight pre-roll without another reset");
-        player.seek_relative(-5,visible);wait([&]{return !player.state().seeking;});
-        check(resets==2 && visible==5000000,"Backward seek after continuation remains exact");
-        player.seek_relative(5,visible);wait([&]{return advances>=4;});
-        player.seek_relative(-10,0);wait([&]{return !player.state().seeking;});
-        check(resets==3 && visible==0 && player.state().error.empty(),
-              "Reversing an in-flight continuing seek resets safely");
-        player.seek_relative(5,0);wait([&]{return advances>=5;});player.stop();
-        wait([&]{return !selected;});check(!player.state().seeking,"Stop cancels continuing pre-roll");
+        player.seek_relative(-5,0);check(!player.state().seeking && resets==2,"Left at the first keyframe is a no-op");
+        player.seek_relative(5,0);player.seek_relative(-5,0);
+        wait([&]{return !player.state().seeking;});
+        check(visible==0 && player.state().error.empty(),"Reversing a pending jump restores the previous keyframe");
+        player.seek_relative(5,0);player.stop();
+        wait([&]{return !selected;});check(!player.state().seeking,"Stop cancels keyframe jump");
     }
     puts("PASS: MP4 playback, pacing, pause/resume, cancel, invalid files, decoder errors and recovery");return 0;
  } catch(const std::exception& e) {fprintf(stderr,"FAIL: %s\n",e.what());return 1;}
