@@ -45,6 +45,7 @@ Ticket EncoderPart::set_max_bitrate(int kbps) {
     return ticket(m, std::get<cmd::MaxBitrate>(m.c).kbps);
 }
 Ticket EncoderPart::set_max_exposure(int us) { return ticket(m_.post(cmd::MaxExposure{us}), us); }
+Ticket EncoderPart::set_strips(int n) { return ticket(m_.post(cmd::Strips{n}), n); }
 
 Ticket AirRadioPart::set_tx_power(int mw) { return ticket(m_.post(cmd::RfControl{RF_TX_POWER, mw, -1}), mw); }
 
@@ -113,6 +114,8 @@ void Model::save(Settings& s, const Command& c) {
         s.set(setting::ar8030_max_kbps, a->kbps);          // sent at every link-up
     } else if (const auto* a = std::get_if<cmd::MaxExposure>(&c)) {
         s.set(setting::ar8030_max_exp_us, a->us);          // sent when its info says maxexp=1
+    } else if (const auto* a = std::get_if<cmd::Strips>(&c)) {
+        s.set(setting::ar8030_strips, a->n);               // asked while its info says otherwise
     } else if (const auto* a = std::get_if<cmd::MaxBandwidth>(&c)) {
         s.set(setting::ar8030_max_bw_mhz, a->mhz);         // and to a kestrel-air that takes it
     } else if (const auto* a = std::get_if<cmd::Firmware>(&c)) {
@@ -197,6 +200,7 @@ void Model::held(const State& h) {
     air_radio_.publish(air_radio_s_);
     encoder_s_.max_kbps = h.max_kbps;
     encoder_s_.max_exp_us = h.max_exp_us;
+    encoder_s_.strips = h.strips;
     encoder_s_.taken = h.commands_taken;
     encoder_.publish(encoder_s_);
 }

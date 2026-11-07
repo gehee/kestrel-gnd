@@ -20,7 +20,7 @@ void Ar8030Link::publish_air_info() {
     model_.air_info(a);
 }
 
-const Ar8030Link::AirCap Ar8030Link::kAirCaps[13] = {
+const Ar8030Link::AirCap Ar8030Link::kAirCaps[14] = {
     { kAirFeatLatInfo,      "air-timing",    "Air Timing" },
     { kAirFeatApClock,      "radio-clock",   "Radio Clock" },
     { kAirSaidFrameClock,   "frame-clock",   "Frame Clock" },
@@ -34,6 +34,7 @@ const Ar8030Link::AirCap Ar8030Link::kAirCaps[13] = {
     { kAirFeatPwrLvl,       "power-levels",  "TX Power Levels" },
     { kAirFeatPwr400,       "power-400",     "TX Power 400mW" },
     { kAirFeatMaxExp,       "exposure-cap",  "Exposure Cap" },
+    { kAirFeatStrips,       "strips",        "Strips" },
 };
 
 std::vector<std::string> Ar8030Link::cap_names(const AirInfo &a) {
@@ -50,6 +51,8 @@ void Ar8030Link::clear_air_info() {
         air_info_feat_ = 0;
         air_info_seen_ = false;
     }
+    air_strips_now_ = air_strips_max_ = 0;
+    air_run_.clear();
     if (air_cam_ != air::kCamAll) {
         air_cam_ = air::kCamAll;
         model_.update_unit([&](air::UnitState &a) { a.cam_settings = air::kCamAll; });
@@ -722,6 +725,7 @@ void Ar8030Link::apply_pending_settings() {
             case CAM_MAX_BW:    cmd = sky::CMD_KA_MAX_BW;      name = "video link bandwidth cap MHz"; break;
             case CAM_AIR_LOGS:  cmd = sky::CMD_KA_LOGS;        name = "air flight logs"; break;
             case CAM_MAX_EXP_US: cmd = sky::CMD_KA_MAX_EXP;    name = "exposure cap us"; break;
+            case CAM_STRIPS:    cmd = sky::CMD_KA_STRIPS;      name = "strips a picture"; break;
             case CAM_WORK_LIST: cmd = sky::CMD_SET_WORK_CHAN_LIST; name = "work channels"; break;
             case CAM_HOP_ON:    cmd = sky::CMD_SET_BB_FREQ;    name = "own hopping on, from kHz"; break;
             case CAM_HOP_OFF:   cmd = sky::CMD_SET_BB_FREQ;    name = "own hopping off, at kHz"; break;
@@ -742,6 +746,8 @@ void Ar8030Link::apply_pending_settings() {
             printf("ar8030: %s = %d kept for an air unit that takes it\n", name, item.second);
             continue;
         }
+        // Strips likewise (strips=N/M): its info asks again while it differs.
+        if (item.first == CAM_STRIPS && air_strips_max_ < 2) continue;
         // ar_ldy_gnd 0x89060 builds this one as {cmd 0x23, len 1}: a single
         // byte, unlike most camera settings, which are a u32.
         // Payload width differs per command: ar_ldy_gnd 0x88fd8 writes cmd 0x22
@@ -766,7 +772,7 @@ void Ar8030Link::apply_pending_settings() {
             uint8_t v[2] = { 0, (uint8_t)item.second };
             f = sky_proto.build(cmd, v, sizeof(v));
         } else if (item.first == CAM_STANDBY || item.first == CAM_BW ||
-                   item.first == CAM_MAX_BW || item.first == CAM_AIR_LOGS) {
+                   item.first == CAM_MAX_BW || item.first == CAM_AIR_LOGS || item.first == CAM_STRIPS) {
             f = sky_proto.build_u8(cmd, (uint8_t)item.second);
         } else {
             f = sky_proto.build_u32(cmd, (uint32_t)item.second);
@@ -896,6 +902,10 @@ void Ar8030Link::note_air_info(const uint8_t *pl, size_t n) {
             if (e.first == "864p144" && e.second == "1") xf |= kAirFeat864p144;
             if (e.first == "pwr400" && e.second == "1") xf |= kAirFeatPwr400;
             if (e.first == "maxexp" && e.second == "1") xf |= kAirFeatMaxExp;
+            int sn = 0, sm = 0;
+            if (e.first == "strips" && sscanf(e.second.c_str(), "%d/%d", &sn, &sm) == 2 && sm > 1 &&
+                strips_supported())
+                xf |= kAirFeatStrips;
         }
         const bool first = !air_info_seen_;
         air_info_seen_ = true;
@@ -924,6 +934,28 @@ void Ar8030Link::note_air_info(const uint8_t *pl, size_t n) {
             printf("ar8030: the air unit's camera settings: %s\n",
                    cam == air::kCamAll ? "all" : "only those its info lists");
         }
+    }
+    // Strips (strips=N/M): asked for as many as the setting wants, and again
+    // while the air unit says otherwise - after its kestrel-air started
+    // again, or a link that dropped (it goes back to whole pictures then).
+    // run=: new at each kestrel-air start, which then has lost what it was
+    // sent once a link (Max Exposure). Neither shown nor logged.
+    for (auto it = kv.begin(); it != kv.end();) {
+        if (it->first == "strips") {
+            int now = 0, max = 0;
+            if (sscanf(it->second.c_str(), "%d/%d", &now, &max) == 2) { air_strips_now_ = now; air_strips_max_ = max; }
+        } else if (it->first == "run") {
+            if (!air_run_.empty() && it->second != air_run_) {
+                printf("ar8030: the air unit's kestrel-air started again - its settings sent again\n");
+                if (air_info_feat_ & kAirFeatMaxExp) request_setting(CAM_MAX_EXP_US, max_exp_us.load());
+            }
+            air_run_ = it->second;
+        } else { ++it; continue; }
+        it = kv.erase(it);
+    }
+    if (air_strips_max_ > 1 && air_strips_now_ != strips_wanted() && now_ms() - strips_asked_ms_ >= 2000) {
+        strips_asked_ms_ = now_ms();
+        request_setting(CAM_STRIPS, strips_wanted());
     }
     // The sensor's readout and exposure: ours, they change as it runs, so not
     // part of what is logged or shown.

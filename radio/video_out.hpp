@@ -68,6 +68,12 @@ public:
         int idx = -1;
         bool last = false;
         bool ends = false;   // last, said by a kestrel-air unit (stock's byte 32 is not known to mean it)
+        // The air unit's picture number, counted on (-1: not used) - a strip's
+        // picture goes by it, so the strips of one capture find each other.
+        int64_t pic = -1;
+        // A strip's: the rows it codes past each of its joins (kestrel-air's
+        // header byte 8), cut off again where the strips are joined.
+        int strip_ov = 0;
         uint64_t out_us = 0;
         uint32_t fps = 0;
     };

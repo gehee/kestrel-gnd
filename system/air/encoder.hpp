@@ -1,6 +1,7 @@
 #pragma once
 // The air unit's video encoder: the cap on its bitrate, and the one on its
-// camera's exposure (kestrel-air's two caps on the picture it sends).
+// camera's exposure (kestrel-air's two caps on the picture it sends), and
+// the strips it sends each picture in.
 #include <cstdint>
 
 #include "system/part.hpp"
@@ -10,6 +11,7 @@ namespace air {
 struct EncoderState {
     int max_kbps = 0;              // 0: none
     int max_exp_us = 0;            // 0: none
+    int strips = 1;                // pictures in strips (1: whole pictures)
     uint32_t taken = 0;            // the last change carried out (Ticket::seq)
 };
 
@@ -39,11 +41,21 @@ static inline int ar_maxexp_index(int us) {
     for (int i = 0; i < kArMaxExpCount; i++) if (kArMaxExpVals[i] == us) return i;
     return 3;   // 4 ms
 }
+// Strips: each picture encoded and sent as strips of rows, the top one out of
+// the air unit's encoder sooner (ar8030_strips; OFF: whole pictures).
+static const int kArStripsVals[]     = { 1, 2, 3, 4 };
+static const char* kArStripsLabels[] = { "OFF", "2", "3", "4" };
+static const int kArStripsCount = 4;
+static inline int ar_strips_index(int n) {
+    for (int i = 0; i < kArStripsCount; i++) if (kArStripsVals[i] == n) return i;
+    return n < 1 ? 0 : kArStripsCount - 1;
+}
 
 class Encoder : public Part<EncoderState> {
 public:
     virtual Ticket set_max_bitrate(int kbps) = 0;   // RADIO > Max Bitrate (kestrel-air takes it)
     virtual Ticket set_max_exposure(int us) = 0;    // VIDEO > Max Exposure (a kestrel-air that says maxexp=1)
+    virtual Ticket set_strips(int n) = 0;           // VIDEO > Strips (one that says strips=N/M, M > 1)
 };
 
 }  // namespace air

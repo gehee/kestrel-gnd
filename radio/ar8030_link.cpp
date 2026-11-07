@@ -22,7 +22,7 @@ Ar8030Link::Ar8030Link(radio::Model& model, const Ar8030Config& cfg,
       tx_power_mw(cfg.tx_power_mw), tx_power_want_mw(cfg.tx_power_want_mw),
       air_floor_us(cfg.air_floor_us), skip_handshake(cfg.skip_handshake),
       standby_mode(cfg.standby_mode), prj_rf_bw(cfg.prj_rf_bw), prj_rf_pwr_mw(cfg.prj_rf_pwr_mw),
-      air_bw(cfg.air_bw), max_kbps(cfg.max_kbps), max_exp_us(cfg.max_exp_us), air_logs(cfg.air_logs),
+      air_bw(cfg.air_bw), max_kbps(cfg.max_kbps), max_exp_us(cfg.max_exp_us), strips(cfg.strips), air_logs(cfg.air_logs),
       stream_decode(cfg.stream_decode), max_bw_mhz(cfg.max_bw_mhz), max_mcs(cfg.max_mcs),
       steady(cfg.steady), radio_fw(cfg.radio_fw), frame_mode(cfg.frame_mode),
       replay_stock_rf(cfg.replay_stock_rf), msp_bb_port(cfg.msp_bb_port),
@@ -45,7 +45,7 @@ Ar8030Link::~Ar8030Link() { disconnect_bb(); }
 // loads with restarts it here.
 void Ar8030Link::apply(const radio::Command& c) {
     using namespace radio;
-    static_assert(std::variant_size_v<Command> == 15, "a new command: carry it out here (and save it in Model::save if it is a setting)");
+    static_assert(std::variant_size_v<Command> == 16, "a new command: carry it out here (and save it in Model::save if it is a setting)");
     if (const auto* a = std::get_if<cmd::AirLogs>(&c)) {
         air_logs = a->on;
         request_setting(CAM_AIR_LOGS, a->on);
@@ -65,6 +65,11 @@ void Ar8030Link::apply(const radio::Command& c) {
     } else if (const auto* a = std::get_if<cmd::MaxExposure>(&c)) {
         max_exp_us = a->us;
         request_setting(CAM_MAX_EXP_US, a->us);
+    } else if (const auto* a = std::get_if<cmd::Strips>(&c)) {
+        // Asked now of an air unit that has them; its info re-asks while it
+        // says otherwise.
+        strips = a->n;
+        if (air_strips_max_ > 1) request_setting(CAM_STRIPS, strips_wanted());
     } else if (const auto* a = std::get_if<cmd::MaxBandwidth>(&c)) {
         // Open8030 here takes it live (SET 22), 5 to 40 MHz. Stock: the
         // goggle's radio config caps the width (bb_only.sh picks it from the
@@ -124,6 +129,7 @@ radio::State Ar8030Link::held() const {
     s.frame_mode = frame_mode;
     s.max_kbps = max_kbps;
     s.max_exp_us = max_exp_us;
+    s.strips = strips;
     s.max_bw_mhz = max_bw_mhz;
     s.steady = steady;
     s.chan_auto = chan_auto;
@@ -311,7 +317,7 @@ void Ar8030Link::run() {
                         search_all_channels();
                     }
                     if (retune) {
-                        video_.drop_picture();
+                        drop_pictures();
                         printf("ar8030: link back after the bandwidth change - same link, video goes on\n");
                     } else if (ls == 2) {
                         // Whatever is still queued belongs to the link that just
@@ -320,7 +326,7 @@ void Ar8030Link::run() {
                         // than no picture at the moment you are trying to work
                         // out where the aircraft is. Drop it and wait for a
                         // keyframe from the new link.
-                        video_.drop_picture();
+                        drop_pictures();
                         live_cap_valid_  = false;   // a new link may be a new clock
                         hdr_stale_       = false;
                         resync_          = true;

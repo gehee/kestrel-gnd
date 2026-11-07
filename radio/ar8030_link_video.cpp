@@ -80,6 +80,19 @@ void Ar8030Link::picture_start(uint64_t recv_us, radio::VideoOut::PictureTiming&
     pic_air_unknown_ = false;
 }
 
+// Whole pictures or strips, as each header says: a change drops the picture
+// the other way was building.
+void Ar8030Link::vhdr_strip_seen(bool strip) {
+    if (strip != vstrip_) {
+        if (strip) video_.drop_picture();
+        else if (strips_) strips_->drop_picture();
+        printf("ar8030: %s\n", strip ? "pictures in strips now: each strip decoded on its own, joined again"
+                                     : "whole pictures again");
+    }
+    vstrip_ = strip;
+    strips_on_ = strip;
+}
+
 bool Ar8030Link::ask_keyframe(const char* why) {
     if (now_ms() - idr_asked_ms_ < 1500) return false;
     idr_asked_ms_ = now_ms();
@@ -135,6 +148,11 @@ void Ar8030Link::emit_nal(const uint8_t* nal, size_t len) {
                 const bool numbered = len >= 33 && (nal[32] & 0x60);
                 vhdr_.idx = numbered ? (nal[32] & 0x1f) : -1;
                 vhdr_.last = numbered && (nal[32] & 0x40);
+                // 0x80, kestrel-air's: the slice is a strip, its own stream.
+                const bool strip = numbered && (nal[32] & 0x80) && len >= 42 && nal[33] == 0x4B;
+                vhdr_strip_seen(strip);
+                // [8], a strip's: the rows it codes past each of its joins.
+                vhdr_.strip_ov = strip ? nal[8] : 0;
                 // From kestrel-air, a picture can be decoded on it (video_out).
                 vhdr_.ends = vhdr_.last && air_kestrel_;
                 // A picture from the past, and everything up to the next
@@ -294,7 +312,15 @@ void Ar8030Link::emit_nal(const uint8_t* nal, size_t len) {
     // kernel's stamp for the read that brought them, free of how long this
     // thread took to be scheduled; otherwise now.
     vhdr_.fps = hdr_fps_;
-    if (!video_.nal(nal, len, read_rx_us ? read_rx_us : now_us(), vhdr_)) return;
+    const uint64_t rx_us = read_rx_us ? read_rx_us : now_us();
+    if (vstrip_) {
+        // A strip: into its own stream (radio/strip_video).
+        if (!strips_ && strips_supported())
+            strips_.reset(new radio::StripVideo(codec, decode_enabled, model_, *this, strip_decoder_, strip_joiner_()));
+        if (!strips_ || !strips_->nal(nal, len, rx_us, vhdr_)) return;
+    } else if (!video_.nal(nal, len, rx_us, vhdr_)) {
+        return;
+    }
 
     update_stats(len + 4);
 
@@ -391,6 +417,7 @@ void Ar8030Link::run_replay() {
 void Ar8030Link::consume(const uint8_t* data, size_t len) {
     consume_bytes(data, len);
     video_.end_of_read();
+    if (strips_) strips_->end_of_read();
 }
 
 

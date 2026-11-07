@@ -104,6 +104,7 @@ struct FakeCamera : Fake<air::Camera> {
 struct FakeEncoder : Fake<air::Encoder> {
     Ticket set_max_bitrate(int kbps) override { return ask(kbps); }
     Ticket set_max_exposure(int us) override { return ask(us); }
+    Ticket set_strips(int n) override { return ask(n); }
 };
 struct FakeAirRadio : Fake<air::Radio> {
     Ticket set_tx_power(int mw) override { return ask(mw); }
@@ -355,9 +356,9 @@ int main(int argc, char** argv) {
     r.key(kOk);                     // on RADIO, the side's first open
     r.key(kLeft);
     // A P1 Air: its info's cam_ctrl (Scene and Focus greyed), White Balance
-    // held at Lock; Max Exposure taken.
+    // held at Lock; Max Exposure taken, Strips listed.
     r.air.cam_settings = air::cam_settings_of("rotate,ev,wb,wb_lock,sat,contrast,sharpness,3dnr");
-    r.air.features = 0x1000;
+    r.air.features = 0x1000 | 0x2000;
     r.camera.s.awb = -1;
     r.camera.s.camera_n++;
     r.camera.publish();
@@ -366,7 +367,7 @@ int main(int argc, char** argv) {
     r.camera.s.camera_n++;
     r.camera.publish();
     r.air.cam_settings = air::kCamAll;
-    r.air.features = 0;                 // tab0: no Max Exposure row
+    r.air.features = 0;                 // tab0: no Strips or Max Exposure row
     for (int i = 0; i < 4; i++) {   // the air unit's: VIDEO, RADIO, SERIAL, INFO
         char name[32];
         snprintf(name, sizeof(name), "menu_air_tab%d", i);

@@ -10,13 +10,18 @@
 
 #include "base/settings.hpp"
 #include "base/video_codec.hpp"
+#include "radio/strip_video.hpp"
 
 class Vdec;
 class OSD;
 struct Ar8030Config;
 namespace radio { class Model; }
 
-// Runs the radio on this thread until stop is set.
+// Runs the radio on this thread until stop is set. strip_decoder and
+// strip_joiner: what strips are decoded and joined with (none: the air unit
+// is not asked for strips).
 void run_radio(radio::Model& model, const Ar8030Config& cfg, Settings& settings,
                const VideoCodec& codec, std::shared_ptr<Vdec> vdec,
-               std::shared_ptr<OSD> osd, std::atomic<bool>* stop, int slot, int port);
+               std::shared_ptr<OSD> osd, std::atomic<bool>* stop, int slot, int port,
+               radio::StripVideo::MakeDecoder strip_decoder = nullptr,
+               std::function<std::unique_ptr<hal::StripJoiner>()> strip_joiner = nullptr);

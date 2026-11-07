@@ -26,7 +26,8 @@ add_library(kg_msp STATIC msp/msp_osd.cpp msp/msp_telem.cpp)
 target_link_libraries(kg_msp PUBLIC kg_motion)
 add_library(kg_radio STATIC radio/ar8030_link.cpp radio/ar8030_link_bb.cpp radio/ar8030_link_bind.cpp
     radio/ar8030_link_air.cpp radio/ar8030_link_rf.cpp radio/ar8030_link_stats.cpp radio/ar8030_link_video.cpp
-    radio/bb_watchdog.cpp radio/ar8030_sky.cpp radio/model.cpp radio/air_imu.cpp radio/streams.cpp radio/video_out.cpp)
+    radio/bb_watchdog.cpp radio/ar8030_sky.cpp radio/model.cpp radio/air_imu.cpp radio/streams.cpp radio/video_out.cpp
+    radio/strip_video.cpp)
 target_link_libraries(kg_radio PUBLIC kg_hal kg_region "${AR8030_LIB}" dl)
 add_library(kg_display STATIC display/ar9311_screen.cpp)
 target_include_directories(kg_display PRIVATE "${DRM_UAPI_INCLUDE_DIR}")

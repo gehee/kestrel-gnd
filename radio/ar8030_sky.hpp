@@ -86,6 +86,8 @@ enum Cmd : uint8_t {
     CMD_KA_LOGS           = 0x42,  // u8 1/0: the air unit keeps flight logs on its flash - kestrel-air only
     CMD_KA_MAX_EXP        = 0x43,  // u32 us, the auto exposure's longest exposure, 0 = none - kestrel-air
                                    // that says maxexp=1 in its info
+    CMD_KA_STRIPS         = 0x44,  // u8: strips a picture is encoded in (1: whole) - kestrel-air that says
+                                   // strips=N/M in its info
 };
 
 // The FPV-channel (ch0) video modes this camera accepts, taken from the mode

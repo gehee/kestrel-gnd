@@ -12,7 +12,7 @@ namespace hud {
 
 // What the menu asked, each with its ticket (Ticket::seq 0: nothing asked).
 struct Asked {
-    Ticket kbps, bw, frame, mcs, steady, fw, hop, exp;
+    Ticket kbps, bw, frame, mcs, steady, fw, hop, exp, strips;
 };
 
 struct LinkView {
@@ -23,6 +23,7 @@ struct LinkView {
     int frame_mode = 0;
     int max_kbps = 0;
     int max_exp_us = 0;
+    int strips = 1;
     int max_bw_mhz = 0;
     int steady = 0;
     bool chan_auto = false;        // channel adaptation on

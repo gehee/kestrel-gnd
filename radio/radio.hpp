@@ -77,7 +77,10 @@ enum CamField { CAM_EV = 1, CAM_SAT, CAM_CONTRAST, CAM_SHARPNESS,
                 CAM_WORK_LIST, CAM_HOP_ON, CAM_HOP_OFF,
                 // Ours: the cap on the air unit's auto exposure, us (0 =
                 // none), sky cmd 0x43 - a kestrel-air that says maxexp=1.
-                CAM_MAX_EXP_US };
+                CAM_MAX_EXP_US,
+                // Ours: the strips a picture is encoded in (1: whole
+                // pictures), sky cmd 0x44 - a kestrel-air that says strips=N/M.
+                CAM_STRIPS };
 
 // RF controls on our own radio: rf_control(field, value).
 enum RfField { RF_TX_POWER = 1, RF_MCS, RF_LNA, RF_BW, RF_CHAN, RF_HOP,
@@ -94,6 +97,7 @@ struct State {
     int frame_mode = 0;
     int max_kbps = 0;
     int max_exp_us = 0;
+    int strips = 1;                // strips asked of the air unit (1: whole pictures)
     int max_bw_mhz = 0;
     int steady = 0;
     bool chan_auto = false;        // channel adaptation on
@@ -109,7 +113,7 @@ struct State {
 inline bool operator==(const State& a, const State& b) {
     return a.radio_fw == b.radio_fw && a.tx_power_mw == b.tx_power_mw &&
            a.tx_power_want_mw == b.tx_power_want_mw && a.max_mcs == b.max_mcs &&
-           a.frame_mode == b.frame_mode && a.max_kbps == b.max_kbps && a.max_exp_us == b.max_exp_us && a.max_bw_mhz == b.max_bw_mhz &&
+           a.frame_mode == b.frame_mode && a.max_kbps == b.max_kbps && a.max_exp_us == b.max_exp_us && a.strips == b.strips && a.max_bw_mhz == b.max_bw_mhz &&
            a.steady == b.steady && a.chan_auto == b.chan_auto && a.chan_hop == b.chan_hop &&
            a.bind_state == b.bind_state && a.bind_secs_left == b.bind_secs_left && a.bind_peer == b.bind_peer &&
            a.commands_taken == b.commands_taken && a.resend_known == b.resend_known;
@@ -126,6 +130,7 @@ struct CameraSetting { int field; int value; };           // CamField
 struct RfControl { int field; int value; int fixed_mhz; };   // RfField; fixed_mhz: RF_CHAN's, else -1
 struct MaxBitrate { int kbps; };
 struct MaxExposure { int us; };        // 0: no cap
+struct Strips { int n; };              // 1: whole pictures, 2-4 strips
 struct MaxBandwidth { int mhz; };      // 0: no cap
 struct Firmware { int firmware; };
 struct FrameMode { int mode; };
@@ -140,7 +145,7 @@ struct ScanScreen { bool open; };     // the channel-scan screen: scan fast whil
 using Command = std::variant<cmd::AirLogs, cmd::CameraSetting, cmd::RfControl,
                              cmd::MaxBitrate, cmd::MaxBandwidth, cmd::Firmware, cmd::FrameMode,
                              cmd::MaxMcs, cmd::Steady, cmd::ChannelHop, cmd::VideoMode, cmd::Bind,
-                             cmd::RegionChanged, cmd::ScanScreen, cmd::MaxExposure>;
+                             cmd::RegionChanged, cmd::ScanScreen, cmd::MaxExposure, cmd::Strips>;
 
 // A command as the radio's queue holds it: numbered in the order it was
 // asked (from 1; 0 is no command).

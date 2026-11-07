@@ -655,7 +655,7 @@ bool Ar8030Link::connect_bb() {
     // Arming here covers every path, because there is no stream at all without
     // this socket. On a first connect it costs nothing: the same cadence test
     // decides when to open the gate either way.
-    video_.drop_picture();
+    drop_pictures();
     resync_          = true;
     resync_live_     = 0;
     resync_prev_us_  = 0;
@@ -717,7 +717,7 @@ bool Ar8030Link::connect_bb() {
 
 void Ar8030Link::disconnect_bb() {
     stop_stats();                        // before the handles it uses go
-    video_.drop_picture();
+    drop_pictures();
     // --debug-bb-dump's file was opened lazily and never closed; on a forced exit the
     // tail of the capture was whatever had not been flushed.
     if (dump_fp) { fclose((FILE *)dump_fp); dump_fp = nullptr; }

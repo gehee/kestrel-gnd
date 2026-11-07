@@ -20,6 +20,7 @@ LinkView link_view(const gnd::RadioState& r, const air::RadioState& a, const air
     v.resend_known = a.resend_known;
     v.max_kbps = shown(asked.kbps, e.max_kbps, e.taken);
     v.max_exp_us = shown(asked.exp, e.max_exp_us, e.taken);
+    v.strips = shown(asked.strips, e.strips, e.taken);
     return v;
 }
 

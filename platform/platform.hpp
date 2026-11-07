@@ -18,6 +18,7 @@
 #include "display/hud_layer.hpp"
 #include "display/video_listener.hpp"
 #include "hal/screen_out.hpp"
+#include "hal/strip_joiner.hpp"
 #include "hal/vdec.hpp"
 #include "render/canvas.hpp"
 
@@ -82,6 +83,13 @@ bool has_background_decoder();
 std::unique_ptr<Vdec> make_background_decoder(VideoCodec codec, std::shared_ptr<hal::Scanout> scanout,
                                               std::atomic<bool>* stop,
                                               std::function<void(std::shared_ptr<DecodedUnit>)> sink);
+// Strips (kestrel-air's, radio/strip_video): what joins the strips' decoded
+// pictures into whole ones for `out`; a strip's decoder is a background one.
+// False / nullptr where the box cannot: the air unit is then never asked for
+// strips.
+bool has_strip_joiner();
+std::unique_ptr<hal::StripJoiner> make_strip_joiner(std::shared_ptr<hal::FrameSink> out,
+                                                    std::shared_ptr<hal::Scanout> scanout);
 
 // ---- the screen as a stream -----------------------------------------------------
 // Screen recording and the phone view (hal/screen_out.hpp): where the box has

@@ -283,7 +283,18 @@ int main(int argc, char **argv)
 	if (!bb_watchdog_deadline_set())
 		bb_watchdog_set_deadline(g_settings.get(radio::setting::bb_watchdog));
 	bb_watchdog_start(argv, g_settings);
-	run_radio(radio_model, ar_cfg, g_settings, codec, vdec, osd, &signal_stop, o.ar8030_slot, o.ar8030_port);
+	// Strips (kestrel-air's): each decoded by a background decoder of its own,
+	// joined into whole pictures for the renderer.
+	radio::StripVideo::MakeDecoder strip_decoder;
+	std::function<std::unique_ptr<hal::StripJoiner>()> strip_joiner;
+	if (renderer && dev && vdec && platform::hardware_decoder(decoder_name) && platform::has_strip_joiner()) {
+		strip_decoder = [codec, dev](std::function<void(std::shared_ptr<DecodedUnit>)> sink, std::atomic<bool>* stop) {
+			return platform::make_background_decoder(codec, dev, stop, std::move(sink));
+		};
+		strip_joiner = [renderer, dev] { return platform::make_strip_joiner(renderer, dev); };
+	}
+	run_radio(radio_model, ar_cfg, g_settings, codec, vdec, osd, &signal_stop, o.ar8030_slot, o.ar8030_port,
+	          std::move(strip_decoder), std::move(strip_joiner));
 
 	////////////////////////////////////////////// MPI CLEANUP
 	bb_watchdog_stop();   // a deliberate exit is not a wedge

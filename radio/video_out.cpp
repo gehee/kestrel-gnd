@@ -341,6 +341,8 @@ bool VideoOut::nal(const uint8_t* nal, size_t len, uint64_t recv_us, SliceHeader
             const int idx = hdr.idx;
             const bool idx_last = hdr.last;
             const bool said_end = hdr.ends && !ends_off_;
+            const int64_t pic = hdr.pic;
+            hdr.pic = -1;
             hdr.hseq = -1;
             hdr.idx = -1;
             hdr.last = false;
@@ -407,13 +409,13 @@ bool VideoOut::nal(const uint8_t* nal, size_t len, uint64_t recv_us, SliceHeader
                     au_times_->readout_us = pt.readout_us;
                     au_times_->exposure_us = pt.exposure_us;
                     au_times_->key = keyframe_nal(codec_, nal_type);
-                    au_times_->pts = (int64_t)frame_pts_;
+                    au_times_->pts = pic >= 0 ? pic : (int64_t)frame_pts_;
                 }
                 // The air unit's capture stamp of this picture: its clock, not
                 // ours - only the differences are used (the recording's sample
                 // durations).
                 au_cap_us_ = pt.cap_us;
-                au_pts_ = frame_pts_;
+                au_pts_ = pic >= 0 ? pic : frame_pts_;
                 au_nal_type_ = nal_type;   // picture key-ness (IDR vs trailing)
                 au_pic_->keyframe = keyframe_nal(codec_, nal_type);
                 au_first_recv_us_ = recv_us;  // zero point for this picture

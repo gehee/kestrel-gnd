@@ -594,6 +594,7 @@ void Ar8030Link::note_ap_delay(const uint8_t *hdr, size_t len, bool new_pic) {
             printf("ar8030: video mode %ux%u fps -> %u lines %u fps: learning its slices again\n",
                    hdr_height_, hdr_fps_, h, fps);
             video_.relearn();
+            if (strips_) strips_->relearn();
             air_readout_us_ = 0;   // the air unit says the new mode's within 2 s
         }
         hdr_height_ = h;

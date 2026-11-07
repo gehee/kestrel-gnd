@@ -273,9 +273,11 @@ int OSD::hud_row(int shown) const {
 int OSD::video_row(int shown) const {
     if (shown == 0) return 0;     // Video Mode
     if (shown == 1) return 10;    // Max Bitrate
-    const int e = (air_feat_.load() & kAirMaxExpFeat) ? 1 : 0;
-    if (e && shown == 2) return 11;          // Max Exposure
-    const int first = 2 + e;                 // Rotate, the first camera row
+    const uint16_t feat = air_feat_.load();
+    const int s = (feat & kAirStripsFeat) ? 1 : 0, e = (feat & kAirMaxExpFeat) ? 1 : 0;
+    if (s && shown == 2) return 12;          // Strips
+    if (e && shown == 2 + s) return 11;      // Max Exposure
+    const int first = 2 + s + e;             // Rotate, the first camera row
     return shown >= first && shown < first + 9 ? shown - first + 1 : -1;
 }
 
@@ -432,6 +434,7 @@ static const char kAirCapsHelp[] =
     "Sensor Timing: readout and exposure, for STATS. Intra Refresh: no keyframe spikes. "
     "Camera IMU: the camera's gyro with the video. FC IMU: the flight controller's gyro instead. "
     "Bandwidth Cap: takes the VRX's limit. Exposure Cap: takes VIDEO > Max Exposure. "
+    "Strips: sends pictures as strips this goggle joins (VIDEO > Strips). "
     "TX Power Levels, TX Power 400mW: the levels TX Power offers it besides Caddx's. "
     "864p120, 864p144: Video Mode offers a 1536x864 window at 120 or 144 fps.";
 
@@ -494,11 +497,20 @@ std::vector<OSD::MenuItem> OSD::menu_items(int tab) const {
                 // only holds goggle-local drawing settings.
                 cam_item("Focus Mode", 9)
             };
-            // After Max Bitrate, Max Exposure (row 11): listed only where the
-            // air unit's kestrel-air takes it while it runs (the P1 Air) - not
-            // at all otherwise (video_row skips it then).
-            if (air_feat_.load() & kAirMaxExpFeat)
-                items.insert(items.begin() + 2,
+            // After Max Bitrate, each only where it can be had - not listed
+            // at all otherwise (video_row skips it then): Strips (row 12),
+            // where both ends can, and Max Exposure (11), where the air
+            // unit's kestrel-air takes it while it runs (the P1 Air).
+            const uint16_t feat = air_feat_.load();
+            int at = 2;
+            if (feat & kAirStripsFeat)
+                items.insert(items.begin() + at++,
+                             MenuItem{"Strips", 1, "Each picture sent as strips of rows, the top one out of the "
+                                                   "air unit's encoder sooner: lower latency. More strips: lower "
+                                                   "still, but less detail in each and more joins where they "
+                                                   "meet. OFF: whole pictures."});
+            if (feat & kAirMaxExpFeat)
+                items.insert(items.begin() + at,
                              MenuItem{"Max Exposure", 1, "Longest exposure the camera's auto exposure may use. "
                                                          "Shorter: less motion blur and a fresher picture, the "
                                                          "gain making up the light, so more grain when dark. "
@@ -997,6 +1009,7 @@ void OSD::menu_apply_change(int tab, int index, int dir) {
                if (air_feat_.load() & kAirMaxExpFeat)
                    menu_ar_maxexp = menu_step(menu_ar_maxexp, dir, kArMaxExpCount);
                break;
+           case 12: menu_ar_strips = menu_step(menu_ar_strips, dir, kArStripsCount); break;
            default: break;
        }
     } else if (menu_tab == 1) {
@@ -1276,6 +1289,7 @@ void OSD::menu_value_text(int tab, int i, char* val_buf, size_t cap) {
                 else snprintf(val_buf, cap, "< %s >", kArMaxBrLabels[menu_ar_maxbr]);
                 break;
             case 11: snprintf(val_buf, cap, "< %s >", kArMaxExpLabels[menu_ar_maxexp]); break;
+            case 12: snprintf(val_buf, cap, "< %s >", kArStripsLabels[menu_ar_strips]); break;
             default: break;
         }
     } else if (menu_tab == 1) { // AR8030 RF items

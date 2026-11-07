@@ -329,6 +329,10 @@ static void commands_test(Rig& b, HudLike& h) {
     CHECK(st.get(rs::ar8030_max_exp_us) == 4000);
     const Ticket te = b.model.encoder().set_max_exposure(2000);
     CHECK(te.value == 2000 && st.get(rs::ar8030_max_exp_us) == 2000);
+    // Strips: 2 until asked, saved as asked.
+    CHECK(st.get(rs::ar8030_strips) == 2);
+    const Ticket ts = b.model.encoder().set_strips(4);
+    CHECK(ts.value == 4 && st.get(rs::ar8030_strips) == 4);
     b.model.take_commands(f);
     // The air unit's info: published by the radio, read without its lock,
     // its capabilities named.

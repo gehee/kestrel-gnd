@@ -25,6 +25,12 @@ std::unique_ptr<Vdec> make_background_decoder(VideoCodec, std::shared_ptr<hal::S
     return nullptr;
 }
 
+bool has_strip_joiner() { return false; }
+
+std::unique_ptr<hal::StripJoiner> make_strip_joiner(std::shared_ptr<hal::FrameSink>, std::shared_ptr<hal::Scanout>) {
+    return nullptr;
+}
+
 bool screen_compositor_available() { return false; }
 
 std::unique_ptr<hal::ScreenEncoder> make_screen_encoder() {

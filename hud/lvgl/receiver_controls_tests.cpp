@@ -18,7 +18,7 @@ struct Camera : Fake<air::Camera,air::CameraState> {
     Ticket set(air::CameraField f,int v) override { field=f; return request(v); }
     Ticket set_mode(int v) override { return request(v); }
 };
-struct Encoder : Fake<air::Encoder,air::EncoderState> { Ticket set_max_bitrate(int v) override { return request(v); } Ticket set_max_exposure(int v) override { return request(v); } };
+struct Encoder : Fake<air::Encoder,air::EncoderState> { Ticket set_max_bitrate(int v) override { return request(v); } Ticket set_max_exposure(int v) override { return request(v); } Ticket set_strips(int v) override { return request(v); } };
 struct Air : Fake<air::Radio,air::RadioState> { bool take_resend(air::Resend&) override {return false;} uint64_t resends_dropped() const override {return 0;} Ticket set_tx_power(int v) override { return request(v); } };
 struct Unit : Fake<air::Unit,air::UnitState> {
     Ticket set_standby(bool v) override { return request(v); }

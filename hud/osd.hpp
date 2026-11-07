@@ -347,9 +347,9 @@ class OSD : public display::VideoListener {
         std::atomic<uint16_t> air_cam_{0xffff};
         bool cam_row_ok(int row) const { return row < 1 || row > 9 || (air_cam_.load() >> row & 1); }
         // VIDEO: the row the handlers number a listed index as - Max Bitrate
-        // (10) and Max Exposure (11) right after Video Mode, Max Exposure
-        // listed only where it can be had, then the camera rows 1-9; -1 past
-        // them.
+        // (10), Strips (12) and Max Exposure (11) right after Video Mode, the
+        // last two listed only where they can be had, then the camera rows
+        // 1-9; -1 past them.
         int video_row(int shown) const;
         std::atomic<bool> air_stock_{false};
         // AR8030 camera menu: the VIDEO tab shows the camera's own settings
@@ -515,6 +515,7 @@ class OSD : public display::VideoListener {
         float    serial_rate_ = 0;             // frames a second
         int menu_ar_maxbr = 0;     // index into kArMaxBrVals (0 = AUTO, no cap)
         int menu_ar_maxexp = 3;    // index into kArMaxExpVals (3 = 4 ms)
+        int menu_ar_strips = 1;    // index into kArStripsVals (1 = 2 strips)
         int menu_ar_maxbw = 4;     // index into kArMaxBwVals (0 = AUTO, 4 = 40 MHz)
         int menu_ar_frame = 0;     // index into kArFrameVals (0 = SHORT, mode 2)
         int menu_ar_maxmcs = 0;    // RADIO > Max MCS: 0 AUTO, n = MCS n-1 (Open8030)

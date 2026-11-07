@@ -2,6 +2,7 @@
 #define AR8030_SOURCE_H
 
 #include <atomic>
+#include <functional>
 #include <condition_variable>
 #include <deque>
 #include <mutex>
@@ -23,6 +24,8 @@
 #include "radio/model.hpp"
 #include "radio/streams.hpp"
 #include "radio/video_out.hpp"
+#include "radio/strip_video.hpp"
+#include "hal/strip_joiner.hpp"
 #include "base/slice_times.hpp"
 #include "radio/frame_clock.hpp"
 #include "radio/ar8030_sky.hpp"
@@ -64,6 +67,17 @@ class Ar8030Link : public radio::Link, private radio::VideoOut::Source {
         // Video goes to sinks (radio/video_out), called on the radio thread
         // with the pictures themselves (a reference, no copy). Before it runs.
         void add_video_sink(bus::VideoSink* s) { video_.add_sink(s); }
+        // Strips (kestrel-air's KA_SLICE_STRIP, radio/strip_video): what makes
+        // a strip's decoder and what joins the strips again. Without them the
+        // air unit is never asked for strips. Before it runs.
+        void set_strips(radio::StripVideo::MakeDecoder make, std::function<std::unique_ptr<hal::StripJoiner>()> join) {
+            strip_decoder_ = std::move(make);
+            strip_joiner_ = std::move(join);
+        }
+        bool strips_supported() const { return strip_decoder_ && strip_joiner_; }
+        // Pictures are coming in strips now (the DVR records the screen then:
+        // there is no one stream of them to record).
+        bool strips_active() const { return strips_on_.load(); }
         void apply(const radio::Command& c) override;
         radio::State held() const override;
 
@@ -85,6 +99,14 @@ class Ar8030Link : public radio::Link, private radio::VideoOut::Source {
         // the next slice.
         radio::VideoOut video_;
         radio::VideoOut::SliceHeader vhdr_;
+        // ...and the strips' (KA_SLICE_STRIP): made at the first strip.
+        radio::StripVideo::MakeDecoder strip_decoder_;
+        std::function<std::unique_ptr<hal::StripJoiner>()> strip_joiner_;
+        std::unique_ptr<radio::StripVideo> strips_;
+        bool vstrip_ = false;                 // the header says its slice is a strip
+        std::atomic<bool> strips_on_{false};  // strips are what comes now
+        void drop_pictures() { video_.drop_picture(); if (strips_) strips_->drop_picture(); }
+        void vhdr_strip_seen(bool strip);   // the header's strip bit (a change drops the other way's picture)
         void picture_start(uint64_t recv_us, radio::VideoOut::PictureTiming& t) override;
         void picture_done(const radio::VideoOut::PictureDone& d) override;
         bool ask_keyframe(const char* why) override;
@@ -167,7 +189,7 @@ class Ar8030Link : public radio::Link, private radio::VideoOut::Source {
         // kestrel-air's capabilities, named for the INFO tab, by the feature bit
         // (or AirInfo::said bit) that says the air unit has it on.
         struct AirCap { uint16_t bit; const char *key; const char *name; };
-        static const AirCap kAirCaps[13];
+        static const AirCap kAirCaps[14];
         // What the air unit has on, by name: its feature bits and what it said.
         static std::vector<std::string> cap_names(const AirInfo &a);
         int air_floor_us;       // fastest capture -> first slice (air_floor_ms), see air_delay_for
@@ -189,6 +211,15 @@ class Ar8030Link : public radio::Link, private radio::VideoOut::Source {
         int  air_bw;
         std::atomic<int>  max_kbps;   // ar8030_max_kbps: the video bitrate cap sent at link-up, 0 = none
         std::atomic<int>  max_exp_us; // ar8030_max_exp_us: the exposure cap, sent when its info says maxexp=1
+        std::atomic<int>  strips;     // ar8030_strips: asked of an air unit whose info says strips=N/M (1: none)
+        // Its info's strips=N/M, and run= (new at each kestrel-air start).
+        std::atomic<int> air_strips_now_{0}, air_strips_max_{0};   // written by the info, read by apply()
+        uint64_t strips_asked_ms_ = 0;
+        std::string air_run_;
+        int strips_wanted() const {
+            const int s = strips.load(), m = air_strips_max_.load();
+            return !strips_supported() || s < 2 || m < 2 ? 1 : std::min(s, m);
+        }
         std::atomic<bool> air_logs;   // hud_debug: the air unit's flight logs, sent at link-up
         bool stream_decode;   // KESTREL_STREAM_DECODE / stream_decode: 0 (default on)
         std::atomic<int>  max_bw_mhz; // ar8030_max_bw_mhz: the video link bandwidth cap sent at link-up, 5/10/20/40, 0 AUTO (stock: 20 or 40)
@@ -507,7 +538,10 @@ class Ar8030Link : public radio::Link, private radio::VideoOut::Source {
         static constexpr uint16_t kAirFeatPwr400 = 0x800;
         // ... and maxexp=1: it takes VIDEO > Max Exposure (sky 0x43) while it runs.
         static constexpr uint16_t kAirFeatMaxExp = 0x1000;
-        static constexpr uint16_t kAirInfoFeats = kAirFeat864p144 | kAirFeatPwr400 | kAirFeatMaxExp;
+        // ... and strips=N/M with M > 1, on a goggle that can join them
+        // (strips_supported()): VIDEO > Strips is listed.
+        static constexpr uint16_t kAirFeatStrips = 0x2000;
+        static constexpr uint16_t kAirInfoFeats = kAirFeat864p144 | kAirFeatPwr400 | kAirFeatMaxExp | kAirFeatStrips;
         // No feature bits, only AirInfo::said, for the INFO tab: its frame
         // (KA_MSG_FRAME) came, and its info says the sensor's readout.
         static constexpr uint16_t kAirSaidFrameClock = 0x200;

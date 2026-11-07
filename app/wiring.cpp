@@ -9,10 +9,13 @@
 
 void run_radio(radio::Model& model, const Ar8030Config& cfg, Settings& settings,
                const VideoCodec& codec, std::shared_ptr<Vdec> vdec,
-               std::shared_ptr<OSD> osd, std::atomic<bool>* stop, int slot, int port) {
+               std::shared_ptr<OSD> osd, std::atomic<bool>* stop, int slot, int port,
+               radio::StripVideo::MakeDecoder strip_decoder,
+               std::function<std::unique_ptr<hal::StripJoiner>()> strip_joiner) {
     // The radio: the AR8030, reporting to its model, writing its streams.
     auto link = std::make_shared<Ar8030Link>(model, cfg, settings, codec, vdec, stop, "127.0.0.1", 50000,
                                              slot, port);
+    if (strip_decoder && strip_joiner) link->set_strips(std::move(strip_decoder), std::move(strip_joiner));
     // What reads it besides the HUD (which watched its parts when it was
     // made): the air unit's IMU samples, and the recording, a video sink -
     // each on a thread of its own.

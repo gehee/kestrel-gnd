@@ -82,6 +82,11 @@ using air::kArMaxBrVals; using air::kArMaxBrLabels; using air::kArMaxBrCount; us
 // in the unit's features).
 using air::kArMaxExpVals; using air::kArMaxExpLabels; using air::kArMaxExpCount; using air::ar_maxexp_index;
 static const uint16_t kAirMaxExpFeat = 0x1000;   // = Ar8030Link::kAirFeatMaxExp
+// Strips' choices: system/air/encoder.hpp. Listed only where both ends can:
+// an air unit whose info says strips=N/M (M > 1) and a goggle that joins them
+// (the radio's Ar8030Link::kAirFeatStrips).
+using air::kArStripsVals; using air::kArStripsLabels; using air::kArStripsCount; using air::ar_strips_index;
+static const uint16_t kAirStripsFeat = 0x2000;   // = Ar8030Link::kAirFeatStrips
 // Max Bandwidth: how wide the video link may go. The goggle's radio widens it
 // by itself on a good link (bw_auto), to 40 MHz with fpvOS's radio config -
 // more throughput and a shorter frame, less range - or 20 with its 20 MHz one

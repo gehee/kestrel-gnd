@@ -3,6 +3,7 @@
 #include "hal/ffmpeg/vdec_ffmpeg.hpp"
 #include "hal/rockchip/mpp_encoder.hpp"
 #include "hal/rockchip/rga_compositor.hpp"
+#include "hal/rockchip/rga_strips.hpp"
 #include "hal/rockchip/vdec_rk.hpp"
 #include "kestrel_gnd_features.h"
 #include "platform/box.hpp"
@@ -31,6 +32,14 @@ std::unique_ptr<Vdec> make_background_decoder(VideoCodec codec, std::shared_ptr<
     v->set_output_timeout(100);   // ms, so run_frame can notice a stop
     v->set_frame_sink(std::move(sink));
     return v;
+}
+
+bool has_strip_joiner() { return RgaStripJoiner::available(); }
+
+std::unique_ptr<hal::StripJoiner> make_strip_joiner(std::shared_ptr<hal::FrameSink> out,
+                                                    std::shared_ptr<hal::Scanout> scanout) {
+    if (!RgaStripJoiner::available() || !out || !scanout) return nullptr;
+    return std::unique_ptr<hal::StripJoiner>(new RgaStripJoiner(std::move(out), scanout->scanout_fd()));
 }
 
 bool screen_compositor_available() { return RgaCompositor::available(); }

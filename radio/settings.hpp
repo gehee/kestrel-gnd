@@ -17,6 +17,12 @@ inline constexpr Setting<int> ar8030_chan_hop{"ar8030_chan_hop", 0};
 inline constexpr Setting<int> ar8030_max_kbps{"ar8030_max_kbps", 0};
 // VIDEO > Max Exposure: the air unit's auto exposure goes no longer, us (0 none).
 inline constexpr Setting<int> ar8030_max_exp_us{"ar8030_max_exp_us", 4000};
+// VIDEO > Strips: the strips a kestrel-air that has them encodes each picture
+// in (KA_CMD_STRIPS), sent as each one, joined again here; 1: whole pictures.
+// 2 by default: row 0 lit 35.5-36.4 ms (whole pictures 39.3) with one join;
+// 3 and 4 are faster (32.4, 31.2) but each join is one more place the strips
+// meet and each strip has fewer bits for its detail.
+inline constexpr Setting<int> ar8030_strips{"ar8030_strips", 2};
 inline constexpr Setting<int> ar8030_max_bw_mhz{"ar8030_max_bw_mhz", 40};
 inline constexpr Setting<int> ar8030_max_mcs{"ar8030_max_mcs", -1};
 inline constexpr Setting<int> ar8030_steady{"ar8030_steady", 0};

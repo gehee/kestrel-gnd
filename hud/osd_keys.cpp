@@ -189,6 +189,7 @@ void OSD::handle_key(int key) {
              menu_ar_hop = rs.chan_auto;
              menu_ar_maxbr = ar_maxbr_index(rs.max_kbps);
              menu_ar_maxexp = ar_maxexp_index(rs.max_exp_us);
+             menu_ar_strips = ar_strips_index(rs.strips);
              menu_ar_maxbw = ar_maxbw_index(rs.max_bw_mhz);
              menu_ar_frame = ar_frame_index(rs.frame_mode);
              menu_ar_maxmcs = rs.max_mcs < 0 ? 0 : rs.max_mcs + 1;
@@ -405,6 +406,11 @@ void OSD::handle_key(int key) {
                     case 11:
                         if (air_feat_.load() & kAirMaxExpFeat)
                             asked_.exp = parts_.encoder.set_max_exposure(kArMaxExpVals[menu_ar_maxexp]);
+                        break;
+                    // Strips: saved, and asked of the air unit now (listed only where it has them).
+                    case 12:
+                        if (air_feat_.load() & kAirStripsFeat)
+                            asked_.strips = parts_.encoder.set_strips(kArStripsVals[menu_ar_strips]);
                         break;
                     default: break;
                 }

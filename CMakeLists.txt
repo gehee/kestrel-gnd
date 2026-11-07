@@ -145,7 +145,7 @@ set(_hal_srcs hal/ffmpeg/vdec_ffmpeg.cpp hal/frame_length.cpp hal/plane_rules.cp
               hal/rockchip/vop2_frame_length.cpp)
 if(USE_RKMPP)
     list(APPEND _hal_srcs hal/rockchip/vdec_rk.cpp hal/rockchip/mpp_encoder.cpp
-                          hal/rockchip/rga_compositor.cpp)
+                          hal/rockchip/rga_compositor.cpp hal/rockchip/rga_strips.cpp)
 endif()
 kestrel_module(hal FOLDERS hal DEPS base
     SOURCES ${_hal_srcs}
@@ -168,7 +168,7 @@ kestrel_module(render FOLDERS render DEPS base
 kestrel_module(radio FOLDERS radio DEPS hal region system
     SOURCES radio/ar8030_link.cpp radio/ar8030_link_bb.cpp radio/ar8030_link_bind.cpp radio/ar8030_link_air.cpp
             radio/ar8030_link_rf.cpp radio/ar8030_link_stats.cpp radio/ar8030_link_video.cpp radio/bb_watchdog.cpp radio/ar8030_sky.cpp radio/model.cpp
-            radio/air_imu.cpp radio/streams.cpp radio/video_out.cpp
+            radio/air_imu.cpp radio/streams.cpp radio/video_out.cpp radio/strip_video.cpp
     LIBS ${_ar8030_libs})
 kestrel_module(motion FOLDERS motion DEPS system
     SOURCES motion/imu_stream.cpp motion/imu_reader.cpp)
