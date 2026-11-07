@@ -38,7 +38,25 @@ void OSD::handle_key(int key) {
         pthread_mutex_unlock(&osd_mutex);
         return;
     }
-    
+    // Back turns it down at once: the previous mode, as when the 10 s run out
+    // (osd_frame.cpp).
+    if (screen_confirm_ && menu_open && (key == kKeyBack || key == 27)) {
+        screen_confirm_ = false;
+        printf("menu: screen mode %s turned down - restarting in the previous one\n",
+               screen_confirm_mode_.c_str());
+        kestrel_request_restart();
+        pthread_mutex_unlock(&osd_mutex);
+        return;
+    }
+    // ...and until then the menu stays on its question, DISPLAY > Screen Mode
+    // (osd_frame.cpp opens it there): every other key does nothing - no
+    // closing, no other row, tab or value - so "Keep this mode?" stays on
+    // screen.
+    if (screen_confirm_ && menu_open) {
+        pthread_mutex_unlock(&osd_mutex);
+        return;
+    }
+
     // The buttons. On the live picture the D-pad's Enter opens the menu and Back
     // opens the gallery. With the menu open they are what they were: Enter
     // applies, Back closes (as M does). With the gallery open they are its keys.

@@ -243,7 +243,7 @@ std::string OSD::screen_mode_label(int idx) {
 const char* OSD::menu_help_warning(int tab, int i) {
     if (tab == 3 && disp_row(i) == kDispScreenMode && screen_confirm_) {
         static char ask[96];
-        snprintf(ask, sizeof(ask), "Keep this mode? Enter keeps it - going back in %d s.",
+        snprintf(ask, sizeof(ask), "Keep this mode? Enter keeps it, Back goes back - by itself in %d s.",
                  screen_confirm_left_s());
         return ask;
     }
