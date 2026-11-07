@@ -152,7 +152,7 @@ int read_start_options(int argc, char** argv, Settings& settings, StartOptions& 
 	// its EDID (display/screen_id.h), and unset means Auto - the fastest 1080p
 	// above 60 Hz, else 720p above 60 Hz, else 1080p60 (display/kms/
 	// mode_follow.h). screen_mode is for a screen with no ID, and --screen-mode.
-	// A mode picked in SYSTEM > Screen Mode is only on trial the first time:
+	// A mode picked in DISPLAY > Screen Mode is only on trial the first time:
 	// screen_mode_try names the screen and the mode, and is read and removed
 	// here, so a mode that leaves the screen black is gone at the next start
 	// even if nobody could see the prompt to reject it (see OSD, confirm).

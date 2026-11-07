@@ -393,7 +393,7 @@ class OSD : public display::VideoListener {
         int  volt_mode = 0;
         int  menu_volt_mode = 0;
         int  menu_wifi_ap = 0;     // SYSTEM > WiFi AP (fpvos-wifi)
-        // SYSTEM > Screen Mode: 0 is Auto, then the connector's modes as
+        // DISPLAY > Screen Mode: 0 is Auto, then the connector's modes as
         // screen_modes() lists them. -1 until first read from screen_mode.
         int  menu_screen_mode = -1;
         std::string screen_id_;
@@ -591,17 +591,21 @@ class OSD : public display::VideoListener {
         static const int kMenuTabs = 8, kMenuRows = 24;
         static const int kTabDvr = 4, kTabSystem = 5, kTabAirInfo = 6, kTabAirSerial = 7;
         // DISPLAY rows, in the order they are listed. The tab is dispatched
-        // by index in half a dozen places, so the order lives here once and
-        // the dispatchers name the row rather than count to it. Sync Margin
-        // is listed only while Refresh Sync is NUDGE or FOLLOW, and Sync To not at
-        // all (hidden, its setting still read): both last, so no row moves.
+        // by row in half a dozen places, so the order lives here once and the
+        // dispatchers name the row rather than count to it. Refresh Sync and
+        // Sync Margin are listed only where the frame length can be set, Sync
+        // Margin only while Refresh Sync is NUDGE or FOLLOW, and Sync To not at
+        // all (hidden, its setting still read): the rows after them close up,
+        // so a listed index goes through disp_row(). Screen Mode, before them,
+        // never moves (its pending choice is menu_dirty[3][kDispScreenMode]).
         enum DisplayRow {
             kDispTheme = 0, kDispBgVideo, kDispPicture, kDispUiScale, kDispBrightness,
-            kDispHdrAdvanced, kDispFrameMode, kDispRefreshSync, kDispSyncMargin, kDispSyncSlice
+            kDispHdrAdvanced, kDispScreenMode, kDispRefreshSync, kDispSyncMargin, kDispFrameMode,
+            kDispSyncSlice
         };
         // SYSTEM rows, headers included, in the order they are listed.
         enum SysRow {
-            kSysBuild = 0, kSysVersion, kSysDecoder, kSysScreen, kSysWifi,
+            kSysBuild = 0, kSysVersion, kSysDecoder, kSysWifi,
             kSysHdrZone, kSysLicence, kSysArea, kSysCountry, kSysTimezone
         };
         int  menu_licence_ = 0;   // SYSTEM > Amateur Licence's mirror (zones::licensed())
@@ -619,6 +623,8 @@ class OSD : public display::VideoListener {
         // The HUD tab lists Canopy Voltage only with the canopy up, which moves the rows after it:
         // the HudRow a listed row is, whatever is shown above it.
         int hud_row(int shown) const;
+        // DISPLAY: the DisplayRow a listed index is, rows not listed skipped.
+        int disp_row(int shown) const;
         // Amber line below a row's help, shown whatever its value; nullptr for none.
         const char* menu_help_warning(int tab, int i);
         bool menu_dirty[kMenuTabs][kMenuRows] = {};
@@ -1028,7 +1034,7 @@ class OSD : public display::VideoListener {
         // key its mode is kept under: screen_mode_<ID>, or screen_mode.
         void set_screen(const std::string& id) { screen_id_ = id; }
         // This run's mode is on trial (screen_mode_try, main.cpp): the menu
-        // opens on SYSTEM > Screen Mode to ask whether to keep it. Enter keeps
+        // opens on DISPLAY > Screen Mode to ask whether to keep it. Enter keeps
         // it; otherwise, or unseen on a black screen, it is dropped and the
         // app restarts in the screen's kept mode.
         void begin_screen_mode_confirm(const std::string& mode);

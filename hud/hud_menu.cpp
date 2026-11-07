@@ -182,7 +182,7 @@ void OSD::draw_side_panel(int side, float x, float y, float w, float h, float u)
     // joins the network from the first code and opens the page from the
     // second. Above the help; the rows stop above them.
     float list_bottom = help_top - 20 * u;
-    if (n && menu_tab == kTabSystem && sel == 4 && !editing && !menu_dirty[kTabSystem][4] && wifi_ap_on()) {
+    if (n && menu_tab == kTabSystem && sel == kSysWifi && !editing && !menu_dirty[kTabSystem][kSysWifi] && wifi_ap_on()) {
         static Qr qr_join, qr_page;
         // The network's name and password from their file, once a second.
         static std::string join_text, page_url;

@@ -100,15 +100,15 @@ void OSD::handle_key(int key) {
              // The canopy wakes with a blade picked - the one used last - and
              // nothing unfolded yet.
              ui_stage_ = 0;
-             // SYSTEM > Screen Mode lists what the connector offers at this
+             // DISPLAY > Screen Mode lists what the connector offers at this
              // open: a display plugged in since brings modes of its own. A
              // choice staged against the old list goes with it.
              // The HUD's thread makes the list again (refill_screen_modes): it
              // reads it while drawing, without the lock this holds.
              screen_modes_stale_ = true;
              menu_screen_mode = -1;
-             menu_dirty[kTabSystem][3] = false;
-             menu_pending_from[kTabSystem][3][0] = '\0';
+             menu_dirty[3][kDispScreenMode] = false;
+             menu_pending_from[3][kDispScreenMode][0] = '\0';
              menu_opt_tab_ = -1;
              // Focus opens on the section column (menu_focus = 0, below) so
              // the first press goes somewhere useful, the same on every open
@@ -446,7 +446,7 @@ void OSD::handle_key(int key) {
                 // save as they are nudged. Background Video is the one row
                 // here Enter still owns, because switching it starts or stops
                 // a player rather than changing a number.
-                if (menu_index == kDispBgVideo) {
+                if (disp_row(menu_index) == kDispBgVideo) {
                     bg_video_enabled = menu_bg_video;
                     settings_.set(hud::setting::bg_video_enabled, bg_video_enabled);
                     // Only start the player if we are still in idle (BACKGROUND) state -
@@ -454,18 +454,7 @@ void OSD::handle_key(int key) {
                     do_start_player = bg_video_enabled && (video_state_ == VideoState::BACKGROUND);
                     do_stop_player  = !bg_video_enabled;
                 }
-            } else if (menu_tab == kTabDvr) {
-                if (menu_index == 0) {
-                    // Just a mode flag now. The REC button owns starting and
-                    // stopping; this used to spin up a second DVR of its own the
-                    // moment it was switched on, which recorded to a fixed
-                    // dvr_screen.mp4 and had nothing to do with the REC button.
-                    dvr_screen = menu_dvr_source > 0;
-                    settings_.set(dvr::setting::dvr_screen, dvr_screen);
-                    DvrRecorder::instance().set_screen_mode(dvr_screen);
-                }
-            } else if (menu_tab == kTabSystem) {
-                if (menu_index == 3 && screen_mode_menu() != screen_mode_saved()) {
+                if (disp_row(menu_index) == kDispScreenMode && screen_mode_menu() != screen_mode_saved()) {
                     // Only a trial: main.cpp applies it at the restart and asks
                     // (begin_screen_mode_confirm); the screen's screen_mode is
                     // written once it is kept.
@@ -479,7 +468,18 @@ void OSD::handle_key(int key) {
                     printf("menu: screen mode %s on trial - restarting to apply it\n", v);
                     kestrel_request_restart();
                 }
-                if (menu_index == 4 && platform::caps().wifi_ap) {
+            } else if (menu_tab == kTabDvr) {
+                if (menu_index == 0) {
+                    // Just a mode flag now. The REC button owns starting and
+                    // stopping; this used to spin up a second DVR of its own the
+                    // moment it was switched on, which recorded to a fixed
+                    // dvr_screen.mp4 and had nothing to do with the REC button.
+                    dvr_screen = menu_dvr_source > 0;
+                    settings_.set(dvr::setting::dvr_screen, dvr_screen);
+                    DvrRecorder::instance().set_screen_mode(dvr_screen);
+                }
+            } else if (menu_tab == kTabSystem) {
+                if (menu_index == kSysWifi && platform::caps().wifi_ap) {
                     wifi_ap_set(menu_wifi_ap != 0);   // for this session only
                 }
             }

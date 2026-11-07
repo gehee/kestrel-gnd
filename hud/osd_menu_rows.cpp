@@ -153,7 +153,7 @@ void OSD::menu_action_status(int tab, int i, char* hint, size_t hcap,
 // And how they must sit: an element is recognised by its glyphs, so one that
 // overlaps a neighbour can lose them - a voltage whose V was blanked by the
 // next element's padding stayed on screen as a bare figure under the canopy.
-// SYSTEM > Screen Mode's choices: the modes the connector in use advertises,
+// DISPLAY > Screen Mode's choices: the modes the connector in use advertises,
 // progressive only (interlaced ones do not composite here), each size and
 // rate once, largest and fastest first. Read without probing the connector -
 // a probe re-reads the EDID - and made at the first frame after a menu open
@@ -241,21 +241,21 @@ std::string OSD::screen_mode_label(int idx) {
 // and the radio sits next to the RC link: say so on the row, on or off.
 
 const char* OSD::menu_help_warning(int tab, int i) {
-    if (tab == kTabSystem && i == 3 && screen_confirm_) {
+    if (tab == 3 && disp_row(i) == kDispScreenMode && screen_confirm_) {
         static char ask[96];
         snprintf(ask, sizeof(ask), "Keep this mode? Enter keeps it - going back in %d s.",
                  screen_confirm_left_s());
         return ask;
     }
-    if (tab == 3 && i == kDispRefreshSync && sync_confirm_) {
+    if (tab == 3 && disp_row(i) == kDispRefreshSync && sync_confirm_) {
         static char ask[96];
         snprintf(ask, sizeof(ask), "Keep it? Enter keeps it - back to %s in %d s.",
                  refresh_sync_label(sync_confirm_prev_), sync_confirm_left_s());
         return ask;
     }
-    if (tab == kTabSystem && i == 3 && menu_dirty[kTabSystem][3])
+    if (tab == 3 && disp_row(i) == kDispScreenMode && menu_dirty[3][kDispScreenMode])
         return "Enter tries it: the app restarts, then asks whether to keep it.";
-    if (tab == kTabSystem && i == 4)
+    if (tab == kTabSystem && i == kSysWifi)
         return "Warning: Before enabling, plug an external antenna to the wifi uFL connector.";
     return nullptr;
 }
@@ -270,8 +270,15 @@ int OSD::hud_row(int shown) const {
     return (!voltage_listed && shown >= kHudRowVoltage) ? shown + 1 : shown;
 }
 
+int OSD::disp_row(int shown) const {
+    if (shown < kDispRefreshSync) return shown;
+    if (!platform::caps().phase_lock) return shown + (kDispFrameMode - kDispRefreshSync);
+    if (menu_refresh_sync == 0 && shown >= kDispSyncMargin) return shown + 1;
+    return shown;
+}
+
 const char* OSD::menu_help_text(int tab, int i, const char* fallback) {
-    if (tab == 3 && i == kDispFrameMode) {
+    if (tab == 3 && disp_row(i) == kDispFrameMode) {
         // Lowest latency first; what each one costs.
         switch (menu_frame_mode) {
         case kFrameSplit:
@@ -285,7 +292,7 @@ const char* OSD::menu_help_text(int tab, int i, const char* fallback) {
                    "only whole pictures go up. No tearing. The default.";
         }
     }
-    if (tab == 3 && i == kDispRefreshSync) {
+    if (tab == 3 && disp_row(i) == kDispRefreshSync) {
         // With the screen's refresh and the camera's rate known (the display
         // lock's, measured): what the value shown does to this screen in this
         // video mode, and while it is the one running, whether it holds now.
@@ -348,8 +355,8 @@ const char* OSD::menu_help_text(int tab, int i, const char* fallback) {
                         "No impact on the FPV feed's latency.";
         }
     }
-    if (tab == kTabSystem && i == 3) {
-        if (menu_dirty[kTabSystem][3] || screen_confirm_) return "";   // the warning says it
+    if (tab == 3 && disp_row(i) == kDispScreenMode) {
+        if (menu_dirty[3][kDispScreenMode] || screen_confirm_) return "";   // the warning says it
         static std::string mode;
         char now[64] = "--";
         if (dev && dev->has_output())
@@ -369,10 +376,10 @@ const char* OSD::menu_help_text(int tab, int i, const char* fallback) {
                     (zones::has_rules(z.country) ? "." : std::string(", and none are known for it yet."));
         return zone_help.c_str();
     }
-    if (tab == kTabSystem && i == 4) {
+    if (tab == kTabSystem && i == kSysWifi) {
         // While a change is pending, the "Pending: OFF -> ON" line says it
         // all; the antenna warning above it comes from menu_help_warning().
-        if (menu_dirty[kTabSystem][4]) return "";
+        if (menu_dirty[kTabSystem][kSysWifi]) return "";
         static std::string wifi;          // rebuilt each frame the row is selected
         wifi = wifi_ap_describe();
         return wifi.c_str();
@@ -541,19 +548,22 @@ std::vector<OSD::MenuItem> OSD::menu_items(int tab) const {
             {"UI Scaling", 1, "Size of the HUD's type. The panels stay put."},
             {"Brightness", 1, "Panel backlight. Lifts video and HUD together."},
             // How pictures are timed onto the screen: worth leaving alone
-            // unless chasing latency or smoothness.
+            // unless chasing latency or smoothness. The screen's mode first,
+            // as Refresh Sync can only hold one that suits the camera.
             {"ADVANCED", 2},
-            {"Frame Mode", 1, "How pictures go from the radio to the screen."},  // see menu_help_text
+            // Help is built live by menu_help_text: the mode in use.
+            {"Screen Mode", 1, ""},
         };
         // Refresh Sync only where the display controller's frame length can be
         // set (platform::caps), and Sync Margin only while it is NUDGE or FOLLOW: with it
-        // OFF the margin does nothing. Sync To (kDispSyncSlice, after it: which
-        // slice the lock times the screen to) is hidden; display_lock_slice
-        // still applies.
+        // OFF the margin does nothing. Sync To (kDispSyncSlice: which slice the
+        // lock times the screen to) is hidden; display_lock_slice still
+        // applies. The rows after them close up (disp_row()).
         if (platform::caps().phase_lock)
             items.push_back({"Refresh Sync", 1, ""});                            // see menu_help_text
         if (platform::caps().phase_lock && menu_refresh_sync != 0)
             items.push_back({"Sync Margin", 1, "Refresh Sync's refresh this much later. Fewer pictures miss their refresh (a hitch each), for that much latency: 2 MS, about a third fewer."});
+        items.push_back({"Frame Mode", 1, "How pictures go from the radio to the screen."});  // see menu_help_text
     } else if (tab == kTabDvr) {
         items = {
             // A reading where the screen cannot be recorded: FPV is all there is.
@@ -609,8 +619,6 @@ std::vector<OSD::MenuItem> OSD::menu_items(int tab) const {
             {"Build", 0},
             {"Version", 0},
             {"Decoder", 0},
-            // Help is built live by menu_help_text: the mode in use.
-            {"Screen Mode", 1, ""}
         };
         // Help is built live by menu_help_text: name, password, channel.
         items.push_back({"WiFi AP", 1, ""});
@@ -646,8 +654,8 @@ std::vector<OSD::MenuItem> OSD::menu_items(int tab) const {
 // steps off the HUD and out of the settings file.
 int OSD::menu_options(int tab, int index, char out[kMenuOptMax][kMenuOptLen], int* cur) {
     if (cur) *cur = 0;
-    const bool self_saving = (tab == 3 && index == kDispBrightness) ||
-                             (tab == 3 && index == kDispUiScale);
+    const bool self_saving = (tab == 3 && disp_row(index) == kDispBrightness) ||
+                             (tab == 3 && disp_row(index) == kDispUiScale);
     if (self_saving) return 0;
 
     if (tab == menu_opt_tab_ && index == menu_opt_idx_) {
@@ -749,7 +757,7 @@ int OSD::menu_range_ladder(int tab, int index, int span,
         }
     };
 
-    if (tab == 3 && index == kDispBrightness) {   // 0..100 in fives
+    if (tab == 3 && disp_row(index) == kDispBrightness) {   // 0..100 in fives
         for (int k = -span; k <= span; k++) {
             int v = menu_brightness + k * 5;
             if (v < 0 || v > 100) continue;
@@ -757,7 +765,7 @@ int OSD::menu_range_ladder(int tab, int index, int span,
         }
         return n;
     }
-    if (tab == 3 && index == kDispUiScale) {      // 0.5x..2.0x in tenths
+    if (tab == 3 && disp_row(index) == kDispUiScale) {      // 0.5x..2.0x in tenths
         for (int k = -span; k <= span; k++) {
             float v = menu_ui_scale + (float)k * 0.1f;
             if (v < 0.5f - 0.001f || v > 2.0f + 0.001f) continue;
@@ -889,10 +897,13 @@ bool OSD::menu_row_applies_live(int tab, int index) {
         // (The headers cannot be selected, so which row `index` is makes no difference.)
         return true;
     }
-    if (tab == 3)   // DISPLAY: all but Background Video, which owns a player
-        return index != kDispBgVideo;
-    // SYSTEM: Screen Mode restarts the app and WiFi AP waits for Enter, after
-    // its antenna warning has been shown; neither applies as it is stepped.
+    // DISPLAY: all but Background Video, which owns a player, and Screen
+    // Mode, which restarts the app (both before the rows that come and go,
+    // so listed where their DisplayRow says).
+    if (tab == 3)
+        return index != kDispBgVideo && index != kDispScreenMode;
+    // SYSTEM: WiFi AP waits for Enter, after its antenna warning has been
+    // shown; it does not apply as it is stepped.
     // The time zone applies as it is walked: the clock follows it.
     if (tab == kTabSystem) return index >= kSysLicence && index <= kSysTimezone;
     return false;
@@ -1036,8 +1047,13 @@ void OSD::menu_apply_change(int tab, int index, int dir) {
                 parts_.air_unit.set_logs(hud_debug);   // and the air unit's
             }
         }
-    } else if (menu_tab == 3) { // DISPLAY
-        if (menu_index == kDispBrightness) {
+    } else if (menu_tab == 3) { // DISPLAY - rows as listed in menu_items(), see disp_row()
+        const int row = disp_row(menu_index);
+        if (row == kDispScreenMode) {
+            // Only stages the choice: the display is set up once, at start,
+            // so Enter saves it and restarts kestrel (osd_keys.cpp).
+            menu_screen_mode = menu_step(screen_mode_menu(), dir, (int)screen_modes().size() + 1);
+        } else if (row == kDispBrightness) {
             // Hardware picture control on the HDMI connector: lifts the
             // video and the OSD together, which is what made the grid
             // read better when the video was accidentally drawn twice.
@@ -1048,7 +1064,7 @@ void OSD::menu_apply_change(int tab, int index, int dir) {
                 if (dev) dev->set_display_property("brightness", menu_brightness);
                 settings_.set(hud::setting::brightness, menu_brightness);
             }
-        } else if (menu_index == kDispUiScale) {
+        } else if (row == kDispUiScale) {
             // Applies and saves as it is nudged, like Brightness beside it.
             // A scale is judged by looking at what it did to the HUD, and the
             // menu is drawn at this scale too - holding it back until Enter
@@ -1058,9 +1074,9 @@ void OSD::menu_apply_change(int tab, int index, int dir) {
                 osd_vars.ui_scale = menu_ui_scale;
                 settings_.set(hud::setting::ui_scale, menu_ui_scale);
             }
-        } else if (menu_index == kDispBgVideo) {
+        } else if (row == kDispBgVideo) {
             menu_bg_video = menu_step(menu_bg_video ? 1 : 0, dir, 2) != 0;
-        } else if (menu_index == kDispTheme) {
+        } else if (row == kDispTheme) {
             int n = hud_theme_count();
             menu_hud_theme = menu_step(menu_hud_theme, dir, n);
             // A theme is chosen by looking at it, and the menu is drawn over
@@ -1070,7 +1086,7 @@ void OSD::menu_apply_change(int tab, int index, int dir) {
                 hud_theme_set(hud_theme_idx);
                 settings_.set(hud::setting::hud_theme, hud_theme_idx);
             }
-        } else if (menu_index == kDispPicture) {
+        } else if (row == kDispPicture) {
             // Whole-picture scale: video and HUD shrink together, black all
             // round. Not Overscan, which only pulls the HUD's margins in. For
             // optics that clip the frame, this is the one that shows the lot.
@@ -1080,7 +1096,7 @@ void OSD::menu_apply_change(int tab, int index, int dir) {
                 dev->set_picture_scale(menu_picture_scale);
                 settings_.set(hud::setting::picture_scale, menu_picture_scale);
             }
-        } else if (menu_index == kDispFrameMode) {
+        } else if (row == kDispFrameMode) {
             // Applied as it is stepped: the difference is seen in the video.
             menu_frame_mode = menu_step(menu_frame_mode, dir, kFrameModeCount);
             if (!menu_stepping_) {
@@ -1088,7 +1104,7 @@ void OSD::menu_apply_change(int tab, int index, int dir) {
                 settings_.set(base::setting::frame_mode, menu_frame_mode);
                 printf("menu: frame mode %s\n", frame_mode_label(menu_frame_mode));
             }
-        } else if (menu_index == kDispSyncMargin) {
+        } else if (row == kDispSyncMargin) {
             // Applied as it is stepped, like Sync To.
             menu_sync_margin = menu_step(menu_sync_margin, dir, 5);
             if (!menu_stepping_) {
@@ -1096,14 +1112,14 @@ void OSD::menu_apply_change(int tab, int index, int dir) {
                 settings_.set(display::setting::display_lock_margin_ms, menu_sync_margin);
                 printf("menu: refresh sync margin %d ms\n", menu_sync_margin);
             }
-        } else if (menu_index == kDispSyncSlice) {
+        } else if (row == kDispSyncSlice) {
             menu_sync_slice = menu_step(menu_sync_slice - 1, dir, 2) + 1;
             if (!menu_stepping_) {
                 if (dev) dev->set_sync_slice(menu_sync_slice);
                 settings_.set(display::setting::display_lock_slice, menu_sync_slice);
                 printf("menu: refresh sync to slice %d\n", menu_sync_slice);
             }
-        } else if (menu_index == kDispRefreshSync) {
+        } else if (row == kDispRefreshSync) {
             // The screen's own, like its mode: one that blanks on it keeps it off
             // while another has it on. FOLLOW also moves Screen Mode Auto to the
             // fastest mode (and back), so Auto chooses again.
@@ -1135,11 +1151,7 @@ void OSD::menu_apply_change(int tab, int index, int dir) {
             menu_dvr_source = menu_step(menu_dvr_source, dir, 2);
         }
     } else if (menu_tab == kTabSystem) {
-        if (menu_index == 3) {
-            // Only stages the choice: the display is set up once, at start,
-            // so Enter saves it and restarts kestrel (below).
-            menu_screen_mode = menu_step(screen_mode_menu(), dir, (int)screen_modes().size() + 1);
-        } else if (menu_index == 4 && platform::caps().wifi_ap) {
+        if (menu_index == kSysWifi && platform::caps().wifi_ap) {
             // Only stages the choice. Enter applies it (below, with DVR
             // Source), so turning the radio on always passes through the
             // pending state, whose help line is the antenna warning.
@@ -1310,25 +1322,31 @@ void OSD::menu_value_text(int tab, int i, char* val_buf, size_t cap) {
             } else if (hud_row(i) == kHudRowDebug) {
                 snprintf(val_buf, cap, "< %s >", menu_hud_debug ? "ON" : "OFF");
             }
-        } else if (menu_tab == 3) { // DISPLAY Tab
-            if (i == kDispBrightness) {
+        } else if (menu_tab == 3) { // DISPLAY Tab - see menu_items() and disp_row()
+            const int row = disp_row(i);
+            if (row == kDispScreenMode) {
+                if (screen_modes().empty())
+                    snprintf(val_buf, cap, "--");
+                else
+                    snprintf(val_buf, cap, "< %s >", screen_mode_label(screen_mode_menu()).c_str());
+            } else if (row == kDispBrightness) {
                 snprintf(val_buf, cap, "< %d >", menu_brightness);
-            } else if (i == kDispUiScale) {
+            } else if (row == kDispUiScale) {
                 snprintf(val_buf, cap, "< %.1fx >", menu_ui_scale);
-            } else if (i == kDispBgVideo) {
+            } else if (row == kDispBgVideo) {
                 snprintf(val_buf, cap, "< %s >", menu_bg_video ? "ON" : "OFF");
-            } else if (i == kDispTheme) {
+            } else if (row == kDispTheme) {
                 snprintf(val_buf, cap, "< %s >", hud_theme_at(menu_hud_theme).name);
-            } else if (i == kDispPicture) {
+            } else if (row == kDispPicture) {
                 if (menu_picture_scale >= 100) snprintf(val_buf, cap, "< FULL >");
                 else                           snprintf(val_buf, cap, "< %d%% >", menu_picture_scale);
-            } else if (i == kDispFrameMode) {
+            } else if (row == kDispFrameMode) {
                 snprintf(val_buf, cap, "< %s >", frame_mode_label(menu_frame_mode));
-            } else if (i == kDispRefreshSync) {
+            } else if (row == kDispRefreshSync) {
                 snprintf(val_buf, cap, "< %s >", refresh_sync_label(menu_refresh_sync));
-            } else if (i == kDispSyncSlice) {
+            } else if (row == kDispSyncSlice) {
                 snprintf(val_buf, cap, "< SLICE %d >", menu_sync_slice);
-            } else if (i == kDispSyncMargin) {
+            } else if (row == kDispSyncMargin) {
                 snprintf(val_buf, cap, "< %d MS >", menu_sync_margin);
             }
         } else if (menu_tab == kTabDvr) {
@@ -1416,12 +1434,7 @@ void OSD::menu_value_text(int tab, int i, char* val_buf, size_t cap) {
                 snprintf(val_buf, cap, "v%s", KESTREL_GND_VERSION);
             } else if (i == 2) {
                 snprintf(val_buf, cap, "%s", decoder_name.c_str());
-            } else if (i == 3) {
-                if (screen_modes().empty())
-                    snprintf(val_buf, cap, "--");
-                else
-                    snprintf(val_buf, cap, "< %s >", screen_mode_label(screen_mode_menu()).c_str());
-            } else if (i == 4) {
+            } else if (i == kSysWifi) {
                 if (platform::caps().wifi_ap)
                     snprintf(val_buf, cap, "< %s >", menu_wifi_ap ? "ON" : "OFF");
                 else

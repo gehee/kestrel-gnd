@@ -310,8 +310,8 @@ void OSD::frame_take(Frame& f) {
         menu_open_at_start = false;
         if (screen_confirm_) {           // straight onto the question
             menu_first_open_ = false;
-            menu_tab = kTabSystem;
-            menu_index = 3;
+            menu_tab = 3;
+            menu_index = kDispScreenMode;
             menu_focus = 1;
         }
         if (menu_first_open_) {          // --menu with no tab named
@@ -320,9 +320,11 @@ void OSD::frame_take(Frame& f) {
             menu_index = 0;
             menu_focus = 0;
         }
-        // Straight onto the goggle's blade, unfolded, on SYSTEM.
+        // Straight onto the goggle's blade, unfolded: on DISPLAY for the
+        // screen mode's question, else on SYSTEM.
         ui_side_ = 0;
-        ui_side_tab_[0] = menu_tab = kTabSystem;
+        if (!screen_confirm_) menu_tab = kTabSystem;
+        ui_side_tab_[0] = menu_tab;
         ui_stage_ = 1;
         if (menu_focus == 0) menu_focus = 1;
         // --menu opens without a keypress, so nothing has worked out the value
