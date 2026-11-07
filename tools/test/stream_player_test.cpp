@@ -45,7 +45,9 @@ int main() {
         check(!selected && pictures==8 && parameters==3,"Playback sends eight pictures and all parameter sets then returns live");
         check(timestamps.front()==0,"Playback PTS are relative to the MP4 timeline");
         check(timestamps.back()-timestamps.front()>116000 && timestamps.back()-timestamps.front()<117000,"Original capture pacing retained");
-        pictures=0;player.play(name);wait([&]{return player.state().playing;});player.pause();
+        pictures=0;player.play(name);player.pause();
+        wait([&]{return pictures>0;});
+        check(player.state().paused,"Pausing during open still presents the first picture");
         std::this_thread::sleep_for(std::chrono::milliseconds(20));const auto paused=pictures.load();
         std::this_thread::sleep_for(std::chrono::milliseconds(50));check(pictures==paused && player.state().paused,"Paused stream stops producing pictures");
         player.pause();wait([&]{return !player.state().busy;});check(pictures==8,"Resume completes the clip");

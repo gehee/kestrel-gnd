@@ -208,7 +208,8 @@ void StreamPlayer::play_file(const std::string& name,uint64_t generation) {
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
     };
-    bool priming=false;unsigned target_frame=0;
+    // An early pause still needs one picture to hold on screen.
+    bool priming=false,first_picture=true;unsigned target_frame=0;
     uint64_t seek_begin=0;
     for(unsigned i=0;i<t.sample_count;) {
         if(seek_revision!=seek_revision_) {
@@ -243,7 +244,7 @@ void StreamPlayer::play_file(const std::string& name,uint64_t generation) {
         const auto offset=offsets[i];
         const auto size=t.entry_size[i];
         const uint64_t position=timestamp(i);
-        while((paused_ && !priming) || (!(priming && output_.decoded) && get_time_us()<origin+(position-base_position))) {
+        while((paused_ && !priming && !first_picture) || (!(priming && output_.decoded) && get_time_us()<origin+(position-base_position))) {
             if(quit_ || generation!=generation_)return;
             if(seek_revision!=seek_revision_)break;
             const bool paused=paused_ && !priming;const auto before=get_time_us();
@@ -286,6 +287,7 @@ void StreamPlayer::play_file(const std::string& name,uint64_t generation) {
             while(telemetry_samples_.size()>128)telemetry_samples_.pop_front();}
         if(seek_revision!=seek_revision_)continue;
         output_.feed(annex,position,type,key);
+        first_picture=false;
         if(output_.decoded) {
             outstanding.push_back(position);
             if(priming && i>=target_frame)wait_decoded(position);
