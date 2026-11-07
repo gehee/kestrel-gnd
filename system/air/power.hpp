@@ -25,7 +25,8 @@
 //
 // Ours: a kestrel-air that says it takes them (KA_FEAT_PWRLVL) is offered 150,
 // 200 and 316 mW (24 dBm) besides, each with its AUTO (N + 1: 151, 201, 317),
-// on a Lite+: AUTO's top can be set under 500 mW. The menu shows it as two
+// on a Lite+: AUTO's top can be set under 500 mW. One whose info says pwr400=1
+// gets 400 mW (25 dBm) and its AUTO (401) too. The menu shows it as two
 // rows, the mode (FIXED / AUTO) and the level (the fixed level, or AUTO's
 // top); the value on the wire stays stock's.
 // Until the air unit has reported, stock's global is 0, which gets the Lite's
@@ -47,6 +48,7 @@ static const ar_pwr_level kArPwrLevels[] = {
     {  150, 19, false, "150mW"     }, {  151, 19, true,  "150mW AUTO"},
     {  200, 20, false, "200mW"     }, {  201, 20, true,  "200mW AUTO"},
     {  316, 22, false, "316mW"     }, {  317, 22, true,  "316mW AUTO"},
+    {  400, 23, false, "400mW"     }, {  401, 23, true,  "400mW AUTO"},
     {  500, 24, false, "500mW"     }, {  501, 24, true,  "500mW AUTO"},
 };
 static const int kArPwrCount = (int)(sizeof(kArPwrLevels) / sizeof(kArPwrLevels[0]));
@@ -66,11 +68,14 @@ static inline int ar_pwr_index(int mw) {
 enum { AR_AIR_LITE = 4, AR_AIR_RC = 6, AR_AIR_LITE_PLUS = 7 };
 static const int kArPwrOfferLite[]     = { 25, 100, 101 };
 static const int kArPwrOfferLitePlus[] = { 25, 100, 200, 500, 501 };
-// With kestrel-air's own levels (fine): the fixed ones, then their AUTO.
+// With kestrel-air's own levels (fine 1): the fixed ones, then their AUTO;
+// fine 2 adds 400 mW.
 static const int kArPwrOfferLitePlusFine[] = { 25, 100, 150, 200, 316, 500, 151, 201, 317, 501 };
+static const int kArPwrOfferLitePlusFine400[] = { 25, 100, 150, 200, 316, 400, 500, 151, 201, 317, 401, 501 };
 struct ar_pwr_offer { const int *mw; int n; };
-static inline ar_pwr_offer ar_pwr_offered(int air_prj, bool fine = false) {
+static inline ar_pwr_offer ar_pwr_offered(int air_prj, int fine = 0) {
     if (air_prj == AR_AIR_LITE_PLUS) {
+        if (fine >= 2) return { kArPwrOfferLitePlusFine400, 12 };
         if (fine) return { kArPwrOfferLitePlusFine, 10 };
         return { kArPwrOfferLitePlus, 5 };
     }
@@ -99,7 +104,7 @@ static inline const char *ar_air_sn_prefix(int air_prj) {
     }
 }
 // mw's place in the air unit's list, or -1.
-static inline int ar_pwr_offer_index(int air_prj, int mw, bool fine = false) {
+static inline int ar_pwr_offer_index(int air_prj, int mw, int fine = 0) {
     ar_pwr_offer o = ar_pwr_offered(air_prj, fine);
     for (int i = 0; i < o.n; i++) if (o.mw[i] == mw) return i;
     return -1;
@@ -107,7 +112,7 @@ static inline int ar_pwr_offer_index(int air_prj, int mw, bool fine = false) {
 // A level the air unit is offered for mw: mw itself, or else the highest one
 // at or under it - AUTO stays AUTO where the list has it (500mW AUTO -> 100mW
 // AUTO on a Lite).
-static inline int ar_pwr_fit(int air_prj, int mw, bool fine = false) {
+static inline int ar_pwr_fit(int air_prj, int mw, int fine = 0) {
     if (ar_pwr_offer_index(air_prj, mw, fine) >= 0) return mw;
     ar_pwr_offer o = ar_pwr_offered(air_prj, fine);
     const ar_pwr_level &want = kArPwrLevels[ar_pwr_index(mw)];
@@ -132,7 +137,7 @@ static inline int ar_pwr_top(int mw) {
 // through. Stock's lists have AUTO at one level only (100 on a Lite, 500 on a
 // Lite+).
 static const int kArPwrTopsMax = 8;
-static inline int ar_pwr_tops(int air_prj, bool fine, bool automode, int out[kArPwrTopsMax]) {
+static inline int ar_pwr_tops(int air_prj, int fine, bool automode, int out[kArPwrTopsMax]) {
     ar_pwr_offer o = ar_pwr_offered(air_prj, fine);
     int n = 0;
     for (int i = 0; i < o.n && n < kArPwrTopsMax; i++)
@@ -141,7 +146,7 @@ static inline int ar_pwr_tops(int air_prj, bool fine, bool automode, int out[kAr
 }
 // The value for a mode at a level; where the mode has not that level, the next
 // one up (else the highest it has). -1: the air unit has no such mode.
-static inline int ar_pwr_pick(int air_prj, bool fine, bool automode, int top) {
+static inline int ar_pwr_pick(int air_prj, int fine, bool automode, int top) {
     int t[kArPwrTopsMax];
     const int n = ar_pwr_tops(air_prj, fine, automode, t);
     if (n == 0) return -1;
@@ -174,7 +179,7 @@ static inline int ar_pwr_mw_from_dbm(int dbm) {
 // under the label (kestrel-air: 25/100/150/200/500 mW = 13/19/21/22/26), so a
 // level reads as the menu's figure for it.
 static inline int ar_air_mw_from_dbm(int dbm) {
-    static const int lv[][2] = { {13, 25}, {19, 100}, {21, 150}, {22, 200}, {24, 316}, {26, 500} };
+    static const int lv[][2] = { {13, 25}, {19, 100}, {21, 150}, {22, 200}, {24, 316}, {25, 400}, {26, 500} };
     for (const auto &l : lv) if (l[0] == dbm) return l[1];
     if (dbm <= 0) return 0;
     return (int)(pow(10.0, (dbm + 1) / 10.0) + 0.5);
@@ -182,7 +187,7 @@ static inline int ar_air_mw_from_dbm(int dbm) {
 // And back: the air unit's radio level for a level in mW (what AUTO's top is
 // asked in, an Open8030 radio's SET 9 window).
 static inline int ar_air_dbm_from_mw(int mw) {
-    static const int lv[][2] = { {13, 25}, {19, 100}, {21, 150}, {22, 200}, {24, 316}, {26, 500} };
+    static const int lv[][2] = { {13, 25}, {19, 100}, {21, 150}, {22, 200}, {24, 316}, {25, 400}, {26, 500} };
     for (const auto &l : lv) if (l[1] == mw) return l[0];
     if (mw <= 0) return 0;
     return (int)(10.0 * log10((double)mw) + 0.5) - 1;

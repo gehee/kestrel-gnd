@@ -43,6 +43,19 @@ int main() {
     n = ar_pwr_tops(AR_AIR_LITE, false, true, t);
     CHECK(n == 1 && t[0] == 100);
 
+    // 400 mW only where the air unit says it takes it (fine 2).
+    n = ar_pwr_tops(AR_AIR_LITE_PLUS, 2, false, t);
+    CHECK(n == 7 && t[4] == 316 && t[5] == 400 && t[6] == 500);
+    n = ar_pwr_tops(AR_AIR_LITE_PLUS, 2, true, t);
+    CHECK(n == 5 && t[2] == 316 && t[3] == 400 && t[4] == 500);
+    CHECK(ar_pwr_fit(AR_AIR_LITE_PLUS, 400, 2) == 400 && ar_pwr_fit(AR_AIR_LITE_PLUS, 401, 2) == 401);
+    CHECK(ar_pwr_fit(AR_AIR_LITE_PLUS, 400, 1) == 316 && ar_pwr_fit(AR_AIR_LITE_PLUS, 401, 1) == 317);
+    CHECK(ar_pwr_fit(AR_AIR_LITE_PLUS, 400) == 200);          // stock's list
+    CHECK(ar_pwr_fit(AR_AIR_LITE, 401, 2) == 101);            // a Lite: still its 100mW AUTO
+    CHECK(ar_pwr_pick(AR_AIR_LITE_PLUS, 2, true, 400) == 401);
+    CHECK(ar_air_dbm_from_mw(400) == 25 && ar_air_mw_from_dbm(25) == 400);
+    CHECK(kArPwrLevels[ar_pwr_index(400)].dbm == 23 && ar_pwr_mw_from_dbm(23) == 400);
+
     // The mode row: the same level where the mode has it, else the next one up.
     CHECK(ar_pwr_pick(AR_AIR_LITE_PLUS, true, true, 316) == 317);
     CHECK(ar_pwr_pick(AR_AIR_LITE_PLUS, true, false, 316) == 316);

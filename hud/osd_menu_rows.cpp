@@ -416,6 +416,7 @@ static const char kAirCapsHelp[] =
     "Sensor Timing: readout and exposure, for STATS. Intra Refresh: no keyframe spikes. "
     "Camera IMU: the camera's gyro with the video. FC IMU: the flight controller's gyro instead. "
     "Bandwidth Cap: takes the VRX's limit. "
+    "TX Power Levels, TX Power 400mW: the levels TX Power offers it besides Caddx's. "
     "864p120, 864p144: Video Mode offers a 1536x864 window at 120 or 144 fps.";
 
 // A row label made at run time (the capabilities list), kept for good: a
@@ -956,7 +957,7 @@ void OSD::menu_apply_change(int tab, int index, int dir) {
                        if (prj <= 0) break;
                        // The level: the fixed level, or AUTO's top, among the ones the
                        // mode has.
-                       const bool fine = air_radio_.fine;
+                       const int fine = air_radio_.fine;
                        const int cur = ar_pwr_fit(prj, menu_ar_power, fine);
                        const bool autom = ar_pwr_is_auto(cur);
                        int t[kArPwrTopsMax];
@@ -973,7 +974,7 @@ void OSD::menu_apply_change(int tab, int index, int dir) {
                        // The mode, at the same level where the air unit has it there.
                        const int prj = air_radio_.prj;
                        if (prj <= 0) break;
-                       const bool fine = air_radio_.fine;
+                       const int fine = air_radio_.fine;
                        const int cur = ar_pwr_fit(prj, menu_ar_power, fine);
                        const int v = ar_pwr_pick(prj, fine, !ar_pwr_is_auto(cur), ar_pwr_top(cur));
                        if (v >= 0) menu_ar_power = v;

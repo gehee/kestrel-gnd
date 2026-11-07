@@ -12,7 +12,7 @@ struct RadioState {
     int tx_power_want_mw = 0;      // TX Power as chosen, fitted to each air unit
     int live_dbm = 0;              // as it last announced it (Open8030 event 14), dBm; 0: not known
     uint32_t levels_n = 0;         // its power levels are known: TX Power's row
-    bool fine = false;             // ... and include kestrel-air's own (150, 200, 316 mW, their AUTO)
+    int fine = 0;                  // ... and include kestrel-air's own: 1 (150, 200, 316 mW, their AUTO), 2 (and 400)
     int prj = 0;                   // its power-level set, its project number (0: not known yet)
     bool resend_known = false;     // its resends are known (take_resend)
     uint32_t taken = 0;            // the last change carried out (Ticket::seq)

@@ -20,7 +20,7 @@ void Ar8030Link::publish_air_info() {
     model_.air_info(a);
 }
 
-const Ar8030Link::AirCap Ar8030Link::kAirCaps[11] = {
+const Ar8030Link::AirCap Ar8030Link::kAirCaps[12] = {
     { kAirFeatLatInfo,      "air-timing",    "Air Timing" },
     { kAirFeatApClock,      "radio-clock",   "Radio Clock" },
     { kAirSaidFrameClock,   "frame-clock",   "Frame Clock" },
@@ -32,6 +32,7 @@ const Ar8030Link::AirCap Ar8030Link::kAirCaps[11] = {
     { kAirFeat864p120,      "864p120",       "864p120" },
     { kAirFeat864p144,      "864p144",       "864p144" },
     { kAirFeatPwrLvl,       "power-levels",  "TX Power Levels" },
+    { kAirFeatPwr400,       "power-400",     "TX Power 400mW" },
 };
 
 std::vector<std::string> Ar8030Link::cap_names(const AirInfo &a) {
@@ -157,7 +158,7 @@ void Ar8030Link::load_sky_link() {
     // would hold a Lite+ to 100 mW (and its own uplink with it) until the unit is back.
     const int prj = air_prj.load() > 0 ? air_prj.load() : settings_.get(radio::setting::air_prj(sky_cfg_key));
     const int rec = settings_.get(radio::setting::air_features(sky_cfg_key));   // 0x100 | its feature bits
-    const bool fine = air_pwr_fine() || ((rec & 0x100) && (rec & kAirFeatPwrLvl));
+    const int fine = std::max(air_pwr_fine(), (rec & 0x100) && (rec & kAirFeatPwrLvl) ? 1 : 0);
     tx_power_mw  = ar_pwr_fit(prj, tx_power_want_mw, fine);
     tx_power_dbm = kArPwrLevels[ar_pwr_index(tx_power_mw)].dbm;
     printf("ar8030: [%s] restored radio cfg: power=%s (chosen %s)\n", sky_cfg_key.c_str(),
@@ -847,15 +848,19 @@ void Ar8030Link::note_air_info(const uint8_t *pl, size_t n) {
     // Mode row offers them, and a stored one it lacks goes back to the default.
     {
         uint16_t xf = 0;
-        for (const auto &e : kv)
+        for (const auto &e : kv) {
             if (e.first == "864p144" && e.second == "1") xf |= kAirFeat864p144;
+            if (e.first == "pwr400" && e.second == "1") xf |= kAirFeatPwr400;
+        }
         const bool first = !air_info_seen_;
         air_info_seen_ = true;
         if (first || xf != air_info_feat_) {
+            const bool pwr = (xf ^ air_info_feat_) & kAirFeatPwr400;
             air_info_feat_ = xf;
             const uint16_t f = air_kestrel_ ? (uint16_t)(air_feat_ | xf) : 0;
             model_.update_unit([&](air::UnitState &a) { a.features = f; });
             check_air_modes();
+            if (pwr) refit_air_power();   // 400 mW chosen: held to 316 until it says it takes it
         }
     }
     // The sensor's readout and exposure: ours, they change as it runs, so not
@@ -880,7 +885,7 @@ void Ar8030Link::note_air_info(const uint8_t *pl, size_t n) {
         std::lock_guard<bus::PiMutex> g(air_info_mtx_);
         // For the INFO tab's capabilities: 864p144 as the info says it now; a
         // readout said once in this link stays said (a new mode's comes late).
-        air_info_.said = (uint16_t)((air_info_.said & ~kAirFeat864p144) | air_info_feat_ |
+        air_info_.said = (uint16_t)((air_info_.said & ~(kAirFeat864p144 | kAirFeatPwr400)) | air_info_feat_ |
                                     (air_readout_us_ ? kAirSaidSensorTiming : 0));
         same = got.kv_n == air_info_.kv_n;
         for (int i = 0; same && i < got.kv_n; i++)
@@ -920,7 +925,7 @@ void Ar8030Link::note_air_prj(int prj, const char *from) {
 void Ar8030Link::refit_air_power() {
     const int prj = air_prj.load();
     if (prj <= 0) return;
-    const bool fine = air_pwr_fine();
+    const int fine = air_pwr_fine();
     int fit = ar_pwr_fit(prj, tx_power_want_mw, fine);
     if (fit != tx_power_mw) {
         printf("ar8030: power for it: %s (chosen %s, was %s)\n", kArPwrLevels[ar_pwr_index(fit)].label,

@@ -164,7 +164,7 @@ class Ar8030Link : public radio::Link, private radio::VideoOut::Source {
         // kestrel-air's capabilities, named for the INFO tab, by the feature bit
         // (or AirInfo::said bit) that says the air unit has it on.
         struct AirCap { uint16_t bit; const char *key; const char *name; };
-        static const AirCap kAirCaps[11];
+        static const AirCap kAirCaps[12];
         // What the air unit has on, by name: its feature bits and what it said.
         static std::vector<std::string> cap_names(const AirInfo &a);
         int air_floor_us;       // fastest capture -> first slice (air_floor_ms), see air_delay_for
@@ -474,7 +474,11 @@ class Ar8030Link : public radio::Link, private radio::VideoOut::Source {
         void note_air_prj(int prj, const char *from);   // what the air unit is: its power levels
         // The power levels this air unit is offered: its project's, and kestrel-air's
         // own (kAirFeatPwrLvl) once it has said it takes them.
-        bool air_pwr_fine() const { return air_kestrel_ && (air_feat_ & kAirFeatPwrLvl); }
+        // The power levels it takes (ar_pwr_offered): 0 stock's, 1 kestrel-air's, 2 with 400 mW.
+        int air_pwr_fine() const {
+            if (!air_kestrel_ || !(air_feat_ & kAirFeatPwrLvl)) return 0;
+            return (air_info_feat_ & kAirFeatPwr400) ? 2 : 1;
+        }
         void refit_air_power();   // the chosen power fitted to them (the menu's choice is kept)
         void note_air_announce(bool ka, uint8_t proto, uint8_t feat);
         // Air-side times of each slice, us, over 5 s windows, from the header.
@@ -495,6 +499,8 @@ class Ar8030Link : public radio::Link, private radio::VideoOut::Source {
         // Said in its info (KA_MSG_INFO), the header's byte being full: 864p144
         // (864p144=1), its OS02K10's 1536x864 window at 144 fps.
         static constexpr uint16_t kAirFeat864p144 = 0x100;
+        // And pwr400=1: TX power takes 400 mW (25 dBm) and its AUTO (401).
+        static constexpr uint16_t kAirFeatPwr400 = 0x800;
         // No feature bits, only AirInfo::said, for the INFO tab: its frame
         // (KA_MSG_FRAME) came, and its info says the sensor's readout.
         static constexpr uint16_t kAirSaidFrameClock = 0x200;
