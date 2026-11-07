@@ -364,7 +364,7 @@ void View::draw_gallery(lv_layer_t* layer) {
         label(model_.backend.playback_seeking?"SEEKING":model_.backend.playback_paused?"PAUSED":"PLAYBACK",32,42,26,theme.accent);
         label(model_.backend.media.playback_id,240,42,22,theme.text);
         const auto elapsed=model_.backend.playback_position_us/1000000,total=model_.backend.playback_duration_us/1000000;
-        label(std::to_string(elapsed)+" / "+std::to_string(total)+" s   LEFT/RIGHT: -/+5s   OK: pause/resume   BACK: gallery   UP: HUD " + std::string(!model_.backend.playback_hud?"UNAVAILABLE":model_.playback_hud_enabled?"ON":"OFF"),32,82,20,theme.text);
+        label(std::to_string(elapsed)+" / "+std::to_string(total)+" s   LEFT/RIGHT: -/+5s   OK: pause/resume   BACK: gallery   DOWN: bar   UP: HUD " + std::string(!model_.backend.playback_hud?"UNAVAILABLE":model_.playback_hud_enabled?"ON":"OFF"),32,82,20,theme.text);
         const int left=int(32*u),right=width_-left;
         const auto duration=model_.backend.playback_duration_us;
         const double progress=duration?double(std::min(model_.backend.playback_position_us,duration))/duration:0;
@@ -529,7 +529,8 @@ void View::update(uint64_t now) {
     menu_damage_applied_=false;
     text_.begin_frame(); idle_.prepare(model_, now);
     now_ = now;
-    const bool gallery=model_.scene==SceneMode::GalleryBrowse || model_.scene==SceneMode::GalleryPlayback;
+    const bool gallery=model_.scene==SceneMode::GalleryBrowse ||
+        (model_.scene==SceneMode::GalleryPlayback && model_.playback_controls_visible);
     hidden(gallery_,!gallery);
     if(gallery) {
         const int first=std::max(0,model_.gallery_selected)/6*6;

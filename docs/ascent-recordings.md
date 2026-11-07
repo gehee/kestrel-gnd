@@ -86,6 +86,11 @@ between keyframes take longer to seek because those reference frames must decode
 The telemetry reader restores the matching recorded state, including backward
 seeks, and old playback HUD data is hidden during the transition.
 
+DOWN hides or shows the playback top bar and progress timeline together, without
+changing the recorded HUD. Seeking and pause controls remain active while the
+bar is hidden. Each new clip starts with the bar visible; holding DOWN does not
+repeatedly toggle it.
+
 UP toggles the recorded HUD during playback. OK pauses/resumes; BACK returns to
 the gallery. The initial HUD setting follows the current HUD preference. The
 current theme, font scale, and detail preference apply to the recorded readings.

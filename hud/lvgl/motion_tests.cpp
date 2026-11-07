@@ -86,6 +86,14 @@ int main(int argc, char** argv) {
             }
             const auto timeline_presentations=display.presentations;draw();
             check(display.presentations==timeline_presentations,"Paused timeline caused redundant redraws");
+            controller.key(kestrel_ui::Key::Down);draw();full_matches();
+            const auto hidden_controls=display.pixels();
+            check(hidden_controls!=empty_timeline,"Down did not erase playback controls");
+            const auto hidden_presentations=display.presentations;
+            model.backend.playback_position_us=5000000;draw();
+            check(display.presentations==hidden_presentations,"Hidden timeline updates triggered a redraw");
+            controller.key(kestrel_ui::Key::Down);draw();full_matches();
+            check(display.pixels()!=hidden_controls,"Down did not restore playback controls");
         }
         lv_deinit();
         std::printf("PASS: %dp live/replay translation, bank ignored, held pose and damage\n",height);

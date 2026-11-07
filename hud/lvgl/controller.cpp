@@ -39,7 +39,10 @@ void Controller::tick(uint64_t now) {
 void Controller::open_menu() { model_.menu_open = true; model_.stage = MenuStage::Pick; model_.scene = SceneMode::Live; model_.feedback.clear(); ++model_.menu_version; }
 void Controller::set_scene(SceneMode scene) {
     if (model_.stage == MenuStage::Edit) cancel_edit();
-    if(scene==SceneMode::GalleryPlayback)model_.playback_hud_enabled=model_.show_hud;
+    if(scene==SceneMode::GalleryPlayback) {
+        model_.playback_hud_enabled=model_.show_hud;
+        model_.playback_controls_visible=true;
+    }
     model_.scene = scene;
     model_.menu_open = scene == SceneMode::Menu;
     model_.stage = MenuStage::Pick;
@@ -68,6 +71,8 @@ void Controller::key(Key key, bool repeat) {
             catch(const std::exception& e) {m.feedback=e.what();}
         } else if(m.scene==SceneMode::GalleryPlayback && key==Key::Up) {
             m.playback_hud_enabled=!m.playback_hud_enabled;
+        } else if(m.scene==SceneMode::GalleryPlayback && key==Key::Down) {
+            if(!repeat)m.playback_controls_visible=!m.playback_controls_visible;
         } else if(m.scene==SceneMode::GalleryPlayback && (key==Key::Left || key==Key::Right)) {
             try {if(apply_receiver)apply_receiver("playback_seek",key==Key::Left?-5:5);}
             catch(const std::exception& e) {m.feedback=e.what();}

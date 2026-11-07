@@ -147,6 +147,13 @@ int main(int argc, char** argv) {
         check(model.hud_visible() && controller.hud_data(2300000).panels[0].primary=="16.40", "Playback uses recorded HUD values");
         controller.key(Key::Up);check(!model.hud_visible() && !controller.hud_data(2300000).enabled,"Playback HUD can be hidden");
         controller.key(Key::Up);check(model.hud_visible(),"Playback HUD can be restored");
+        controller.key(Key::Down);
+        check(!model.playback_controls_visible && model.hud_visible(),"Down hides playback controls independently of HUD");
+        controller.key(Key::Down,true);
+        check(!model.playback_controls_visible,"Holding Down does not repeatedly toggle playback controls");
+        controller.key(Key::Down);check(model.playback_controls_visible,"Down restores playback controls");
+        controller.key(Key::Down);controller.set_scene(SceneMode::GalleryPlayback);
+        check(model.playback_controls_visible,"New playback restores visible controls");
         model.backend.playback_hud.reset();
         std::string playback_action;int playback_value=0;
         controller.apply_receiver=[&](const std::string& id,int value){playback_action=id;playback_value=value;return std::string();};
