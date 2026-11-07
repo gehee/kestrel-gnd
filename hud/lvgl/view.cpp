@@ -587,11 +587,12 @@ void View::update(uint64_t now) {
             if(transform[1]!=motion_transform_[1]) lv_obj_set_style_translate_y(object,transform[1],0);
             if(transform[2]!=motion_transform_[2]) lv_obj_set_style_transform_rotation(object,transform[2],0);
         }
+        const bool rotated=transform[2] || motion_transform_[2];
         motion_transform_=transform;
         // LVGL's software transform samples relative to its clipped layer.
-        // Keep the sampling origin stable while a rotated HUD moves; static
-        // HUD and menu navigation retain their bounded damage path.
-        lv_obj_invalidate(screen_);
+        // Keep its sampling origin stable while rotation is active or clears.
+        // Pure translation uses LVGL's old/new object bounds for damage.
+        if(rotated)lv_obj_invalidate(screen_);
     }
     if(hud_changed && transform[2]) lv_obj_invalidate(screen_);
     const float dt = last_tick_ ? std::min(0.1f, float(now - last_tick_) / 1000000) : 0;
