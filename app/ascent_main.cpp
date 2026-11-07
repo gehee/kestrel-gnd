@@ -263,14 +263,15 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
                     settings.flush();
                     return std::string("Screen mode saved");
                 }
-                if(recorder.is_recording() || recorder.state().finishing || player.state().busy)
-                    throw std::runtime_error("Stop recording or playback before changing screen mode");
+                if(recorder.is_recording() || recorder.state().finishing || player.state().busy || player.state().deleting)
+                    throw std::runtime_error("Wait for recording, playback or deletion to finish before changing screen mode");
                 if(std::none_of(screen_choices.begin(),screen_choices.end(),[&](const auto& choice){return choice.value==value;}))
                     throw std::runtime_error("Screen mode or compiled assets unavailable");
                 mode.select(display::AscentMode::from_id(value)); model.quit=mode.restart;
                 return std::string("Testing screen mode");
             }
             if(id=="record") {
+                if(player.state().deleting)throw std::runtime_error("Wait for recording deletion to finish");
                 if(!recorder.is_recording() && (player.state().busy || !model.backend.media.video_fresh(kestrel_ui::monotonic_us()) || !recorder.state().storage_ready))
                     throw std::runtime_error("Recording needs live video and writable storage");
                 recorder.toggle(); return std::string("Recording change requested");
@@ -279,6 +280,12 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
                 const auto rec=recorder.state();
                 if(recorder.is_recording() || rec.finishing)throw std::runtime_error("Stop recording and wait for it to finish saving first");
                 player.play(id.substr(5));playback=player.state();playback_checked=0;return std::string("Opening recording");
+            }
+            if(id.compare(0,7,"delete:")==0) {
+                const auto rec=recorder.state();
+                if(recorder.is_recording() || rec.finishing)throw std::runtime_error("Stop recording and wait for saving before deleting");
+                player.erase(id.substr(7));playback_checked=0;
+                return std::string("Deleting recording...");
             }
             if(id=="playback_stop") {player.stop();return std::string("Playback stopped");}
             if(id=="playback_pause") {player.pause();return std::string("Playback pause changed");}
@@ -405,9 +412,13 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
             channel_menu.update(model.backend,now,model.channel_open);
             if(!playback_checked || now-playback_checked>=250000) {
                 const bool was_busy=playback.busy;
+                const auto deletion_revision=playback.deletion_revision;
                 playback=player.state();playback_checked=now;
                 model.backend.recordings.clear();
                 for(const auto& clip:playback.recordings)model.backend.recordings.push_back({clip.name,clip.size});
+                model.gallery_selected=std::clamp(model.gallery_selected,0,std::max(0,int(playback.recordings.size())-1));
+                if(playback.deletion_revision!=deletion_revision && model.scene==kestrel_ui::SceneMode::GalleryBrowse)
+                    model.feedback=playback.deletion_message;
                 if(was_busy && !playback.busy && model.scene==kestrel_ui::SceneMode::GalleryPlayback) {
                     controller.set_scene(kestrel_ui::SceneMode::GalleryBrowse);
                     model.feedback=playback.error.empty()?"Playback finished":playback.error;
@@ -464,6 +475,10 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
                 if (event.repeat && !model.key_repeat) continue;
                 printf("panel: key=%s%s\n", bsp::ascent_panel::name(event.key), event.repeat ? " repeat" : "");
                 if (event.key == platform::PanelKey::Rec) {
+                    if(event.repeat)continue;
+                    if(model.scene==kestrel_ui::SceneMode::GalleryBrowse) {
+                        controller.key(kestrel_ui::Key::Record);panel.beep();continue;
+                    }
                     try {model.feedback=controller.apply_receiver("record",0);panel.beep();}
                     catch(const std::exception& e) {notice(e.what());panel.beep(platform::PanelTone::Failure);}
                 } else if (event.key == platform::PanelKey::Upgrade) {

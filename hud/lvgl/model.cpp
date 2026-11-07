@@ -17,7 +17,7 @@ MenuRow choice(std::string id, std::string name, int current, std::vector<std::s
 }
 }
 const char* key_name(Key key) {
-    static const char* names[] = {"menu", "up", "down", "left", "right", "enter", "back", "quit"};
+    static const char* names[] = {"menu", "up", "down", "left", "right", "enter", "back", "quit", "record"};
     return names[static_cast<unsigned>(key)];
 }
 bool parse_key(const std::string& text, Key& key) {
@@ -30,7 +30,8 @@ bool parse_key(const std::string& text, Key& key) {
     normalized.erase(0, first);
     if (normalized == "ok" || normalized == "return") normalized = "enter";
     if (normalized == "esc" || normalized == "cancel") normalized = "back";
-    for (unsigned i = 0; i < 8; ++i) if (normalized == key_name(static_cast<Key>(i))) { key = static_cast<Key>(i); return true; }
+    if (normalized == "rec") normalized = "record";
+    for (unsigned i = 0; i <= unsigned(Key::Record); ++i) if (normalized == key_name(static_cast<Key>(i))) { key = static_cast<Key>(i); return true; }
     return false;
 }
 std::string Model::status(uint64_t now) const {
@@ -274,6 +275,9 @@ std::string Model::describe() const {
         << " msp_frames=" << backend.serial.frames << " pack_valid=" << backend.flight.have_pack_v
         << " pack_v=" << (backend.flight.have_pack_v ? backend.flight.pack_v : -1.0f)
         << " scene=" << int(scene_mode()) << " recording=" << backend.media.recording
+        << " gallery_selected=" << gallery_selected << " delete_confirm=" << !gallery_delete_name.empty()
+        << " gallery_count=" << backend.recordings.size()
+        << " delete_chosen=" << gallery_delete_chosen
         << " playing=" << backend.media.playing << " paused=" << backend.playback_paused
         << " seeking=" << backend.playback_seeking << " duration_us=" << backend.playback_duration_us
         << " playback_controls=" << playback_controls_visible

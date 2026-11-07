@@ -125,6 +125,10 @@ void Thumbnails::run() {
                 mkdir((directory_+"/.thumbs").c_str(),0755);
                 if(!write(file,*job.image))fprintf(stderr,"thumbnail: cannot save %s\n",job.name.c_str());
             }
+            // A clip can be deleted while this worker encodes its last frame.
+            // Deletion removes video first; this post-write check prevents an
+            // in-flight capture from recreating an orphan preview afterward.
+            if(access((directory_+"/"+job.name).c_str(),F_OK)<0)unlink(file.c_str());
             std::lock_guard<std::mutex> lock(mutex_);cache_.clear();
         } else {
             auto image=read(file,job.width,job.height);

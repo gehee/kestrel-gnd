@@ -14,6 +14,7 @@ int main(){try {
     const auto sample=dvr::Thumbnails::sample(frame,32,18);check(sample && sample->argb.size()==576,"bounded I420 sampling");
     check((sample->argb[0]&0xffffff)==0x808080,"limited-range neutral conversion");
     frame.early=true;check(!dvr::Thumbnails::sample(frame,32,18),"partial frames rejected");frame.early=false;
+    std::ofstream(std::string(dir)+"/clip.mp4")<<"recording";
     {
         dvr::Thumbnails thumbnails(dir);thumbnails.arm("clip.mp4",101);thumbnails.capture(std::make_shared<DecodedUnit>(frame));
         std::this_thread::sleep_for(30ms);check(!std::filesystem::exists(std::string(dir)+"/.thumbs/clip.mp4.jpg"),"old frame not captured");
@@ -29,6 +30,9 @@ int main(){try {
         dvr::Thumbnails thumbnails(dir);std::shared_ptr<const media::Thumbnail> image;
         for(int i=0;i<1000 && !image;++i){image=thumbnails.get("clip.mp4",320,180);std::this_thread::sleep_for(2ms);}
         check(bool(image),"cached thumbnail survives process lifetime");
+        thumbnails.arm("removed.mp4");
+        for(int i=0;i<20;++i){thumbnails.capture(std::make_shared<DecodedUnit>(frame));std::this_thread::sleep_for(2ms);}
     }
+    check(!std::filesystem::exists(std::string(dir)+"/.thumbs/removed.mp4.jpg"),"Late capture cannot recreate a deleted clip's preview");
     puts("PASS: thumbnail capture, JPEG persistence, pre-scaled loading, stale/partial frames and malformed inputs");return 0;
 }catch(const std::exception& e){fprintf(stderr,"FAIL: %s\n",e.what());return 1;}}

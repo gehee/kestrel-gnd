@@ -19,7 +19,9 @@ public:
         std::function<uint64_t()> decoded; // last completed PTS + 1, zero after reset
     };
     struct State {
-        bool busy=false,playing=false,paused=false,seeking=false;
+        bool busy=false,playing=false,paused=false,seeking=false,deleting=false;
+        uint64_t deletion_revision=0;
+        std::string deletion_message;
         std::string file,error,telemetry_error;
         uint64_t started_us=0;
         uint64_t position_us=0,duration_us=0,revision=0,seek_target_us=0;
@@ -31,6 +33,7 @@ public:
     void stop();
     void pause();
     void seek_relative(int seconds,uint64_t presented_us);
+    void erase(const std::string& name);
     State state() const;
     std::shared_ptr<const media::TelemetrySample> telemetry_at(uint64_t position_us) const;
 private:
@@ -38,7 +41,7 @@ private:
     void play_file(const std::string&,uint64_t generation);
     std::string directory_;Output output_;int width_,height_;
     mutable std::mutex mutex_;std::condition_variable wake_;
-    State state_;std::string requested_;
+    State state_;std::string requested_,delete_requested_;
     std::atomic<bool> quit_{false},paused_{false};
     std::atomic<uint64_t> generation_{0};
     std::atomic<uint64_t> seek_revision_{0};

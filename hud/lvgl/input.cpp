@@ -168,6 +168,7 @@ void Input::poll(Controller& controller, uint64_t now) {
             case KEY_ESC: case KEY_BACK: case KEY_BACKSPACE: key = Key::Back; break;
             case KEY_M: case KEY_MENU: key = Key::Menu; break;
             case KEY_Q: key = Key::Quit; break;
+            case KEY_RECORD: key = Key::Record; break;
             default: continue;
         }
         controller.key(key, event.value == 2);

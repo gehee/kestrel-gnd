@@ -94,6 +94,14 @@ int main(int argc, char** argv) {
             check(display.presentations==hidden_presentations,"Hidden timeline updates triggered a redraw");
             controller.key(kestrel_ui::Key::Down);draw();full_matches();
             check(display.pixels()!=hidden_controls,"Down did not restore playback controls");
+            controller.set_scene(kestrel_ui::SceneMode::GalleryBrowse);
+            model.backend.recordings={{"recording_test.mp4",1234567}};draw();full_matches();
+            const auto gallery=display.pixels();
+            controller.key(kestrel_ui::Key::Record);draw();full_matches();
+            check(display.pixels()!=gallery,"Delete confirmation did not appear");
+            controller.key(kestrel_ui::Key::Right);draw();full_matches();
+            controller.key(kestrel_ui::Key::Back);draw();full_matches();
+            check(display.pixels()==gallery,"Cancelled deletion left stale dialog pixels");
         }
         lv_deinit();
         std::printf("PASS: %dp live/replay translation, bank ignored, held pose and damage\n",height);

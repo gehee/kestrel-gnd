@@ -63,6 +63,13 @@ empty sidecars. The catalog delete operation removes both companion files.
 
 ## Playback
 
+In the gallery, REC opens a deletion confirmation for the selected clip.
+LEFT selects CANCEL, RIGHT selects DELETE, and OK confirms the highlighted
+choice. CANCEL is selected initially; BACK or REC dismisses the prompt.
+The confirmation stays tied to the original filename if the catalog refreshes.
+Deletion removes the video, preview and telemetry sidecar on the storage worker,
+then refreshes the gallery. Recording/saving and playback must finish first.
+
 The hardware decoder receives MP4-relative presentation timestamps. Completed
 video flips expose those timestamps to the application; the HUD selects the
 recorded state for the frame actually displayed. The player parses the sidecar

@@ -111,6 +111,25 @@ int main() {
         check(!player.state().paused && visible>5000000,"Playing seek stays playing");
         player.seek_relative(5,visible);player.stop();wait([&]{return !selected;});
         check(!player.state().busy && !player.state().seeking,"Stop cancels an in-flight seek");
+        std::filesystem::create_directory(std::string(path)+"/.thumbs");
+        const auto preview=std::string(path)+"/.thumbs/"+seek_name+".jpg";
+        std::ofstream(preview)<<"preview";
+        const auto clip=std::string(path)+"/"+seek_name;
+        check(std::filesystem::exists(clip+".telemetry.jsonl"),"Deletion fixture has telemetry");
+        player.play(seek_name);
+        bool busy_rejected=false;try{player.erase(seek_name);}catch(const std::runtime_error&){busy_rejected=true;}
+        check(busy_rejected,"Deletion rejects an active player");
+        player.stop();wait([&]{return !selected;});
+        player.erase(seek_name);wait([&]{return player.state().deletion_revision==1;});
+        check(!std::filesystem::exists(clip) && !std::filesystem::exists(preview) &&
+              !std::filesystem::exists(clip+".telemetry.jsonl"),"Deletion removes video and companion files");
+        check(!player.state().deleting && player.state().deletion_message=="Recording deleted","Worker reports deletion completion");
+        const auto catalog=player.state().recordings;
+        check(std::none_of(catalog.begin(),catalog.end(),[&](const auto& r){return r.name==seek_name;}),"Completed deletion refreshes catalog");
+        player.erase(seek_name);wait([&]{return player.state().deletion_revision==2;});
+        check(player.state().deletion_message.find("Delete failed:")==0,"Missing file reports deletion error");
+        bool path_rejected=false;try{player.erase("../escape.mp4");}catch(const std::invalid_argument&){path_rejected=true;}
+        check(path_rejected,"Deletion rejects path traversal");
     }
     puts("PASS: MP4 playback, pacing, pause/resume, cancel, invalid files, decoder errors and recovery");return 0;
  } catch(const std::exception& e) {fprintf(stderr,"FAIL: %s\n",e.what());return 1;}

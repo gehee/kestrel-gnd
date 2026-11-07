@@ -135,6 +135,33 @@ int main(int argc, char** argv) {
         check(failure.theme == 0 && failure.feedback.find("Save failed") != std::string::npos, "Failed persistence rolls back the preview");
         Key parsed;
         check(parse_key(" OK\n", parsed) && parsed == Key::Enter && !parse_key("bind", parsed), "Named controls are restricted to UI keys");
+        check(parse_key("rec",parsed) && parsed==Key::Record,"REC maps to the gallery record button");
+        {
+            Model gallery;Controller gc(gallery);gc.set_scene(SceneMode::GalleryBrowse);
+            gallery.backend.recordings={{"one.mp4",1},{"two.mp4",2}};
+            std::string action;
+            gc.apply_receiver=[&](const std::string& id,int){action=id;return std::string("Deleting recording...");};
+            gc.key(Key::Record);
+            check(gallery.gallery_delete_name=="one.mp4" && !gallery.gallery_delete_chosen,"REC opens Cancel by default");
+            gc.key(Key::Enter);check(action.empty() && gallery.gallery_delete_name.empty(),"Default confirmation keeps the video");
+            gc.key(Key::Record);gc.key(Key::Record,true);
+            check(!gallery.gallery_delete_name.empty(),"REC repeat does not dismiss the prompt");
+            gc.key(Key::Right);check(gallery.gallery_selected==0 && gallery.gallery_delete_chosen,"Confirmation arrows do not navigate gallery");
+            gc.key(Key::Back);check(action.empty() && gallery.scene==SceneMode::GalleryBrowse,"Back cancels without leaving gallery");
+            gc.key(Key::Record);gc.key(Key::Right);gc.key(Key::Left);gc.key(Key::Enter);
+            check(action.empty(),"Left selects Cancel");
+            gc.key(Key::Record);gc.key(Key::Right);
+            std::reverse(gallery.backend.recordings.begin(),gallery.backend.recordings.end());
+            gc.key(Key::Enter);
+            check(action=="delete:one.mp4" && gallery.gallery_delete_name.empty(),"Deletion stays pinned to confirmed filename across catalog refresh");
+            gc.apply_receiver=[](const std::string&,int)->std::string{throw std::runtime_error("Storage busy");};
+            gc.key(Key::Record);gc.key(Key::Right);gc.key(Key::Enter);
+            check(gallery.feedback=="Storage busy" && gallery.gallery_delete_name.empty(),"Deletion errors stay in gallery");
+            gallery.backend.recordings.clear();gc.key(Key::Record);
+            check(gallery.gallery_delete_name.empty(),"Empty gallery cannot open deletion");
+            gc.set_scene(SceneMode::GalleryPlayback);gc.key(Key::Record);
+            check(gallery.gallery_delete_name.empty(),"REC cannot delete during playback");
+        }
         model.key_repeat = false; const auto keys_before = model.key_count;
         controller.key(Key::Up, true); check(model.key_count == keys_before, "Disabled repeats do not move the menu");
         model.key_repeat = true; controller.key(Key::Menu, true); check(model.key_count == keys_before, "Menu keys never auto-repeat");

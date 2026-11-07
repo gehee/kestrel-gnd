@@ -396,8 +396,24 @@ void View::draw_gallery(lv_layer_t* layer) {
         label(std::to_string(clips[i].bytes/(1024*1024))+" MiB",x+365,y+122,23,theme.quiet);
         label("OK  PLAY",x+365,y+190,20,i==selected?theme.accent:theme.quiet);
     }
-    label("ARROWS  Select     OK  Play     BACK  Live video",48,1000,24,theme.text);
+    label("ARROWS  Select     OK  Play     REC  Delete     BACK  Live video",48,1000,24,theme.text);
     label(model_.feedback,48,1045,20,theme.quiet);
+    if(!model_.gallery_delete_name.empty()) {
+        rect(layer,0,0,width_,height_,theme.ground,.65f);
+        rect(layer,int(390*u),int(325*u),int(1140*u),int(430*u),theme.ground,1);
+        rect(layer,int(390*u),int(325*u),int(1140*u),int(430*u),theme.accent,1,2);
+        label("Delete this recording?",440,390,32,theme.text);
+        const auto& name=model_.gallery_delete_name;
+        label(name.size()>70?name.substr(0,32)+"..."+name.substr(name.size()-32):name,440,450,24,theme.text);
+        label("Video, thumbnail and recorded HUD data will be removed.",440,505,20,theme.quiet);
+        for(int i=0;i<2;++i) {
+            const bool chosen=bool(i)==model_.gallery_delete_chosen;
+            const int x=440+i*560;
+            rect(layer,int(x*u),int(560*u),int(480*u),int(85*u),chosen?theme.accent:theme.quiet,1,chosen?3:1);
+            label(i?"DELETE":"CANCEL",x+155,615,28,chosen?theme.accent:theme.text);
+        }
+        label("LEFT / RIGHT  Choose     OK  Confirm     BACK  Cancel",440,710,20,theme.text);
+    }
 }
 lv_area_t View::menu_reveal(float progress) const {
     const float p = std::clamp(progress, 0.0f, 1.0f), e = p * p * (3 - 2 * p);
@@ -548,6 +564,7 @@ void View::update(uint64_t now) {
         }
         std::ostringstream signature;
         signature<<int(model_.scene)<<':'<<model_.gallery_selected<<':'<<model_.theme<<':'<<model_.feedback<<':'
+            <<model_.gallery_delete_name<<':'<<model_.gallery_delete_chosen<<':'
             <<model_.backend.playback_position_us/100000<<':'<<model_.backend.playback_duration_us/1000000<<':'<<model_.backend.playback_seeking<<':'
             <<model_.playback_hud_enabled<<bool(model_.backend.playback_hud)<<model_.backend.playback_telemetry_error<<model_.backend.playback_paused<<':'<<model_.backend.media.playback_id<<':'<<model_.backend.playback_error;
         if(model_.scene==SceneMode::GalleryBrowse) for(const auto& clip:model_.backend.recordings)signature<<clip.name<<':'<<clip.bytes<<';';

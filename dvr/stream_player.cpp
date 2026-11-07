@@ -36,6 +36,7 @@ std::shared_ptr<const media::TelemetrySample> StreamPlayer::telemetry_at(uint64_
 void StreamPlayer::play(const std::string& name) {
     if(!dvr_lib::safe_name(name) || !dvr_lib::ends_with(name,".mp4"))throw std::invalid_argument("Not a recording filename");
     std::lock_guard<std::mutex> lock(mutex_);
+    if(state_.deleting)throw std::runtime_error("Wait for recording deletion to finish");
     ++generation_;seek_revision_=0;state_.seeking=false;paused_=false;requested_=name;state_.busy=true;state_.playing=false;
     state_.position_us=state_.duration_us=0;state_.error.clear();state_.telemetry_error.clear();state_.started_us=get_time_us();telemetry_samples_.clear();state_.file=name;wake_.notify_one();
 }
@@ -56,12 +57,21 @@ void StreamPlayer::seek_relative(int seconds,uint64_t presented_us) {
     state_.seek_target_us=uint64_t(std::clamp<int64_t>(target,0,state_.duration_us-1));
     state_.seeking=true;++seek_revision_;wake_.notify_one();
 }
+void StreamPlayer::erase(const std::string& name) {
+    if(!dvr_lib::safe_name(name) || !dvr_lib::ends_with(name,".mp4"))throw std::invalid_argument("Not a recording filename");
+    std::lock_guard<std::mutex> lock(mutex_);
+    if(state_.busy)throw std::runtime_error("Stop playback before deleting a recording");
+    if(state_.deleting)throw std::runtime_error("Wait for recording deletion to finish");
+    state_.deleting=true;state_.deletion_message.clear();delete_requested_=name;wake_.notify_one();
+}
 void StreamPlayer::run() {
     dvr_lib::set_dir(directory_);
     while(!quit_) {
-        std::string file;uint64_t generation;
-        {std::unique_lock<std::mutex> lock(mutex_);wake_.wait_for(lock,std::chrono::milliseconds(500),[&]{return quit_ || !requested_.empty();});
-         if(quit_)break;file=std::move(requested_);requested_.clear();generation=generation_;}
+        std::string file,remove;uint64_t generation;
+        {std::unique_lock<std::mutex> lock(mutex_);wake_.wait_for(lock,std::chrono::milliseconds(500),[&]{return quit_ || !requested_.empty() || !delete_requested_.empty();});
+         if(quit_)break;file=std::move(requested_);requested_.clear();generation=generation_;
+         remove=std::move(delete_requested_);delete_requested_.clear();}
+        const int deletion_error=remove.empty()?0:dvr_lib::delete_recording(remove,"");
         if(!file.empty()) {
             try {play_file(file,generation);}
             catch(const std::exception& e) {std::lock_guard<std::mutex> lock(mutex_);if(generation==generation_)state_.error=e.what();}
@@ -71,7 +81,11 @@ void StreamPlayer::run() {
             ++state_.revision;
         }
         const auto recordings=dvr_lib::list_recordings();
-        {std::lock_guard<std::mutex> lock(mutex_);state_.recordings=recordings;++state_.revision;}
+        {std::lock_guard<std::mutex> lock(mutex_);state_.recordings=recordings;++state_.revision;
+         if(!remove.empty()) {
+             state_.deleting=false;++state_.deletion_revision;
+             state_.deletion_message=deletion_error?std::string("Delete failed: ")+strerror(deletion_error):"Recording deleted";
+         }}
     }
     output_.select(false);
 }

@@ -21,7 +21,7 @@ struct RcSignal {
     float level() const { return percent / 100.0f; }
 };
 
-enum class Key { Menu, Up, Down, Left, Right, Enter, Back, Quit };
+enum class Key { Menu, Up, Down, Left, Right, Enter, Back, Quit, Record };
 enum class MenuStage { Pick, Browse, Edit };
 enum class SceneMode { Live, Menu, GalleryBrowse, GalleryPlayback };
 struct UiPreferences {
@@ -51,6 +51,8 @@ public:
     bool channel_open = false;
     int channel_mhz = 0;
     int gallery_selected=0;
+    std::string gallery_delete_name;
+    bool gallery_delete_chosen=false;
     int tab = 0, selected = 0, theme = 0;
     int side = 0, fps = 25;
     int clock = 0;

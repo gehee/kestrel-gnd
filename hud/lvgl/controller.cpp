@@ -38,6 +38,7 @@ void Controller::tick(uint64_t now) {
 }
 void Controller::open_menu() { model_.menu_open = true; model_.stage = MenuStage::Pick; model_.scene = SceneMode::Live; model_.feedback.clear(); ++model_.menu_version; }
 void Controller::set_scene(SceneMode scene) {
+    model_.gallery_delete_name.clear();model_.gallery_delete_chosen=false;
     if (model_.stage == MenuStage::Edit) cancel_edit();
     if(scene==SceneMode::GalleryPlayback) {
         model_.playback_hud_enabled=model_.show_hud;
@@ -62,6 +63,22 @@ void Controller::key(Key key, bool repeat) {
     ++m.key_count; m.last_key = key_name(key); ++m.menu_version;
     if (key == Key::Quit) { if (m.stage == MenuStage::Edit) cancel_edit(); m.quit = true; return; }
     if(m.scene==SceneMode::GalleryBrowse || m.scene==SceneMode::GalleryPlayback) {
+        if(m.scene==SceneMode::GalleryBrowse && !m.gallery_delete_name.empty()) {
+            if(key==Key::Back || key==Key::Menu || key==Key::Record) {
+                m.gallery_delete_name.clear();m.gallery_delete_chosen=false;
+            } else if(key==Key::Left) m.gallery_delete_chosen=false;
+            else if(key==Key::Right) m.gallery_delete_chosen=true;
+            else if(key==Key::Enter) {
+                const auto name=m.gallery_delete_name;
+                const bool remove=m.gallery_delete_chosen;
+                m.gallery_delete_name.clear();m.gallery_delete_chosen=false;
+                if(remove)try {
+                    if(!apply_receiver)throw std::runtime_error("Recording storage is not connected");
+                    m.feedback=apply_receiver("delete:"+name,0);
+                }catch(const std::exception& e){m.feedback=e.what();}
+            }
+            return;
+        }
         if(key==Key::Back || key==Key::Menu) {
             try {if(m.scene==SceneMode::GalleryPlayback && apply_receiver) apply_receiver("playback_stop",0);}
             catch(const std::exception& e) {m.feedback=e.what();return;}
@@ -81,6 +98,11 @@ void Controller::key(Key key, bool repeat) {
             const int last=std::max(0,int(clips.size())-1);
             if(key==Key::Up || key==Key::Left) m.gallery_selected=std::clamp(m.gallery_selected-1,0,last);
             if(key==Key::Down || key==Key::Right) m.gallery_selected=std::clamp(m.gallery_selected+1,0,last);
+            if(key==Key::Record && !clips.empty()) {
+                m.gallery_selected=std::clamp(m.gallery_selected,0,last);
+                m.gallery_delete_name=clips[m.gallery_selected].name;
+                m.gallery_delete_chosen=false;m.feedback.clear();
+            }
             if(key==Key::Enter && !clips.empty()) {
                 m.gallery_selected=std::clamp(m.gallery_selected,0,last);
                 try {
