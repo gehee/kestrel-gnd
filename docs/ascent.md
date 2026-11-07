@@ -339,7 +339,9 @@ updater. Its existing kernel, root image, and bundle size checks still apply.
 
 Normal boot mounts `/usr/share/kestrel/runtime.squashfs` at `/opt/kestrel`, starts
 the native decoder/radio and the supervised application, and restores the saved
-HDMI mode, preferences and peer. No application files or host launch commands
+HDMI mode, preferences and peer. The video plane starts with a 1080p black
+surface, using hardware scaling at 720p output, so the first 1080p video frame
+does not reset the HDMI link. No application files or host launch commands
 are needed on the SD card. An unpaired receiver starts with the idle screen and
 binding controls; `--peer` remains a session-only diagnostic override.
 

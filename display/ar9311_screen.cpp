@@ -474,13 +474,14 @@ class Ar9311Screen final : public PlaneScreen {
     void run() override {
         std::unique_ptr<Imported> showing, pending;
         int active_ui = -1, next_ui = -1;
-        int source_width = width_, source_height = height_;
+        int source_width = 1920, source_height = 1080;
         uint64_t cookie = 0;
         try {
             Atomic initial;
-            // Preserve the native-size startup sequence. Once video arrives,
-            // blanks retain its geometry across every subsequent decoder flush.
-            initial.plane(primary_, crtc_.id, height_ == 720 ? black_720_.fb : black_.fb,
+            // Start with the decoder's 1080p source geometry, including at
+            // 720p output. The first video frame then needs only a buffer flip,
+            // not a second HDMI modeset during acquisition.
+            initial.plane(primary_, crtc_.id, black_.fb,
                           source_width, source_height, width_, height_);
             initial.plane(overlay_, crtc_.id, 0, width_, height_, width_, height_);
             initial.add(connector_, {{"CRTC_ID", crtc_.id}});
