@@ -1,6 +1,7 @@
 #ifndef OSD_H
 #define OSD_H
 
+#include <atomic>
 #include <deque>
 #include <vector>
 #include <mutex>
@@ -72,19 +73,6 @@ typedef struct  {
     std::vector<antenna_stats> antennas;
 } packets_stats;
 
-// Air-side adaptation decisions, received over the RF status channel
-// (tx_send_status 0x30-0x35). Lets the gnd log/overlay what bw_adapt and the
-// TX water-level are doing, with no management network to the air.
-typedef struct {
-    uint32_t applied_bitrate_kbps;  // encoder target the air applied
-    uint32_t link_throughput_kbps;  // link capacity the air adapted to
-    int      tier;                  // bw_adapt tier index
-    uint32_t wl_drops;              // water-level cumulative dropped frames
-    uint32_t wl_latency_ms;         // water-level modeled in-flight latency
-    uint32_t fps;                   // encoder frame rate the air applied
-    uint64_t last_update_ms;
-} adapt_stats;
-
 typedef struct png_closure
 {
 	unsigned char * iter;
@@ -116,8 +104,6 @@ struct osd_vars {
 	float video_bandwidth;
 	uint32_t video_width;
 	uint32_t video_height;
-    uint32_t sky_exposure_us;
-    uint32_t sky_framerate;
 
 	// WFB-ng
     packets_stats link_stats;
@@ -136,7 +122,6 @@ struct osd_vars {
     LatencyRing latency_ring;               // see hud/latency_ring.hpp
     uint64_t latency_history_last_us = 0;   // last real/gap append (graph gap-filler)
     gnd::LinkStats radio_link;
-    adapt_stats adapt;        // air-side adaptation decisions (RF telemetry)
     gnd::ScanSample chan_scan{}; // per-channel spectrum scan (channel-scan screen)
 };
 
@@ -159,7 +144,7 @@ class OSD : public display::VideoListener {
         struct osd_vars osd_vars = {0};
         pthread_mutex_t osd_mutex;
         bool console_stats = false;
-        volatile bool* signal_stop;
+        std::atomic<bool>* signal_stop;
         // The HUD thread sleeps on this (OSD::run): a poke needs no lock and is
         // never lost, so the renderer and the radio wake it without osd_mutex.
         bus::Waker hud_wake_;
@@ -214,6 +199,9 @@ class OSD : public display::VideoListener {
 
         // Hardware decode: a video image, each picture taken as it is (NV12)
         render::ImageId         bg_ext_tex_        = 0;
+        // The background clip has put a picture in its texture: until then (or
+        // with no decoder for it) the still background stands in, not black.
+        bool                    bg_have_frame_     = false;
 
         // Idle title texture ("KESTREL" rendered at high resolution for BACKGROUND state)
         render::ImageId idle_title_tex_    = 0;   // "fpv"
@@ -282,8 +270,7 @@ class OSD : public display::VideoListener {
         // wake of its loop and before anything reads the ring (sync_radio).
         bus::Ring<LatencyFrame, 1024> latency_in_;
         void drain_latency_frames();
-        std::atomic<uint32_t> link_lost_{0};   // update_link_stats' count_p_lost, for the latency frames
-        std::atomic<uint32_t> sky_exposure_us_{5000}, sky_framerate_{120};   // osd_vars' copies, for the renderer
+        std::atomic<uint32_t> sky_exposure_us_{5000}, sky_framerate_{120};   // the camera's, for the renderer: defaults, nothing sets them
         std::atomic<uint64_t> last_flip_seen_us_{0};
         int since_flip_hist_[7] = {0, 0, 0, 0, 0, 0, 0};   // KESTREL_PROF
         render::ImageId            gallery_snap_tex_ = 0;
@@ -301,10 +288,12 @@ class OSD : public display::VideoListener {
     // (stats_history_update): up to the longest window, oldest first, from index *_head_ on.
     std::vector<StatsFrame> stats_frames_;
     std::vector<StatsFlip>  stats_flips_;
-    size_t   stats_frames_head_ = 0, stats_flips_head_ = 0;
-    uint64_t stats_frames_t_ = 0, stats_flips_t_ = 0;       // the newest entry held
+    std::vector<StatsResend> stats_resends_;              // the air radio's resends (Open8030)
+    size_t   stats_frames_head_ = 0, stats_flips_head_ = 0, stats_resends_head_ = 0;
+    uint64_t stats_frames_t_ = 0, stats_flips_t_ = 0, stats_resends_t_ = 0;   // the newest entry held
     void stats_history_update(uint64_t now_us);
     float stats_ymax_ = 0, stats_lmax_ = 0;     // the chart scales, eased
+    float stats_dmax_ = 0;                      // the distance's (the link lane's right axis), eased
     float stats_p50_ = 0, stats_p99_ = 0;       // the p50 / p99 lines, eased
     // The stats screen's slow layer, kept as a texture (see render_gallery), and the flat
     // per-vertex-coloured program the charts are drawn with.
@@ -324,6 +313,7 @@ class OSD : public display::VideoListener {
     int gallery_dt_hist_[6] = {0, 0, 0, 0, 0, 0};   // KESTREL_PROF: frame intervals
         void gallery_capture_frame(int screen_w, int screen_h);
         void gallery_prewarm();
+        void gallery_release();                  // closed: its textures and the stats history go
         bool render_gallery(int screen_w, int screen_h);
         void service_clip_player(const Gallery::Snapshot& s);
         render::ImageId gallery_thumb(const std::string& name, int& w, int& h, bool may_load, bool& loaded);
@@ -358,16 +348,14 @@ class OSD : public display::VideoListener {
         // Bitmask of RF controls the baseband accepted (gnd::RfCap).
         // 0 = unknown/none, which leaves the RF tab as it was for other links.
         std::atomic<unsigned> rf_caps{0};
-        // Raw baseband ranging reading (metres, -1 none), the zero-point
-        // calibration subtracted from it, and the distance shown. The baseband
-        // reports a stable ~110 with the units side by side, which is the
-        // "close range td_out base value" the SDK's dist_calc.offset is meant
-        // to remove - but BB_CFG_DISTC is refused at runtime on this board, so
-        // the radio subtracts it instead (gnd::RadioState::dist_offset, HUD >
-        // Calib Distance).
+        // Raw baseband ranging reading (metres, -1 none), and its zero below.
+        // The reading with the units side by side is not 0 and differs by
+        // radio firmware (stock ~110, Open8030 ~70) and bandwidth (stock
+        // subtracts a per-bandwidth table, ar_ldy_gnd 0x9be20): the zero is
+        // taken from the reading where the aircraft is armed instead.
         uint64_t rec_started_us = 0;   // for the REC elapsed timer
         std::atomic<int> link_distance_raw{-1};
-        int  dist_offset_ = 0;
+        // The distance shown (gnd::RadioState::dist_m), metres: -1 none.
         int  dist_m_ = -1;
         // Wall-clock readout, top centre. The time itself comes from the
         // pcf8563 at boot (see /etc/init.d/S36rtc); this only displays
@@ -421,8 +409,12 @@ class OSD : public display::VideoListener {
         uint64_t    sync_confirm_deadline_ms_ = 0;
         int         sync_confirm_left_s();
         struct ScreenModeOpt { int w, h, hz; };
+        // Made only on the HUD's thread under osd_mutex (refill_screen_modes),
+        // read there unlocked while drawing and under the lock by the keys.
         std::vector<ScreenModeOpt> screen_modes_;
+        bool screen_modes_stale_ = true;       // made again at the next frame (a menu open asks)
         const std::vector<ScreenModeOpt>& screen_modes();
+        void refill_screen_modes();
         int  screen_mode_saved();              // screen_mode's menu index
         int  screen_mode_menu();               // menu_screen_mode, read in
         std::string screen_mode_label(int idx);
@@ -487,7 +479,7 @@ class OSD : public display::VideoListener {
         static constexpr unsigned kFramesForVideo = 10;
         uint64_t hud_connected_since_us_ = 0;
         std::atomic<unsigned> frames_since_connect_{0};   // the renderer counts, the HUD resets
-        int  dist_shown() const { return dist_m_; }   // metres, Calib Distance's offset taken off; -1 no ranging
+        int  dist_shown() const { return dist_m_; }   // metres, -1 no ranging
         // The acquiring screen runs for at least this long from the link edge,
         // the same edge the canopy's rebuild sweep fires on. Without it the
         // screen is hostage to how fast the air unit dumps its startup buffer:
@@ -525,9 +517,6 @@ class OSD : public display::VideoListener {
         int menu_cam_scene    = 0;
         int menu_cam_wb       = 0;
         int menu_cam_3dnr     = 0;   // index into kDnrVals
-        int rf_bw_applied = -1;  // bandwidth re-asserted this link session (-1 = pending)
-        bool rf_chan_asserted = false; // channel re-asserted this link session
-        int  air_chan_mode = -1;       // AIR-owned chan mode from broadcast (1=auto 0=force)
         bool menu_scan_open = false;   // AR8030 > Channel: the channel page is open
         int  menu_scan_sel = 0;        // its cursor: 0 AUTO, r + 1 the r-th channel by frequency
         std::atomic<bool> air_standby{false};   // as REPORTED by the air unit (TLV 0x12)
@@ -579,7 +568,6 @@ class OSD : public display::VideoListener {
 
         int menu_tab = 0; // 0: Video, 1: RF
 
-        bool menu_synced = false;
         bool show_all_adapters = false; // Default OFF
         bool bg_video_enabled = true;   // Default ON — use background.mp4
         // Reactive HUD intensity: 0=OFF 1=SMALL 2=MEDIUM 3=EXTREME.
@@ -622,7 +610,7 @@ class OSD : public display::VideoListener {
         int  menu_step_zone(int row, int dir);
         // HUD rows, in the order they are listed.
         enum HudRow {
-            kHudRowStyle = 0, kHudRowBfOsd, kHudRowVoltage, kHudRowCalib, kHudRowClock, kHudRowDynamic,
+            kHudRowStyle = 0, kHudRowBfOsd, kHudRowVoltage, kHudRowClock, kHudRowDynamic,
             kHudRowDebug
         };
         // A row's help line, which for a few rows depends on the value it is
@@ -641,6 +629,9 @@ class OSD : public display::VideoListener {
         // text equality is the one test that needs no per-row table.
         char menu_pending_from[kMenuTabs][kMenuRows][32] = {};
         void menu_plain_value(int tab, int i, char* out, size_t cap);
+        // "menu: HUD > HUD Style: ARENA" in the log: a row opened to change it
+        // (how "edit"), and what was then applied ("live", "enter").
+        void menu_log_applied(const char* how);
         bool menu_show_all_adapters = false;
         bool menu_bg_video = true;
         int  menu_hud_reactivity = 2;
@@ -777,6 +768,7 @@ class OSD : public display::VideoListener {
         float    chan_bar_[64] = {}, chan_peak_[64] = {};        // dBm, by radio channel index
         bool     chan_bars_set_ = false;
         uint64_t chan_anim_us_ = 0, chan_shown_us_ = 0;
+        uint64_t chan_auto_refused_us_ = 0;   // OK on AUTO where it is not offered: its line says why, 3 s
         int      chan_shown_now_[64] = {}, chan_shown_peak_[64] = {};
         int      chan_shown_snr_ = 0, chan_shown_mcs_ = 0;
         bool     chan_shown_linked_ = false;
@@ -805,7 +797,6 @@ class OSD : public display::VideoListener {
         bool  px_live(float x, float y, float w, float h);
     public:
         int refresh_frequency_ms;
-        void update_menu_from_tx(int cmd, int val);
         // The renderer asks every frame: no lock.
         int stats_period_ms() const override { return refresh_frequency_ms; }
         uint32_t get_sky_exposure_us() override {
@@ -867,11 +858,13 @@ class OSD : public display::VideoListener {
             bool  video_active = false;
             bool  link_up      = false;
             // Right panel
-            float mcs_norm  = 0.0f;      // MCS rung / rungs
+            float range_norm = 0.0f;     // range left to fade, 0..1 (the VIDEO track, twelve blocks)
             float quality   = 0.0f;      // composite link health, 0..1
-            int   link_warn = 0;         // 0 fine, 1 amber, 2 red (see link_warn_hold)
+            int   link_warn = 0;         // 0 fine, 1 amber, 2 red (off the VIDEO track's blocks)
             int   dist_m    = -1;        // -1 = no ranging
+            float snr_db    = -1.0f;     // the video link's SNR, dB (-1: no link)
             char  vtx_pwr[24] = {0};
+            char  vrx_pwr[24] = {0};     // our radio's TX power as it pushes it, "" = not known
             int   link_freq_mhz = 0;     // 0 = unknown, do not show
             int   link_bw_idx = -1;      // the video link's bandwidth gear (gnd::bw_step_label), -1 = unknown
             // What the video link is actually delivering: the mode it is
@@ -895,6 +888,9 @@ class OSD : public display::VideoListener {
             bool  vtx_low_power = false;
             bool  rec_active = false;
             unsigned rec_secs = 0;
+            // REC gone off by itself, the card no longer taking it: what the
+            // DVR said ("CARD FULL"), shown where REC was for 5 s; "" else.
+            char  rec_failed[16] = {0};
             // Left panel
             BfTelem bf;
             float vrx_temp_c = 0.0f;
@@ -945,7 +941,6 @@ class OSD : public display::VideoListener {
             bool  hud_verbose = false, legacy_verbose = false;
             CanopyIn canopy;                     // filled as the frame goes, drawn by draw_canopy
             gnd::LinkStats link_copy;
-            adapt_stats adapt_copy{};
             // The palette.
             float cyan_r = 0.0f, cyan_g = 0.9f, cyan_b = 1.0f;
             float neon_r = 0.7f, neon_g = 1.0f, neon_b = 0.0f;
@@ -969,6 +964,7 @@ class OSD : public display::VideoListener {
         };
         bool frame_begin(Frame& f);              // false: the gallery drew this frame
         void frame_take(Frame& f);
+        void frame_timers();                     // the trials' reverts and the time zone, every frame
         void frame_video(Frame& f);
         void frame_wings(Frame& f);              // the side panels' matrices
         void measure_link(Frame& f);
@@ -988,9 +984,6 @@ class OSD : public display::VideoListener {
         // Worse levels land at once; a better one has to hold before the
         // warning steps down, so a link hovering on a threshold does not
         // flash the screen edge.
-        int  link_warn_hold(int raw);
-        int  link_warn_level_  = 0;
-        uint64_t link_warn_better_us_ = 0;
         float link_edge_a_     = 0.0f;   // edge glow intensity, faded 0..1
         int   link_edge_shown_ = 0;      // level whose colour the glow wears
         uint64_t link_edge_ts_ = 0;      // last glow update, for the fade
@@ -1016,7 +1009,7 @@ class OSD : public display::VideoListener {
         // and the layer its frames go to on it, made by the platform.
         OSD(const hud::Parts& parts, Settings& settings, std::shared_ptr<display::Display> dev_,
             std::unique_ptr<render::Canvas> canvas, std::unique_ptr<display::HudLayer> layer,
-            int refresh_frequency_ms_, volatile bool* signal_stop, bool console_stats_ = false);
+            int refresh_frequency_ms_, std::atomic<bool>* signal_stop, bool console_stats_ = false);
         ~OSD();
         void signal_render(prof::Wake why = prof::kWakeOther) override;
 
@@ -1025,7 +1018,6 @@ class OSD : public display::VideoListener {
         void set_video_resolution(int w, int h) override;
           void set_slices_received(bool val);
           bool get_slices_received();
-          void update_link_stats(packets_stats v);
         // The Back button (and Esc on a keyboard). On the live picture it opens
         // the gallery; with the menu open it closes it, as M does.
         static constexpr int kKeyBack = 0x105;
@@ -1082,7 +1074,8 @@ class OSD : public display::VideoListener {
         // ---- the parts, as the HUD reads them (watched in the constructor) ----
         // Our radio, the air unit's radio, its encoder, the unit itself and its
         // camera wake the HUD when they change; our radio's scans and video
-        // rate each wake it; the timing is read when drawn.
+        // rate each wake it; the air radio's resends, every one, wake no one
+        // (the stats screen's history, kept here); the timing is read when drawn.
         hud::Parts parts_;
         // The FC serial bridge: the radio thread only queues it, and drain_msp()
         // parses it here on the OSD thread - OSD work on the latency-critical
@@ -1104,6 +1097,12 @@ class OSD : public display::VideoListener {
         air::CameraState camera_seen_;
         uint32_t standby_seen_n_ = 0, levels_seen_n_ = 0;
         void follow_air(const air::CameraState& c);
+        std::deque<StatsResend> resend_hist_;        // the last 16384, oldest first
+        // TX power as the radios last said it, dBm (0: not known): kept by
+        // sync_radio(), read without a lock (the renderer's samples too).
+        std::atomic<int> air_live_dbm_{0}, gnd_live_dbm_{0};
+        int air_live_dbm() const { return air_live_dbm_.load(std::memory_order_relaxed); }
+        int gnd_live_dbm() const { return gnd_live_dbm_.load(std::memory_order_relaxed); }
         // Under osd_mutex: what the radio published since - its link and air
         // unit figures into osd_vars and the fields the HUD draws, the air
         // unit's settings into the menu - and the renderer's latency samples,
@@ -1117,11 +1116,10 @@ class OSD : public display::VideoListener {
                                  int dnr3d, int focus);
         void apply_camera_dnr(int dnr3d);
         void apply_chan_scan(const gnd::ScanSample& sc);
-        void log_csv_row();                        // a link/adaptation CSV row, each second (under osd_mutex)
+        void log_csv_row();                        // a link CSV row, each second (under osd_mutex)
         void* csv_fp = nullptr;                    // FILE* for /tmp/kestrel-adapt.csv (lazy-opened)
     public:
         bool video_decoding();   // decoded FPV frame within the last 1.5s
-        void update_adapt_stats(adapt_stats v);   // air RF adaptation telemetry
     public:
         void set_dvr(std::shared_ptr<DVR> dvr_, bool dvr_screen_);
         bool is_dvr_screen_enabled() { return dvr_screen; }

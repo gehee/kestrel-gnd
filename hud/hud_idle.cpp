@@ -91,14 +91,14 @@ void OSD::draw_backdrop(Frame& f) {
         canvas_->panel(-frustum_w, -frustum_h, frustum_w * 2.0f, frustum_h * 2.0f,
                    1.0f, 0.0f, 0.0f, 0.0f);
     } else if (!lock_screen && vs == VideoState::BACKGROUND) {
-        if (bg_video_enabled) {
+        if (bg_video_enabled && bg_have_frame_) {
             draw_bg_video(frustum_w, frustum_h, mvp_c, 0.0f);
             // No signal_render() here — on_new_frame callback drives wakeups
         } else {
             draw_bg_png(frustum_w, frustum_h, mvp_c);
         }
     } else if (vs == VideoState::TRANSITION) {
-        if (bg_video_enabled) {
+        if (bg_video_enabled && bg_have_frame_) {
             draw_bg_video(frustum_w, frustum_h, mvp_c, trans_t);
         } else {
             draw_bg_png(frustum_w, frustum_h, mvp_c, trans_t);

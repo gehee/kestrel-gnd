@@ -32,7 +32,7 @@ extern "C" {
 
 class VdecFfmpeg : public Vdec {
     private:
-        volatile bool *should_stop;
+        std::atomic<bool>* should_stop;
         std::shared_ptr<hal::FrameSink> renderer;
 
         // AVCodec
@@ -63,6 +63,10 @@ class VdecFfmpeg : public Vdec {
 
 #ifdef USE_VAAPI
         std::unordered_map<VASurfaceID, DecodedUnit> exported_surfaces;
+        // The frames pool and picture size the exports above are of.
+        const void* exported_pool_ = nullptr;
+        int exported_w_ = 0, exported_h_ = 0;
+        void drop_exported_surfaces(bool flush);
 #endif
         // std::mutex fb_cache_mtx;
         
@@ -92,7 +96,7 @@ class VdecFfmpeg : public Vdec {
         AVFrame* next_frame_slot();
 
     public:
-        VdecFfmpeg(VideoCodec cdc, std::string decoder_name, std::shared_ptr<hal::FrameSink> rdr, volatile bool* signal_stop) : 
+        VdecFfmpeg(VideoCodec cdc, std::string decoder_name, std::shared_ptr<hal::FrameSink> rdr, std::atomic<bool>* signal_stop) : 
             should_stop(signal_stop), renderer(rdr)  {
     
             // av_log_set_level(AV_LOG_TRACE); // Or AV_LOG_TRACE for maximum detail
@@ -162,6 +166,9 @@ class VdecFfmpeg : public Vdec {
         };
 
         ~VdecFfmpeg() {
+#ifdef USE_VAAPI
+            drop_exported_surfaces(false);
+#endif
             for (int i = 0; i < FRAME_RING_SIZE; ++i) {
                 if (frame_ring[i]) { // Ensure it's not nullptr (though it should be non-null if allocated successfully)
                     av_frame_free(&frame_ring[i]); // Pass address of the pointer in the ring buffer

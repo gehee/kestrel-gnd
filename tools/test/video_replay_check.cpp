@@ -87,7 +87,7 @@ int main(int argc, char** argv) {
     cfg.decode_enabled = true;
     cfg.stream_decode = true;
     auto vdec = std::make_shared<FakeVdec>();
-    volatile bool stop = false;
+    std::atomic<bool> stop{false};
     Recorder rec;
     const VideoCodec codec = VideoCodec::H265;   // the link keeps a reference to it
     auto link = std::make_unique<Ar8030Link>(model, cfg, settings, codec, vdec, &stop);

@@ -204,6 +204,15 @@ void OSD::draw_top_strip(Frame& f) {
             if (rec_started_us == 0) rec_started_us = get_time_us();
             unsigned rs = (unsigned)((get_time_us() - rec_started_us) / 1000000ULL);
             snprintf(rec_buf, sizeof(rec_buf), "REC %u:%02u", rs / 60, rs % 60);
+        } else if (!panel_has_rec) {
+            // REC gone off by itself, the card no longer taking it: why, where
+            // it was, for 5 s (drawn before measure_link has it).
+            uint64_t at = 0;
+            const std::string why = DvrRecorder::instance().last_failure(&at);
+            if (!why.empty() && get_time_us() - at < 5000000ULL) {
+                rec_now = true;
+                snprintf(rec_buf, sizeof(rec_buf), "%s", why.c_str());
+            }
         }
         const bool want_clock = clock_buf[0] && (clock_show == 2 || !aircraft_here);
 

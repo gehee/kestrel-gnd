@@ -78,6 +78,13 @@ public:
     // One refresh, in microseconds: the frame being scanned out, which Refresh
     // Sync may make longer than the mode's.
     virtual double frame_period_us() const = 0;
+    // The refresh the screen really runs at, Hz: vblanks counted between
+    // flips a second or more apart, by the kernel's times (Refresh Sync's
+    // longer frames in it). 0 while not known: no flip for a few seconds.
+    virtual float measured_refresh_hz() const = 0;
+    // The mode's own refresh, exact: its pixel clock over its total size, not
+    // the rounded figure the mode is named by (0: no screen).
+    virtual double mode_refresh_hz() const = 0;
     // Blocks until the next vblank: its sequence number and time (CLOCK_MONOTONIC us).
     virtual bool wait_vblank(uint32_t* seq, uint64_t* ts_us) = 0;
     // Hardware picture controls on the screen's connector (brightness,

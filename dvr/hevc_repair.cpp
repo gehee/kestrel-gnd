@@ -208,27 +208,43 @@ void HevcRepair::set_parameter_sets(const std::vector<std::vector<uint8_t>>& ps)
             if (max_sub > 0) for (int k = max_sub; k < 8; k++) b.u(2);
             for (int k = 0; k < max_sub; k++) { if (pp[k]) b.u(88); if (lp[k]) b.u(8); }
             b.ue();                                    // sps id
-            const int chroma = b.ue();
+            // What is taken as a count, a size or a shift has to be in its
+            // range (H.265 7.4.3.2), else the repair is off: a damaged SPS
+            // looped billions of times, shifted past 31 bits or made a
+            // picture of gigabytes.
+            const uint32_t chroma = b.ue();
+            if (chroma > 3) supported = false;
             if (chroma == 3 && b.u(1)) supported = false;   // separate colour planes
             chroma_ = chroma != 0;
-            width_ = b.ue(); height_ = b.ue();
+            const uint32_t w = b.ue(), h = b.ue();
+            if (w == 0 || h == 0 || w > 8192 || h > 8192) supported = false;
+            width_ = (int)std::min<uint32_t>(w, 8192);
+            height_ = (int)std::min<uint32_t>(h, 8192);
             if (b.u(1)) { b.ue(); b.ue(); b.ue(); b.ue(); }   // conformance window
             b.ue(); b.ue();                            // bit depths
-            log2_poc_lsb_ = b.ue() + 4;
+            const uint32_t poc_bits = b.ue();          // log2_max_pic_order_cnt_lsb_minus4, 0..12
+            if (poc_bits > 12) supported = false;
+            log2_poc_lsb_ = (int)std::min<uint32_t>(poc_bits, 12) + 4;
             const int ordering_all = b.u(1);
             for (int k = ordering_all ? 0 : max_sub; k <= max_sub; k++) { b.ue(); b.ue(); b.ue(); }
-            log2_min_cb_ = b.ue() + 3;
-            log2_ctb_ = log2_min_cb_ + b.ue();
+            const uint32_t min_cb = b.ue(), ctb_diff = b.ue();   // blocks of 8..64, a CTB of 16..64
+            if (min_cb > 3 || ctb_diff > 3 || min_cb + ctb_diff > 3) supported = false;
+            log2_min_cb_ = (int)std::min<uint32_t>(min_cb, 3) + 3;
+            log2_ctb_ = std::min(log2_min_cb_ + (int)std::min<uint32_t>(ctb_diff, 3), 6);
             b.ue(); b.ue(); b.ue(); b.ue();            // transform sizes, depths
             if (b.u(1) && b.u(1)) supported = false;   // scaling list data in the SPS
             b.u(1);                                    // amp
             sao_ = b.u(1);
             if (b.u(1)) { b.u(4); b.u(4); b.ue(); b.ue(); b.u(1); }   // pcm
-            num_st_rps_ = b.ue();
+            const uint32_t n_rps = b.ue();             // 0..64
+            if (n_rps > 64) supported = false;
+            num_st_rps_ = (int)std::min<uint32_t>(n_rps, 64);
             sps_rps_neg_.clear();
             for (int k = 0; k < num_st_rps_; k++) {
                 if (k != 0 && b.u(1)) { supported = false; break; }   // predicted sets
-                const int neg = b.ue(), pos = b.ue();
+                const uint32_t n_neg = b.ue(), n_pos = b.ue();      // each 0..16
+                if (n_neg > 16 || n_pos > 16) { supported = false; break; }
+                const int neg = (int)n_neg, pos = (int)n_pos;
                 std::vector<int> d;
                 int poc = 0;
                 for (int j = 0; j < neg; j++) {
@@ -241,22 +257,30 @@ void HevcRepair::set_parameter_sets(const std::vector<std::vector<uint8_t>>& ps)
             lt_present_ = b.u(1);
             num_lt_sps_ = 0;
             if (lt_present_) {
-                num_lt_sps_ = b.ue();
+                const uint32_t n_lt = b.ue();          // 0..32
+                if (n_lt > 32) supported = false;
+                num_lt_sps_ = (int)std::min<uint32_t>(n_lt, 32);
                 for (int k = 0; k < num_lt_sps_; k++) { b.u(log2_poc_lsb_); b.u(1); }
             }
             sps_tmvp_ = b.u(1);
             have_sps = !b.bad;
         } else if (type == 34) {
-            pps_id_ = b.ue();
+            const uint32_t pps_id = b.ue();            // 0..63
+            if (pps_id > 63) supported = false;
+            pps_id_ = (int)std::min<uint32_t>(pps_id, 63);
             b.ue();
             if (b.u(1)) supported = false;             // dependent slices
             output_flag_ = b.u(1);
             num_extra_bits_ = b.u(3);
             b.u(1);                                    // sign data hiding
             cabac_init_present_ = b.u(1);
-            num_ref_l0_default_ = b.ue() + 1;
+            const uint32_t refs = b.ue();              // 0..14
+            if (refs > 14) supported = false;
+            num_ref_l0_default_ = (int)std::min<uint32_t>(refs, 14) + 1;
             b.ue();
-            init_qp_ = 26 + b.se();
+            const int32_t qp = b.se();                 // init_qp_minus26
+            if (qp < -64 || qp > 25) supported = false;
+            init_qp_ = 26 + std::min(std::max(qp, -64), 25);
             b.u(1); b.u(1);                            // constrained intra, transform skip
             if (b.u(1)) b.ue();                        // cu qp delta
             b.se(); b.se();
@@ -329,7 +353,9 @@ bool HevcRepair::parse_slice(const uint8_t* nal, size_t len, Slice& s) const {
                 s.min_ref_delta = sps_rps_neg_[idx][0];
         } else {
             if (num_st_rps_ != 0 && b.u(1)) return false;   // predicted from the SPS's
-            const int neg = b.ue(), pos = b.ue();
+            const uint32_t n_neg = b.ue(), n_pos = b.ue();
+            if (n_neg > 16 || n_pos > 16) return false;     // a damaged header: not looped on
+            const int neg = (int)n_neg, pos = (int)n_pos;
             int poc = 0;
             for (int j = 0; j < neg; j++) {
                 poc -= (int)b.ue() + 1;
@@ -338,8 +364,10 @@ bool HevcRepair::parse_slice(const uint8_t* nal, size_t len, Slice& s) const {
             for (int j = 0; j < pos; j++) { b.ue(); b.u(1); }
         }
         if (lt_present_) {
-            const int n_sps = num_lt_sps_ > 0 ? (int)b.ue() : 0;
-            const int n = n_sps + (int)b.ue();
+            const uint32_t lt_sps = num_lt_sps_ > 0 ? b.ue() : 0, lt_pics = b.ue();
+            if (lt_sps > (uint32_t)num_lt_sps_ || lt_pics > 32) return false;
+            const int n_sps = (int)lt_sps;
+            const int n = n_sps + (int)lt_pics;
             for (int j = 0; j < n; j++) {
                 if (j < n_sps) b.u(lt_lsb_bits_);
                 else { b.u(log2_poc_lsb_); b.u(1); }

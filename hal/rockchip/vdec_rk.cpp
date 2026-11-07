@@ -8,6 +8,7 @@
 #include <xf86drmMode.h>
 #include <drm_fourcc.h>
 #include <sys/ioctl.h>
+#include <fcntl.h>
 
 #include "base/frame_mode.hpp"
 #include "base/scheduling_helper.hpp"
@@ -54,20 +55,13 @@ static std::atomic<uint32_t> s_buf_epoch{1};
 // }
 
 // The picture buffers init_buffer made, given back: on a resolution change,
-// and when the decoder goes. Order: framebuffers, then MPP's group (it
-// closes the prime_fds it holds), then the dumb buffers. A picture still held
-// elsewhere (an imported texture, a DecodedUnit) keeps its memory alive.
+// and when the decoder goes. Only MPP's group is left of them (it closes the
+// prime_fds it holds): the dumb handles went at init_buffer. A picture still
+// held elsewhere (an imported texture, a DecodedUnit, the renderer's
+// framebuffers) keeps its memory alive.
 void VdecRK::free_frame_buffers() {
 	if (!mpi.frm_grp) return;
-	const int fd = dev ? dev->scanout_fd() : -1;
-	// 1. Remove DRM framebuffers (kernel ref-counts, safe even if still displayed)
-	for (int i = 0; i < MAX_FRAMES; i++) {
-		if (mpi.frame_to_drm[i].fb_id) {
-			if (fd >= 0) drmModeRmFB(fd, mpi.frame_to_drm[i].fb_id);
-			mpi.frame_to_drm[i].fb_id = 0;
-		}
-	}
-	// 2. Release MPP buffer group (closes prime_fds owned by MPP). Cleared
+	// Release MPP buffer group (closes prime_fds owned by MPP). Cleared
 	// first, as MPP's own decoder test does on an info change: a buffer
 	// something still references is marked discard, so it is freed when
 	// that lets go. Put back with one still in use, MPP 1.0.3 would
@@ -75,18 +69,7 @@ void VdecRK::free_frame_buffers() {
 	mpp_buffer_group_clear(mpi.frm_grp);
 	mpp_buffer_group_put(mpi.frm_grp);
 	mpi.frm_grp = NULL;
-	// 3. Destroy underlying GEM dumb buffers
-	for (int i = 0; i < MAX_FRAMES; i++) {
-		if (mpi.frame_to_drm[i].handle) {
-			if (fd >= 0) {
-				struct drm_mode_destroy_dumb dmd = {};
-				dmd.handle = mpi.frame_to_drm[i].handle;
-				ioctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dmd);
-			}
-			mpi.frame_to_drm[i].handle = 0;
-		}
-		mpi.frame_to_drm[i].prime_fd = -1;
-	}
+	for (int i = 0; i < MAX_FRAMES; i++) mpi.frame_to_drm[i].prime_fd = -1;
 }
 
 // Everything the constructor and init_buffer took. Before this, a decoder
@@ -128,15 +111,17 @@ void VdecRK::init_buffer(MppFrame frame) {
 	printf("Frame info changed %lu(%d)x%lu(%d)\n", video_frm_width, hor_stride, video_frm_height, ver_stride);
 
 	// On resolution change, free all old DRM/MPP resources before reallocating.
-	// Order: flush renderer cache → remove FBs → put MPP group (closes prime fds) → destroy dumb handles.
+	// Order: flush renderer cache → put MPP group (closes prime fds).
 	if (mpi.frm_grp) {
 		printf("VdecRK: resolution change — flushing renderer and freeing old DRM resources\n");
 		// 0. Ask renderer to drain its frame queue and clear its display_buffers cache.
 		//    This prevents false prime_fd matches after fd numbers are reused by new allocations.
 		if (renderer) renderer->request_flush();
 		// The screen recorder's pictures too: a buffer still referenced when
-		// the group is put back below is never freed by MPP 1.0.3.
-		if (dev) dev->drop_screen_pictures();
+		// the group is put back below is never freed by MPP 1.0.3. Only the
+		// live decoder's (the one with the renderer): a gallery or background
+		// clip changing size must not take the screen's pictures from it.
+		if (renderer && dev) dev->drop_screen_pictures();
 		// The prime_fds' numbers may come back for the new buffers: a new epoch.
 		s_buf_epoch++;
 		free_frame_buffers();
@@ -168,12 +153,14 @@ void VdecRK::init_buffer(MppFrame frame) {
 		assert(!ret);
 		// assert(dmcd.pitch==(fmt==MPP_FMT_YUV420SP?hor_stride:hor_stride*10/8));
 		// assert(dmcd.size==(fmt == MPP_FMT_YUV420SP?hor_stride:hor_stride*10/8)*ver_stride*2);
-		mpi.frame_to_drm[i].handle = dmcd.handle;
-		
-		// commit DRM buffer to frame group
+
+		// commit DRM buffer to frame group. CLOEXEC: a script started from
+		// here (fpvos-wifi -> hostapd, udhcpd) kept every decoder buffer.
+		// Read-only, as it always was (flags 0): nothing maps it to write.
 		struct drm_prime_handle dph;
 		memset(&dph, 0, sizeof(struct drm_prime_handle));
 		dph.handle = dmcd.handle;
+		dph.flags = DRM_CLOEXEC;
 		dph.fd = -1;
 		do {
 			ret = ioctl(dev->scanout_fd(), DRM_IOCTL_PRIME_HANDLE_TO_FD, &dph);
@@ -186,31 +173,25 @@ void VdecRK::init_buffer(MppFrame frame) {
 		info.fd = dph.fd;
 		ret = mpp_buffer_commit(mpi.frm_grp, &info);
 		assert(!ret);
-		mpi.frame_to_drm[i].prime_fd = info.fd; // dups fd						
+		// MPP keeps a plain dup() of it, without CLOEXEC: that one is the
+		// fd that stays, so it gets the flag too.
+		if (info.fd >= 0 && info.fd != dph.fd) fcntl(info.fd, F_SETFD, FD_CLOEXEC);
+		mpi.frame_to_drm[i].prime_fd = info.fd; // dups fd
 		if (dph.fd != info.fd) {
 			ret = close(dph.fd);
 			assert(!ret);
 		}
 
-		// allocate DRM FB from DRM buffer
-		uint32_t handles[4], pitches[4], offsets[4];
-		memset(handles, 0, sizeof(handles));
-		memset(pitches, 0, sizeof(pitches));
-		memset(offsets, 0, sizeof(offsets));
-		handles[0] = mpi.frame_to_drm[i].handle;
-		offsets[0] = 0;
-		pitches[0] = hor_stride;						
-		handles[1] = mpi.frame_to_drm[i].handle;
-		offsets[1] = pitches[0] * ver_stride;
-		pitches[1] = pitches[0];
-        
-        // Debug print
-        // printf("VdecRK: Creating FB %d/%d for handle %u\n", i, MAX_FRAMES, handles[0]);
-		ret = drmModeAddFB2(dev->scanout_fd(), video_frm_width, video_frm_height, DRM_FORMAT_NV12, handles, pitches, offsets, &mpi.frame_to_drm[i].fb_id, 0);
-        if (ret != 0) {
-            printf("VdecRK: drmModeAddFB2 failed: %d (errno=%d)\n", ret, errno);
-        }
-		assert(!ret);
+		// The dumb handle goes now: the dma-buf holds the buffer. Kept, it
+		// was the handle the renderer's import of the prime_fd got back
+		// (one handle per buffer per DRM file), so the renderer closing its
+		// import closed it, and DESTROY_DUMB here later could hit another
+		// buffer given the same handle number meanwhile. The renderer's
+		// import makes a handle of its own now. (Its framebuffers are the
+		// ones scanned out; the 16 made here never were.)
+		struct drm_mode_destroy_dumb dmd = {};
+		dmd.handle = dmcd.handle;
+		ioctl(dev->scanout_fd(), DRM_IOCTL_MODE_DESTROY_DUMB, &dmd);
     }
 	// printf("VdecRK: init_buffer loop complete\n");
 
@@ -228,8 +209,6 @@ void VdecRK::init_buffer(MppFrame frame) {
     // printf("VdecRK: init_buffer returning\n");
 }
 
-
-static int consec_put_stalls = 0;   // consecutive 1s put-packet stalls (decoder wedge detector)
 
 void VdecRK::run_frame()
 {
@@ -585,16 +564,16 @@ void VdecRK::feed_packet_to_decoder(void* data_p, int data_len, int64_t pts, uin
             // reset MPP after 3 consecutive stalls; the air re-sends
             // params+IDR (link-up burst / gnd retry) so decode resumes on the
             // next keyframe within a second or two.
-            if (++consec_put_stalls >= 3) {
+            if (++consec_put_stalls_ >= 3) {
                 printf("VdecRK: %d consecutive stalls — resetting the MPP decoder\n",
-                       consec_put_stalls);
+                       consec_put_stalls_);
                 mpi.mpi->reset(mpi.ctx);
                 key_in_.store(false, std::memory_order_relaxed);   // the reset took its parameter sets
                 {
                     std::lock_guard<std::mutex> lock(decoding_stats_mutex);
                     decoding_stats.clear();
                 }
-                consec_put_stalls = 0;
+                consec_put_stalls_ = 0;
             }
             return;
         }
@@ -606,7 +585,7 @@ void VdecRK::feed_packet_to_decoder(void* data_p, int data_len, int64_t pts, uin
         // drain threads get the CPU; 200us keeps well under a 60fps frame time.
         usleep(200);
     }
-    consec_put_stalls = 0;
+    consec_put_stalls_ = 0;
     // MPP holds parameter sets only once a keyframe went in with them. With
     // intra refresh nothing sends another unless asked, so a keyframe that
     // never got here - or that MPP could not use, a run of packets with no

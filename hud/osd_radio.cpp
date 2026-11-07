@@ -24,53 +24,6 @@ void OSD::apply_camera_dnr(int dnr3d) {
     if (dnr3d == 1) menu_cam_3dnr = 4;   // the bin's own: Auto
 }
 
-void OSD::update_menu_from_tx(int cmd, int val) {
-    pthread_mutex_lock(&osd_mutex);
-    // The legacy kestrel-air menu rows (bitrate, slice, exposure, ...) and the
-    // no-capabilities RF list are gone; their acks are simply ignored here.
-    if (cmd == 0x01) menu_video_mode = val;
-    else if (cmd == 0x07) { osd_vars.sky_exposure_us = val; sky_exposure_us_ = (uint32_t)val; }
-    else if (cmd == 0x08) { osd_vars.sky_framerate = val; sky_framerate_ = (uint32_t)val; }
-    else if (cmd == 0x17) {
-        // AIR-owned channel MODE (1=auto hop, 0=force). Arrives before 0x11.
-        // (This used to skip a goggle-side "pin", read from a pinned_chan
-        // setting nothing has written since pinning was removed.)
-        air_chan_mode = val;
-        if (val == 1) {
-            if (!rf_chan_asserted) {
-                rf_chan_asserted = true;
-                unknown_command(0x107, 1);                 // re-assert AUTO on the AP
-            }
-        }
-    }
-    else if (cmd == 0x11) {
-        // AIR-owned forced channel: re-assert on our AP radio once per link
-        // session (channel is AP-arbitrated and resets to config on re-pair).
-        if (air_chan_mode != 1 && !rf_chan_asserted) {
-            rf_chan_asserted = true;
-            printf("[rf] re-asserting AIR-owned channel %d on the AP\n", val);
-            unknown_command(0x107, 0);
-            unknown_command(0x101, val);
-        }
-    }
-    else if (cmd == 0x14) {
-        // AIR-owned RF bandwidth. The AP arbitrates bandwidth and resets it to
-        // config on every re-pair, so re-assert the persisted value ONCE per
-        // link session (rf_bw_applied is re-armed on link drop).
-        if (val != rf_bw_applied) {
-            rf_bw_applied = val;
-            printf("[rf] re-asserting AIR-owned bandwidth enum %d on the AP\n", val);
-            unknown_command(0x104, val);
-        }
-    }
-    
-    menu_synced = true;
-    render_requested = true;
-    hud_wake_.poke();
-    pthread_mutex_unlock(&osd_mutex);
-}
-
-
 void OSD::drain_msp() {
     air::FcChunk c;
     while (parts_.fc.take(c)) {
@@ -102,14 +55,12 @@ void OSD::sync_radio() {
     const gnd::RadioState rs = parts_.radio.state();
     osd_vars.radio_link = rs.link;
     link_distance_raw = rs.dist_raw;
-    dist_offset_ = rs.dist_offset;
     dist_m_ = rs.dist_m;
     rf_caps = rs.rf_caps;
-    // Link dropped: re-arm the re-asserts so the next settings broadcast
-    // (requested on reconnect) re-applies the AIR-owned values.
-    if (rs.link.state != 2) { rf_bw_applied = -1; rf_chan_asserted = false; }
+    gnd_live_dbm_.store(rs.live_dbm, std::memory_order_relaxed);
 
     air_radio_ = parts_.air_radio.state();
+    air_live_dbm_.store(air_radio_.live_dbm, std::memory_order_relaxed);
     air_unit_ = parts_.air_unit.state();
     const air::UnitState& as = air_unit_;
     air_feat_ = as.features;
@@ -135,9 +86,14 @@ void OSD::sync_radio() {
     }
     gnd::ScanSample sc;
     while (parts_.radio.take_scan(sc)) apply_chan_scan(sc);
-    const uint64_t drops = parts_.radio.dropped();
+    air::Resend r;
+    while (parts_.air_radio.take_resend(r)) {
+        resend_hist_.push_back(r);
+        if (resend_hist_.size() > 16384) resend_hist_.pop_front();
+    }
+    const uint64_t drops = parts_.radio.dropped() + parts_.air_radio.resends_dropped();
     if (drops != radio_drops_seen_) {
-        printf("[OSD] the radio's rates or scans came faster than the HUD took them: %llu dropped\n",
+        printf("[OSD] the radio's rates, scans or resends came faster than the HUD took them: %llu dropped\n",
                (unsigned long long)drops);
         radio_drops_seen_ = drops;
     }

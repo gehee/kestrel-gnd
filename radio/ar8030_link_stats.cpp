@@ -45,6 +45,7 @@ void Ar8030Link::publish_chan_scan() {
     for (int i = 0; i < n; i++) {
         sc.freq_mhz[i]  = (int)(ci.freq[i] / 1000);
         sc.power_dbm[i] = (int)ci.power[i];
+        sc.usable[i]    = region_usable(sc.freq_mhz[i]) ? 1 : 0;
     }
     // BB_GET_CHAN_INFO's work_chan is NOT an index into this freq[] table: with
     // the link demonstrably on 5839 MHz (BB_GET_STATUS tx_freq) it pointed at
@@ -56,6 +57,9 @@ void Ar8030Link::publish_chan_scan() {
         }
     }
     sc.last_update_ms = now;
+    if (link_state_.load() == 2 && link_freq_mhz > 0 && now >= chan_settle_ms_.load())
+        for (int i = 0; i < n; i++)
+            if (sc.freq_mhz[i] != link_freq_mhz) free_level_[i] = sc.power_dbm[i] ? sc.power_dbm[i] : -1;
     // Tests: while /tmp/kestrel-scandump exists, each scan read is printed
     // (MHz:dBm per channel), to compare radio firmwares.
     if (access("/tmp/kestrel-scandump", F_OK) == 0) {
@@ -106,9 +110,23 @@ void Ar8030Link::publish_link_stats() {
         uint8_t raw[256];
     } info_buf;
     memset(&info_buf, 0, sizeof(info_buf));
+    // A call that fails (a 1 s timeout now and then) keeps its figures as last
+    // published: one failed BB_GET_STATUS read as the link down (state 0, no
+    // MACs), and the HUD re-armed its per-link state. For two passes in a row:
+    // a radio that stopped answering has no figures to show.
+    const gnd::LinkStats& last = link_st_last_;
+    auto keep = [this](int k) {
+        if (link_st_fails_[k] <= 2) link_st_fails_[k]++;
+        return link_st_fails_[k] <= 2;
+    };
     bb_get_1v1_info_out_t &info = info_buf.info;
     if (ar_ioctl(dev, BB_GET_1V1_INFO, &info_in, &info_buf) == 0) {
+        link_st_fails_[0] = 0;
         st.snr        = to_db(info.self.snr);
+        // The frames' SNR, when poll_resends has some since the last pass, is
+        // the one shown (their mean): two sources in turn made the figure flick.
+        if (snr_n_) st.snr = (float)snr_sum_ / (float)snr_n_ / 4.0f;
+        snr_sum_ = 0; snr_n_ = 0;
         stat_snr_x10_.store((int)(st.snr * 10.0f + 0.5f));
         stat_gains_.store(info.self.gain_a | info.self.gain_b << 8);
         st.snr_raw    = info.self.snr;
@@ -123,6 +141,12 @@ void Ar8030Link::publish_link_stats() {
         st.fec_error = info.self.ldpc_num_err_ratio / 10000.0f;
         st.fec_total = info.self.ldpc_tlv_err_ratio / 10000.0f;
         st.active     = true;
+    } else if (keep(0)) {
+        st.snr = last.snr; st.snr_raw = last.snr_raw; st.mcs = last.mcs; st.power = last.power;
+        st.air_pwr_mw = tx_power_mw;
+        st.gains_cur = last.gains_cur; st.gains_max = last.gains_max;
+        st.fec_error = last.fec_error; st.fec_total = last.fec_total;
+        st.active = last.active;
     }
 
     bb_get_status_in_t sin;
@@ -131,6 +155,7 @@ void Ar8030Link::publish_link_stats() {
     bb_get_status_out_t sout;
     memset(&sout, 0, sizeof(sout));
     if (ar_ioctl(dev, BB_GET_STATUS, &sin, &sout) == 0) {
+        link_st_fails_[1] = 0;
         st.state = sout.link_status[0].state;
         st.role  = sout.role;
         snprintf(st.mac, sizeof(st.mac), "%02X:%02X:%02X:%02X",
@@ -160,6 +185,18 @@ void Ar8030Link::publish_link_stats() {
                 break;
             }
         }
+    } else if (keep(1)) {
+        // The state the radio said last, by poll or event (the model's): the
+        // last publish here can be older.
+        const int ls = link_state_.load();
+        st.state = ls >= 0 ? ls : last.state;
+        st.role = last.role;
+        memcpy(st.mac, last.mac, sizeof(st.mac));
+        memcpy(st.peer_mac, last.peer_mac, sizeof(st.peer_mac));
+        st.tx_freq = last.tx_freq;
+        st.rx_freq = last.rx_freq;
+        st.bw_step = last.bw_step;
+        st.active = st.active || last.active;
     }
 
     bb_get_mcs_in_t mcs_in;
@@ -168,8 +205,12 @@ void Ar8030Link::publish_link_stats() {
     bb_get_mcs_out_t mcs_out;
     memset(&mcs_out, 0, sizeof(mcs_out));
     if (ar_ioctl(dev, BB_GET_MCS, &mcs_in, &mcs_out) == 0) {
+        link_st_fails_[2] = 0;
         st.rx_mcs_val        = mcs_out.mcs;
         st.rx_data_rate_kbps = mcs_out.throughput;
+    } else if (keep(2)) {
+        st.rx_mcs_val        = last.rx_mcs_val;
+        st.rx_data_rate_kbps = last.rx_data_rate_kbps;
     }
 
     st.pwr_auto = tx_power_auto;
@@ -221,6 +262,7 @@ void Ar8030Link::publish_link_stats() {
                st.rx_freq, st.tx_freq, gnd::bw_step_label(st.bw_step),
                gnd::bw_step_label(last_bw_rx_idx));
     }
+    link_st_last_ = st;
     model_.link_stats(st);
 }
 
@@ -298,7 +340,7 @@ void Ar8030Link::start_stats() {
         [this](uint8_t *b) {
             bb_dev_handle_t *dev = (bb_dev_handle_t *)bb_dev;
             uint8_t in[4] = {0x6e, 0x0e, 1, 0}, out[256] = {0};
-            const int rc = dev ? ar_ioctl(dev, 0x01000064, in, out) : -1;
+            const int rc = dev ? ar_ioctl_yield(dev, 0x01000064, in, out) : -1;
             if (rc == 0) *b = out[0];
             return rc;
         },
@@ -322,11 +364,19 @@ void Ar8030Link::stop_stats() {
 
 void Ar8030Link::stats_run() {
     pthread_setname_np(pthread_self(), "AR8030_STAT");
+    // Made by the radio thread, whose SCHED_FIFO it would inherit: none of
+    // this is real-time work (the settings saver's way).
+    struct sched_param sp = {};
+    pthread_setschedparam(pthread_self(), SCHED_OTHER, &sp);
     // On ar_libre the link state comes from the chip's event, so the poll is
     // only a safety net against a missed one; on Artosyn's library it is the
     // only source.
     const uint64_t link_period = on_ar_libre() ? 5000 : 400;
-    uint64_t next_link = 0, next_stats = now_ms() + 3000, last_stats = 0;
+    // SNR, distance, MCS and the data rate for the HUD: every 500 ms (was 3 s,
+    // which the pilot read as the figures lagging the flight). About five
+    // small radio requests a pass, next to the resend map's one per 100 ms.
+    const uint64_t stats_period = 500;
+    uint64_t next_link = 0, next_stats = now_ms() + stats_period, last_stats = 0;
     std::unique_lock<std::mutex> lk(stats_mu);
     while (!stats_stop) {
         lk.unlock();
@@ -350,17 +400,24 @@ void Ar8030Link::stats_run() {
                 report_link_state(ls);
             }
         }
-        // Every 3 s, or sooner - at most once a second - after an MCS change.
-        if (t >= next_stats || (stats_soon_.load() && t - last_stats >= 1000)) {
+        // Every stats_period, or sooner - at most every 250 ms - after an MCS change.
+        if (t >= next_stats || (stats_soon_.load() && t - last_stats >= 250)) {
             stats_soon_.store(false);
             last_stats = t;
-            next_stats = t + 3000;
+            next_stats = t + stats_period;
             stat_mcs_.store(current_rx_mcs());
             // BB_CFG_DISTC is refused before the link is up (-2), exactly as
             // BB_SET_BANDWIDTH is (-7). Retry a few times once we are linked.
-            int dist_m = current_distance();
-            stat_dist_.store(dist_m);
-            model_.distance(dist_m);
+            // Asked for only when the radio does not push it (event 15: an
+            // Open8030 that has it sends one a second at the least); a pushed
+            // one is shown here too, so the HUD changes at most every pass.
+            if (t - dist_pushed_ms_.load() > 2000) {
+                int dist_m = current_distance();
+                stat_dist_.store(dist_m);
+                model_.distance(dist_m);
+            } else {
+                model_.distance(stat_dist_.load());
+            }
             publish_link_stats();
         }
         publish_chan_scan();             // its own pace: 2 s, 70 ms while the scan screen is up
@@ -368,6 +425,7 @@ void Ar8030Link::stats_run() {
         // Once a second. It was on the video thread, which then waited for the
         // radio's answer - a lost one held the next picture for a second.
         poll_ap_time();
+        poll_resends();
         lk.lock();
         stats_cv.wait_for(lk, std::chrono::milliseconds(35), [this] { return stats_stop; });
     }
@@ -391,7 +449,7 @@ void Ar8030Link::update_stats(size_t frame_size) {
         // Over the time the period really took: a second, or a little more.
         double video_bw = (double)bytes_received * 1000.0 / (double)(t - period_start);   // bytes a second
         period_start = t;
-        model_.video_bandwidth((float)(video_bw / 125000.0));  // -> Mbit/s
+        model_.video_bandwidth((float)(video_bw / 125000.0), (uint32_t)frames_lost);  // -> Mbit/s
         if (t - last_stat_ms >= 3000) {
             last_stat_ms = t;
             // The radio's figures, as the stats thread last read them.
@@ -403,18 +461,27 @@ void Ar8030Link::update_stats(size_t frame_size) {
             // only way to tell a link limit from an encoder limit, and every
             // bandwidth theory so far has been argued without it.
             // Cached by publish_link_stats(), on the stats thread.
+            // The air radio's resends since the last line (Open8030 at both
+            // ends): blocks sent again / radio frames its map covered, and
+            // frames it stalled in; -1 without the map.
+            static uint32_t rs_b0 = 0, rs_k0 = 0, rs_s0 = 0;
+            const uint32_t rs_b = rs_blocks_.load(), rs_k = rs_known_.load(), rs_s = rs_stalls_.load();
+            const bool rs_ok = resend_known_.load() && rs_k >= rs_k0;
+            const long rs_db = rs_ok ? (long)(rs_b - rs_b0) : -1, rs_dk = rs_ok ? (long)(rs_k - rs_k0) : -1;
+            const long rs_ds = rs_ok ? (long)(rs_s - rs_s0) : -1;
+            rs_b0 = rs_b; rs_k0 = rs_k; rs_s0 = rs_s;
             printf("ar8030: rx=%llu bytes nals=%llu frames=%llu lost=%llu telemetry_drained=%llu"
                    " msp=%llu mcs=%d bw=%s MHz link=%.2f Mbps video=%.2f Mbps dist=%d"
                    " air=%.1fms stale=%llu foreign=%llu snr=%.1fdB freq=%d gains=%d/%d"
-                   " damaged=%llu/%llu\n",
+                   " damaged=%llu/%llu resent=%ld/%ld stalled=%ld\n",
                    total_bytes, nal_count, (unsigned long long)video_.frames_seen(), frames_lost,
                    ctrl_bytes,
                    msp_bytes, mcs >= 0 ? ar_mcs_label(mcs) : -99, gnd::bw_step_label(last_bw_idx.load()), last_link_kbps.load() / 1000.0,
                    video_bw / 125000.0, dist_m,
                    air_delay_ms < 0.0f ? 0.0f : air_delay_ms, stale_pics, video_.foreign_slices(),
-                   stat_snr_x10_.load() / 10.0, link_freq_mhz,
+                   stat_snr_x10_.load() / 10.0, link_freq_mhz.load(),
                    stat_gains_.load() & 255, stat_gains_.load() >> 8,
-                   (unsigned long long)xor_bad_, (unsigned long long)xor_checked_);
+                   (unsigned long long)xor_bad_, (unsigned long long)xor_checked_, rs_db, rs_dk, rs_ds);
         }
         bytes_received = 0;
     }
@@ -631,6 +698,15 @@ void Ar8030Link::note_ap_delay(const uint8_t *hdr, size_t len, bool new_pic) {
         return;
     }
     const int64_t queue = ka ? u16(37) : 0;
+    // Emptied with each 5 s window's line (picture_done), which comes only for
+    // a picture handed to a decoder: with decode off these grew for good. A
+    // window holds a few thousand slices.
+    static constexpr size_t kSlicesMax = 1 << 15;
+    if (ap_link_.size() >= kSlicesMax || ap_enc_last_.size() >= kSlicesMax) {
+        ap_link_.clear();
+        ap_enc_last_.clear();
+        for (auto &v : ap_link_pos_) v.clear();
+    }
     if (ka && (hdr[32] & 0x40)) ap_enc_last_.push_back((uint32_t)enc);
     // Not while a link-up's resync drops the pictures: those slices sat in
     // the air radio while the link formed and are never shown, and the

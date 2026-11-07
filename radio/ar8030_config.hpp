@@ -24,6 +24,8 @@ struct Ar8030Config {
     int ap_index = 0;                // which bb_mac_addr_N to use as the AP
     bool chan_auto = true;           // channel adaptation (scan for the AP)
     bool chan_manual_cli = false;    // --ar8030-chan-manual: pinned to freq_khz from the start
+    int chan_hop = 0;                // ar8030_chan_hop: AUTO (0) or AUTO HOP (1)
+    int chan_fixed_mhz = 0;          // ar8030_chan_mhz: FIXED there, 0 AUTO / AUTO HOP
 
     // TX power: stock's encoding (N = hold N mW, N+1 = auto capped at N), as
     // chosen, and our radio's own dBm.

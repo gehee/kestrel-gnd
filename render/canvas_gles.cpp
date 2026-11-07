@@ -102,7 +102,11 @@ void CanvasGles::update_image(ImageId image, int w, int h, const void* pixels) {
 }
 
 void CanvasGles::free_image(ImageId image) {
-    if (image) glDeleteTextures(1, &image);
+    if (!image) return;
+    glDeleteTextures(1, &image);
+    // GL hands the name out again: a layer made under it later must not be
+    // taken for this one, already allocated.
+    layer_size_.erase(image);
 }
 
 // ---- video pictures ---------------------------------------------------------------

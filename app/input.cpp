@@ -52,6 +52,11 @@ void* vrx_button_thread_func(void* arg) {
 	};
 	if (!buttons.available()) {
 		printf("VRX buttons: no front-panel ADC channel on this board, front panel disabled\n");
+		// kill -USR1 still records: it is how the DVR is driven over ssh.
+		while (!signal_stop) {
+			service_rec_signal();
+			usleep(25000);
+		}
 		return nullptr;
 	}
 	printf("VRX buttons: front panel active (ADC ladder)\n");
@@ -95,7 +100,7 @@ void* vrx_button_thread_func(void* arg) {
 				}
 				default: break;
 			}
-			if (key) osd->handle_key(key);
+			if (key && osd) osd->handle_key(key);   // no OSD (--no-osd): only REC and BIND
 		}
 		usleep(25000);   // 25 ms; stock polls at 20 ms
 	}

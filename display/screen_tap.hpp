@@ -36,18 +36,19 @@ public:
     void set_recording(bool on, const ScreenPair* seed = nullptr);
     bool recording() const { return on_.load(std::memory_order_relaxed); }
 
-    // page_flip, just before its commit: the pair that commit carries. A
+    // page_flip, just before its commit: the pair that commit carries, the
+    // picture's part sx,sy sw x sh (sw 0: all of it) in vx,vy vw x vh. A
     // commit that fails takes it back.
     void submitted(std::shared_ptr<DecodedUnit> video, uint32_t osd_fb, uint64_t osd_gen,
-                   int vx, int vy, int vw, int vh, uint64_t now_us);
+                   int vx, int vy, int vw, int vh, int sx, int sy, int sw, int sh, uint64_t now_us);
     void submit_failed();
     // The flip event: the pair submitted last landed on vblank seq.
     void landed(uint32_t seq);
     // A commit of the OSD plane alone (no video flowing) landed on seq.
     void osd_landed(uint32_t osd_fb, uint64_t osd_gen, uint32_t seq);
-    // The frozen picture's rectangle changed (Picture Size with no video
-    // flowing), from vblank seq on.
-    void moved(int vx, int vy, int vw, int vh, uint32_t seq);
+    // The frozen picture's rectangle (and the part of it shown) changed
+    // (Picture Size with no video flowing), from vblank seq on.
+    void moved(int vx, int vy, int vw, int vh, int sx, int sy, int sw, int sh, uint32_t seq);
     // Let go of every picture held, now, on the calling thread - waiting for
     // a composite in progress to finish with its own. The decoder calls this
     // before it puts its buffers back on a resolution change: MPP 1.0.3 never

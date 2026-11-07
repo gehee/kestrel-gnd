@@ -84,7 +84,7 @@ private:
             if (std::string(entry->d_name).find("event") == 0) {
                 std::string path = std::string(dirname) + "/" + entry->d_name;
                 if (have_path(path)) continue;
-                int fd = open(path.c_str(), O_RDONLY | O_NONBLOCK);
+                int fd = open(path.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);   // not for children
                 if (fd >= 0) {
                     // Check if it's a keyboard
                     unsigned long key_bits[NLONGS(KEY_CNT)];

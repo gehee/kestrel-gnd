@@ -51,31 +51,52 @@ enum DvrFormat {
 // back the captures in between were dropped: the recording froze for a few
 // frames every second. Here the muxer's writes are only queued; this thread
 // writes them, in order, and does the syncing.
+//
+// Given the recordings' folder (dir) and the file's name in it, it also keeps
+// room on the card while it writes: now and then the oldest finished
+// recordings make way (never `name`, never anything but a recording).
 class DvrWriter {
     public:
-        explicit DvrWriter(int fd);
+        // on_fail: called once, on this thread, when the card stops taking
+        // the recording - full with nothing left to make way ("CARD FULL"),
+        // or an error ("CARD ERROR"). Nothing is written after it.
+        explicit DvrWriter(int fd, std::string dir = "", std::string name = "",
+                           std::function<void(const char* why)> on_fail = nullptr);
         ~DvrWriter();       // writes out everything queued, then syncs
         // Queue a write; 1 once any write has failed, as minimp4 expects.
         int write(int64_t offset, const void* buf, size_t size);
     private:
         void run();
+        uint64_t headroom() const;   // the free space to keep, bytes
         struct Chunk { int64_t offset; std::vector<uint8_t> data; };
         const int fd_;
+        const std::string dir_, name_;
+        const std::function<void(const char*)> on_fail_;
         std::mutex m_;
         std::condition_variable work_, room_;
         std::deque<Chunk> q_;
         size_t queued_ = 0;     // bytes in q_
         bool done_ = false;
         std::atomic<bool> failed_{false};
+        // This thread's: the bytes written, and how many had been and when
+        // the free space was last looked at.
+        uint64_t written_ = 0, checked_at_ = 0;
+        uint64_t start_us_ = 0, checked_us_ = 0;
         std::thread t_;
 };
 
 class DVR {
     private:
-        volatile bool *should_stop;
+        std::atomic<bool>* should_stop;
         
         FILE *dvr_file;
         std::unique_ptr<DvrWriter> writer;   // the muxer's writes to dvr_file
+        // set_card()'s, and the writer's word that the card stopped taking
+        // the recording (nothing is muxed after it).
+        std::string card_dir_;
+        std::function<void(const char*)> on_write_failure_;
+        std::atomic<bool> write_failed_{false};
+        void make_writer();
         DvrFormat format;
 
         MP4E_mux_t *mux;
@@ -108,7 +129,10 @@ class DVR {
             size_t size() const { return pic ? pic->len : data->size(); }
         };
         std::queue<Queued> dvrQueue;
-        uint64_t last_sample_us = 0;   // previous picture's queue time
+        size_t   queued_bytes = 0;     // in dvrQueue (under mtx)
+        uint64_t queue_dropped = 0;    // pictures it had no room for (under mtx)
+        bool     queue_take(const uint8_t* p, size_t n);   // under mtx: room for it?
+        bool     is_param_set(const uint8_t* p, size_t n) const;
         uint64_t samples_written = 0;  // pictures the muxer accepted
         uint64_t samples_dropped = 0;  // pictures it refused (no VPS/SPS/PPS yet)
         VideoCodec codec;
@@ -141,6 +165,8 @@ class DVR {
         // A screen encoder that writes no file: the web view's (to_file false).
         bool to_file = true;
         int  enc_bitrate = 0;    // bps, 0: the recording's 16 Mbit/s
+        std::string comment_;    // set_comment()'s
+        std::string comment_with(const char* kind, int w, int h, int fps) const;
         int  enc_max_bps = 0;    // > 0: variable rate, never above this
         int  enc_fps_cap = 60;   // the screen sampled at most this often
         // The RGA recorder's slots: composited pictures (idx into the
@@ -205,8 +231,10 @@ class DVR {
         }
 
     public:
-        DVR(Settings& settings, std::string filename_, VideoCodec codec_, int framerate_, DvrFormat fmt_ ,volatile bool* stop_signal, bool record_screen_ = false, bool to_file_ = true) 
-            : settings_(settings), filename(to_file_ ? format_timestamped_filename(filename_) : std::string()), codec(codec_), video_framerate(framerate_), format(fmt_), should_stop(stop_signal), record_screen(record_screen_), to_file(to_file_) {
+        // stamp false: filename_ is the name to use, already timestamped
+        // (timestamped()) - DvrRecorder names the file before it exists.
+        DVR(Settings& settings, std::string filename_, VideoCodec codec_, int framerate_, DvrFormat fmt_ ,std::atomic<bool>* stop_signal, bool record_screen_ = false, bool to_file_ = true, bool stamp = true)
+            : settings_(settings), filename(to_file_ ? (stamp ? format_timestamped_filename(filename_) : filename_) : std::string()), codec(codec_), video_framerate(framerate_), format(fmt_), should_stop(stop_signal), record_screen(record_screen_), to_file(to_file_) {
             dvr_file = nullptr;
             mux = nullptr;
             frame_pts = 0;
@@ -238,6 +266,17 @@ class DVR {
 
         // DvrRecorder reports the open file's path in the OSD.
         const std::string& path() const { return filename; }
+        // "<dir>/fpvOS.mp4" as "<dir>/fpvOS_YYYYMMDD_HHMMSS.mp4", now.
+        static std::string timestamped(const std::string& base) { return format_timestamped_filename(base); }
+        // Before init(): the recordings' folder, kept with room on the card
+        // while this file is written (DvrWriter), and who to tell - on the
+        // writer's thread - when the card stops taking it. --dvr: neither.
+        void set_card(const std::string& dir, std::function<void(const char* why)> on_fail) {
+            card_dir_ = dir;
+            on_write_failure_ = std::move(on_fail);
+        }
+        // The card stopped taking this recording: what reached it ends early.
+        bool write_failed() const { return write_failed_; }
         // Before init(): the screen encoder's bitrate and highest frame rate.
         // max_bps > 0: variable rate under that ceiling.
         void set_encoding(int bitrate_bps, int fps_cap, int max_bps = 0) {
@@ -271,6 +310,9 @@ class DVR {
         void enqueueDvrPacket(const bus::PictureRef& pic, uint64_t us);
         // The display a screen recording samples (vblanks, the screen tap).
         void set_display_dev(display::Display* d) { disp_dev = d; }
+        // Before init(): text for the file's metadata (its comment, which
+        // ffprobe shows as "comment") - what it was recorded with.
+        void set_comment(std::string c) { comment_ = std::move(c); }
         // Queue depth, so producers can drop instead of growing it without
         // bound. A screen frame is ~8MB; letting these pile up OOM-killed the
         // process at 637MB RSS.
@@ -299,11 +341,15 @@ class DvrRecorder {
 
         // Called once at startup with everything needed to build a DVR later.
         void configure(Settings& settings, VideoCodec codec, int framerate, DvrFormat fmt,
-                       volatile bool* stop_signal, const std::string& dir);
+                       std::atomic<bool>* stop_signal, const std::string& dir);
 
         bool toggle();                       // returns the new recording state
         bool is_recording() const;
         std::string current_file() const;    // basename of the open file, or ""
+        // The last recording that ended by itself, the card no longer taking
+        // it: why ("CARD FULL", "CARD ERROR") and when (get_time_us), or ""
+        // if none has. For the HUD to say why REC went off.
+        std::string last_failure(uint64_t* at_us = nullptr) const;
         void feed(std::shared_ptr<std::vector<uint8_t>> frame, uint64_t us = 0);
         // A picture in the radio's pool: queued as it is, no copy - or copied
         // while the pool runs low, so a slow card cannot starve the radio.
@@ -327,6 +373,8 @@ class DvrRecorder {
         // The display screen recordings and the web view sample (its vblanks
         // and screen tap). Set by main() once the DRM device is up.
         void set_display(display::Display* dev);
+        // Once, at start: the build, for each recording's metadata.
+        void set_build(std::string b) { std::lock_guard<std::mutex> lk(m_); build_ = std::move(b); }
         bool screen_mode() const;
 
         // VPS/SPS/PPS for the stream. A recording started mid-stream begins at
@@ -360,6 +408,10 @@ class DvrRecorder {
         DvrRecorder() {}
         bool start_recording();
         void stop_recording();
+        // stop_recording()'s second half, on a thread of its own.
+        void finish_recording(std::shared_ptr<DVR> dvr, pthread_t tid, const std::string& file);
+        // The writer's: the card stopped taking recording number seq.
+        void recording_failed(uint64_t seq, const char* why);
         // Under ctl_: the web view's encoder to match web_want_ and the recording.
         void web_reconcile();
         void start_web(const std::shared_ptr<DVR>& leader);
@@ -379,12 +431,25 @@ class DvrRecorder {
         pthread_t            tid_ = 0;
         std::atomic<bool>    running_{false};
         std::string          file_;
+        // A stopped recording still being written out (finish_recording);
+        // finished_cv_ says when it is done.
+        bool                 finishing_ = false;
+        std::condition_variable finished_cv_;
+        uint64_t             seq_next_ = 0;      // under ctl_: recordings started
+        uint64_t             running_seq_ = 0;   // the running one's number
+        std::string          failure_;           // last_failure()'s
+        uint64_t             failure_us_ = 0;
 
         Settings*     settings_ = nullptr;   // configure()'s: the recordings' and the web view's
+        std::string   build_;                // set_build()'s
+        // What a recording is made with, for its file's metadata: the build,
+        // the recording, the screen and Refresh Sync as they are now, and
+        // every setting.
+        std::string recording_info(display::Display* disp);
         VideoCodec    codec_ = VideoCodec::H265;
         int           fps_   = 60;
         DvrFormat     fmt_   = DvrFormat::MP4;
-        volatile bool* stop_ = nullptr;
+        std::atomic<bool>* stop_ = nullptr;
         std::string   dir_   = "/media/dvr";
         bool          configured_ = false;
         int           fw_ = 1920, fh_ = 1080;  // frame size handed to the muxer

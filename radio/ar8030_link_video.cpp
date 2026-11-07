@@ -162,11 +162,20 @@ void Ar8030Link::emit_nal(const uint8_t* nal, size_t len) {
                     note_air_latency(nal);
                 note_ap_delay(nal, len, new_pic);
                 // The capture stamp, unwrapped: 32 bits of microseconds last
-                // 71 minutes. An air unit reboot sends it backwards by less
-                // than half the range, which is not a wrap.
-                if (cap_valid && cap32 < cap_last32 && cap_last32 - cap32 > 0x80000000u)
-                    cap_wraps++;
+                // 71.6 minutes. A wrap is a step back whose way forward across
+                // the top of the range took as long here as it says (an outage
+                // in between too); any other step back is a new clock (the air
+                // unit started again), not a wrap. Any step back by over half
+                // the range was taken for one: an air unit restarted after its
+                // 36th minute moved the recording's time on by up to 36 min.
+                const uint64_t local_us = now_us();
+                if (cap_valid && cap32 < cap_last32) {
+                    const uint64_t across = (uint32_t)(cap32 - cap_last32);
+                    const uint64_t here = local_us - cap_last_local_us;
+                    if (across <= here + 2000000 + here / 50) cap_wraps++;
+                }
                 cap_last32 = cap32;
+                cap_last_local_us = local_us;
                 cap_us64 = ((uint64_t)cap_wraps << 32) | cap32;
                 cap_valid = true;
                 hdr_fps = fps;

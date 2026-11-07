@@ -13,6 +13,8 @@
 #include "app/signals.hpp"
 #include "app/wiring.hpp"
 #include "base/ltrace.hpp"
+#include "base/restart.hpp"
+#include "base/sd_log.hpp"
 #include "base/settings.hpp"
 #include "display/settings.hpp"
 #include "dvr/dvr.hpp"
@@ -37,6 +39,11 @@ static Settings g_settings;
 
 int main(int argc, char **argv)
 {
+	// Before any thread: every signal unblocked (a re-exec from the stop
+	// watchdog's SIGALRM handler hands SIGALRM on blocked, and the next wedged
+	// stop would never time out), and the scheduling the process started
+	// with, which a re-exec puts back (base/restart.hpp).
+	restart_init();
 	signals_set_restart(argv, g_settings);
 	// Line-buffer stdout. It is a terminal only when someone is watching by
 	// hand; in service it is redirected to a file, where glibc switches to full
@@ -111,12 +118,9 @@ int main(int argc, char **argv)
 		ds.osd_zpos = osd_zpos;
 		ds.vrr = enable_vrr;
 		ds.screen_id = screen_id_str;
-		// Auto: the refresh follows the camera, from the rate last seen.
+		// Auto: the mode by the screen alone (display/kms/mode_follow.h);
+		// the refresh follows the camera once its pictures come.
 		ds.follow_camera = !(mode_width > 0 && mode_height > 0 && mode_vrefresh > 0);
-		const int last_fps = g_settings.get(display::setting::camera_fps);
-		ds.follow_fps = last_fps > 0 ? (uint32_t)last_fps : 0;
-		const int last_lines = g_settings.get(display::setting::camera_lines);
-		ds.follow_lines = last_lines > 0 ? (uint32_t)last_lines : 0;
 		ds.sync_mode = o.sync_mode;
 		ds.sync_slice = o.sync_slice;
 		ds.sync_margin_us = o.sync_margin_us;
@@ -196,9 +200,10 @@ int main(int argc, char **argv)
 		assert(!ret);
 		ret = pthread_create(&tid_kb, NULL, kb_thread_func, osd.get());
 		assert(!ret);
-		ret = pthread_create(&tid_btn, NULL, vrx_button_thread_func, osd.get());
-		assert(!ret);
 	}
+	// The front buttons, with or without an OSD: SIGUSR1's REC is done there.
+	ret = pthread_create(&tid_btn, NULL, vrx_button_thread_func, osd.get());
+	assert(!ret);
     
 
     // Recording is button-driven now, so give the recorder everything it needs
@@ -216,12 +221,19 @@ int main(int argc, char **argv)
     });
     DvrRecorder::instance().set_screen_mode(
         g_settings.get(dvr::setting::dvr_screen));
+    {
+        char build[192];
+        snprintf(build, sizeof build, "kestrel-gnd v%s (built %s, git:%s)",
+                 KESTREL_GND_VERSION, KESTREL_GND_BUILD_TIME, KESTREL_GND_GIT_HASH);
+        DvrRecorder::instance().set_build(build);   // into each recording's metadata
+    }
     DvrRecorder::instance().configure(
         g_settings, codec, dvr_framerate > 0 ? dvr_framerate : 60, dvr_format, &signal_stop,
         g_settings.get(dvr::setting::dvr_dir));
     dvr_lib::set_dir(g_settings.get(dvr::setting::dvr_dir));
 
     // Live video in a browser: http://<goggle>/ on the USB link or WiFi.
+    WebStream::instance().set_radio(&radio_model.radio());
     wifi_ap_set_page_port(g_settings.get(web::setting::web_port));
     if (g_settings.get(web::setting::web_stream))
         WebStream::instance().start(g_settings.get(web::setting::web_port));
@@ -302,8 +314,8 @@ int main(int argc, char **argv)
 		assert(!ret);
 	}
 
+	if (tid_btn) pthread_join(tid_btn, NULL);
 	if (osd) {
-		if (tid_btn) pthread_join(tid_btn, NULL);
 		ret = pthread_join(tid_kb, NULL);
 		assert(!ret);
 		printf("Keyboard thread joined.\n");
@@ -325,12 +337,22 @@ int main(int argc, char **argv)
 	if (dev) dev->cleanup();
 
 	if (signals_restart_asked()) {
-		alarm(0);                          // it would outlive the exec
-		unsetenv("KESTREL_BB_ATTEMPT");    // a fresh start, not a watchdog retry
+		// The pending alarm, the signals and the descriptors are reset just
+		// before the exec (restart_prepare_exec); a watchdog retry's count is
+		// not in the environment (bb_watchdog.cpp takes it out at start).
 		printf("kestrel-gnd: restarting\n");
 		fflush(nullptr);
+		sd_log::flush();   // the card's log: its threads do not survive the exec
 		signals_restart_now();
 	}
 	printf("kestrel-gnd done.\n");
-	return 0;
+	// Out with _exit(), not by returning: detached threads (a recording being
+	// recovered, the web view's, the WiFi script's) may still be running, and
+	// exit() would run the static destructors under them. What returning did
+	// that matters is done here: the settings and the SD log written out,
+	// every stdio stream flushed.
+	g_settings.flush();
+	sd_log::flush();
+	fflush(nullptr);
+	_exit(0);
 }

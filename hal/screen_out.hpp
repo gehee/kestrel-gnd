@@ -24,6 +24,9 @@ struct ScreenPair {
     uint32_t osd_fb  = 0;                 // the OSD plane's fb, 0 if none
     uint64_t osd_gen = 0;                 // which OSD frame is in it - the fbs are reused
     int vx = 0, vy = 0, vw = 0, vh = 0;   // the video plane's rectangle on screen
+    // The part of the picture in it (a gallery tile partly off screen
+    // shows only part of it); sw 0: all of it.
+    int sx = 0, sy = 0, sw = 0, sh = 0;
     uint32_t seq = 0;                     // the vblank it landed on
 };
 

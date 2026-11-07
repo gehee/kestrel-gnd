@@ -3,7 +3,6 @@
 // carries (system/air/, system/gnd/) - the air unit's camera, encoder, radio
 // and the unit itself, its FC bytes and IMU samples, our radio, the pictures'
 // timing - each one's state made from what the radio's threads report, with
-// the logic that is the link's rather than the chip's (the distance's zero);
 // and the changes asked of them: numbered, saved when they are settings, and
 // queued for the radio, which takes them between its steps. No thread of its
 // own: its callers' run it. One is made at startup; it outlives the radio.
@@ -67,6 +66,11 @@ class AirRadioPart final : public detail::Held<air::Radio> {
 public:
     using Held::Held;
     Ticket set_tx_power(int mw) override;
+    bool take_resend(air::Resend& r) override { return resends_.pop(r); }
+    uint64_t resends_dropped() const override { return resends_.drops(); }
+    void resend(const air::Resend& r) { resends_.push(r); }   // under the model's lock
+private:
+    bus::Ring<air::Resend, 4096> resends_;   // the stats screen's history: no wake
 };
 
 class UnitPart final : public detail::Held<air::Unit> {
@@ -90,10 +94,11 @@ public:
     Ticket set_max_bandwidth(int mhz) override;
     Ticket set_steady(bool on) override;
     Ticket set_channel(int mhz) override;
+    Ticket set_channel_auto(bool hop) override;
     void search_channels() override;
     void scan_screen(bool open) override;
     void bind() override;
-    void set_dist_offset(int raw) override;
+    void region_changed() override;
     bool take_scan(gnd::ScanSample& s) override { return scans_.pop(s); }
     bool take_rate(float& mbps) override { return rates_.pop(mbps); }
     uint64_t dropped() const override { return scans_.drops() + rates_.drops(); }
@@ -137,7 +142,7 @@ public:
     void rx_mcs(int mcs);                      // the chip's MCS event
     void distance(int raw);                    // the ranging reading, metres (-1 none)
     void low_power(bool on);                   // standby power or radiating
-    void video_bandwidth(float mbps);          // each second (the radio thread): the link's figure and the rate
+    void video_bandwidth(float mbps, uint32_t frames_lost = 0);          // each second (the radio thread): the link's figure and the rate
     // What a part's state holds, changed by f and published.
     template <class F> void update_camera(F&& f) { update(camera_, cam_, f); }
     template <class F> void update_unit(F&& f) { update(unit_, unit_s_, f); }
@@ -152,7 +157,7 @@ public:
     void clear_air_delay() { tim_.air_delay_valid = false; timing_.publish(tim_); }
     void reassembly(float ms) { tim_.rsm_ms = ms; timing_.publish(tim_); }
     void scan(const gnd::ScanSample& sc);
-    void set_dist_offset(int raw);             // HUD > Calib Distance (gnd::Radio::set_dist_offset)
+    void resend(const air::Resend& r);
 
     // The radio thread, between its steps: the changes asked since, each
     // carried out by the radio (link.apply), then what it holds (link.held).
@@ -172,8 +177,6 @@ private:
     }
     // ---- the model's own (mu_: the radio's threads; no reader takes it) ----
     void publish_radio();                      // under mu_
-    MadeSetting<int> dist_offset(int def) const;   // dist_offset_<the air unit's radio MAC>
-    void flush_log();
 
     Settings& settings_;
     CameraPart camera_{*this};
@@ -186,7 +189,6 @@ private:
     TimingPart timing_{*this};
 
     bus::PiMutex mu_;                    // the radio thread is SCHED_FIFO; the others are not
-    std::string log_;                    // printed once mu_ is let go (flush_log)
     air::CameraState cam_;
     air::EncoderState encoder_s_;
     air::RadioState air_radio_s_;
@@ -194,8 +196,6 @@ private:
     gnd::RadioState radio_s_;
     gnd::TimingState tim_;               // the radio thread's alone
     State held_;                         // as last published
-
-    char peer_mac_[20] = {0};            // the air unit linked: whose Calib Distance offset is in use
 
     // ---- the changes asked, for the radio: in order, numbered as they are
     // queued (post_mu_ among the askers), taken by the radio thread alone.

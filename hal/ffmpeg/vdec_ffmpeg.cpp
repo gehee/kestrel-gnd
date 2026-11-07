@@ -10,6 +10,7 @@
 #include "hal/ffmpeg/vdec_ffmpeg.hpp"
 
 #include <drm_fourcc.h>
+#include <unistd.h>
 
 //#define ERRSTR strerror(errno)
 
@@ -379,8 +380,7 @@ void VdecFfmpeg::receive_avframe() {
 }
 
 void VdecFfmpeg::process_avframe(AVFrame* frame, uint64_t dec_start_ts, uint64_t dec_end_ts, uint64_t recvts, uint32_t encode_delay_us, uint32_t processing_delay_us, bool is_keyframe) {
-    DecodedUnit du;
-    memset(&du, 0, sizeof(du));
+    DecodedUnit du{};   // not memset: it holds shared_ptrs
     du.frame_ref = NULL;
 
     bool ok = false;
@@ -595,6 +595,16 @@ bool VdecFfmpeg::populate_drm_from_vaapi(AVFrame *hw_frame, DecodedUnit *du) {
         return false;
     }
 
+    // The exports are of one frames pool at one picture size. A new one (the
+    // stream changed size) hands the old surfaces' IDs to other buffers, and
+    // the old exports - their fds never closed - showed the old pictures.
+    const void* pool = hw_frame->hw_frames_ctx ? (const void*)hw_frame->hw_frames_ctx->data : nullptr;
+    if (pool != exported_pool_ || hw_frame->width != exported_w_ || hw_frame->height != exported_h_) {
+        drop_exported_surfaces(true);
+        exported_pool_ = pool;
+        exported_w_ = hw_frame->width;
+        exported_h_ = hw_frame->height;
+    }
 
     if (!exported_surfaces.count(va_surface)) {
         VADRMPRIMESurfaceDescriptor prime_desc;
@@ -687,6 +697,16 @@ bool VdecFfmpeg::populate_drm_from_vaapi(AVFrame *hw_frame, DecodedUnit *du) {
         du->drm_pixel_format = base_du.drm_pixel_format;
     }
     return true;
+}
+
+// The cached exports' fds closed. flush: the renderer lets go of what it made
+// of them first - their numbers come back with the next exports.
+void VdecFfmpeg::drop_exported_surfaces(bool flush) {
+    if (exported_surfaces.empty()) return;
+    if (flush && renderer) renderer->request_flush();
+    for (auto& e : exported_surfaces)
+        if (e.second.has_prime_fd && e.second.prime_fd >= 0) close(e.second.prime_fd);
+    exported_surfaces.clear();
 }
 #endif
 

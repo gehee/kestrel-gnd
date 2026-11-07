@@ -1,13 +1,14 @@
 // The AR8030 link: its construction, what it is as a radio::Link (the
 // commands carried out between its steps, what it holds), and its loop.
 #include "radio/ar8030_link_detail.hpp"
+#include "base/shell.hpp"
 
 using namespace radio;
 
 
 Ar8030Link::Ar8030Link(radio::Model& model, const Ar8030Config& cfg,
                        Settings& settings, const VideoCodec& codec_, std::shared_ptr<Vdec> vdec_,
-                       volatile bool* stop_signal,
+                       std::atomic<bool>* stop_signal,
                        std::string host_, int host_port_,
                        int slot_, int video_port_)
     : model_(model), settings_(settings), fc_out_(model.fc()), imu_out_(model.imu()),
@@ -16,7 +17,7 @@ Ar8030Link::Ar8030Link(radio::Model& model, const Ar8030Config& cfg,
       host(std::move(host_)), host_port(host_port_), slot(slot_), video_port(video_port_),
       freq_khz(cfg.freq_khz), bandwidth(cfg.bandwidth), do_pair(cfg.do_pair),
       ap_index(cfg.ap_index), chan_auto(cfg.chan_auto), chan_manual_cli(cfg.chan_manual_cli),
-      tx_power_dbm(cfg.tx_power_dbm),
+      chan_hop(cfg.chan_hop), chan_fixed_mhz(cfg.chan_fixed_mhz), tx_power_dbm(cfg.tx_power_dbm),
       tx_power_mw(cfg.tx_power_mw), tx_power_want_mw(cfg.tx_power_want_mw),
       air_floor_us(cfg.air_floor_us), skip_handshake(cfg.skip_handshake),
       standby_mode(cfg.standby_mode), prj_rf_bw(cfg.prj_rf_bw), prj_rf_pwr_mw(cfg.prj_rf_pwr_mw),
@@ -29,6 +30,7 @@ Ar8030Link::Ar8030Link(radio::Model& model, const Ar8030Config& cfg,
       mode_w(cfg.mode_w), mode_h(cfg.mode_h), mode_fps(cfg.mode_fps), mode_chn(cfg.mode_chn),
       probe_modes(cfg.probe_modes), probe_rf(cfg.probe_rf) {
     accum.reserve(AR_READ_CHUNK * 2);
+    link_st_last_.bw_step = -1;          // not known, as each publish starts it
 }
 
 Ar8030Link::~Ar8030Link() { disconnect_bb(); }
@@ -41,17 +43,19 @@ Ar8030Link::~Ar8030Link() { disconnect_bb(); }
 // loads with restarts it here.
 void Ar8030Link::apply(const radio::Command& c) {
     using namespace radio;
-    static_assert(std::variant_size_v<Command> == 12, "a new command: carry it out here (and save it in Model::save if it is a setting)");
-    auto caps_now = [this] {
-        caps_live.store(true);
-        caps_due.store(true);
-    };
+    static_assert(std::variant_size_v<Command> == 14, "a new command: carry it out here (and save it in Model::save if it is a setting)");
     if (const auto* a = std::get_if<cmd::AirLogs>(&c)) {
         air_logs = a->on;
         request_setting(CAM_AIR_LOGS, a->on);
     } else if (const auto* a = std::get_if<cmd::CameraSetting>(&c)) {
         request_setting(a->field, a->value);
     } else if (const auto* a = std::get_if<cmd::RfControl>(&c)) {
+        // A channel picked on the channel page is FIXED from here on
+        // (chan_fixed_mhz); AUTO HOP is off with it.
+        if (a->fixed_mhz >= 0) {
+            chan_fixed_mhz = a->fixed_mhz;
+            if (a->fixed_mhz) chan_hop = 0;
+        }
         request_rf(a->field, a->value);
     } else if (const auto* a = std::get_if<cmd::MaxBitrate>(&c)) {
         max_kbps = a->kbps;
@@ -63,7 +67,8 @@ void Ar8030Link::apply(const radio::Command& c) {
         if (radio_fw == 1) {
             max_bw_mhz = a->mhz;
             request_setting(CAM_MAX_BW, a->mhz == 0 || a->mhz >= 40 ? 40 : 20);
-            caps_now();
+            caps_now(true);
+            region_changed();   // AUTO's channels are judged within this cap
         } else {
             const int bw = a->mhz == 20 ? 20 : 40;
             const int was = max_bw_mhz;
@@ -82,16 +87,24 @@ void Ar8030Link::apply(const radio::Command& c) {
         frame_mode_changed.store(true);
     } else if (const auto* a = std::get_if<cmd::MaxMcs>(&c)) {
         max_mcs = a->mcs;
-        caps_now();
+        caps_now(true);
     } else if (const auto* a = std::get_if<cmd::Steady>(&c)) {
         steady = a->on;
-        caps_now();
+        caps_now(true);
+    } else if (const auto* a = std::get_if<cmd::ChannelHop>(&c)) {
+        // No longer FIXED; AUTO's pick is made now.
+        chan_fixed_mhz = 0;
+        chan_hop = a->hop;
+        region_pick = true;
+        region_changed();
     } else if (const auto* a = std::get_if<cmd::VideoMode>(&c)) {
         // The camera is reached over the baseband's port-2 control socket
         // (SET_CHN_RES), and it has its own list of modes.
         request_mode_index(a->index);
     } else if (std::holds_alternative<cmd::Bind>(c)) {
         request_bind();
+    } else if (std::holds_alternative<cmd::RegionChanged>(c)) {
+        region_changed();
     } else if (const auto* a = std::get_if<cmd::ScanScreen>(&c)) {
         scan_active = a->open;   // the stats thread polls the scan fast while it is open
     }
@@ -108,9 +121,11 @@ radio::State Ar8030Link::held() const {
     s.max_bw_mhz = max_bw_mhz;
     s.steady = steady;
     s.chan_auto = chan_auto;
+    s.chan_hop = chan_hop;
     s.bind_state = bind_state.load();
     s.bind_secs_left = bind_secs_left.load();
     s.bind_peer = bind_peer.load();
+    s.resend_known = resend_known_.load();
     return s;
 }
 
@@ -124,7 +139,7 @@ void Ar8030Link::restart_with(const Setting<int>& setting, int value, const char
     fflush(stdout);
     settings_.set(setting, value);
     settings_.flush();
-    if (system("setsid sh -c '/etc/init.d/S70kestrel stop; /etc/init.d/S60ar8030 restart; "
+    if (run_shell("setsid sh -c '/etc/init.d/S70kestrel stop; /etc/init.d/S60ar8030 restart; "
                "sleep 2; /etc/init.d/S70kestrel start' </dev/null >/dev/null 2>&1 &") != 0)
         printf("ar8030: could not restart the radio\n");
 }
@@ -187,7 +202,7 @@ void Ar8030Link::run() {
                                          : "ar8030: %d bring-ups failed - restarting the daemon\n",
                            connect_fails);
                     settings_.flush();   // bb_only.sh reads it
-                    if (system("/etc/init.d/S60ar8030 restart >/dev/null 2>&1") != 0)
+                    if (run_shell("/etc/init.d/S60ar8030 restart >/dev/null 2>&1") != 0)
                         printf("ar8030: S60ar8030 restart returned non-zero\n");
                     // It backgrounds its own bring-up: loading the driver and
                     // opening the device takes seconds, and asking too early
@@ -222,7 +237,18 @@ void Ar8030Link::run() {
             }
         }
         apply_pending_settings();
+        // Rotate taken: the mode the air unit runs, sent again, is what makes
+        // the camera turn. Without it the video stopped until the silence
+        // check re-sent the handshake, ~3 s later.
+        if (remode_after_angle_) {
+            remode_after_angle_ = false;
+            mode_w = sky_cfg.ch0_w; mode_h = sky_cfg.ch0_h; mode_fps = sky_cfg.ch0_fps; mode_chn = 0;
+            printf("ar8030: rotate taken - the camera's mode again, %dx%d@%d\n", mode_w, mode_h, mode_fps);
+            apply_video_mode();
+        }
         apply_pending_rf();
+        chan_follow_poll();
+        if (region_due.load() && now_ms() >= region_retry_ms_ && region_due.exchange(false)) region_auto_apply();
         // Binding, if the menu or the front-panel button asked for it. One
         // non-blocking step per pass; it owns the baseband only in short
         // bursts, so video and telemetry keep flowing while it runs.
@@ -245,6 +271,7 @@ void Ar8030Link::run() {
                 int ls = link_state_.load();
                 // (The HUD is told by the stats thread and the event handler.)
                 if (ls >= 0 && ls != last_link_state) {
+                    chan_settle_ms_ = tl + 6000;
                     printf("ar8030: link state %d -> %d (%s)\n", last_link_state, ls,
                            ls == 2 ? "linked" : ls == 1 ? "connecting" : "not linked");
                     // The step to 40 MHz (kestrel-air's, after link-up) makes the
@@ -270,6 +297,8 @@ void Ar8030Link::run() {
                     // the idle reconnect below happened to reset the mode. So a
                     // lost link puts the ground back to searching, as at start.
                     // --ar8030-chan-manual asked to stay fixed, and does.
+                    if (last_link_state == 2 && ls != 2 && !retune_down_ms_ && !lost_reopened_) link_lost_ms_ = tl;
+                    if (ls == 2) { link_lost_ms_ = 0; lost_reopened_ = false; }
                     if (last_link_state == 2 && ls != 2 && !retune_down_ms_ && !chan_auto && !chan_manual_cli && bb_dev) {
                         printf("ar8030: link lost on a pinned channel - searching again\n");
                         search_all_channels();
@@ -304,7 +333,7 @@ void Ar8030Link::run() {
                                "at the rate it was captured\n");
                         printf("ar8030: link up - sending the air handshake now that "
                                "there is a link to carry it\n");
-                        send_air_handshake();
+                        send_air_handshake(true);
                         last_rehandshake_ms = tl;
                         rehandshakes = 0;
                     }
@@ -316,8 +345,11 @@ void Ar8030Link::run() {
                 // Once the air unit has said what it runs (kestrel-air's first
                 // tagged header, or the stock app's 200 untagged): a stock air
                 // unit keeps the standard frame every link starts on.
-                if (fm_due && ls == 2 && tl >= fm_due && tl - bw_change_ms_.load() >= 1000 && air_ver_seen_) {
-                    frame_mode_due_ms_.store(0);
+                // Cleared only if no link-up moved it since it was read: that
+                // one's second is still to come.
+                uint64_t fm_was = fm_due;
+                if (fm_due && ls == 2 && tl >= fm_due && tl - bw_change_ms_.load() >= 1000 && air_ver_seen_ &&
+                    frame_mode_due_ms_.compare_exchange_strong(fm_was, 0)) {
                     if (air_kestrel_) set_frame_mode();
                     else printf("ar8030: stock air app: the radio frame stays standard\n");
                 }
@@ -332,7 +364,7 @@ void Ar8030Link::run() {
             // while data flows, so zeroing unconditionally here made the OSD
             // alternate between the real bitrate and 0 every other second.
             if (now - last_data_ms >= 1500) {
-                model_.video_bandwidth(0.0f);   // idle tick
+                model_.video_bandwidth(0.0f, (uint32_t)frames_lost);   // idle tick
             }
         }
 
@@ -364,17 +396,31 @@ void Ar8030Link::run() {
                 // the air unit then talks but never streams.
                 bool video_gone  = last_data_ms ? (t_now - last_data_ms) > 2500
                                                 : last_rehandshake_ms && (t_now - last_rehandshake_ms) > 5000;
-                bool cooled      = (t_now - last_rehandshake_ms) > 6000;
-                if (air_talking && video_gone && cooled && rehandshakes < 4) {
+                // Four tries 6 s apart, then one every 15 s for as long as it
+                // talks without video - never none. The count goes back to 0
+                // only with video or a link-up, and a kestrel-air
+                // restarts on a link that stays up: four spent on one whose
+                // camera gave no frames left the next, healthy, without a
+                // handshake - no video for minutes, until kestrel-gnd
+                // restarted (2026-11-04). Its telemetry kept the idle reads
+                // from counting, so the reopen below never came either.
+                bool cooled      = (t_now - last_rehandshake_ms) > (rehandshakes < 4 ? 6000u : 15000u);
+                if (air_talking && video_gone && cooled) {
                     last_rehandshake_ms = t_now;
                     rehandshakes++;
-                    printf("ar8030: video silent %llums but telemetry still arriving - "
-                           "re-sending the air handshake (%d/4)\n",
-                           (unsigned long long)(t_now - last_data_ms), rehandshakes);
+                    if (rehandshakes <= 4)
+                        printf("ar8030: video silent %llums but telemetry still arriving - "
+                               "re-sending the air handshake (%d/4)\n",
+                               (unsigned long long)(t_now - last_data_ms), rehandshakes);
+                    else
+                        printf("ar8030: video silent %llums but telemetry still arriving - "
+                               "re-sending the air handshake (%d, every 15 s now)\n",
+                               (unsigned long long)(t_now - last_data_ms), rehandshakes);
                     send_air_handshake();
                 }
         };
         int rd;
+        bool gone = false;   // ar_libre: a read failed, or poll() says a socket is gone
         if (poll_fd(sockfd) >= 0) {
             rd = arlink_socket_read_now(sockfd, buf.data(), (uint32_t)buf.size());
             if (rd == 0) {
@@ -386,10 +432,16 @@ void Ar8030Link::run() {
                     if (f >= 0) p[np++] = { f, POLLIN, 0 };
                 }
                 if (poll(p, (nfds_t)np, 500) > 0)
-                    for (int i = 1; i < np; i++) other |= (p[i].revents & POLLIN) != 0;
+                    for (int i = 0; i < np; i++) {
+                        gone |= (p[i].revents & (POLLERR | POLLHUP | POLLNVAL)) != 0;
+                        if (i) other |= (p[i].revents & POLLIN) != 0;
+                    }
                 rd = arlink_socket_read_now(sockfd, buf.data(), (uint32_t)buf.size());
-                if (rd == 0 && other) { video_silent_check(); continue; }   // the control or MSP socket's: drained above, next pass
+                if (rd == 0 && other && !gone) { video_silent_check(); continue; }   // the control or MSP socket's: drained above, next pass
                 if (rd == 0) rd = -1;             // nothing: as a read timeout
+                else if (rd < 0) gone = true;
+            } else if (rd < 0) {
+                gone = true;                      // an error: 0 is nothing queued
             }
         } else {
             rd = bb_socket_read(sockfd, buf.data(), (uint32_t)buf.size(), 500);
@@ -464,6 +516,12 @@ void Ar8030Link::run() {
             // air unit transmitting) and for a dead socket, so a bare -1 is
             // not a reason to tear the link down. Only reconnect once reads
             // have been failing for long enough that the socket is suspect.
+            // A dead socket answers at once, every time: the loop went round
+            // as fast as it could, on SCHED_FIFO - 200 times and a reopen, or
+            // for a whole bind window, which keeps the radio open. While
+            // binding, 20 ms a pass instead (short: one failed read is not
+            // yet a dead socket).
+            if (gone && bind_busy()) usleep(20000);
             if (read_timeouts == 6 && !link_reported) { link_reported = true; report_link_status(); }
             if (++read_timeouts == 1 || read_timeouts % 40 == 0)
                 printf("ar8030: no video yet (%d idle reads) - is the air unit powered?\n",
@@ -488,10 +546,28 @@ void Ar8030Link::run() {
             // this timer was being killed from inside. Seen on hardware as
             // repeated "shutdown:" and "bring-ups failed - restarting the
             // daemon" in the middle of an open window.
-            if (read_timeouts >= 200 && !bind_busy()) {
-                printf("ar8030: link idle too long, reopening socket\n");
+            // A link that was up and went down is searched for by the radio,
+            // and that search does not always find the air unit again: drive
+            // 2026-10-29 (Open8030 both ends), the link dropped on a clean
+            // signal (SNR 23, MCS 8) and stayed down until the 200-read rule
+            // below, ~105 s of no picture; the reopen then linked in ~3 s.
+            // When the search works it relinks within ~10 s (9.2 and 2.7 s at
+            // the edge of range the same evening), so 12 s without the link
+            // back reopens - once per loss, the 200-read rule after that.
+            const bool lost_long = link_lost_ms_ && now_ms() - link_lost_ms_ >= 12000;
+            if ((read_timeouts >= 200 || lost_long) && !bind_busy()) {
+                if (lost_long) printf("ar8030: link lost 12 s ago and not back - reopening socket\n");
+                else printf("ar8030: link idle too long, reopening socket\n");
+                if (lost_long) lost_reopened_ = true;
+                link_lost_ms_ = 0;
                 disconnect_bb();
+                // The stream starts again: accum_base_ moves past what goes, so
+                // a packet's end or slice checksum still pending is not looked
+                // for in the next socket's bytes (false "damaged" counts).
+                accum_base_ += accum.size();
                 accum.clear();
+                pkt_end_pos_ = 0;
+                if (xor_pending_) { xor_pending_ = false; xor_unchecked_++; }
                 read_timeouts = 0;
                 sleep(1);
             }

@@ -25,6 +25,11 @@ namespace {
 const uint64_t kWindowUs = 2000000;       // arrivals looked at: the last 2 s
 const size_t kMinSamples = 50;
 const double kStayUs = 30;                // a better position by less than this is not worth a move
+// A picture past the deadline is not shown a refresh late: the next one
+// overtakes it and it is dropped, a visible stutter. Weighed as this much
+// wait, a position with 1 fewer of 200 dropped is worth 0.5 ms more wait for
+// the rest (minimizing the wait alone kept ~5% past it, 20 MHz worse).
+const double kDroppedUs = 100000;
 
 double wrap(double x, double P) {         // into [-P/2, P/2)
     x = std::fmod(x, P);
@@ -154,13 +159,14 @@ void DisplayLock::release() {
 
 // Where the vblank should be, as a shift on the same reference as the samples:
 // each picture shows at the first vblank at least cutoff_us after it arrives,
-// and the expected wait to it is least with the deadline just after one of
-// them (between those points it only grows), so those are the candidates. Of
-// the ones within kStayUs of the best, the nearest to G. Also the expected
-// wait and the share of pictures past the deadline where the vblank is now.
+// and the cost (the expected wait to it, a dropped one as kDroppedUs) is least
+// with the deadline just after one of them (between those points it only
+// grows), so those are the candidates. Of the ones within kStayUs of the
+// best, the nearest to G. Also the expected wait and the share of pictures
+// past the deadline where the vblank is now.
 double DisplayLock::target_offset(double P, double G, double *wait_now, double *late_now) {
     const double C = P - cutoff_us_;
-    auto cost = [&](double g, double *late) {
+    auto cost = [&](double g, double *wait, double *late) {
         double w = 0;
         int n_late = 0;
         for (const Sample &s : win_) {
@@ -168,20 +174,21 @@ double DisplayLock::target_offset(double P, double G, double *wait_now, double *
             if (x <= C + 0.01) w += P - x;
             else { w += 2 * P - x; n_late++; }
         }
+        if (wait) *wait = w / win_.size();
         if (late) *late = (double)n_late / win_.size();
-        return w / win_.size();
+        return (w + n_late * kDroppedUs) / win_.size();
     };
-    *wait_now = cost(G, late_now);
+    const double now = cost(G, wait_now, late_now);
     std::vector<double> gs, ws;
     double best = 1e18;
     for (const Sample &s : win_) {
         const double g = mod(s.u + cutoff_us_, P);
-        const double w = cost(g, nullptr);
+        const double w = cost(g, nullptr, nullptr);
         gs.push_back(g);
         ws.push_back(w);
         if (w < best) best = w;
     }
-    if (*wait_now <= best + kStayUs) return G;
+    if (now <= best + kStayUs) return G;
     double pick = G, dist = 1e18;
     for (size_t i = 0; i < gs.size(); i++) {
         if (ws[i] > best + kStayUs) continue;

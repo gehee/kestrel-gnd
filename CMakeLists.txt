@@ -150,8 +150,8 @@ kestrel_module(third_party FOLDERS third_party include
 kestrel_module(utils FOLDERS utils DEPS third_party
     SOURCES utils/Queue.cpp utils/Msg.cpp)
 kestrel_module(base FOLDERS base DEPS utils
-    SOURCES base/scheduling_helper.cpp base/prof.cpp base/sd_log.cpp
-            base/ltrace.cpp base/video_pool.cpp base/restart.cpp base/settings.cpp
+    SOURCES base/scheduling_helper.cpp base/prof.cpp base/sd_log.cpp base/frame_log.cpp
+            base/ltrace.cpp base/video_pool.cpp base/restart.cpp base/settings.cpp base/shell.cpp
             base/frame_mode.cpp
     LIBS pthread m)
 set(_hal_srcs hal/ffmpeg/vdec_ffmpeg.cpp hal/frame_length.cpp hal/plane_rules.cpp hal/wifi_ap.cpp
@@ -306,11 +306,19 @@ if(KESTREL_TESTS)
     kestrel_test(platform_test platform)
     kestrel_test(air_clock_test radio)
     kestrel_test(display_lock_test)
+    kestrel_test(gallery_stats_test hud)
     kestrel_test(link_view_test hud)
+    kestrel_test(power_test)   # system/air/power.hpp: header only
     kestrel_test(bus_test base)
     kestrel_test(settings_test base)
     kestrel_test(hevc_repair_test dvr)
     kestrel_test(model_test radio)
+    kestrel_test(mode_pick_test)
+    # base/sd_log.cpp first: the order in which the old exit crash showed
+    # every time (see the test's header).
+    add_executable(sd_log_test base/sd_log.cpp tools/test/sd_log_test.cpp)
+    target_link_libraries(sd_log_test pthread)
+    add_test(NAME sd_log_test COMMAND sd_log_test)
     kestrel_test(imu_stream_test motion radio)
     kestrel_test(msp_telem_test msp)
     kestrel_test(msp_osd_hide_test msp)

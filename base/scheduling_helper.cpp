@@ -8,6 +8,7 @@
 #include <map>
 #include <thread>
 #include <mutex>
+#include <atomic>
 
 namespace SchedulingHelper {
 
@@ -28,7 +29,9 @@ static std::vector<CoreInfo> g_cores;
 static std::vector<int> g_little_cores;
 static std::vector<int> g_big_cores;
 static std::mutex g_init_mutex;
-static bool g_initialized = false;
+// Read without the lock (the fast path of each call): set last, once the
+// tables above are filled, so a thread that sees it sees them.
+static std::atomic<bool> g_initialized{false};
 
 static int read_max_freq(int cpu_id) {
     std::string path = "/sys/devices/system/cpu/cpu" + std::to_string(cpu_id) + "/cpufreq/cpuinfo_max_freq";

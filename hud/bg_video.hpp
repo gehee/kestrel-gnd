@@ -4,6 +4,7 @@
 #include <atomic>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include "render/canvas.hpp"
 
@@ -89,8 +90,14 @@ private:
 
     std::string path_;
     const bool loop_;
-    volatile bool running_ = false;   // true while the feed/demux loop runs
-    volatile bool vdec_stop_ = false; // VdecRK::run_frame stop signal (true = stop)
+    std::atomic<bool> running_{false};   // true while the feed/demux loop runs
+    std::atomic<bool> vdec_stop_{false}; // VdecRK::run_frame stop signal (true = stop)
+    // start() and stop() come from the HUD's thread and the keys' thread. started_
+    // says thread_ is there to join: running_ alone did not, since the loop clears
+    // it itself when it ends early, and stop() then returned with the thread still
+    // tearing down - and the gallery freed the player under it.
+    std::mutex ctl_mu_;
+    bool started_ = false;             // under ctl_mu_
     pthread_t thread_;                 // feed/demux thread (decode_loop)
     pthread_t vdec_thread_ = 0;        // VdecRK::run_frame output thread
     pthread_mutex_t mu_;

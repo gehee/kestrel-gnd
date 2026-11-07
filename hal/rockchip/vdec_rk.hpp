@@ -28,9 +28,7 @@ struct RkMPI {
 
 	MppBufferGroup	frm_grp;
 	struct {
-		int prime_fd;
-		uint32_t fb_id;
-		uint32_t handle;
+		int prime_fd;   // MPP's fd of the buffer (the one its frames report)
 	} frame_to_drm[MAX_FRAMES];
 } ;
 
@@ -39,7 +37,11 @@ class VdecRK : public Vdec {
         std::shared_ptr<hal::FrameSink> renderer;
         std::shared_ptr<hal::Scanout> dev;
         int decoder_stalled_count = 0;
-        volatile bool *should_stop;
+        // Consecutive 1 s put-packet stalls (decoder wedge detector). This
+        // decoder's own: file-static, a gallery clip's decoder reset the live
+        // one's count and its "3 stalls -> reset" never fired.
+        int consec_put_stalls_ = 0;
+        std::atomic<bool>* should_stop;
         RkMPI mpi;
         pthread_mutex_t video_mutex;
         pthread_cond_t video_cond;
@@ -130,7 +132,7 @@ class VdecRK : public Vdec {
         // The owner stops run_frame (and joins its thread) first.
         virtual ~VdecRK();
 
-        VdecRK(VideoCodec codec, std::shared_ptr<hal::FrameSink> rdr, std::shared_ptr<hal::Scanout> dev_, volatile bool* signal_stop) :
+        VdecRK(VideoCodec codec, std::shared_ptr<hal::FrameSink> rdr, std::shared_ptr<hal::Scanout> dev_, std::atomic<bool>* signal_stop) :
             should_stop(signal_stop), renderer(rdr), dev(dev_),
             first_successful_decode(false), last_decoded_frame_time_ms(0), last_idr_request_ms(0) {
             int ret;

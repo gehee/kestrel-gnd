@@ -12,6 +12,7 @@
 #include <cerrno>
 #include <cstring>
 #include <pthread.h>
+#include <algorithm>
 #include "base/time_util.h"
 #include "display/display.hpp"
 #include "display/screen_tap.hpp"
@@ -21,8 +22,30 @@
 // recording, far more than a sync ever takes.
 constexpr size_t kWriterMaxQueued = 64u << 20;
 
-DvrWriter::DvrWriter(int fd) : fd_(fd) {
+// The free space kept on the card while recording: a minute of the recording
+// at its rate so far, and at least what REC start makes (no rate known yet).
+// Looked at every 32 MB written or every 5 s, whichever comes first.
+constexpr uint64_t kMinFreeBytes    = 300ull << 20;
+constexpr uint64_t kHeadroomUs      = 60000000;
+constexpr uint64_t kSpaceCheckBytes = 32ull << 20;
+constexpr uint64_t kSpaceCheckUs    = 5000000;
+
+namespace {
+uint64_t purge_oldest_recordings(const std::string& dir, uint64_t min_free_bytes,
+                                 const std::string& keep = "");
+}
+
+DvrWriter::DvrWriter(int fd, std::string dir, std::string name, std::function<void(const char*)> on_fail)
+	: fd_(fd), dir_(std::move(dir)), name_(std::move(name)), on_fail_(std::move(on_fail)) {
+	start_us_ = checked_us_ = get_time_us();
 	t_ = std::thread([this] { run(); });
+}
+
+// A minute of the recording at its rate so far, kMinFreeBytes at least.
+uint64_t DvrWriter::headroom() const {
+	const uint64_t el = get_time_us() - start_us_;
+	const uint64_t room = el >= 2000000 ? (uint64_t)((double)written_ * kHeadroomUs / el) : 0;
+	return std::max(kMinFreeBytes, room);
 }
 
 DvrWriter::~DvrWriter() {
@@ -35,6 +58,7 @@ DvrWriter::~DvrWriter() {
 }
 
 int DvrWriter::write(int64_t offset, const void* buf, size_t size) {
+	if (failed_) return 1;   // the card stopped taking it: nothing more is queued
 	const uint8_t* p = static_cast<const uint8_t*>(buf);
 	{
 		std::unique_lock<std::mutex> lk(m_);
@@ -62,21 +86,41 @@ void DvrWriter::run() {
 		room_.notify_all();
 		for (const Chunk& c : batch) {
 			size_t off = 0;
+			int room_tries = 0;
 			while (off < c.data.size() && !failed_) {
 				ssize_t n = pwrite(fd_, c.data.data() + off, c.data.size() - off, (off_t)(c.offset + off));
-				if (n > 0) off += (size_t)n;
-				else if (!(n < 0 && errno == EINTR)) {
-					printf("DVR: write failed: %s\n", n < 0 ? strerror(errno) : "no progress");
-					failed_ = true;
-					room_.notify_all();
-				}
+				if (n > 0) { off += (size_t)n; written_ += (uint64_t)n; continue; }
+				const int err = n < 0 ? errno : 0;
+				if (err == EINTR) continue;
+				// The card full: the oldest finished recordings make way and the
+				// write goes again - a few times, as one still open elsewhere (the
+				// gallery playing it) frees nothing until it is closed.
+				if (err == ENOSPC && !dir_.empty() && room_tries++ < 3 &&
+				    purge_oldest_recordings(dir_, headroom(), name_) > 0)
+					continue;
+				// Said once: nothing is written after it, and the recording is
+				// ended (on_fail) - it used to drop everything without a word,
+				// REC still on the HUD.
+				printf("DVR: write failed: %s - the recording ends here\n", err ? strerror(err) : "no progress");
+				failed_ = true;
+				room_.notify_all();
+				if (on_fail_) on_fail_(err == ENOSPC ? "CARD FULL" : "CARD ERROR");
 			}
+		}
+		// Room on the card, now and then, from the oldest finished recordings:
+		// it was made at REC start only, and once the card was full every
+		// recording stopped at the 300 MB made then.
+		const uint64_t now = get_time_us();
+		if (!dir_.empty() && !failed_ &&
+		    (written_ - checked_at_ >= kSpaceCheckBytes || now - checked_us_ >= kSpaceCheckUs)) {
+			checked_at_ = written_;
+			checked_us_ = now;
+			purge_oldest_recordings(dir_, headroom(), name_);
 		}
 		// Once a second, push what has been written onto the card: until then
 		// it is only in the page cache, and on the exFAT DVR partition even the
 		// file's length is not updated - a power cut would lose all of it. With
 		// fragmented MP4 this bounds the loss to about the last second.
-		const uint64_t now = get_time_us();
 		if (done || now - last_sync_us >= 1000000) {
 			last_sync_us = now;
 			fsync(fd_);
@@ -92,13 +136,41 @@ int write_callback(int64_t offset, const void *buffer, size_t size, void *token)
     return static_cast<DvrWriter*>(token)->write(offset, buffer, size);
 }
 
+// The muxer's writes to dvr_file, keeping room on the card in card_dir_
+// (set_card) and saying when the card stops taking them.
+void DVR::make_writer() {
+	const std::string name = filename.substr(filename.find_last_of('/') + 1);
+	writer.reset(new DvrWriter(fileno(dvr_file), card_dir_, card_dir_.empty() ? "" : name,
+	                           [this](const char* why) {
+		write_failed_ = true;
+		if (on_write_failure_) on_write_failure_(why);
+	}));
+}
+
+// The metadata comment with the recording's own line in it, after the
+// build's and the start's: its size, and for a screen recording the rate the
+// sampler settled on here (not the camera recording's setting).
+std::string DVR::comment_with(const char* kind, int w, int h, int fps) const {
+	char line[96];
+	if (fps > 0) snprintf(line, sizeof line, "recording: %s %dx%d, %d fps\n", kind, w, h, fps);
+	else snprintf(line, sizeof line, "recording: %s %dx%d\n", kind, w, h);
+	std::string c = comment_;
+	size_t at = c.find("\nscreen:");
+	if (at == std::string::npos) at = c.find("\nsettings:");
+	if (at == std::string::npos) c += line; else c.insert(at + 1, line);
+	return c;
+}
 
 int DVR::init(int frm_width, int frm_height) {
 	if (!record_screen) {
+		if (!dvr_file) {
+			printf("DVR: output file not open - not recording\n");
+			return -1;
+		}
 		if(format == DvrFormat::RAW) {
 			return 0;
 		}
-		writer.reset(new DvrWriter(fileno(dvr_file)));
+		make_writer();
 		mux = MP4E_open(0 /*sequential_mode*/, format == DvrFormat::FMP4, writer.get(), write_callback);
 		// Fragmented while recording, so a power cut loses a second at most;
 		// plain once stopped, so it plays anywhere - phone browsers will not
@@ -108,6 +180,8 @@ int DVR::init(int frm_width, int frm_height) {
 		// The camera's 100-144 fps: QuickTime played it as slow motion, slowed
 		// down between a normal-speed first and last few seconds.
 		MP4E_set_full_frame_rate(mux);
+		if (mux && !comment_.empty())   // the camera's rate is on the Refresh Sync line
+			MP4E_set_text_comment(mux, comment_with("camera", frm_width, frm_height, 0).c_str());
 		// MP4E_open returns NULL when the file refuses its first write (a full
 		// card), and add_track would dereference it before checking.
 		if (!mux || MP4E_STATUS_OK != mp4_h26x_write_init(&mp4wr, mux, frm_width, frm_height, codec==VideoCodec::H265))
@@ -116,8 +190,10 @@ int DVR::init(int frm_width, int frm_height) {
 			// No recording then: the muxer closed before the file it writes
 			// into, and the file too, so run_dvr does not write raw NAL units
 			// into an .mp4 (it only writes with a file and no muxer for RAW).
+			// And said so: 0 here had REC on the HUD with no file behind it.
 			close_mux();
 			if (dvr_file) { fclose(dvr_file); dvr_file = NULL; }
+			return -1;
 		}
 		return 0;
 	}
@@ -206,12 +282,14 @@ int DVR::init(int frm_width, int frm_height) {
 			printf("DVR: output file not open - screen recording disabled\n");
 			return -1;
 		}
-		writer.reset(new DvrWriter(fileno(dvr_file)));
+		make_writer();
 		mux = MP4E_open(0 /*sequential_mode*/, format == DvrFormat::FMP4, writer.get(), write_callback);
 		if (format == DvrFormat::FMP4)
 			MP4E_set_finalize(mux);     // as in the camera recording
 		// Above 60 fps Apple's players took it for slow motion (as the camera's).
 		if (mux && fps > 60) MP4E_set_full_frame_rate(mux);
+		if (mux && !comment_.empty())
+			MP4E_set_text_comment(mux, comment_with("screen", frm_width, frm_height, fps).c_str());
 		if (!mux || MP4E_STATUS_OK != mp4_h26x_write_init(&mp4wr, mux, frm_width, frm_height, screen_enc->hevc())) {
 			printf("DVR: mp4_h26x_write_init failed (screen)\n");
 			close_mux();   // the file is closed by discard() or the destructor
@@ -283,6 +361,7 @@ void DVR::run_screen_rga() {
 		uint64_t last_pts = 0, last_dec = 0, last_gen = 0;
 		uint32_t last_epoch = 0;
 		int lvx = 0, lvy = 0, lvw = 0, lvh = 0;
+		int lsx = 0, lsy = 0, lsw = 0, lsh = 0;   // and the part of the picture in it
 		while (sampling) {
 			uint32_t seq;
 			uint64_t vb;
@@ -315,7 +394,8 @@ void DVR::run_screen_rga() {
 			bool same = have_last && (du != nullptr) == last_video &&
 			                  (!du || (du->pts == last_pts && du->dec_end_ts == last_dec &&
 			                           du->buf_epoch == last_epoch)) &&
-			                  p.osd_gen == last_gen && p.vx == lvx && p.vy == lvy && p.vw == lvw && p.vh == lvh;
+			                  p.osd_gen == last_gen && p.vx == lvx && p.vy == lvy && p.vw == lvw && p.vh == lvh &&
+			                  p.sx == lsx && p.sy == lsy && p.sw == lsw && p.sh == lsh;
 			// A viewer waiting for a keyframe (ours, or our follower's) gets
 			// one only from a picture that is encoded: this slot is, anyway.
 			if (same && fresh_wanted()) same = false;
@@ -356,6 +436,7 @@ void DVR::run_screen_rga() {
 			last_epoch = du ? du->buf_epoch : 0;
 			last_gen = p.osd_gen;
 			lvx = p.vx; lvy = p.vy; lvw = p.vw; lvh = p.vh;
+			lsx = p.sx; lsy = p.sy; lsw = p.sw; lsh = p.sh;
 			{ std::lock_guard<std::mutex> lk(qm); shots.push_back({idx, slot}); }
 			qcv.notify_one();
 			last_slot = slot;
@@ -370,7 +451,7 @@ void DVR::run_screen_rga() {
 	uint64_t frames = 0, skips = 0;
 	auto write = [&](const uint8_t* d, size_t len, int dur) {
 		to_sink(d, len, dur);
-		if (!mux) return;
+		if (!mux || write_failed_) return;   // the card has stopped taking it (said once)
 		auto r = mp4_h26x_write_nal(&mp4wr, d, (int)len, dur);
 		if (!(MP4E_STATUS_OK == r || MP4E_STATUS_BAD_ARGUMENTS == r))
 			printf("DVR: rga mp4_h26x_write_nal err %d\n", r);
@@ -581,25 +662,39 @@ void DVR::run_dvr() {
 		return;
 	}
 
-	// A sample's duration is the time since the previous picture, which is
+	// A sample's duration is the time from its picture to the next, which is
 	// the stream's real frame rate - not the configured one. A fixed 1/fps
 	// played a 14 fps stream back four times too fast. The times are the
 	// pictures' capture stamps where the source has them (the air unit's
 	// clock): their arrival times carried the radio's jitter, every other
 	// sample a little long or short, and stuttered in players. Within a
 	// quarter of the nominal interval it snaps to nominal.
+	// To the next, not since the one before: each picture is written once the
+	// next is in (held). After a gap the picture past it came too early and
+	// then stood - a jump, then a freeze - where the screen had frozen on the
+	// one before it.
 	const int nominal = 90000 / (video_framerate > 0 ? video_framerate : 60);
-	auto duration_for = [&](uint64_t us) {
+	auto duration = [&](uint64_t from, uint64_t to) {
 		int dur = nominal;
-		if (last_sample_us && us > last_sample_us) {
-			uint64_t d = us - last_sample_us;
+		if (from && to > from) {
+			uint64_t d = to - from;
 			if (d > 1000000) d = 1000000;
 			if (d < 1000)    d = 1000;
 			int measured = (int)(d * 90000 / 1000000);
 			if (abs(measured - nominal) > nominal / 4) dur = measured;
 		}
-		last_sample_us = us;
 		return dur;
+	};
+	Queued held{};            // the last picture, its duration not known yet
+	bool have_held = false;
+	auto put = [&](const uint8_t* bytes, size_t size, int dur, bool picture) {
+		auto res = mp4_h26x_write_nal(&mp4wr, bytes, size, dur);
+		if (picture) {
+			if (res == MP4E_STATUS_OK) samples_written++; else samples_dropped++;
+		}
+		if (!(MP4E_STATUS_OK == res || MP4E_STATUS_BAD_ARGUMENTS == res) && !write_failed_) {
+			printf("mp4_h26x_write_nal failed with error %d\n", res);
+		}
 	};
 
 	for (;;) {
@@ -611,6 +706,7 @@ void DVR::run_dvr() {
 		{
 			Queued q = std::move(dvrQueue.front());
 			dvrQueue.pop();
+			queued_bytes -= q.size();
 			lock.unlock();
 			const uint8_t* const bytes = q.bytes();
 			const size_t size = q.size();
@@ -622,23 +718,27 @@ void DVR::run_dvr() {
 				if(format == DvrFormat::RAW) {
 					fwrite(bytes, size, 1, dvr_file);
 					fflush(dvr_file);
-				} else if (mux) {
-					const uint8_t* p = bytes;
-					const bool ps = size > 4 && (codec == VideoCodec::H265
-						? ((p[4] >> 1) & 0x3F) >= 32 && ((p[4] >> 1) & 0x3F) <= 34
-						: ((p[4] & 0x1F) == 7 || (p[4] & 0x1F) == 8));
-					auto res = mp4_h26x_write_nal(&mp4wr, bytes, size,
-					                              ps ? nominal : duration_for(q.us));
-					if (!ps) {
-						if (res == MP4E_STATUS_OK) samples_written++; else samples_dropped++;
-					}
-					if (!(MP4E_STATUS_OK == res || MP4E_STATUS_BAD_ARGUMENTS == res)) {
-						printf("mp4_h26x_write_nal failed with error %d\n", res);
+				} else if (mux && !write_failed_) {   // the card has stopped taking it: nothing to mux
+					if (is_param_set(bytes, size)) {
+						// After the picture held, in the stream's order.
+						if (have_held) {
+							put(held.bytes(), held.size(), nominal, true);
+							held = Queued{};
+							have_held = false;
+						}
+						put(bytes, size, nominal, false);
+					} else {
+						if (have_held) put(held.bytes(), held.size(), duration(held.us, q.us), true);
+						held = std::move(q);
+						have_held = true;
 					}
 				}
 			}
 		}
 	}
+	// The last picture: as long as one at the nominal rate.
+	if (have_held && mux && !write_failed_) put(held.bytes(), held.size(), nominal, true);
+	held = Queued{};
 	if (!record_screen && format != DvrFormat::RAW)
 		printf("DVR: %llu pictures written, %llu dropped%s\n",
 		       (unsigned long long)samples_written, (unsigned long long)samples_dropped,
@@ -665,19 +765,52 @@ size_t DVR::queue_depth() {
 	return dvrQueue.size();
 }
 
+// The pictures waiting for run_dvr, at most: a card behind (the writer's own
+// queue full) holds that thread up, and they piled up here until the OOM
+// killer ended the program - and a stop then wrote out the whole backlog.
+// Past this a picture is dropped: a gap in the recording.
+constexpr size_t kDvrQueueMaxBytes = 16u << 20;
+
+bool DVR::is_param_set(const uint8_t* p, size_t size) const {
+	return size > 4 && (codec == VideoCodec::H265
+		? ((p[4] >> 1) & 0x3F) >= 32 && ((p[4] >> 1) & 0x3F) <= 34
+		: ((p[4] & 0x1F) == 7 || (p[4] & 0x1F) == 8));
+}
+
+// Under mtx. Parameter sets always go in: without them nothing after plays.
+bool DVR::queue_take(const uint8_t* p, size_t n) {
+	if (queued_bytes + n > kDvrQueueMaxBytes && !is_param_set(p, n)) {
+		queue_dropped++;
+		return false;
+	}
+	queued_bytes += n;
+	return true;
+}
+
+static void say_dropped(uint64_t n) {
+	if (n == 1 || n % 100 == 0)
+		printf("DVR: the card is behind - picture dropped (%llu so far)\n", (unsigned long long)n);
+}
+
 void DVR::enqueueDvrPacket(std::shared_ptr<std::vector<uint8_t>> frame, uint64_t us) {
+	uint64_t dropped = 0;
 	{
 		std::lock_guard<std::mutex> lock(mtx);
-		dvrQueue.push({frame, {}, us ? us : get_time_us()});
+		if (queue_take(frame->data(), frame->size())) dvrQueue.push({frame, {}, us ? us : get_time_us()});
+		else dropped = queue_dropped;
 	}
+	if (dropped) { say_dropped(dropped); return; }
 	cv.notify_one();
 }
 
 void DVR::enqueueDvrPacket(const bus::PictureRef& pic, uint64_t us) {
+	uint64_t dropped = 0;
 	{
 		std::lock_guard<std::mutex> lock(mtx);
-		dvrQueue.push({nullptr, pic, us ? us : get_time_us()});
+		if (queue_take(pic->data(), pic->len)) dvrQueue.push({nullptr, pic, us ? us : get_time_us()});
+		else dropped = queue_dropped;
 	}
+	if (dropped) { say_dropped(dropped); return; }
 	cv.notify_one();
 }
 
@@ -691,6 +824,7 @@ void DVR::enqueueDvrPacket(const bus::PictureRef& pic, uint64_t us) {
 #include <algorithm>
 #include <sys/resource.h>
 #include <pthread.h>
+#include "dvr/dvr_library.hpp"
 #include "dvr/dvr_recover.hpp"
 
 namespace {
@@ -722,23 +856,26 @@ class OrdinaryScheduling {
 };
 
 // Deletes the oldest fpvOS_*.mp4 / fpvOS_*.h265 recordings in dir - and
-// kestrel_*, what earlier builds named them - until
-// free space clears min_free_bytes, or there is nothing left to delete. Only
-// called from start_recording(), before any recording is open, so there is
-// never a live file among the candidates.
-void purge_oldest_recordings(const std::string& dir, uint64_t min_free_bytes) {
+// kestrel_*, what earlier builds named them - until free space clears
+// min_free_bytes, or there is nothing left to delete; returns the bytes
+// freed. Recordings only: the SD logs (fpvOS_*.log) and the radio's
+// .frames.csv share the folder and the prefix. Called from start_recording(),
+// before any recording is open, and from a recording's writer, which names
+// its own file as `keep`.
+uint64_t purge_oldest_recordings(const std::string& dir, uint64_t min_free_bytes, const std::string& keep) {
     struct statvfs st;
-    if (statvfs(dir.c_str(), &st) != 0) return;
+    if (statvfs(dir.c_str(), &st) != 0) return 0;
     uint64_t avail = (uint64_t)st.f_bavail * (uint64_t)st.f_frsize;
-    if (avail >= min_free_bytes) return;
+    if (avail >= min_free_bytes) return 0;
 
     DIR* d = opendir(dir.c_str());
-    if (!d) return;
+    if (!d) return 0;
     std::vector<std::pair<time_t, std::string>> files;
     struct dirent* ent;
     while ((ent = readdir(d)) != nullptr) {
         std::string name = ent->d_name;
         if (name.rfind("fpvOS_", 0) != 0 && name.rfind("kestrel_", 0) != 0) continue;
+        if (!(dvr_lib::ends_with(name, ".mp4") || dvr_lib::ends_with(name, ".h265")) || name == keep) continue;
         std::string path = dir + "/" + name;
         struct stat fst;
         if (stat(path.c_str(), &fst) != 0 || !S_ISREG(fst.st_mode)) continue;
@@ -747,6 +884,7 @@ void purge_oldest_recordings(const std::string& dir, uint64_t min_free_bytes) {
     closedir(d);
     std::sort(files.begin(), files.end());
 
+    uint64_t total = 0;
     for (const auto& f : files) {
         if (avail >= min_free_bytes) break;
         struct stat fst;
@@ -754,10 +892,12 @@ void purge_oldest_recordings(const std::string& dir, uint64_t min_free_bytes) {
         if (remove(f.second.c_str()) == 0) {
             printf("DVR: low on space, removed oldest recording %s\n", f.second.c_str());
             avail += freed;
+            total += freed;
         } else {
             printf("DVR: low on space, failed to remove %s: %s\n", f.second.c_str(), strerror(errno));
         }
     }
+    return total;
 }
 
 } // namespace
@@ -768,7 +908,7 @@ DvrRecorder& DvrRecorder::instance() {
 }
 
 void DvrRecorder::configure(Settings& settings, VideoCodec codec, int framerate, DvrFormat fmt,
-                            volatile bool* stop_signal, const std::string& dir) {
+                            std::atomic<bool>* stop_signal, const std::string& dir) {
     std::lock_guard<std::mutex> lk(m_);
     settings_ = &settings;
     codec_ = codec;
@@ -845,18 +985,54 @@ std::string DvrRecorder::current_file() const {
 // recordings and sets the encoder up. Meanwhile feed() on the video ingest
 // thread and is_recording() on the OSD thread waited on m_ - the live
 // picture or the HUD froze for as long as REC took.
+std::string DvrRecorder::recording_info(display::Display* disp) {
+    std::string t;
+    char b[256];
+    {
+        std::lock_guard<std::mutex> lk(m_);
+        t += build_.empty() ? std::string("kestrel-gnd") : build_;
+        t += "\n";
+    }
+    const time_t now = time(nullptr);
+    struct tm lt;
+    localtime_r(&now, &lt);
+    strftime(b, sizeof b, "%Y-%m-%d %H:%M:%S %Z", &lt);
+    t += std::string("started: ") + b + "\n";
+    if (disp && disp->has_output()) {
+        const display::Mode md = disp->mode();
+        snprintf(b, sizeof b, "screen: %dx%d, mode %.3f Hz, running %.3f Hz, frame %.1f us\n", md.w, md.h,
+                 disp->mode_refresh_hz(), disp->measured_refresh_hz(), disp->frame_period_us());
+        t += b;
+        static const char* const kSync[] = { "OFF", "ON", "FREE" };
+        const display::RefreshSync rs = disp->refresh_sync();
+        snprintf(b, sizeof b, "refresh sync: %s, slice %d, margin %d us, camera %.3f fps, %s%s%s\n",
+                 rs.mode >= 0 && rs.mode <= 2 ? kSync[rs.mode] : "?", rs.slice, rs.margin_us, rs.camera_fps,
+                 rs.holding ? "holding" : "not holding", !rs.holding && rs.why ? " - " : "",
+                 !rs.holding && rs.why ? rs.why : "");
+        t += b;
+    }
+    if (settings_) t += "settings:\n" + settings_->all_text();
+    return t;
+}
+
 bool DvrRecorder::start_recording() {
     VideoCodec codec;
     int fps, fw, fh, sw, sh;
     DvrFormat fmt;
-    volatile bool* stop_signal;
+    std::atomic<bool>* stop_signal;
     std::string dir;
     bool configured;
     const bool screen = screen_;
     display::Display* disp_dev;
     std::vector<std::vector<uint8_t>> ps;
     {
-        std::lock_guard<std::mutex> lk(m_);
+        // The last recording still being written out (finish_recording):
+        // this one after it - their threads must not overlap (one screen
+        // sampler, one screen tap). Only a REC pressed again right after a
+        // stop waits here.
+        std::unique_lock<std::mutex> lk(m_);
+        if (finishing_) printf("DVR: still writing the last recording - this one starts after it\n");
+        finished_cv_.wait(lk, [this] { return !finishing_; });
         codec = codec_; fps = fps_; fmt = fmt_; stop_signal = stop_; dir = dir_;
         configured = configured_; fw = fw_; fh = fh_; sw = sw_; sh = sh_;
         disp_dev = disp_dev_;
@@ -884,11 +1060,20 @@ bool DvrRecorder::start_recording() {
 
     // Keep some headroom on the recordings partition itself so an unattended
     // pile of old footage never runs it to zero.
-    purge_oldest_recordings(dir, 300ull * 1024 * 1024);
-    // DVR::format_timestamped_filename() turns "<dir>/fpvOS.mp4" into
+    // While recording, the writer keeps it (DvrWriter).
+    purge_oldest_recordings(dir, kMinFreeBytes);
+    // DVR::timestamped() turns "<dir>/fpvOS.mp4" into
     // "<dir>/fpvOS_YYYYMMDD_HHMMSS.mp4".
     const char* ext = (fmt == DvrFormat::RAW) ? ".h265" : ".mp4";
-    std::string base = dir + "/fpvOS" + ext;
+    const std::string path = DVR::timestamped(dir + "/fpvOS" + ext);
+    // The gallery must not take the new file for a finished one, nor the web
+    // view delete it, while it is being set up: it is the current file before
+    // it exists.
+    const std::string file = path.substr(path.find_last_of('/') + 1);
+    {
+        std::lock_guard<std::mutex> lk(m_);
+        file_ = file;
+    }
 
     // One screen sampler at a time: the web view's encoder makes way for a
     // screen recording, and then follows its sampler (web_reconcile).
@@ -902,21 +1087,20 @@ bool DvrRecorder::start_recording() {
     // whatever codec the FPV link uses.
     const bool screen_hevc = settings_->get(dvr::setting::dvr_screen_codec) == "h265";
     std::shared_ptr<DVR> dvr = screen
-        ? std::make_shared<DVR>(*settings_, base, screen_hevc ? VideoCodec::H265 : VideoCodec::H264, fps,
-                                fmt == DvrFormat::MP4 ? DvrFormat::MP4 : DvrFormat::FMP4, stop_signal, true)
-        : std::make_shared<DVR>(*settings_, base, codec, fps, fmt, stop_signal, false);
+        ? std::make_shared<DVR>(*settings_, path, screen_hevc ? VideoCodec::H265 : VideoCodec::H264, fps,
+                                fmt == DvrFormat::MP4 ? DvrFormat::MP4 : DvrFormat::FMP4, stop_signal, true,
+                                true, false)
+        : std::make_shared<DVR>(*settings_, path, codec, fps, fmt, stop_signal, false, true, false);
     // The screen sampled at most this often (dvr_screen_fps): 100, every
     // refresh of a 100 Hz screen, the camera's rate in its usual modes -
     // measured on the VRX with H.265: no picture missed, none with the
     // encoder behind, RGA ~5.3 ms a frame, the live picture ~0.5 ms later.
     if (screen) dvr->set_fps_cap(settings_->get(dvr::setting::dvr_screen_fps));
-    // The gallery must not take the new file for a finished one while it is
-    // being set up: it is the current file from the moment it exists.
-    std::string file = dvr->path().substr(dvr->path().find_last_of('/') + 1);
-    {
-        std::lock_guard<std::mutex> lk(m_);
-        file_ = file;
-    }
+    // Room kept on the card while it records, and the recording ended when
+    // the card stops taking it (numbered: a later one is not ended for it).
+    const uint64_t seq = ++seq_next_;
+    dvr->set_card(dir, [this, seq](const char* why) { recording_failed(seq, why); });
+    dvr->set_comment(recording_info(disp_dev));   // its own line is added in init()
     if (screen && disp_dev) dvr->set_display_dev(disp_dev);
     // Without this the muxer is never created and every frame the writer thread
     // dequeues is silently dropped - the file is opened, the timer runs, and
@@ -963,6 +1147,7 @@ bool DvrRecorder::start_recording() {
         dvr_ = dvr;
         tid_ = tid;
         ps_sent_ = !ps.empty();
+        running_seq_ = seq;
         running_ = true;
         rec_screen_ = screen;
     }
@@ -982,26 +1167,76 @@ void DvrRecorder::stop_recording() {
         tid = tid_;
         tid_ = 0;
         file = file_;   // still the current file until it is complete
+        finishing_ = true;
     }
     printf("DVR: stopping -> %s\n", file.c_str());
     // The web view's encoder following this recording's sampler goes first.
     if (web_leader_ == dvr) stop_web();
     dvr->stop();
+    // The rest on a thread of its own: joining the DVR's thread waits for
+    // what the card is behind on and the MP4's index to be written - seconds
+    // on a slow card - and the caller is the REC button's real-time thread,
+    // whose buttons froze for as long as that took. REC is off at once.
+    std::thread([this, dvr, tid, file] {
+        pthread_setname_np(pthread_self(), "dvr-stop");
+        struct sched_param sp = {};
+        pthread_setschedparam(pthread_self(), SCHED_OTHER, &sp);   // made from a real-time thread
+        finish_recording(dvr, tid, file);
+    }).detach();
+}
+
+void DvrRecorder::finish_recording(std::shared_ptr<DVR> dvr, pthread_t tid, const std::string& file) {
     pthread_join(tid, nullptr);
+    const bool failed = dvr->write_failed();
+    const std::string path = dvr->path();
     dvr.reset();
+    // Cut short by the card: what reached it made plain now (the muxer could
+    // not), so it plays in the gallery before the next start's recovery.
+    if (failed) dvr_finalize_fragmented(path);
     {
         std::lock_guard<std::mutex> lk(m_);
         file_.clear();
+        rec_screen_ = false;
+        finishing_ = false;
     }
+    finished_cv_.notify_all();
     // The file is complete now (moov written): its gallery thumbnail can be
     // made in the background, ready before the gallery is opened.
     if (web_hooks_.recording_finished) web_hooks_.recording_finished(file);
     // A phone still watching gets its own screen encoder back.
     {
         std::lock_guard<std::mutex> lk(m_);
-        rec_screen_ = false;
+        if (shut_ || !web_want_) return;
     }
+    std::lock_guard<std::mutex> ctl(ctl_);
     web_reconcile();
+}
+
+// The card stopped taking the recording (on its writer's thread): it ends as
+// if REC had been pressed - off on the HUD - from a thread of its own, under
+// ctl_ like any stop. seq is its number: a later one is never ended for it.
+void DvrRecorder::recording_failed(uint64_t seq, const char* why) {
+    {
+        std::lock_guard<std::mutex> lk(m_);
+        failure_ = why;
+        failure_us_ = get_time_us();
+    }
+    printf("DVR: %s - ending the recording\n", why);
+    std::thread([this, seq] {
+        pthread_setname_np(pthread_self(), "dvr-failed");
+        std::lock_guard<std::mutex> ctl(ctl_);
+        {
+            std::lock_guard<std::mutex> lk(m_);
+            if (!running_ || running_seq_ != seq) return;   // stopped already
+        }
+        stop_recording();
+    }).detach();
+}
+
+std::string DvrRecorder::last_failure(uint64_t* at_us) const {
+    std::lock_guard<std::mutex> lk(m_);
+    if (at_us) *at_us = failure_us_;
+    return failure_;
 }
 
 // ---- the web view's screen encoder ----
@@ -1015,7 +1250,7 @@ void DvrRecorder::attach_web(DVR* d) {
 void DvrRecorder::start_web(const std::shared_ptr<DVR>& leader) {
     if (web_dvr_) return;
     int fps, sw, sh;
-    volatile bool* stop_signal;
+    std::atomic<bool>* stop_signal;
     display::Display* disp_dev;
     {
         std::lock_guard<std::mutex> lk(m_);
@@ -1066,18 +1301,23 @@ void DvrRecorder::stop_web() {
 }
 
 void DvrRecorder::web_reconcile() {
-    bool want, rec_screen;
+    bool want, rec_screen, screen_finishing;
     std::shared_ptr<DVR> rec;
     {
         std::lock_guard<std::mutex> lk(m_);
         want = web_want_ && !shut_;
         rec_screen = running_ && rec_screen_;
+        screen_finishing = finishing_ && rec_screen_;
         rec = dvr_;
     }
     if (!want) {
         stop_web();
         return;
     }
+    // A screen recording stopped but still being written out has the screen
+    // tap until it is done: the web view's encoder starts after it
+    // (finish_recording).
+    if (screen_finishing) return;
     // A screen recording owns the screen's one sampler: the web view's
     // encoder follows it.
     std::shared_ptr<DVR> lead = rec_screen && rec ? rec : nullptr;
@@ -1181,5 +1421,10 @@ void DvrRecorder::shutdown() {
         shut_ = true;     // a viewer arriving now starts nothing (the web view stops after us)
     }
     stop_recording();
+    // The recording written out and closed before the program goes on to exit.
+    {
+        std::unique_lock<std::mutex> lk(m_);
+        finished_cv_.wait(lk, [this] { return !finishing_; });
+    }
     stop_web();
 }

@@ -19,33 +19,37 @@ int main() {
     // Nothing asked: what the parts hold.
     r.radio_fw = 1;
     r.max_mcs = 9;
+    r.chan_hop = 1;
     r.chan_auto = true;
     r.bind_state = gnd::BIND_RUNNING;
     r.bind_secs_left = 12;
     a.tx_power_mw = 501;
     a.tx_power_want_mw = 200;
+    a.resend_known = true;
     e.max_kbps = 8000;
     hud::LinkView v = hud::link_view(r, a, e, asked);
-    CHECK(v.radio_fw == 1 && v.max_mcs == 9 && v.chan_auto);
+    CHECK(v.radio_fw == 1 && v.max_mcs == 9 && v.chan_hop == 1 && v.chan_auto);
     CHECK(v.bind_state == gnd::BIND_RUNNING && v.bind_secs_left == 12);
-    CHECK(v.tx_power_mw == 501 && v.tx_power_want_mw == 200 && v.max_kbps == 8000);
+    CHECK(v.tx_power_mw == 501 && v.tx_power_want_mw == 200 && v.resend_known && v.max_kbps == 8000);
 
     // Asked, not carried out yet: the asked values.
     r.taken = 4;
     e.taken = 4;
     asked.mcs = Ticket{5, 3};
     asked.kbps = Ticket{6, 12000};
+    asked.hop = Ticket{7, 0};
     asked.frame = Ticket{8, 2};
     v = hud::link_view(r, a, e, asked);
-    CHECK(v.max_mcs == 3 && v.max_kbps == 12000 && v.frame_mode == 2);
+    CHECK(v.max_mcs == 3 && v.max_kbps == 12000 && v.chan_hop == 0 && v.frame_mode == 2);
     CHECK(v.radio_fw == 1 && v.steady == 0 && v.max_bw_mhz == 0);     // not asked: held
 
     // Our radio has taken them, the encoder not yet: each by its own part.
     r.taken = 8;
     r.max_mcs = 3;
+    r.chan_hop = 0;
     r.frame_mode = 2;
     v = hud::link_view(r, a, e, asked);
-    CHECK(v.max_mcs == 3 && v.frame_mode == 2 && v.max_kbps == 12000);
+    CHECK(v.max_mcs == 3 && v.chan_hop == 0 && v.frame_mode == 2 && v.max_kbps == 12000);
 
     // The radio ended elsewhere than asked (a stock radio's width, a refused
     // MCS): once taken, its value, not the one asked.

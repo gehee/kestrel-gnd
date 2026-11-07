@@ -57,6 +57,9 @@ std::string osd_asset(const char* name);
 #include "bsp/bsp.hpp"
 #include "platform/platform.hpp"
 
+// The menu's sections, by menu_tab: drawn on the tab strip, named in the log.
+inline constexpr const char* kTabNames[8] = { "VIDEO", "RADIO", "HUD", "DISPLAY", "DVR", "SYSTEM", "INFO", "SERIAL" };
+
 // AR8030 RF menu. The rows are Channel (the channel page, where AUTO is the
 // old Channel Hop), TX Power and Standby Mode; MCS, Bandwidth and LNA Mode were
 // removed - see ar_rf_items().

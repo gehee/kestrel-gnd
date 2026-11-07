@@ -13,8 +13,9 @@ void OSD::handle_key(int key) {
     pthread_mutex_lock(&osd_mutex);
     sync_radio();   // the menu acts on the radio as it is now
 
-    // Refresh Sync on trial: Enter, anywhere in the menu, keeps it.
-    if (sync_confirm_ && (key == 13 || key == '\n')) {
+    // Refresh Sync on trial: Enter, anywhere in the menu, keeps it. Not in the
+    // gallery: there Enter plays a recording, and the trial runs out as it would.
+    if (sync_confirm_ && !gallery_.active() && (key == 13 || key == '\n')) {
         sync_confirm_ = false;
         settings_.set(display::setting::display_lock(screen_id_), refresh_sync().mode);
         printf("menu: refresh sync %s kept for %s\n", refresh_sync_label(refresh_sync().mode),
@@ -24,8 +25,8 @@ void OSD::handle_key(int key) {
         pthread_mutex_unlock(&osd_mutex);
         return;
     }
-    // A screen mode on trial: Enter, anywhere in the menu, keeps it.
-    if (screen_confirm_ && (key == 13 || key == '\n')) {
+    // A screen mode on trial: Enter, anywhere in the menu, keeps it (not in the gallery).
+    if (screen_confirm_ && !gallery_.active() && (key == 13 || key == '\n')) {
         screen_confirm_ = false;
         settings_.set(display::setting::screen_mode(screen_id_),
             screen_confirm_mode_ == "auto" ? std::string() : screen_confirm_mode_);
@@ -102,7 +103,9 @@ void OSD::handle_key(int key) {
              // SYSTEM > Screen Mode lists what the connector offers at this
              // open: a display plugged in since brings modes of its own. A
              // choice staged against the old list goes with it.
-             screen_modes_.clear();
+             // The HUD's thread makes the list again (refill_screen_modes): it
+             // reads it while drawing, without the lock this holds.
+             screen_modes_stale_ = true;
              menu_screen_mode = -1;
              menu_dirty[kTabSystem][3] = false;
              menu_pending_from[kTabSystem][3][0] = '\0';
@@ -135,7 +138,6 @@ void OSD::handle_key(int key) {
                  menu_focus = 0;
              }
              menu_scan_open = false;
-             menu_synced = false;
              unknown_command(0xe, 0);
              memset(menu_dirty, 0, sizeof(menu_dirty));   // re-seeded = nothing pending
              menu_bf_osd = bf_osd;
@@ -189,7 +191,7 @@ void OSD::handle_key(int key) {
     // The canopy (osd.hpp, ui_*). Picking: Left and Right are the two blades,
     // OK unfolds one. Unfolded: Left and Right walk its sections; Up and Down
     // its rows; OK on a setting starts changing it (Up/Down) and OK again
-    // applies it; OK on an action (Bind, Calib Distance, Channel) does it.
+    // applies it; OK on an action (Bind, Channel) does it.
     {
         const bool up    = (key == 'w' || key == 'W' || key == KEY_UP    || key == 0x101);
         const bool down  = (key == 's' || key == 'S' || key == KEY_DOWN  || key == 0x102);
@@ -237,6 +239,7 @@ void OSD::handle_key(int key) {
             std::vector<MenuItem> rows = menu_items(menu_tab);
             const int type = (menu_index >= 0 && menu_index < (int)rows.size()) ? rows[menu_index].type : 0;
             if (type == 1) {                          // a setting: start changing it
+                menu_log_applied("edit");             // what it was
                 menu_focus = 2;
                 menu_edit_tab_ = menu_tab;
                 menu_edit_label_ = rows[menu_index].label ? rows[menu_index].label : "";
@@ -259,7 +262,7 @@ void OSD::handle_key(int key) {
 
     if (key == 9) {
        menu_tab = (menu_tab + 1) % kMenuTabs;
-       menu_index = -1;
+       menu_index = menu_first_selectable_row(menu_tab);   // a real row, as every other tab change
        render_requested = true;
        hud_wake_.poke();
        pthread_mutex_unlock(&osd_mutex);
@@ -313,6 +316,7 @@ void OSD::handle_key(int key) {
             // highlight follows the key: UP is the entry above, which is
             // the one before it in the row's order.
             if (!ro) menu_apply_change(menu_tab, menu_index, -dir);
+            if (!ro && !tracked) menu_log_applied("live");
             if (from) {
                 char now[32];
                 menu_plain_value(menu_tab, menu_index, now, sizeof(now));
@@ -348,6 +352,7 @@ void OSD::handle_key(int key) {
     if (key == 13 || key == '\n') { // Enter
         if (menu_open) {
             menu_mark_dirty(false);      // committing is what clears the marker
+            menu_log_applied("enter");
             if (menu_tab == 0) {
                 // 0x01 = video mode (routed to SET_CHN_RES in main); 0x300+n are
                 // the AR8030 camera settings, kept out of the kestrel-air id space.
@@ -389,9 +394,10 @@ void OSD::handle_key(int key) {
                         case 5:
                             chan_open();
                             break;
-                        case 1: {   // saved per air unit there; nothing before it is known
+                        case 1:     // the level and the mode are one value: saved per air unit
+                        case 16: {  // there; nothing before it is known
                             const int prj = air_radio_.prj;
-                            if (prj > 0) parts_.air_radio.set_tx_power(ar_pwr_fit(prj, menu_ar_power));
+                            if (prj > 0) parts_.air_radio.set_tx_power(ar_pwr_fit(prj, menu_ar_power, air_radio_.fine));
                             break;
                         }
                         case 8:
@@ -433,21 +439,6 @@ void OSD::handle_key(int key) {
                             parts_.radio.bind();
                             break;
                         default: break;
-                    }
-                }
-            } else if (menu_tab == 2) { // HUD - see menu_items() and hud_row()
-                // Only Calib Distance has anything for Enter to do. Every
-                // other row applies and saves as the arrows move it.
-                if (hud_row(menu_index) == kHudRowCalib) {
-                    // Zero the ranging: with the units side by side, Enter
-                    // captures the current reading as the new base value. The
-                    // arrows nudge the same offset by hand.
-                    const int raw = link_distance_raw.load();
-                    if (raw >= 0) {
-                        dist_offset_ = raw;
-                        parts_.radio.set_dist_offset(raw);
-                        printf("[OSD] distance calibrated for air unit %s: offset = %d\n",
-                               osd_vars.radio_link.peer_mac[0] ? osd_vars.radio_link.peer_mac : "?", dist_offset_);
                     }
                 }
             } else if (menu_tab == 3) { // DISPLAY

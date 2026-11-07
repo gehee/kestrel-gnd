@@ -114,7 +114,13 @@ bool RgaCompositor::compose(const ScreenPair& pair, int osd_fd, uint32_t osd_str
     // The video layer, as the plane showed it.
     rga_buffer_t src;
     const DecodedUnit* du = pair.video.get();
-    const bool one_to_one = du && pair.vx == 0 && pair.vy == 0 && pair.vw == w_ && pair.vh == h_ &&
+    // The part of the picture the plane showed: all of it, unless a gallery
+    // tile partly off screen showed only part (scaled whole into the cut
+    // rectangle, it was recorded squeezed).
+    const bool part = du && pair.sw > 0 && pair.sh > 0 && pair.sx >= 0 && pair.sy >= 0 &&
+                      pair.sx + pair.sw <= (int)du->width && pair.sy + pair.sh <= (int)du->height &&
+                      (pair.sw != (int)du->width || pair.sh != (int)du->height);
+    const bool one_to_one = du && !part && pair.vx == 0 && pair.vy == 0 && pair.vw == w_ && pair.vh == h_ &&
                             (int)du->width == w_ && (int)du->height == h_;
     if (du && one_to_one) {
         uint32_t h = import_decoded(*du);
@@ -137,7 +143,8 @@ bool RgaCompositor::compose(const ScreenPair& pair, int osd_fd, uint32_t osd_str
             const int ver_stride = du->pitches[0] ? (int)(du->offsets[1] / du->pitches[0]) : (int)du->height;
             rga_buffer_t pic = wrapbuffer_handle(h, (int)du->width, (int)du->height, RK_FORMAT_YCbCr_420_SP,
                                                  (int)du->pitches[0], ver_stride);
-            im_rect sr = {0, 0, (int)du->width, (int)du->height};
+            im_rect sr = part ? im_rect{pair.sx, pair.sy, pair.sw, pair.sh}
+                              : im_rect{0, 0, (int)du->width, (int)du->height};
             im_rect dr = {pair.vx, pair.vy, pair.vw, pair.vh};
             rga_buffer_t none = {};
             im_rect nr = {};

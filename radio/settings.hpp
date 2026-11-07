@@ -10,8 +10,10 @@
 
 namespace radio::setting {
 
-// RADIO: the caps on the video's bitrate (kbps, 0 none), bandwidth (MHz) and
-// MCS (-1 AUTO); Steady.
+// RADIO: the channel (FIXED, MHz; 0 for none) and AUTO HOP; the caps on the
+// video's bitrate (kbps, 0 none), bandwidth (MHz) and MCS (-1 AUTO); Steady.
+inline constexpr Setting<int> ar8030_chan_mhz{"ar8030_chan_mhz", 0};
+inline constexpr Setting<int> ar8030_chan_hop{"ar8030_chan_hop", 0};
 inline constexpr Setting<int> ar8030_max_kbps{"ar8030_max_kbps", 0};
 inline constexpr Setting<int> ar8030_max_bw_mhz{"ar8030_max_bw_mhz", 40};
 inline constexpr Setting<int> ar8030_max_mcs{"ar8030_max_mcs", -1};
@@ -51,17 +53,11 @@ inline MadeSetting<int> air_camera(const std::string& air, const char* what, int
 inline MadeSetting<int> air_tx_power_mw(const std::string& air, int def) {
     return {air + "_tx_power_mw", def};
 }
-// HUD > Calib Distance: the ranging reading subtracted from it. Stock
-// subtracts a per-index calibration from the raw ranging result and clamps at
-// zero (ar_ldy_gnd 0x9be20). Its table, built in that function's prologue, is
-// {0, 0, 115, 90, 75, 0, 0, 0} indexed by a byte at ctx+1212 - the offsets
-// fall as the index rises, consistent with an RF-bandwidth index (wider
-// bandwidth = finer time-of-flight resolution = smaller base). This board
-// measures 109-111 with the units together, i.e. stock's index-2 entry, so
-// 115 is the default. Recalibrate if the RF bandwidth changes, since the
-// correct offset changes with it. Per air unit (by its radio MAC, no colons);
-// the plain one is the start for one never calibrated.
-inline constexpr Setting<int> dist_offset{"dist_offset", 115};
-inline MadeSetting<int> air_dist_offset(const std::string& mac, int def) { return {"dist_offset_" + mac, def}; }
+inline MadeSetting<int> air_features(const std::string& air) { return {air + "_air", 0}; }
+// What it is (its project number, system/air/power.hpp): its power levels, before it has said so
+// on a link that was lost and reopened.
+inline MadeSetting<int> air_prj(const std::string& air) { return {air + "_prj", 0}; }
+// The distance's zero for an air unit (by its radio MAC, no colons), as
+// "<power-up id>:<raw>".
 
 }  // namespace radio::setting
