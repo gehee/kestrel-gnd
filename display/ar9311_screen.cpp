@@ -355,6 +355,13 @@ class Ar9311Screen final : public PlaneScreen {
                 create(black_720_, false, 1280, 720);
             for (auto &b : ui_)
                 create(b, true, width_, height_);
+            // Reserve before producers can publish: this buffer is scanned
+            // during bootstrap, so overlay_damage must not write into it.
+            slots_[0]=Slot::Active;
+            for(int y=0;y<height_;++y) {
+                auto* row=reinterpret_cast<uint32_t*>(ui_[0].pixels+y*ui_[0].pitch);
+                std::fill(row,row+width_,0xff000000u);
+            }
             // EDID alone does not prove that installed firmware can drive a
             // mode. TEST_ONLY also checks the fixed 1080p-to-720p video path.
             // --force-display permits this probe without a valid EDID.
@@ -473,21 +480,29 @@ class Ar9311Screen final : public PlaneScreen {
     bool failed() const override { return failed_.load(); }
     void run() override {
         std::unique_ptr<Imported> showing, pending;
-        int active_ui = -1, next_ui = -1;
-        int source_width = 1920, source_height = 1080;
+        int active_ui = 0, next_ui = -1;
+        int source_width = width_, source_height = height_;
         uint64_t cookie = 0;
         try {
             Atomic initial;
-            // Start with the decoder's 1080p source geometry, including at
-            // 720p output. The first video frame then needs only a buffer flip,
-            // not a second HDMI modeset during acquisition.
-            initial.plane(primary_, crtc_.id, black_.fb,
+            // Prime the hardware at native size, then establish the 1080p
+            // decoder geometry before publishing UI or live frames. The VO
+            // needs this native-size reset sequence even for 720p output.
+            // An opaque UI buffer hides the bootstrap video surface.
+            initial.plane(primary_, crtc_.id, height_ == 720 ? black_720_.fb : black_.fb,
                           source_width, source_height, width_, height_);
-            initial.plane(overlay_, crtc_.id, 0, width_, height_, width_, height_);
+            initial.plane(overlay_, crtc_.id, ui_[0].fb, width_, height_, width_, height_);
             initial.add(connector_, {{"CRTC_ID", crtc_.id}});
             initial.add(crtc_, {{"MODE_ID", mode_}, {"ACTIVE", 1}});
             initial.commit(fd_, DRM_MODE_ATOMIC_ALLOW_MODESET);
             active_ = true;
+            if(height_==720) {
+                Atomic prepare;
+                prepare.plane(primary_,crtc_.id,black_.fb,1920,1080,width_,height_);
+                prepare.plane(overlay_,crtc_.id,ui_[0].fb,width_,height_,width_,height_);
+                prepare.commit(fd_,DRM_MODE_ATOMIC_ALLOW_MODESET);
+                source_width=1920; source_height=1080;
+            }
             while (!*stop_ && !failed_) {
                 std::shared_ptr<DecodedUnit> frame;
                 {
