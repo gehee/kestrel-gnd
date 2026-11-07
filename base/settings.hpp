@@ -39,7 +39,7 @@ public:
     Settings(const Settings&) = delete;
     Settings& operator=(const Settings&) = delete;
 
-    void load(const std::string& filename);
+    void load(const std::string& filename, bool atomic = false);
     // Writes the file now if a change is not on disk yet. set() only queues the
     // write, so anything about to restart the app, or hand over to a script
     // or process that reads the file, calls this first.
@@ -91,6 +91,7 @@ private:
 
     std::map<std::string, std::string> _settings;
     std::string _filename;
+    bool _atomic = false;
     std::mutex _mutex;
 
     // Background writer. _gen counts changes, _saved_gen is the last one on

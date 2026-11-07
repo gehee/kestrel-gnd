@@ -68,6 +68,10 @@ void store_preferences(const std::string& path, const UiPreferences& p) {
         if (fsync(fd)) throw std::runtime_error("Syncing UI preferences failed");
         close(fd); fd = -1;
         if (rename(name.data(), path.c_str())) throw std::runtime_error("Replacing UI preferences failed");
+        const int dirfd=open(directory.empty()?"/":directory.c_str(),O_RDONLY|O_DIRECTORY|O_CLOEXEC);
+        if(dirfd<0)throw std::runtime_error("Opening UI preferences directory failed");
+        const int synced=fsync(dirfd); close(dirfd);
+        if(synced)throw std::runtime_error("Syncing UI preferences directory failed");
     } catch (...) {
         if (fd >= 0) close(fd);
         unlink(name.data()); throw;

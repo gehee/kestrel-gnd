@@ -1,6 +1,7 @@
 // The AR8030 link: its construction, what it is as a radio::Link (the
 // commands carried out between its steps, what it holds), and its loop.
 #include "radio/ar8030_link_detail.hpp"
+#include "radio/native_pairing.hpp"
 
 using namespace radio;
 
@@ -10,7 +11,7 @@ Ar8030Link::Ar8030Link(radio::Model& model, const Ar8030Config& cfg,
                        volatile bool* stop_signal,
                        std::string host_, int host_port_,
                        int slot_, int video_port_)
-    : native_sdio_(cfg.native_sdio), peer_(cfg.peer), model_(model), settings_(settings), fc_out_(model.fc()), imu_out_(model.imu()),
+    : native_sdio_(cfg.native_sdio), pairing_file_(cfg.pairing_file), peer_(cfg.peer), model_(model), settings_(settings), fc_out_(model.fc()), imu_out_(model.imu()),
       video_("ar8030", codec_, vdec_, cfg.decode_enabled, cfg.stream_decode, model, *this),
       codec(codec_), vdec(vdec_), should_stop(stop_signal),
       host(std::move(host_)), host_port(host_port_), slot(slot_), video_port(video_port_),
@@ -28,6 +29,7 @@ Ar8030Link::Ar8030Link(radio::Model& model, const Ar8030Config& cfg,
       video_dump_path(cfg.video_dump_path), decode_enabled(cfg.decode_enabled),
       mode_w(cfg.mode_w), mode_h(cfg.mode_h), mode_fps(cfg.mode_fps), mode_chn(cfg.mode_chn),
       probe_modes(cfg.probe_modes), probe_rf(cfg.probe_rf) {
+    if (native_sdio_ && !peer_) peer_ = radio::load_native_peer(pairing_file_);
     accum.reserve(AR_READ_CHUNK * 2);
 }
 

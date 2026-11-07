@@ -1,4 +1,7 @@
 #include "base/settings.hpp"
+#include <fcntl.h>
+#include <unistd.h>
+#include <cstdio>
 #include <fstream>
 #include <sstream>
 #include <iostream>
@@ -15,9 +18,10 @@ std::string Settings::trim(const std::string& str) {
     return str.substr(first, (last - first + 1));
 }
 
-void Settings::load(const std::string& filename) {
+void Settings::load(const std::string& filename, bool atomic) {
     std::lock_guard<std::mutex> lock(_mutex);
     _filename = filename;
+    _atomic = atomic;
     _settings.clear();
     _saved_gen = _gen;   // what is in memory now is what the file holds
 
@@ -101,15 +105,32 @@ void Settings::write_snapshot() {
         gen = _gen;
     }
 
-    // Rewritten in place, as before: the file may be a link into a writable
-    // partition, and a rename would replace the link rather than its target.
-    std::ofstream file(filename);
-    if (!file.is_open()) {
-        std::cerr << "Failed to open settings file for writing: " << filename << std::endl;
-    } else {
-        for (const auto& pair : snap) {
-            file << pair.first << ": " << pair.second << "\n";
+    if (_atomic) {
+        // Native deployment owns this regular file. Never expose a truncated
+        // receiver configuration if power disappears during a save.
+        const auto tmp=filename+".new";
+        FILE* f=fopen(tmp.c_str(),"w");
+        bool ok=f!=nullptr;
+        if(f) {
+            for(const auto& pair:snap)
+                if(fprintf(f,"%s: %s\n",pair.first.c_str(),pair.second.c_str())<0)ok=false;
+            if(fflush(f) || fsync(fileno(f)))ok=false;
+            if(fclose(f))ok=false;
         }
+        if(ok && rename(tmp.c_str(),filename.c_str())==0) {
+            const auto slash=filename.find_last_of('/');
+            const auto parent=slash==std::string::npos?".":filename.substr(0,slash?slash:1);
+            const int fd=open(parent.c_str(),O_RDONLY|O_DIRECTORY|O_CLOEXEC);
+            if(fd>=0) { fsync(fd); close(fd); }
+        } else {
+            unlink(tmp.c_str());
+            std::cerr << "Failed to replace settings file: " << filename << std::endl;
+        }
+    } else {
+        // Legacy boards may use symlinks into vendor writable partitions.
+        std::ofstream file(filename);
+        if(!file.is_open())std::cerr << "Failed to open settings file: " << filename << std::endl;
+        else for(const auto& pair:snap)file << pair.first << ": " << pair.second << "\n";
     }
 
     // Marked done even when the open failed: a read-only file stays read-only,

@@ -151,7 +151,7 @@ kestrel-gnd --assets ./assets --no-radio --show-menu --seconds 20
 ```
 
 The example exits after twenty seconds and disables scanout. Omit `--seconds`
-to keep the menu running; this target does not start automatically at boot.
+to keep a manually launched menu running. Firmware deployment below starts it automatically.
 
 Use `--force-display` for development with a disconnected/misreported sink or
 a known-compatible mode missing from EDID. Always verify actual visible output;
@@ -313,4 +313,54 @@ continuous UI redraws. Paused gallery playback does not count as stalled live
 video.
 
 Keep experiment logs, captures, local configurations and builds in ignored
-`.local/`. Do not install this bring-up executable as an automatic boot service.
+`.local/`. Use the packaged runtime and fpvOS service for automatic startup; stop that service before manually launching a diagnostic receiver.
+
+
+## Firmware deployment and power-on
+
+Build the native static executables and both UI profiles, then package them:
+
+```sh
+python3 tools/package_ascent.py .local/build-ascent .local/runtime.squashfs
+```
+
+The host needs `squashfs-tools` and the matching AArch64 `strip` tool (override
+with `--strip`). The packer takes only executables and generated UI profiles,
+never preferences, pairing, recordings, or development files. It losslessly
+encodes idle themes relative to their shared background (KUIB v2). The receiver
+restores one image only when its theme changes; there is no per-frame decoding.
+Both KUIB v1 build assets and v2 packaged assets remain supported.
+
+In fpvOS, build `ascentvrx_defconfig` with `BR2_PACKAGE_KESTREL_NATIVE=y` and pass
+`KESTREL_NATIVE_IMAGE` as the absolute path to that SquashFS on every build.
+After changing the runtime, use `kestrel-native-reinstall` before building the
+firmware again. Install the resulting firmware through fpvOS's board-aware USB
+updater. Its existing kernel, root image, and bundle size checks still apply.
+
+Normal boot mounts `/usr/share/kestrel/runtime.squashfs` at `/opt/kestrel`, starts
+the native decoder/radio and the supervised application, and restores the saved
+HDMI mode, preferences and peer. No application files or host launch commands
+are needed on the SD card. An unpaired receiver starts with the idle screen and
+binding controls; `--peer` remains a session-only diagnostic override.
+
+Writable SD state lives in `/mnt/sd/fpvos/kestrel`: `ui.conf`, `receiver.conf`,
+`peer`, and `ssh/`. `/var/lib/kestrel` points there. Recordings and their existing
+thumbnail/telemetry sidecars live under `/mnt/sd/fpvos/recordings`. For an existing
+manual installation, stop its app, copy its visual/receiver preferences, migrate
+its peer to a four-byte colon-separated line in `peer`, and move or symlink the
+recording folder before restarting. These are device-local data, never firmware
+inputs. No vendor partition is formatted or reused for settings.
+
+Without writable SD storage, the application and full UI still run from flash.
+Settings/pairing are temporary in `/run/kestrel-state`, and recording is disabled
+by an unavailable recording path. Inserting a card requires remounting storage
+and restarting the service (or rebooting); automatic card hotplug is not part of
+this deployment. Missing HDMI is retried by the supervisor, so connecting a
+monitor later does not require a host command.
+
+`/etc/init.d/S60kestrel-gnd {start|stop|restart|status}` owns the application.
+Its supervisor bounds RAM logs to two 1 MiB files in `/run/kestrel-gnd`, retries
+failures with 2–10 second backoff, and reaps the HUD helper before restarting.
+Normal shutdown stops the app before unmounting SD. The control socket is
+`/run/kestrel-gnd/control`. Sending `quit` under supervision restarts the app;
+use the service's `stop` operation for maintenance.

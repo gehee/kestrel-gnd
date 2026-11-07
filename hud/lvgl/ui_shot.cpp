@@ -1,6 +1,7 @@
 // Deterministic offscreen states for comparison with tools/test/hud_shot.cpp.
 #include "display.hpp"
 #include "view.hpp"
+#include "hud/hud_theme.hpp"
 #include <filesystem>
 #include <cstdio>
 
@@ -24,6 +25,10 @@ int main(int argc, char** argv) {
                 for (int i = 0; i < 16; ++i) frame();
                 display.dump(std::string(argv[2]) + "/" + name + ".pam");
             };
+            for(int theme=0;theme<hud_theme_count();++theme) {
+                model.theme=theme; shot("idle_theme_"+std::to_string(theme));
+            }
+            model.theme=0;
             shot("idle"); controller.open_menu(); shot("picker");
             controller.key(Key::Enter); shot("ground_hud");
             controller.key(Key::Right); shot("ground_display");

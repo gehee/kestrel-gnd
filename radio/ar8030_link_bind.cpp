@@ -1,6 +1,7 @@
 // The AR8030 link's binding: pairing with an air unit, and which one it is
 // (its key for its own settings).
 #include "radio/ar8030_link_detail.hpp"
+#include "radio/native_pairing.hpp"
 
 using namespace radio;
 
@@ -187,7 +188,7 @@ void Ar8030Link::bind_finish(bool ok, const uint8_t peer[4], bool cancelled) {
         }
 
         if (save_paired_mac(peer))
-            printf("ar8030: bound peer saved to /factory/user_cfg.json\n");
+            printf("ar8030: bound peer saved\n");
         else
             printf("ar8030: WARNING could not save the bind - it will be lost on reboot\n");
     } else {
@@ -316,6 +317,10 @@ void Ar8030Link::bind_step() {
 // rewritten whole. Unknown keys are not preserved; the stock file has only
 // these three, and inventing others would be worse than dropping them.
 bool Ar8030Link::save_paired_mac(const uint8_t mac[4]) {
+    if (native_sdio_) {
+        peer_ = radio::Peer{mac[0],mac[1],mac[2],mac[3]};
+        return radio::save_native_peer(pairing_file_, *peer_);
+    }
     static const char *kPath = "/factory/user_cfg.json";
     static const char *kTmp  = "/factory/.user_cfg.json.new";
     static const int   kRing = 100;
@@ -439,7 +444,7 @@ void Ar8030Link::identify_peer() {
     // (66:00:00:00) there, and adopting it moved every setting to a new key.
     bb_mac_t macs[BB_CONFIG_MAX_SLOT_CANDIDATE];
     const int n = ar_load_candidate_macs(macs, BB_CONFIG_MAX_SLOT_CANDIDATE);
-    bool paired = false;
+    bool paired = native_sdio_ && peer_ && memcmp(peer_->data(),p,BB_MAC_LEN)==0;
     for (int i = 0; i < n && !paired; i++) paired = memcmp(macs[i].addr, p, BB_MAC_LEN) == 0;
     if (!paired) {
         printf("ar8030: linked peer is not a paired unit - settings key kept\n");

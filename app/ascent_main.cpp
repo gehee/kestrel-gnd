@@ -6,6 +6,7 @@
 #include "platform/ascent_panel.hpp"
 #include "kestrel_gnd_config.h"
 #include "radio/ar8030_link.hpp"
+#include "radio/native_pairing.hpp"
 #include "hud/lvgl/display.hpp"
 #include "hud/lvgl/input.hpp"
 #include "hud/lvgl/preferences.hpp"
@@ -48,6 +49,7 @@ struct Options {
 Options options(int argc, char **argv) {
     Options o;
     o.link.native_sdio = true;
+    o.link.pairing_file = "/var/lib/kestrel/peer";
     o.link.radio_fw = 1;
     o.link.decode_enabled = true;
     o.link.stream_decode = false;
@@ -95,6 +97,8 @@ Options options(int argc, char **argv) {
             o.menu = true;
         else if (arg == "--trace-dir")
             o.trace_dir = value();
+        else if (arg == "--pairing")
+            o.link.pairing_file = value();
         else if (arg == "--settings")
             o.settings_file = value();
         else if (arg == "--recordings")
@@ -130,6 +134,7 @@ Options options(int argc, char **argv) {
                  "  --send-key KEY      Send menu/up/down/left/right/enter/back/quit to that socket\n"
                  "  --preferences FILE  Save visual preferences (optional)\n"
                  "  --show-menu --vector --no-radio --seconds N\n"
+                 "  --pairing FILE      Persistent native pairing file\n"
                  "  --settings FILE     Save receiver and per-air-unit settings\n"
                  "  --recordings DIR    Existing folder for received-stream MP4 recordings\n"
                  "  --profile           Log UI and display timing every five seconds\n"
@@ -139,8 +144,6 @@ Options options(int argc, char **argv) {
         } else
             throw std::invalid_argument("unknown option: " + arg);
     }
-    if (o.command.empty() && o.radio && !o.link.peer && o.link.replay_path.empty())
-        throw std::invalid_argument("specify --peer for the air unit, or --no-radio for the UI");
     return o;
 }
 
@@ -243,7 +246,10 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
         model.backend.service.adapter = "fpvOS native Ascent";
         model.backend.service.hardware_delegated = false;
         model.backend.vrx.freshness_us = 6000000; // native full radio poll is every three seconds
-        model.set_preferences(kestrel_ui::load_preferences(o.preferences));
+        try { model.set_preferences(kestrel_ui::load_preferences(o.preferences)); }
+        catch(const std::exception& error) {
+            fprintf(stderr,"preferences: %s; starting with defaults\n",error.what());
+        }
         kestrel_ui::Controller controller(model);
         ascent::RegionMenu region_menu;
         ascent::ChannelMenu channel_menu(radio_model.radio());
@@ -615,11 +621,12 @@ int main(int argc, char **argv) {
             if (o.control.empty()) throw std::invalid_argument("--send-key requires --control");
             puts(kestrel_ui::send_control(o.control, o.command).c_str()); return 0;
         }
+        setvbuf(stdout,nullptr,_IOLBF,0);
         if (!o.trace_dir.empty()) ltrace::start(o.trace_dir);
         signal(SIGINT, signal_handler); signal(SIGTERM, signal_handler); signal(SIGUSR1, signal_handler);
         Settings settings;
         if (o.settings_file.empty() && !o.preferences.empty()) o.settings_file=o.preferences+".receiver";
-        if (!o.settings_file.empty()) settings.load(o.settings_file);
+        if (!o.settings_file.empty()) settings.load(o.settings_file,true);
         display::AscentMode selected = o.explicit_mode ?
             display::AscentMode{o.platform.display_height,o.platform.display_hz} :
             display::AscentMode{settings.get(display::setting::ascent_screen_height),settings.get(display::setting::ascent_screen_hz)};

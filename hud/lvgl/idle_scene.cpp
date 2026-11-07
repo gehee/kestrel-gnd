@@ -26,7 +26,7 @@ void IdleScene::prepare(const Model& model, uint64_t now) {
     auto word = [&](int offset) { return uint32_t(header[offset]) | uint32_t(header[offset + 1]) << 8 |
         uint32_t(header[offset + 2]) << 16 | uint32_t(header[offset + 3]) << 24; };
     if (!file.read(reinterpret_cast<char*>(header), sizeof(header)) || std::memcmp(header, "KUIB", 4) ||
-        word(4) != 1 || word(8) != unsigned(width_) || word(12) != unsigned(height_) ||
+        (word(4) != 1 && word(4) != 2) || word(8) != unsigned(width_) || word(12) != unsigned(height_) ||
         width_ < 1 || width_ > 4096 || height_ < 1 || height_ > 2160 || !word(16) || word(16) > 64)
         throw std::runtime_error("Invalid static idle artwork: " + path_);
     const uint64_t bytes = uint64_t(width_) * height_ * 4;
@@ -42,6 +42,13 @@ void IdleScene::prepare(const Model& model, uint64_t now) {
             pixels_.resize(bytes);
             if (!file.read(reinterpret_cast<char*>(pixels_.data()), pixels_.size()))
                 throw std::runtime_error("Cannot read static idle artwork: " + path_);
+            if (word(4) == 2 && i != 0) {
+                std::vector<uint8_t> base(bytes);
+                file.seekg(52); // Header, then the first theme's name.
+                if (!file.read(reinterpret_cast<char*>(base.data()),base.size()))
+                    throw std::runtime_error("Truncated base idle artwork: " + path_);
+                for (size_t j=0;j<pixels_.size();++j) pixels_[j] ^= base[j];
+            }
             image_.header.magic = LV_IMAGE_HEADER_MAGIC;
             image_.header.cf = LV_COLOR_FORMAT_ARGB8888;
             image_.header.w = width_; image_.header.h = height_; image_.header.stride = width_ * 4;

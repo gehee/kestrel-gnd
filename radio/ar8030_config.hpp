@@ -14,6 +14,7 @@
 struct Ar8030Config {
     // Native SDIO has no vendor daemon or factory pairing store.
     bool native_sdio = false;
+    std::string pairing_file;
     std::optional<std::array<uint8_t, 4>> peer;
     // The channel and width to start on (--ar8030-freq / --ar8030-bw).
     // Defaults taken from the stock boot log for this board (rf_board 16):

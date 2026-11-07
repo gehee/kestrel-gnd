@@ -157,7 +157,7 @@ void Ar8030Link::configure_link() {
     if (!dev) return;
 
     bb_mac_t macs[BB_CONFIG_MAX_SLOT_CANDIDATE];
-    int n = peer_ ? 1 : ar_load_candidate_macs(macs, BB_CONFIG_MAX_SLOT_CANDIDATE);
+    int n = peer_ ? 1 : native_sdio_ ? 0 : ar_load_candidate_macs(macs, BB_CONFIG_MAX_SLOT_CANDIDATE);
     if (peer_) memcpy(macs[0].addr, peer_->data(), 4);
     if (n > 0 && !native_sdio_) {
         for (int i = 0; i < n; i++)
@@ -173,7 +173,7 @@ void Ar8030Link::configure_link() {
         // Empty on a goggle never paired under stock (fpvOS merges stock's
         // list off the NAND at boot) and never bound here: not a fault, just
         // nothing to link with yet.
-        printf("ar8030: no paired air units in /factory/user_cfg.json - bind one from the menu\n");
+        printf("ar8030: no paired air units - bind one from the menu\n");
     }
 
     // Which side are we? The VRX runs as BB_ROLE_DEV (stock logs "rold=DEV"),
@@ -545,14 +545,13 @@ bool Ar8030Link::connect_bb() {
     if (!bounded_req(BB_INIT_REQ, "bb_init")) return false;
     if (*should_stop) return false;
     if (native_sdio_) {
-        // Native startup must set uplink power and the explicit peer before
-        // START can associate. No factory partition or daemon is involved.
+        // Set the paired AP before START. A zero AP keeps a new receiver
+        // unpaired, with its menu and binding controls available.
         const uint8_t power_auto[3] = {0, 14, 14}, power[2] = {0, 14};
         if (bb_ioctl_ex(hdev, BB_SET_POWER_AUTO, power_auto, nullptr, kBringupReqTimeoutMs) != 0 ||
             bb_ioctl_ex(hdev, BB_SET_POWER, power, nullptr, kBringupReqTimeoutMs) != 0) return false;
         bb_set_ap_mac_t ap{};
-        if (!peer_) return false;
-        memcpy(ap.mac.addr, peer_->data(), 4);
+        if (peer_) memcpy(ap.mac.addr, peer_->data(), 4);
         if (bb_ioctl_ex(hdev, BB_SET_AP_MAC, &ap, nullptr, kBringupReqTimeoutMs) != 0) return false;
     }
     if (!bounded_req(BB_START_REQ, "bb_start")) return false;
