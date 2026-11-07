@@ -121,7 +121,7 @@ static const char* kArFwLabels[] = { "STOCK", "OPEN8030" };
 static const int kArFwCount = 2;
 // DISPLAY > Refresh Sync's values (display::RefreshSync::mode).
 static inline const char *refresh_sync_label(int v) {
-    return v == 2 ? "FREE" : v == 1 ? "ON" : "OFF";
+    return v == 2 ? "FOLLOW" : v == 1 ? "NUDGE" : "OFF";
 }
 
 // AR8030 camera menu option tables. EV, the mode list and the anti-flicker

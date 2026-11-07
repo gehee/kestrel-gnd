@@ -401,7 +401,7 @@ class OSD : public display::VideoListener {
         std::string screen_confirm_mode_;             // it: "WxH@R", or "auto"
         uint64_t    screen_confirm_deadline_ms_ = 0;
         int         screen_confirm_left_s();
-        // DISPLAY > Refresh Sync on trial: ON or FREE applied but not saved
+        // DISPLAY > Refresh Sync on trial: NUDGE or FOLLOW applied but not saved
         // until Enter; no answer in 10 s puts the kept value back (a screen
         // that blanks on it cannot be answered from).
         bool        sync_confirm_ = false;
@@ -593,7 +593,7 @@ class OSD : public display::VideoListener {
         // DISPLAY rows, in the order they are listed. The tab is dispatched
         // by index in half a dozen places, so the order lives here once and
         // the dispatchers name the row rather than count to it. Sync Margin
-        // is listed only while Refresh Sync is ON or FREE, and Sync To not at
+        // is listed only while Refresh Sync is NUDGE or FOLLOW, and Sync To not at
         // all (hidden, its setting still read): both last, so no row moves.
         enum DisplayRow {
             kDispTheme = 0, kDispBgVideo, kDispPicture, kDispUiScale, kDispBrightness,

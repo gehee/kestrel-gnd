@@ -354,7 +354,7 @@ void DrmDevice::check_follow_camera() {
     drmModeConnector *conn = drmModeGetConnectorCurrent(drm_fd, output_list->connector.id);
     if (!conn) return;
     const drmModeModeInfo cur = output_list->mode;
-    // A screen that takes any frame length (Refresh Sync FREE) keeps its
+    // A screen that takes any frame length (Refresh Sync FOLLOW) keeps its
     // fastest mode: the lock makes its frames as long as the camera's, and
     // its quick scan-out lights the lower rows sooner.
     int in_step = 0;

@@ -344,7 +344,7 @@ public:
     // The display lock sets each frame's length (Refresh Sync): how long the
     // one being scanned out is, us, 0 for the mode's own (frame_period_us).
     void set_frame_period(double us) { frame_period_now_us_.store(us, std::memory_order_relaxed); }
-    // Refresh Sync changed (FREE wants the fastest mode): Auto chooses again.
+    // Refresh Sync changed (FOLLOW wants the fastest mode): Auto chooses again.
     void refollow() override { refollow_.store(true); }
     // Held while the CRTC's mode changes (Auto following the camera, a hotplug
     // modeset), and by the display lock (display_lock.hpp) around its register

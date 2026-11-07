@@ -233,7 +233,7 @@ int DVR::init(int frm_width, int frm_height) {
 		if (fps < 1) fps = 1;
 		rga_slot_ticks = leader->rga_slot_ticks * follow_k;
 	} else {
-		// Refresh Sync FREE holds each refresh as long as a camera frame: the
+		// Refresh Sync FOLLOW holds each refresh as long as a camera frame: the
 		// screen's rate is the camera's, whatever its mode says. Taken from the
 		// lock's target, not the refresh of the moment - a recording started
 		// while the lock was not holding (the video back after a drop) read the
@@ -1003,7 +1003,7 @@ std::string DvrRecorder::recording_info(display::Display* disp) {
         snprintf(b, sizeof b, "screen: %dx%d, mode %.3f Hz, running %.3f Hz, frame %.1f us\n", md.w, md.h,
                  disp->mode_refresh_hz(), disp->measured_refresh_hz(), disp->frame_period_us());
         t += b;
-        static const char* const kSync[] = { "OFF", "ON", "FREE" };
+        static const char* const kSync[] = { "OFF", "NUDGE", "FOLLOW" };
         const display::RefreshSync rs = disp->refresh_sync();
         snprintf(b, sizeof b, "refresh sync: %s, slice %d, margin %d us, camera %.3f fps, %s%s%s\n",
                  rs.mode >= 0 && rs.mode <= 2 ? kSync[rs.mode] : "?", rs.slice, rs.margin_us, rs.camera_fps,

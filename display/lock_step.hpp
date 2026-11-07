@@ -1,5 +1,5 @@
 #pragma once
-// DISPLAY > Refresh Sync ON's step (DisplayLock::run), apart from the lock so
+// DISPLAY > Refresh Sync NUDGE's step (DisplayLock::run), apart from the lock so
 // it can be tested without a display (tools/test/display_lock_test.cpp).
 
 namespace display {
@@ -10,7 +10,7 @@ struct LineStep {
     bool arrived;   // reached the target this frame
 };
 
-// One frame of ON: a line at a time, and one way only - frames made longer
+// One frame of NUDGE: a line at a time, and one way only - frames made longer
 // where the screen is the faster than the camera, shorter where it is the
 // slower (`shorter`). Either way the drift between them brings the vblank
 // back the other way, so it never has to move against it. e: the target less

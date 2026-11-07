@@ -25,7 +25,7 @@ namespace {
 const uint64_t kWindowUs = 2000000;       // arrivals looked at: the last 2 s
 const size_t kMinSamples = 50;
 const double kStayUs = 30;                // a better position by less than this is not worth a move
-const double kFreeShorter = 0.005;        // FREE: frames at most this much shorter than the mode's
+const double kFreeShorter = 0.005;        // FOLLOW: frames at most this much shorter than the mode's
 // A picture past the deadline is not shown a refresh late: the next one
 // overtakes it and it is dropped, a visible stutter. Weighed as this much
 // wait, a position with 1 fewer of 200 dropped is worth 0.5 ms more wait for
@@ -112,9 +112,9 @@ bool DisplayLock::map_register() {
 
 // Whether to hold the phase now: turned on for this screen, no VRR, and the
 // screen able to keep in step at all.
-// ON: the refresh a whole multiple of the camera's frame rate - otherwise the
+// NUDGE: the refresh a whole multiple of the camera's frame rate - otherwise the
 // pictures sweep through the refresh far faster than a line a frame follows.
-// FREE: the screen's mode no more than 0.5% slower than the camera (frames
+// FOLLOW: the screen's mode no more than 0.5% slower than the camera (frames
 // made shorter than the mode's by at most that, kFreeShorter), and no more
 // than twice as fast.
 bool DisplayLock::usable(int lock, double Pm, double Pc, const char **why) {
@@ -214,11 +214,11 @@ void DisplayLock::run() {
     uint64_t log_t = 0, cam_t = 0;
     double moved_us = 0;              // since the last log line
     double pc_last = 0, pc_known = 0; // the camera's period: last measured, and in use
-    double trim = 0;                  // FREE: lines learned on top of the period's (its error)
+    double trim = 0;                  // FOLLOW: lines learned on top of the period's (its error)
     double aim_us = 0;                // test: the vblank this much earlier than the best (A/B)
     uint64_t aim_t = 0;
     int pc_mode = -1;                 // (lines << 16) | fps pc_known is of
-    int dir_said = 0;                 // ON: the way frames were last said to move (1 longer, -1 shorter)
+    int dir_said = 0;                 // NUDGE: the way frames were last said to move (1 longer, -1 shorter)
     std::vector<uint64_t> in;
 
     while (run_.load(std::memory_order_relaxed)) {
@@ -334,7 +334,7 @@ void DisplayLock::run() {
         if (why_said) {
             why_said = nullptr;
             printf("display lock: on (%s) - holding the vblank just after the pictures arrive\n",
-                   free ? "FREE: each frame as long as the camera's" : "one line at a time");
+                   free ? "FOLLOW: each frame as long as the camera's" : "NUDGE: one line at a time");
             fflush(stdout);
         }
 
@@ -356,8 +356,8 @@ void DisplayLock::run() {
             released_ = d_ == 0 && !seen.held;
         }
 
-        // The grid the vblank is held to: the mode's refresh (ON), or one
-        // refresh per camera frame, or per half, third... of one (FREE): B
+        // The grid the vblank is held to: the mode's refresh (NUDGE), or one
+        // refresh per camera frame, or per half, third... of one (FOLLOW): B
         // lines more than the mode's each frame - fewer, by up to 0.5%, where
         // the camera is a little faster (60.03 fps on a 60.000 Hz mode).
         double Pt = Pm, B = 0;

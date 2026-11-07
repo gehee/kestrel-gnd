@@ -308,36 +308,36 @@ const char* OSD::menu_help_text(int tab, int i, const char* fallback) {
                              "camera frame (%.2f fps). Off if the screen blanks.%s", hz, k, k > 1 ? "es" : "", fps, now);
                 else
                     snprintf(t, sizeof(t), "Cannot hold here: %.2f Hz is not a whole multiple of the camera's\n"
-                             "%.2f fps. Screen Mode Auto picks one that is, or use FREE.", hz, fps);
+                             "%.2f fps. Screen Mode Auto picks one that is, or use FOLLOW.", hz, fps);
                 return t;
             }
             case 2: {
-                if (fps > hz / 0.999f) {
-                    snprintf(t, sizeof(t), "Cannot slow this screen: the camera (%.2f fps) is faster than\n"
-                             "its %.2f Hz. Pick a faster screen mode.", fps, hz);
+                if (fps > hz / 0.995f) {
+                    snprintf(t, sizeof(t), "Cannot hold this screen: the camera (%.2f fps) is more than 0.5%% faster\n"
+                             "than its %.2f Hz. Pick a faster screen mode.", fps, hz);
                     return t;
                 }
                 const float k = std::max(1.0f, std::floor(hz / fps + 1e-6f));
                 char per[40];
                 if (k > 1) snprintf(per, sizeof(per), "%.0f refreshes a camera frame", k);
                 else snprintf(per, sizeof(per), "a refresh a camera frame");
-                snprintf(t, sizeof(t), "Slows this screen from %.2f Hz to %.2f Hz in this video mode, %s.\n"
+                snprintf(t, sizeof(t), "Moves this screen from %.2f Hz to %.2f Hz in this video mode, %s.\n"
                          "Only for screens that take any frame length.%s", hz, k * fps, per, now);
                 return t;
             }
             default:
                 snprintf(t, sizeof(t), "The screen refreshes on its own timing: %.2f Hz, the camera %.2f fps.\n"
-                         "ON or FREE hold it in step with the pictures.", hz, fps);
+                         "NUDGE or FOLLOW hold it in step with the pictures.", hz, fps);
                 return t;
             }
         }
         switch (menu_refresh_sync) {
-        case 1:  return "Holds the refresh just after each picture arrives, a line at a time.\n"
-                        "Needs a refresh in step with the camera (Screen Mode Auto). Off if the screen blanks.";
-        case 2:  return "Each frame made as long as the camera's, at the fastest mode: for screens that\n"
+        case 1:  return "Nudges the refresh a line at a time to just after each picture: for screens that\n"
+                        "blank when the timing changes. Needs a refresh in step with the camera.";
+        case 2:  return "The screen follows the camera, each frame as long as the camera's: for screens that\n"
                         "show their refresh change (118, 100 Hz...) without blanking. Lowest latency.";
-        default: return "The screen refreshes on its own timing. ON or FREE hold it in step with\n"
-                        "the pictures - FREE only for a screen that takes any frame length.";
+        default: return "The screen refreshes on its own timing. NUDGE or FOLLOW hold it in step with\n"
+                        "the pictures - FOLLOW only for a screen that takes any frame length.";
         }
     }
     if (tab == kTabDvr && i == 0) {
@@ -546,7 +546,7 @@ std::vector<OSD::MenuItem> OSD::menu_items(int tab) const {
             {"Frame Mode", 1, "How pictures go from the radio to the screen."},  // see menu_help_text
         };
         // Refresh Sync only where the display controller's frame length can be
-        // set (platform::caps), and Sync Margin only while it is ON or FREE: with it
+        // set (platform::caps), and Sync Margin only while it is NUDGE or FOLLOW: with it
         // OFF the margin does nothing. Sync To (kDispSyncSlice, after it: which
         // slice the lock times the screen to) is hidden; display_lock_slice
         // still applies.
@@ -1105,9 +1105,9 @@ void OSD::menu_apply_change(int tab, int index, int dir) {
             }
         } else if (menu_index == kDispRefreshSync) {
             // The screen's own, like its mode: one that blanks on it keeps it off
-            // while another has it on. FREE also moves Screen Mode Auto to the
+            // while another has it on. FOLLOW also moves Screen Mode Auto to the
             // fastest mode (and back), so Auto chooses again.
-            // ON and FREE go on trial (sync_confirm_): live at once, kept on
+            // NUDGE and FOLLOW go on trial (sync_confirm_): live at once, kept on
             // Enter, the kept value back after 10 s without it. OFF, or the
             // kept value itself, is kept at once.
             const int was = refresh_sync().mode;

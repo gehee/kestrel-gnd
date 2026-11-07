@@ -117,7 +117,7 @@ int main() {
     RATE("1920x1080@240", mon, 120, 1920, 1080);
     RATE("1920x1080@240", mon, 60, 1920, 1080);    // 240 is in step with 60
     RATE("1920x1080@240", mon, 90, 1920, 1080);    // none in step: the fastest
-    RATE("1920x1080@240", mon, 0, 1920, 1080);     // Refresh Sync FREE: the fastest
+    RATE("1920x1080@240", mon, 0, 1920, 1080);     // Refresh Sync FOLLOW: the fastest
     RATE("1920x1080@144", V({{1920, 1080, 60, 0}, {1920, 1080, 144, 0}}), 60, 1920, 1080);
 
     // The order cut at max is still the order's start.

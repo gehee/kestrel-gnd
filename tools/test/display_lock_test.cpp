@@ -1,4 +1,4 @@
-// Host test of display/lock_step.hpp: DISPLAY > Refresh Sync ON's step, a
+// Host test of display/lock_step.hpp: DISPLAY > Refresh Sync NUDGE's step, a
 // line at a time, against a screen a little faster and a little slower than
 // the camera - the vblank's place in the refresh simulated frame by frame.
 //   g++ -std=c++17 -I. -o display_lock_test tools/test/display_lock_test.cpp && ./display_lock_test

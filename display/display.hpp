@@ -52,7 +52,7 @@ struct FlipSample { uint64_t t_us; uint32_t gap_us; };
 // holds). Its settings, and what it sees as of its last pass: for the menu's
 // help line and a screen recording's rate.
 struct RefreshSync {
-    int mode = 0;               // 0 OFF, 1 ON, 2 FREE
+    int mode = 0;               // 0 OFF, 1 NUDGE, 2 FOLLOW
     int slice = 1;              // what it times the refresh to: 1 a picture's first slice, 2 its last
     int margin_us = 0;          // the refresh this much later than where the expected wait is least
     float mode_hz = 0;          // the screen mode's refresh
@@ -91,7 +91,7 @@ public:
     // contrast, saturation, hue - 0..100, default 50): the video and the HUD
     // together.
     virtual bool set_display_property(const char* name, uint64_t value) = 0;
-    // Refresh Sync changed (FREE wants the fastest mode): Screen Mode Auto
+    // Refresh Sync changed (FOLLOW wants the fastest mode): Screen Mode Auto
     // chooses again.
     virtual void refollow() = 0;
 

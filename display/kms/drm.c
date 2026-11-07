@@ -761,7 +761,7 @@ struct modeset_output *modeset_output_create(int fd, drmModeRes *res, drmModeCon
 			printf( "%d : %dx%d@%d%s\n",i, conn->modes[i].hdisplay, conn->modes[i].vdisplay , conn->modes[i].vrefresh,
 				(conn->modes[i].flags & DRM_MODE_FLAG_INTERLACE) ? " [interlaced - skipped]" : "" );
 			// "@60" is 60.000 and 59.94 alike (vrefresh is whole Hz): the
-			// faster, so a camera's 60.03 is the nearer and FREE can lengthen it.
+			// faster, so a camera's 60.03 is the nearer and FOLLOW can lengthen it.
 			if (conn->modes[i].hdisplay == mode_width &&
 			conn->modes[i].vdisplay == mode_height &&
 			conn->modes[i].vrefresh == mode_vrefresh

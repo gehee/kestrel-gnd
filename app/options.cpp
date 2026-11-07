@@ -167,7 +167,7 @@ int read_start_options(int argc, char** argv, Settings& settings, StartOptions& 
 	{
 		const int v = have_screen_id
 			? settings.get(display::setting::display_lock(screen_id_buf)) : 0;
-		o.sync_mode = v >= 0 && v <= 2 ? v : 0;   // OFF, ON, FREE
+		o.sync_mode = v >= 0 && v <= 2 ? v : 0;   // OFF, NUDGE, FOLLOW
 	}
 	o.sync_slice = settings.get(display::setting::display_lock_slice) == 2 ? 2 : 1;
 	{
