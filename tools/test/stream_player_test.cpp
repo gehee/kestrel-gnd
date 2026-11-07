@@ -34,7 +34,9 @@ int main() {
             check(p.size()>6 && p[0]==0 && p[1]==0 && p[2]==0 && p[3]==1,"Playback packets are Annex B");
             if(nal>=32)++parameters;
             else {if(active){auto sample=active->telemetry_at(ts);check(sample && sample->values.at("battery_v")==16.4,"Recorded telemetry accompanies video PTS");}
-                std::lock_guard<std::mutex> lock(mutex);timestamps.push_back(ts);if(pictures++==0)check(key,"First picture is random access");}
+                std::lock_guard<std::mutex> lock(mutex);timestamps.push_back(ts);
+                check(p==recording_frames[pictures%recording_frames.size()],"Indexed sample offset preserves encoded picture bytes");
+                if(pictures++==0)check(key,"First picture is random access");}
         }};
     {
         dvr::StreamPlayer player(path,output,64,64);active=&player;
@@ -130,6 +132,67 @@ int main() {
         check(player.state().deletion_message.find("Delete failed:")==0,"Missing file reports deletion error");
         bool path_rejected=false;try{player.erase("../escape.mp4");}catch(const std::invalid_argument&){path_rejected=true;}
         check(path_rejected,"Deletion rejects path traversal");
+    }
+    {
+        // Long GOP metadata with a fake decoder: forward seeks must retain
+        // references and never resubmit a sample after interrupted pre-roll.
+        // This tests scheduling, not the validity of the repeated P-picture payload.
+        dvr::StreamRecorder recorder(path,VideoCodec::H265,64,64,60);
+        recorder.set_parameter_sets(recording_ps);recorder.toggle();wait([&]{return recorder.is_recording();});
+        for(unsigned i=0;i<900;++i) {
+            if(i%30==0) {
+                auto sample=std::make_shared<media::TelemetrySample>();sample->values["group"]=i/30;
+                recorder.set_telemetry(sample);
+            }
+            recorder.feed(std::make_shared<std::vector<uint8_t>>(recording_frames[i?1:0]),1000000+i*16667);
+            if(i%30==29) {wait([&]{const auto state=recorder.state();if(!state.error.empty())throw std::runtime_error(state.error);return state.frames+state.dropped==i+1;});check(recorder.state().dropped==0,"Long GOP fixture has no rejected NALs");}
+        }
+        const auto long_name=std::filesystem::path(recorder.state().file).filename().string();
+        recorder.stop();wait([&]{return !recorder.state().recording && !recorder.state().finishing;});
+        std::atomic<bool> selected{false},expect_key{true};
+        std::atomic<uint64_t> floor{0},visible{0},decoded{0};
+        std::atomic<unsigned> resets{0},advances{0},pictures{0};
+        uint64_t last=0;
+        dvr::StreamPlayer* continuing=nullptr;
+        dvr::StreamPlayer player(path,{
+            [&](bool on){selected=on;},[&]{return selected.load();},[]{return false;},
+            [&](const std::vector<uint8_t>&,uint64_t pts,uint8_t nal,bool key){
+                if(nal>=32)return;
+                if(expect_key.exchange(false))check(key,"Reset requires random access");
+                else check(pts>last,"Continuing seek never duplicates or reverses submitted frames");
+                last=pts;++pictures;
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                if(pts>=floor) {
+                    const auto sample=continuing->telemetry_at(pts);
+                    check(sample && sample->values.at("group")==double((pts*60/1000000+1)/30),
+                          "Continuing seek HUD matches the exact visible picture");
+                    visible=pts;
+                }
+                decoded=pts+1;
+            },{},{},[&](uint64_t target){floor=target;decoded=0;expect_key=true;++resets;},
+            [&]{return decoded.load();},[&](uint64_t target){floor=target;++advances;}
+        },64,64);continuing=&player;
+        player.play(long_name);wait([&]{return pictures>0;});player.pause();
+        player.seek_relative(5,0);wait([&]{return !player.state().seeking;});
+        check(player.state().error.empty() && advances==1 && resets==0 && visible==5000000,
+              "Forward seek reuses long-GOP decoder at exact target");
+        check(player.state().paused,"Continuing seek preserves pause");
+        check(player.state().present_from_us==visible,"Pending old scanout cannot supply target HUD");
+        player.seek_relative(-5,visible);wait([&]{return !player.state().seeking;});
+        check(resets==1 && visible==0,"Backward seek resets to random access");
+        check(player.state().present_from_us==0,"Backward seek restores HUD presentation floor");
+        player.seek_relative(5,0);wait([&]{return advances>=2 && decoded>100000;});
+        player.seek_relative(5,0);wait([&]{return !player.state().seeking;});
+        check(advances>=3 && resets==1 && visible==10000000 && player.state().error.empty(),
+              "New forward target continues in-flight pre-roll without another reset");
+        player.seek_relative(-5,visible);wait([&]{return !player.state().seeking;});
+        check(resets==2 && visible==5000000,"Backward seek after continuation remains exact");
+        player.seek_relative(5,visible);wait([&]{return advances>=4;});
+        player.seek_relative(-10,0);wait([&]{return !player.state().seeking;});
+        check(resets==3 && visible==0 && player.state().error.empty(),
+              "Reversing an in-flight continuing seek resets safely");
+        player.seek_relative(5,0);wait([&]{return advances>=5;});player.stop();
+        wait([&]{return !selected;});check(!player.state().seeking,"Stop cancels continuing pre-roll");
     }
     puts("PASS: MP4 playback, pacing, pause/resume, cancel, invalid files, decoder errors and recovery");return 0;
  } catch(const std::exception& e) {fprintf(stderr,"FAIL: %s\n",e.what());return 1;}

@@ -85,11 +85,17 @@ while seeking. Requests clamp to the beginning or last frame, and repeated
 requests accumulate while a seek is pending. A paused seek displays the target
 frame and stays paused; a playing seek continues playback.
 
-Seeking recreates only the hardware decoder, preserving the HDMI mode and UI.
-The player finds the preceding HEVC random-access frame, feeds its reference
-frames as fast as hardware decode permits with at most six outstanding pre-roll
-frames, and suppresses their display until the target frame. Clips with long gaps
-between keyframes take longer to seek because those reference frames must decode.
+Forward seeks retain the current hardware decoder and reference pictures when
+that is closer to the target than the preceding HEVC random-access frame.
+Repeated requests can extend an in-flight seek without restarting its decoder.
+Backward seeks, and jumps with a closer random-access frame, recreate only the
+decoder, preserving the HDMI mode and UI. The player indexes sample offsets
+once per clip and caches keyframe locations as it reads them.
+
+Pre-roll runs as fast as hardware decode permits with at most six outstanding
+frames; intermediate pictures stay hidden until the exact target. Clips with
+long gaps between keyframes still take longer to seek backward because their
+reference frames must decode. No extra decoder or decoded-frame cache is used.
 The telemetry reader restores the matching recorded state, including backward
 seeks, and old playback HUD data is hidden during the transition.
 

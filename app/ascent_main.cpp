@@ -201,7 +201,8 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
             },[&](bool paused){source_decoder->pause_input(paused);},
             [&](const std::string& name){thumbnails.arm(name,kestrel_ui::monotonic_us());},
             [&](uint64_t pts){preview_sink->playback_floor=pts;source_decoder->restart_playback();},
-            [&]{return preview_sink->decoded_pts.load();}});
+            [&]{return preview_sink->decoded_pts.load();},
+            [&](uint64_t pts){preview_sink->playback_floor=pts;}});
         DvrSink recording_sink(codec,recorder);
         Ar8030Link link(radio_model, o.link, settings, codec, receiver.decoder, &stop);
         link.add_video_sink(&recording_sink);
@@ -536,7 +537,7 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
             model.backend.playback_dx=model.backend.playback_dy=model.backend.playback_bank=0;
             model.backend.playback_warning=0;model.backend.playback_clock.clear();
             model.backend.playback_telemetry_error=playback.telemetry_error;
-            if(playback.playing && !playback.seeking && video.stamp_us>=playback.started_us) {
+            if(playback.playing && !playback.seeking && video.stamp_us>=playback.started_us && video.pts_us>=playback.present_from_us) {
                 model.backend.playback_position_us=video.pts_us;
                 if(auto sample=player.telemetry_at(video.pts_us)) {
                     try {
