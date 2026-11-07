@@ -72,6 +72,20 @@ until their next update. Pause holds the picture, readings, motion, and warning
 pulse time. Current live receiver readings are never substituted for a missing
 recorded HUD.
 
+LEFT/RIGHT seek backward/forward five seconds; held arrows repeat when key repeat
+is enabled. The timeline shows the current position and the requested position
+while seeking. Requests clamp to the beginning or last frame, and repeated
+requests accumulate while a seek is pending. A paused seek displays the target
+frame and stays paused; a playing seek continues playback.
+
+Seeking recreates only the hardware decoder, preserving the HDMI mode and UI.
+The player finds the preceding HEVC random-access frame, feeds its reference
+frames as fast as hardware decode permits with at most six outstanding pre-roll
+frames, and suppresses their display until the target frame. Clips with long gaps
+between keyframes take longer to seek because those reference frames must decode.
+The telemetry reader restores the matching recorded state, including backward
+seeks, and old playback HUD data is hidden during the transition.
+
 UP toggles the recorded HUD during playback. OK pauses/resumes; BACK returns to
 the gallery. The initial HUD setting follows the current HUD preference. The
 current theme, font scale, and detail preference apply to the recorded readings.
@@ -86,14 +100,14 @@ The selected Dynamic HUD setting must be enabled for playback movement; OFF
 centers the panels. `motion.bank_rad` remains in the sidecar for compatibility
 and other consumers, but does not rotate the native software HUD.
 
-The sidecar reader keeps checkpoint offsets for backward lookup. The current
-player exposes pause/resume and stop, not a video-seeking control. Ordinary
+The sidecar reader keeps checkpoint offsets for backward lookup. Ordinary
 external players display clean video; burning the HUD into an export is not
 part of recording or playback.
 
 ## Performance boundary
 
 Recording adds metadata and one thumbnail, not video composition. Playback
-retains independent hardware video and UI planes. Moving/rotating the HUD
-still uses the existing LVGL software transform path; its render cost can
-prevent a 60 Hz UI cadence. This feature does not remove that limitation.
+retains independent hardware video and UI planes. HUD translation redraws only
+affected regions; its render cost can still prevent a 60 Hz UI cadence at 1080p.
+The timeline refreshes at 10 Hz and invalidates only the playback header while
+the scene is unchanged. A paused, unchanged timeline does not trigger redraws.

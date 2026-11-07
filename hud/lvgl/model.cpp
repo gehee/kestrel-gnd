@@ -275,6 +275,7 @@ std::string Model::describe() const {
         << " pack_v=" << (backend.flight.have_pack_v ? backend.flight.pack_v : -1.0f)
         << " scene=" << int(scene_mode()) << " recording=" << backend.media.recording
         << " playing=" << backend.media.playing << " paused=" << backend.playback_paused
+        << " seeking=" << backend.playback_seeking << " duration_us=" << backend.playback_duration_us
         << " playback_us=" << backend.playback_position_us << " recorded_hud=" << bool(backend.playback_hud)
         << " playback_hud=" << playback_hud_enabled << " playback_dx=" << backend.playback_dx
         << " playback_bank=" << backend.playback_bank << " playback_warning=" << backend.playback_warning;

@@ -11,6 +11,12 @@ void SourceDecoder::pause_input(bool on) {
     std::lock_guard<std::mutex> lock(mutex_);paused_=on;
     if(active_ && wanted_ && playing_ && active_generation_==generation_)active_->pause_input(on);
 }
+void SourceDecoder::restart_playback() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if(!wanted_)return;
+    ++generation_;playback_failed_=false;
+    if(active_)active_->cleanup();
+}
 bool SourceDecoder::playback_ready() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return active_ && wanted_ && playing_ && active_generation_==generation_;

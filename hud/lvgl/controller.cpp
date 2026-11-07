@@ -68,6 +68,9 @@ void Controller::key(Key key, bool repeat) {
             catch(const std::exception& e) {m.feedback=e.what();}
         } else if(m.scene==SceneMode::GalleryPlayback && key==Key::Up) {
             m.playback_hud_enabled=!m.playback_hud_enabled;
+        } else if(m.scene==SceneMode::GalleryPlayback && (key==Key::Left || key==Key::Right)) {
+            try {if(apply_receiver)apply_receiver("playback_seek",key==Key::Left?-5:5);}
+            catch(const std::exception& e) {m.feedback=e.what();}
         } else if(m.scene==SceneMode::GalleryBrowse) {
             const auto& clips=m.backend.recordings;
             const int last=std::max(0,int(clips.size())-1);

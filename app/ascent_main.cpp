@@ -171,9 +171,15 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
         dvr::Thumbnails thumbnails(o.recordings.empty()?settings.get(dvr::setting::dvr_dir):o.recordings);
         struct PreviewSink : hal::FrameSink {
             dvr::Thumbnails& thumbnails; std::shared_ptr<hal::FrameSink> screen;
+            std::atomic<uint64_t> playback_floor{0};
+            std::atomic<uint64_t> decoded_pts{0};
             PreviewSink(dvr::Thumbnails& t,std::shared_ptr<hal::FrameSink> s):thumbnails(t),screen(std::move(s)) {}
-            void queue_frame(std::shared_ptr<DecodedUnit> frame) override {thumbnails.capture(frame);screen->queue_frame(std::move(frame));}
-            void request_flush() override {screen->request_flush();}
+            void queue_frame(std::shared_ptr<DecodedUnit> frame) override {
+                decoded_pts=uint64_t(frame->pts)+1;
+                if(uint64_t(frame->pts)<playback_floor.load())return;
+                thumbnails.capture(frame);screen->queue_frame(std::move(frame));
+            }
+            void request_flush() override {screen->request_flush();decoded_pts=0;}
         };
         auto receiver = platform::make_software_receiver(o.platform, codec, &stop);
         auto preview_sink=std::make_shared<PreviewSink>(thumbnails,receiver.screen);
@@ -184,13 +190,15 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
         if(o.recordings.empty()) o.recordings=settings.get(dvr::setting::dvr_dir);
         dvr::StreamRecorder recorder(o.recordings,codec,1920,1080,60);
         dvr::StreamPlayer player(o.recordings,{
-            [&](bool playing){thumbnails.cancel();receiver.screen->hold_video(playing);source_decoder->playback(playing);},
+            [&](bool playing){thumbnails.cancel();preview_sink->playback_floor=0;receiver.screen->hold_video(playing);source_decoder->playback(playing);},
             [&]{return source_decoder->playback_ready();},
             [&]{return source_decoder->playback_failed() || source_decoder->failed();},
             [&](const std::vector<uint8_t>& data,uint64_t pts,uint8_t nal,bool key) {
                 source_decoder->feed_playback(const_cast<uint8_t*>(data.data()),int(data.size()),pts,kestrel_ui::monotonic_us(),nal,key);
             },[&](bool paused){source_decoder->pause_input(paused);},
-            [&](const std::string& name){thumbnails.arm(name,kestrel_ui::monotonic_us());}});
+            [&](const std::string& name){thumbnails.arm(name,kestrel_ui::monotonic_us());},
+            [&](uint64_t pts){preview_sink->playback_floor=pts;source_decoder->restart_playback();},
+            [&]{return preview_sink->decoded_pts.load();}});
         DvrSink recording_sink(codec,recorder);
         Ar8030Link link(radio_model, o.link, settings, codec, receiver.decoder, &stop);
         link.add_video_sink(&recording_sink);
@@ -274,6 +282,10 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
             }
             if(id=="playback_stop") {player.stop();return std::string("Playback stopped");}
             if(id=="playback_pause") {player.pause();return std::string("Playback pause changed");}
+            if(id=="playback_seek") {
+                player.seek_relative(value,model.backend.playback_position_us);
+                playback_checked=0;return std::string("Playback seek requested");
+            }
             if (region_menu.owns(id)) return region_menu.apply(id,value);
             if (id=="channel") return channel_menu.apply(value,model.backend);
             return controls.apply(id,value,kestrel_ui::monotonic_us());
@@ -404,7 +416,9 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
             model.backend.media.playback_known=true;model.backend.media.playing=playback.playing;
             model.backend.media.playback_id=playback.file;
             model.backend.playback_busy=playback.busy;model.backend.playback_paused=playback.paused;
-            model.backend.playback_position_us=playback.position_us;model.backend.playback_duration_us=playback.duration_us;
+            model.backend.playback_seeking=playback.seeking;
+            model.backend.playback_position_us=playback.seeking?playback.seek_target_us:playback.position_us;
+            model.backend.playback_duration_us=playback.duration_us;
             model.backend.playback_error=playback.error;
             auto& gallery=model.backend.controls["gallery"];gallery={};gallery.known=true;gallery.enabled=true;gallery.action=true;
             gallery.text=std::to_string(playback.recordings.size())+" RECORDINGS";
@@ -501,7 +515,7 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
             model.backend.playback_dx=model.backend.playback_dy=model.backend.playback_bank=0;
             model.backend.playback_warning=0;model.backend.playback_clock.clear();
             model.backend.playback_telemetry_error=playback.telemetry_error;
-            if(playback.playing && video.stamp_us>=playback.started_us) {
+            if(playback.playing && !playback.seeking && video.stamp_us>=playback.started_us) {
                 model.backend.playback_position_us=video.pts_us;
                 if(auto sample=player.telemetry_at(video.pts_us)) {
                     try {

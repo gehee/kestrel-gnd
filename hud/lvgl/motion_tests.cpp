@@ -75,6 +75,17 @@ int main(int argc, char** argv) {
                 model.show_hud=false;draw();full_matches();
                 model.show_hud=true;draw();full_matches();
             }
+            model.backend.playback_duration_us=30000000;
+            model.backend.playback_position_us=0;draw();
+            const auto empty_timeline=display.pixels();
+            for(uint64_t position:{5000000,15000000,1000000,30000000,0}) {
+                model.backend.playback_position_us=position;
+                model.backend.playback_seeking=position==15000000;
+                draw();full_matches();
+                if(position==5000000)check(display.pixels()!=empty_timeline,"Playback timeline did not advance");
+            }
+            const auto timeline_presentations=display.presentations;draw();
+            check(display.presentations==timeline_presentations,"Paused timeline caused redundant redraws");
         }
         lv_deinit();
         std::printf("PASS: %dp live/replay translation, bank ignored, held pose and damage\n",height);

@@ -15,12 +15,14 @@ public:
         std::function<void(const std::vector<uint8_t>&,uint64_t,uint8_t,bool)> feed;
         std::function<void(bool)> pause;
         std::function<void(const std::string&)> started;
+        std::function<void(uint64_t)> seek; // reset decoder; suppress frames before this PTS
+        std::function<uint64_t()> decoded; // last completed PTS + 1, zero after reset
     };
     struct State {
-        bool busy=false,playing=false,paused=false;
+        bool busy=false,playing=false,paused=false,seeking=false;
         std::string file,error,telemetry_error;
         uint64_t started_us=0;
-        uint64_t position_us=0,duration_us=0,revision=0;
+        uint64_t position_us=0,duration_us=0,revision=0,seek_target_us=0;
         std::vector<dvr_lib::Recording> recordings;
     };
     StreamPlayer(std::string directory,Output output,int width=1920,int height=1080);
@@ -28,6 +30,7 @@ public:
     void play(const std::string& name);
     void stop();
     void pause();
+    void seek_relative(int seconds,uint64_t presented_us);
     State state() const;
     std::shared_ptr<const media::TelemetrySample> telemetry_at(uint64_t position_us) const;
 private:
@@ -38,6 +41,7 @@ private:
     State state_;std::string requested_;
     std::atomic<bool> quit_{false},paused_{false};
     std::atomic<uint64_t> generation_{0};
+    std::atomic<uint64_t> seek_revision_{0};
     struct PresentedSample {uint64_t us;std::shared_ptr<const media::TimedTelemetry> data;};
     std::deque<PresentedSample> telemetry_samples_;
     std::thread worker_;

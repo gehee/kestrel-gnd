@@ -12,6 +12,7 @@ public:
     using Factory=std::function<std::shared_ptr<Vdec>()>;
     SourceDecoder(Factory factory,volatile bool* stop) : factory_(std::move(factory)),stop_(stop) {}
     void playback(bool on);
+    void restart_playback();
     void pause_input(bool on) override;
     bool playback_ready() const;
     bool playback_failed() const {return playback_failed_;}

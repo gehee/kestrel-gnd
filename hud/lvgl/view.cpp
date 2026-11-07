@@ -360,13 +360,20 @@ void View::draw_gallery(lv_layer_t* layer) {
         text_.canvas(layer,s,x*u,y*u,size*u,false,rgb,1);
     };
     if(playing) {
-        rect(layer,0,0,width_,int(105*u),theme.ground,.88f);
-        label(model_.backend.playback_paused?"PAUSED":"PLAYBACK",32,42,26,theme.accent);
+        rect(layer,0,0,width_,int(140*u),theme.ground,.88f);
+        label(model_.backend.playback_seeking?"SEEKING":model_.backend.playback_paused?"PAUSED":"PLAYBACK",32,42,26,theme.accent);
         label(model_.backend.media.playback_id,240,42,22,theme.text);
         const auto elapsed=model_.backend.playback_position_us/1000000,total=model_.backend.playback_duration_us/1000000;
-        label(std::to_string(elapsed)+" / "+std::to_string(total)+" s   OK: pause/resume   BACK: gallery   UP: HUD " + std::string(!model_.backend.playback_hud?"UNAVAILABLE":model_.playback_hud_enabled?"ON":"OFF"),32,82,20,theme.text);
-        if(!model_.backend.playback_error.empty())label(model_.backend.playback_error,32,145,24,theme.accent);
-        else if(!model_.backend.playback_telemetry_error.empty())label("Recorded HUD unavailable",32,145,24,theme.accent);
+        label(std::to_string(elapsed)+" / "+std::to_string(total)+" s   LEFT/RIGHT: -/+5s   OK: pause/resume   BACK: gallery   UP: HUD " + std::string(!model_.backend.playback_hud?"UNAVAILABLE":model_.playback_hud_enabled?"ON":"OFF"),32,82,20,theme.text);
+        const int left=int(32*u),right=width_-left;
+        const auto duration=model_.backend.playback_duration_us;
+        const double progress=duration?double(std::min(model_.backend.playback_position_us,duration))/duration:0;
+        const int head=left+int((right-left)*progress);
+        rect(layer,left,int(108*u),right-left,int(6*u),theme.quiet,.65f);
+        if(head>left)rect(layer,left,int(108*u),head-left,int(6*u),theme.accent,1);
+        rect(layer,std::clamp(head-int(3*u),left,right-int(6*u)),int(101*u),int(6*u),int(20*u),theme.text,1);
+        if(!model_.backend.playback_error.empty())label(model_.backend.playback_error,32,175,24,theme.accent);
+        else if(!model_.backend.playback_telemetry_error.empty())label("Recorded HUD unavailable",32,175,24,theme.accent);
         return;
     }
     rect(layer,0,0,width_,height_,theme.ground,.95f);
@@ -540,10 +547,17 @@ void View::update(uint64_t now) {
         }
         std::ostringstream signature;
         signature<<int(model_.scene)<<':'<<model_.gallery_selected<<':'<<model_.theme<<':'<<model_.feedback<<':'
-            <<model_.backend.playback_position_us/1000000<<':'<<model_.backend.playback_duration_us/1000000<<':'
+            <<model_.backend.playback_position_us/100000<<':'<<model_.backend.playback_duration_us/1000000<<':'<<model_.backend.playback_seeking<<':'
             <<model_.playback_hud_enabled<<bool(model_.backend.playback_hud)<<model_.backend.playback_telemetry_error<<model_.backend.playback_paused<<':'<<model_.backend.media.playback_id<<':'<<model_.backend.playback_error;
         if(model_.scene==SceneMode::GalleryBrowse) for(const auto& clip:model_.backend.recordings)signature<<clip.name<<':'<<clip.bytes<<';';
-        if(signature.str()!=gallery_signature_) {gallery_signature_=signature.str();lv_obj_invalidate(gallery_);}
+        if(signature.str()!=gallery_signature_) {
+            const auto next=signature.str();
+            if(model_.scene==SceneMode::GalleryPlayback && gallery_signature_.rfind(std::to_string(int(SceneMode::GalleryPlayback))+":",0)==0) {
+                const lv_area_t header{0,0,width_-1,int(200.0f*height_/1080)};
+                lv_obj_invalidate_area(gallery_,&header);
+            } else lv_obj_invalidate(gallery_);
+            gallery_signature_=next;
+        }
     }
     const bool replay=model_.scene==SceneMode::GalleryPlayback;
     const auto& grid=replay?model_.backend.playback_grid:model_.backend.bf_grid;

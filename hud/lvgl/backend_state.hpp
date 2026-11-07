@@ -97,7 +97,7 @@ struct ReceiverControl {
 struct BackendState : ReceiverState {
     struct Recording {std::string name;uint64_t bytes=0;std::shared_ptr<const media::Thumbnail> thumbnail;};
     std::vector<Recording> recordings;
-    bool playback_busy=false,playback_paused=false;
+    bool playback_busy=false,playback_paused=false,playback_seeking=false;
     uint64_t playback_position_us=0,playback_duration_us=0;
     std::string playback_error,playback_telemetry_error;
     std::shared_ptr<const HudData> playback_hud;

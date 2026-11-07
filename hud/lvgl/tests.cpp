@@ -148,10 +148,13 @@ int main(int argc, char** argv) {
         controller.key(Key::Up);check(!model.hud_visible() && !controller.hud_data(2300000).enabled,"Playback HUD can be hidden");
         controller.key(Key::Up);check(model.hud_visible(),"Playback HUD can be restored");
         model.backend.playback_hud.reset();
-        std::string playback_action;
-        controller.apply_receiver=[&](const std::string& id,int){playback_action=id;return std::string();};
+        std::string playback_action;int playback_value=0;
+        controller.apply_receiver=[&](const std::string& id,int value){playback_action=id;playback_value=value;return std::string();};
         controller.key(Key::Enter);
         check(playback_action=="playback_pause", "OK toggles playback pause");
+        controller.key(Key::Left);check(playback_action=="playback_seek" && playback_value==-5,"Left seeks five seconds backward");
+        controller.key(Key::Right);check(playback_action=="playback_seek" && playback_value==5,"Right seeks five seconds forward");
+        controller.key(Key::Right,true);check(playback_action=="playback_seek" && playback_value==5,"Held arrows repeat seeking");
         controller.key(Key::Back);
         check(model.scene_mode()==SceneMode::GalleryBrowse && playback_action=="playback_stop", "Back stops playback and restores the catalog");
         controller.key(Key::Back);

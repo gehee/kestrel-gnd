@@ -63,6 +63,55 @@ int main() {
         dvr::StreamPlayer player(path,output);player.play(name);wait([&]{return !player.state().busy;});
         check(player.state().error.find("dimensions")!=std::string::npos && !selected,"Unsupported geometry rejected before source switch");
     }
+    {
+        // Repeated independently decodable GOPs with changing recorded values.
+        dvr::StreamRecorder recorder(path,VideoCodec::H265,64,64,60);
+        recorder.set_parameter_sets(recording_ps);recorder.toggle();wait([&]{return recorder.is_recording();});
+        for(unsigned group=0;group<120;++group) {
+            auto sample=std::make_shared<media::TelemetrySample>();sample->values["group"]=group;
+            recorder.set_telemetry(sample);
+            for(unsigned j=0;j<8;++j)recorder.feed(std::make_shared<std::vector<uint8_t>>(recording_frames[j]),1000000+(group*8+j)*16667);
+            wait([&]{return recorder.state().frames==(group+1)*8;});
+        }
+        const auto seek_name=std::filesystem::path(recorder.state().file).filename().string();
+        recorder.stop();wait([&]{return !recorder.state().recording && !recorder.state().finishing;});
+        std::atomic<uint64_t> floor{0},visible{0},decoded{0};std::atomic<unsigned> resets{0};
+        std::atomic<bool> first{false},selected{false};
+        dvr::StreamPlayer* seeking=nullptr;
+        dvr::StreamPlayer player(path,{
+            [&](bool on){selected=on;},[&]{return selected.load();},[]{return false;},
+            [&](const std::vector<uint8_t>&,uint64_t pts,uint8_t nal,bool key){
+                if(nal>=32)return;
+                decoded=pts+1;
+                if(first.exchange(false))check(key,"Seek starts from a random access frame");
+                if(pts>=floor) {
+                    const auto sample=seeking->telemetry_at(pts);
+                    check(sample && sample->values.at("group")==double((pts*60/1000000+1)/8),"Seek HUD matches target video time");
+                    visible=pts;
+                }
+            },{}, {},[&](uint64_t target){floor=target;decoded=0;first=true;++resets;},[&]{return decoded.load();}
+        },64,64);seeking=&player;
+        player.play(seek_name);wait([&]{return player.state().playing;});player.pause();
+        player.seek_relative(5,0);
+        wait([&]{return !player.state().seeking && player.state().position_us>=4900000;});
+        check(player.state().paused && visible>=4900000 && visible<=5000000,"Paused forward seek displays requested frame");
+        const auto held=visible.load();std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        check(visible==held,"Seek preserves a paused picture");
+        player.seek_relative(-5,held);wait([&]{return !player.state().seeking;});
+        check(visible==0 && player.state().paused,"Backward seek restores beginning and recorded telemetry");
+        player.seek_relative(5,0);player.seek_relative(5,0);
+        wait([&]{return !player.state().seeking;});
+        check(visible>=9900000 && visible<=10000000,"Rapid requests accumulate from pending target");
+        player.seek_relative(100,visible);wait([&]{return !player.state().seeking;});
+        check(player.state().busy && player.state().paused && visible>15900000,"Seek clamps to last frame and stays paused");
+        player.seek_relative(-100,visible);wait([&]{return !player.state().seeking;});
+        check(visible==0 && resets>=5,"Backward boundary clamps to zero");
+        player.pause();wait([&]{return visible>100000;});
+        player.seek_relative(5,visible);wait([&]{return !player.state().seeking;});
+        check(!player.state().paused && visible>5000000,"Playing seek stays playing");
+        player.seek_relative(5,visible);player.stop();wait([&]{return !selected;});
+        check(!player.state().busy && !player.state().seeking,"Stop cancels an in-flight seek");
+    }
     puts("PASS: MP4 playback, pacing, pause/resume, cancel, invalid files, decoder errors and recovery");return 0;
  } catch(const std::exception& e) {fprintf(stderr,"FAIL: %s\n",e.what());return 1;}
 }
