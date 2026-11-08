@@ -214,11 +214,12 @@ void DisplayLock::run() {
     uint64_t log_t = 0, cam_t = 0;
     double moved_us = 0;              // since the last log line
     double pc_last = 0, pc_known = 0; // the camera's period: last measured, and in use
+    double pc_own = 0;                // this camera's, from its stamps' last reading (0: none)
     double trim = 0;                  // FOLLOW: lines learned on top of the period's (its error)
     double aim_us = 0;                // test: the vblank this much earlier than the best (A/B)
     uint64_t aim_t = 0;
     int pc_mode = -1;                 // (lines << 16) | fps pc_known is of
-    int dir_said = 0;                 // NUDGE: the way frames were last said to move (1 longer, -1 shorter)
+    int dir_said = 2;                 // NUDGE: the way frames were last said to move (display::Way; 2 none)
     std::vector<uint64_t> in;
 
     while (run_.load(std::memory_order_relaxed)) {
@@ -260,15 +261,18 @@ void DisplayLock::run() {
             pc_mode = cmode;
             trim = 0;
             pc_last = 0;
+            pc_own = 0;
             pc_known = fps > 0 ? settings_.get(display::setting::camera_period(lines, fps)) : 0;
             if (fps <= 0 || pc_known * fps < 0.99e6 || pc_known * fps > 1.01e6) pc_known = 0;
         }
         if (now >= cam_t + 10000000) {
             cam_t = now;
             const double pc = camera_period_us();
+            pc_own = 0;
             // Within 1% of the rate the mode is named by (a "100 fps" Lite+ runs
             // 100.13): anything further is not this mode's camera.
             if (pc > 0 && fps > 0 && pc * fps > 0.99e6 && pc * fps < 1.01e6) {
+                pc_own = pc;
                 printf("display lock: the camera's frame every %.3f us by this clock (%.4f fps), the screen's mode "
                        "%.3f us\n", pc, 1e6 / pc, Pm);
                 fflush(stdout);
@@ -323,7 +327,7 @@ void DisplayLock::run() {
                 fflush(stdout);
                 why_said = why;
                 locked_said = false;
-                dir_said = 0;
+                dir_said = 2;
             }
             std::lock_guard<std::mutex> lk(m_);
             arrivals_in_.clear();
@@ -439,22 +443,30 @@ void DisplayLock::run() {
                 fflush(stdout);
             }
         } else {
-            // A line at a time, one way only (lock_step.hpp): longer where the
-            // screen is the faster, shorter where it is the slower (60.000 Hz
-            // against the Lite+'s 60.03 fps) - longer only, there, went round a
-            // whole refresh every 12 s. Never both ways: the drift brings the
-            // vblank back the other way, so a line one way is all it needs.
-            // Until the camera's period is measured it is the mode's: longer.
-            const double k = std::max(1.0, std::round(Pc / Pm));
-            const bool shorter = k * Pm > Pc * (1 + 1e-6);
-            if ((shorter ? -1 : 1) != dir_said) {
-                dir_said = shorter ? -1 : 1;
+            // A line at a time (lock_step.hpp). One way only where this
+            // camera's own period is measured and drifts 100 ppm or more from
+            // the refresh: longer where the screen is the faster, shorter where
+            // it is the slower (60.000 Hz against the Lite+'s 60.03 fps) -
+            // longer only, there, went round a whole refresh every 12 s; the
+            // drift brings the vblank back the other way. Either way where it
+            // is not measured (the stored period may be another air unit's: a
+            // P1 got the Lite+'s) or drifts less (the P1's ~60.00 fps): a later
+            // arrival went round the whole refresh through the pictures, 15 s
+            // of drops, for want of a drift to wait on.
+            const display::Way way = display::nudge_way(pc_own, Pm);
+            if ((int)way != dir_said) {
+                dir_said = (int)way;
                 moving = false;
-                printf("display lock: frames made only %s (the screen %s than the camera)\n",
-                       shorter ? "shorter" : "longer", shorter ? "slower" : "no slower");
+                if (way == display::Way::Either)
+                    printf("display lock: frames made shorter or longer (%s)\n",
+                           pc_own > 0 ? "the camera as fast as the screen" : "the camera's frame not measured");
+                else
+                    printf("display lock: frames made only %s (the screen %s than the camera)\n",
+                           way == display::Way::Shorter ? "shorter" : "longer",
+                           way == display::Way::Shorter ? "slower" : "faster");
                 fflush(stdout);
             }
-            const display::LineStep s = display::line_step(wrap(target - G, Pt), Pt, line, shorter, moving);
+            const display::LineStep s = display::line_step(wrap(target - G, Pt), Pt, line, way, moving);
             moving = s.moving;
             if (s.arrived && !locked_said) {
                 locked_said = true;
