@@ -28,6 +28,16 @@
 // The air unit acknowledges each command with a frame carrying the same cmd
 // byte, the ack flag, and a one-byte status (0 = accepted).
 namespace sky {
+struct PeriodStatus { bool temperature_valid; int temperature_c; bool low_power; };
+// cmd 0x05, including the command byte, already validated to at least 34 bytes.
+// fpvOS ground/reports.c uses signed degrees (127 = unavailable) and flags;
+// stock uses unsigned degrees and the empirically calibrated standby field.
+inline PeriodStatus period_status(const uint8_t* payload, bool fpvos) {
+    return {!fpvos || payload[1] != 127,
+            fpvos ? int(int8_t(payload[1])) : int(payload[1]),
+            fpvos ? (payload[29] & 1) != 0 : ((unsigned(payload[29]) << 8) | payload[30]) >= 780};
+}
+
 
 // Wire command ids, recovered from ar_ldy_gnd's GUI command dispatcher.
 enum Cmd : uint8_t {

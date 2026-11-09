@@ -3337,6 +3337,9 @@ broken_android_meta_hack:
 
 #if MP4D_AVC_SUPPORTED
         case BOX_avc1:  // AVCSampleEntry extends VisualSampleEntry
+#if MP4D_HEVC_SUPPORTED
+        case BOX_hvc1:  // Same VisualSampleEntry geometry; configuration is hvcC.
+#endif
 //         case BOX_avc2:   - no test
 //         case BOX_svc1:   - no test
         case BOX_mp4v:
@@ -3407,6 +3410,21 @@ broken_android_meta_hack:
             }
             break;
 #endif  // MP4D_AVC_SUPPORTED
+
+#if MP4D_HEVC_SUPPORTED
+        case BOX_hvcC:
+            if (!tr || payload_bytes < 23 || payload_bytes > 65536 || tr->dsi)
+            {
+                ERROR("invalid HEVC decoder configuration");
+            }
+            tr->object_type_indication = MP4_OBJECT_TYPE_HEVC;
+            tr->dsi_bytes = (unsigned)payload_bytes;
+            MALLOC(unsigned char*, tr->dsi, tr->dsi_bytes);
+            // Keep the bounded HEVCDecoderConfigurationRecord intact. Its
+            // length-size and VPS/SPS/PPS arrays are consumed by the player.
+            for (i = 0; i < tr->dsi_bytes; ++i) tr->dsi[i] = READ(1);
+            break;
+#endif
 
         case OD_ESD:
             {

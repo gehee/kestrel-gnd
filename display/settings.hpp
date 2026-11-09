@@ -7,6 +7,10 @@
 
 namespace display::setting {
 
+// Native Ascent HDMI profile; written only after the user confirms a trial.
+inline constexpr Setting<int> ascent_screen_height{"ascent_screen_height", 1080};
+inline constexpr Setting<int> ascent_screen_hz{"ascent_screen_hz", 60};
+
 // DISPLAY > Screen Mode, the screen's own (by the ID in its EDID; "" for a
 // screen with none): "WxH@Hz", unset for Auto. A mode picked in the menu is
 // on trial the first time: screen_mode_try names the screen and the mode,

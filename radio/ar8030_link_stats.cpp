@@ -318,6 +318,9 @@ void Ar8030Link::start_stats() {
     link_state_.store(-1);
     frame_clock_.set_linked(false);
     stats_thread = std::thread(&Ar8030Link::stats_run, this);
+    // Native SDIO does not yet expose a validated frame-clock calibration.
+    // Avoid the USB register-sampling loop on this transport.
+    if (native_sdio_) return;
     // Open8030 on our radio: its frame info (the air radio's clock from the
     // frame stamps). A radio that does not answer is asked again only every
     // 30 s, so the frame clock's steps keep their pace.
@@ -424,7 +427,7 @@ void Ar8030Link::stats_run() {
         send_caps();                     // when due: after a link-up or a menu change
         // Once a second. It was on the video thread, which then waited for the
         // radio's answer - a lost one held the next picture for a second.
-        poll_ap_time();
+        if (!native_sdio_) poll_ap_time();
         poll_resends();
         lk.lock();
         stats_cv.wait_for(lk, std::chrono::milliseconds(35), [this] { return stats_stop; });

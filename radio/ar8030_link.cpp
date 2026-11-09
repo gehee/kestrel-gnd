@@ -1,6 +1,7 @@
 // The AR8030 link: its construction, what it is as a radio::Link (the
 // commands carried out between its steps, what it holds), and its loop.
 #include "radio/ar8030_link_detail.hpp"
+#include "radio/native_pairing.hpp"
 #include "base/shell.hpp"
 
 using namespace radio;
@@ -11,7 +12,7 @@ Ar8030Link::Ar8030Link(radio::Model& model, const Ar8030Config& cfg,
                        std::atomic<bool>* stop_signal,
                        std::string host_, int host_port_,
                        int slot_, int video_port_)
-    : model_(model), settings_(settings), fc_out_(model.fc()), imu_out_(model.imu()),
+    : native_sdio_(cfg.native_sdio), pairing_file_(cfg.pairing_file), peer_(cfg.peer), model_(model), settings_(settings), fc_out_(model.fc()), imu_out_(model.imu()),
       video_("ar8030", codec_, vdec_, cfg.decode_enabled, cfg.stream_decode, model, *this),
       codec(codec_), vdec(vdec_), should_stop(stop_signal),
       host(std::move(host_)), host_port(host_port_), slot(slot_), video_port(video_port_),
@@ -29,6 +30,7 @@ Ar8030Link::Ar8030Link(radio::Model& model, const Ar8030Config& cfg,
       video_dump_path(cfg.video_dump_path), decode_enabled(cfg.decode_enabled),
       mode_w(cfg.mode_w), mode_h(cfg.mode_h), mode_fps(cfg.mode_fps), mode_chn(cfg.mode_chn),
       probe_modes(cfg.probe_modes), probe_rf(cfg.probe_rf) {
+    if (native_sdio_ && !peer_) peer_ = radio::load_native_peer(pairing_file_);
     accum.reserve(AR_READ_CHUNK * 2);
     link_st_last_.bw_step = -1;          // not known, as each publish starts it
 }
@@ -135,6 +137,7 @@ radio::State Ar8030Link::held() const {
 // own. The setting is saved here as the radio takes it (a stock radio's
 // width is 20 or 40), and written out before the restart.
 void Ar8030Link::restart_with(const Setting<int>& setting, int value, const char* why) {
+    if (native_sdio_) { printf("ar8030: %s requires a native radio restart\n", why); return; }
     printf("ar8030: %s - restarting the radio with it\n", why);
     fflush(stdout);
     settings_.set(setting, value);
@@ -194,7 +197,7 @@ void Ar8030Link::run() {
                 // own bring-up, so an early attempt can fail simply because the
                 // daemon is not up yet, and restarting it then would push the
                 // thing we are waiting for further away.
-                if (connect_fails >= kFailsBeforeDaemonRestart &&
+                if (!native_sdio_ && connect_fails >= kFailsBeforeDaemonRestart &&
                     (connect_fails % kFailsBeforeDaemonRestart) == 0) {
                     // On ar_libre this restarts the baseband itself: arlink.ko
                     // is unloaded and the radio power-cycled (bb_only.sh).

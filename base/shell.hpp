@@ -5,3 +5,7 @@
 // them: the decoder's buffers, the screen's DRM file. Same return value as
 // system(); the shell starts with no signal blocked.
 int run_shell(const char* cmd);
+
+#include <spawn.h>
+// Close inherited nonstandard descriptors; nonzero is a spawn action error.
+int spawn_close_descriptors(posix_spawn_file_actions_t* fa);

@@ -41,49 +41,8 @@ enum DvrFormat {
     FMP4
 };
 
-// The DVR's file writes, on a thread of their own.
-//
-// The muxer writes each picture as it is handed one, on the thread that takes
-// the pictures. Writing there meant the once-a-second fsync - which puts the
-// recording on the card, so a power cut loses a second at most - held that
-// thread for as long as the card took, 50 to 250 ms on the DVR partition. A
-// screen recording captures into a few buffers only, and with none coming
-// back the captures in between were dropped: the recording froze for a few
-// frames every second. Here the muxer's writes are only queued; this thread
-// writes them, in order, and does the syncing.
-//
-// Given the recordings' folder (dir) and the file's name in it, it also keeps
-// room on the card while it writes: now and then the oldest finished
-// recordings make way (never `name`, never anything but a recording).
-class DvrWriter {
-    public:
-        // on_fail: called once, on this thread, when the card stops taking
-        // the recording - full with nothing left to make way ("CARD FULL"),
-        // or an error ("CARD ERROR"). Nothing is written after it.
-        explicit DvrWriter(int fd, std::string dir = "", std::string name = "",
-                           std::function<void(const char* why)> on_fail = nullptr);
-        ~DvrWriter();       // writes out everything queued, then syncs
-        // Queue a write; 1 once any write has failed, as minimp4 expects.
-        int write(int64_t offset, const void* buf, size_t size);
-    private:
-        void run();
-        uint64_t headroom() const;   // the free space to keep, bytes
-        struct Chunk { int64_t offset; std::vector<uint8_t> data; };
-        const int fd_;
-        const std::string dir_, name_;
-        const std::function<void(const char*)> on_fail_;
-        std::mutex m_;
-        std::condition_variable work_, room_;
-        std::deque<Chunk> q_;
-        size_t queued_ = 0;     // bytes in q_
-        bool done_ = false;
-        std::atomic<bool> failed_{false};
-        // This thread's: the bytes written, and how many had been and when
-        // the free space was last looked at.
-        uint64_t written_ = 0, checked_at_ = 0;
-        uint64_t start_us_ = 0, checked_us_ = 0;
-        std::thread t_;
-};
+#include "dvr/writer.hpp"
+#include "dvr/recording_target.hpp"
 
 class DVR {
     private:
@@ -335,7 +294,7 @@ class DVR {
 //
 // Frames are dropped (cheaply) when not recording, so sources can call feed()
 // unconditionally.
-class DvrRecorder {
+class DvrRecorder : public RecordingTarget {
     public:
         static DvrRecorder& instance();
 

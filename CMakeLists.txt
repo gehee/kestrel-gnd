@@ -10,6 +10,17 @@ set(KESTREL_GND_VERSION_LABEL "2026.10.beta2" CACHE STRING "Version shown in the
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Software HUD tools can be tested without the receiver's graphics/media SDKs.
+option(KESTREL_LVGL_TOOLS_ONLY "Build only the LVGL frontend tools and tests" OFF)
+if(KESTREL_LVGL_TOOLS_ONLY)
+    option(KESTREL_TESTS "Build unit tests" OFF)
+    if(KESTREL_TESTS)
+        enable_testing()
+    endif()
+    add_subdirectory(hud/lvgl)
+    return()
+endif()
+
 add_compile_options("-Wno-address-of-packed-member")
 include(cmake/features.cmake)
 set(TARGET kestrel-gnd)
@@ -20,6 +31,15 @@ configure_file(kestrel_gnd_features.h.in kestrel_gnd_features.h)
 if(USE_RKMPP)
     message(STATUS "Building with rkmpp")
     add_definitions(-DUSE_RKMPP)
+endif()
+
+include(cmake/version.cmake)
+
+# The AR9311 has a native V4L2/DRM pipeline and the software LVGL frontend.
+# Select its sources before discovering GLES/FFmpeg/Rockchip dependencies.
+if(KESTREL_HAL STREQUAL "ar9311")
+    include(cmake/ascent.cmake)
+    return()
 endif()
 
 # The system libraries, each linked by the parts that call it.
@@ -83,39 +103,6 @@ if(USE_RKMPP AND RGA_LIB)
 else()
     message(STATUS "librga not found - screen recording falls back to writeback")
 endif()
-
-# Version stamping. Both the build time and the git hash used to be computed
-# here, at configure time, and then cached in the build directory - so every
-# binary reported whatever the tree looked like when cmake last ran, which
-# could be many commits ago. They are generated at build time now instead.
-set(KESTREL_GND_STAMP ${PROJECT_BINARY_DIR}/kestrel_gnd_version.cpp)
-# A build from a source tarball has no .git to describe. Packagers that know
-# the revision (fpvOS's Buildroot package) pass it here instead.
-set(KESTREL_GND_GIT_HASH_FALLBACK "" CACHE STRING "Revision to report when the source has no git metadata")
-add_custom_target(kestrel-gnd-stamp
-    COMMAND ${CMAKE_COMMAND}
-            -DPROJECT_VERSION=${KESTREL_GND_VERSION_LABEL}
-            -DSRC_DIR=${CMAKE_SOURCE_DIR}
-            -DGIT_HASH_FALLBACK=${KESTREL_GND_GIT_HASH_FALLBACK}
-            -DIN_FILE=${CMAKE_CURRENT_SOURCE_DIR}/kestrel_gnd_version.cpp.in
-            -DOUT_FILE=${KESTREL_GND_STAMP}
-            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/stamp_version.cmake
-    BYPRODUCTS ${KESTREL_GND_STAMP}
-    COMMENT "Stamping version (git hash + build time)"
-    VERBATIM
-)
-# Produce it once now as well, so the file exists for the first configure.
-execute_process(COMMAND ${CMAKE_COMMAND}
-    -DPROJECT_VERSION=${KESTREL_GND_VERSION_LABEL}
-    -DSRC_DIR=${CMAKE_SOURCE_DIR}
-    -DGIT_HASH_FALLBACK=${KESTREL_GND_GIT_HASH_FALLBACK}
-    -DIN_FILE=${CMAKE_CURRENT_SOURCE_DIR}/kestrel_gnd_version.cpp.in
-    -DOUT_FILE=${KESTREL_GND_STAMP}
-    -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/stamp_version.cmake)
-set_source_files_properties(${KESTREL_GND_STAMP} PROPERTIES GENERATED TRUE)
-# Its own library, under the HUD (which shows the version) and main.
-add_library(kg_version STATIC ${KESTREL_GND_STAMP})
-add_dependencies(kg_version kestrel-gnd-stamp)
 
 # kestrel_module(<part> FOLDERS <folder>... [DEPS <part>...] [SOURCES <file>...]
 #                [LIBS <system library>...])
@@ -197,8 +184,8 @@ kestrel_module(display FOLDERS display DEPS hal
 kestrel_module(platform FOLDERS platform DEPS hal bsp render display
     SOURCES platform/caps.cpp platform/kms_gles.cpp platform/gles_hud_layer.cpp ${KESTREL_PLATFORM_SRC}
     LIBS ${GFX_LIBRARIES} ${DRM_LIBRARIES})
-kestrel_module(dvr FOLDERS dvr DEPS platform
-    SOURCES dvr/h264_cfr.cpp dvr/hevc_repair.cpp dvr/dvr.cpp dvr/dvr_sink.cpp
+kestrel_module(dvr FOLDERS dvr DEPS platform system
+    SOURCES dvr/h264_cfr.cpp dvr/hevc_repair.cpp dvr/dvr.cpp dvr/dvr_sink.cpp dvr/writer.cpp dvr/mp4.cpp
             dvr/dvr_library.cpp dvr/dvr_recover.cpp)
 kestrel_module(hud FOLDERS hud icons DEPS bsp render msp display platform dvr region system
     SOURCES hud/gallery.cpp hud/gallery_stats.cpp hud/osd_gallery.cpp hud/osd_screen.cpp

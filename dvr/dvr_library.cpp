@@ -1,4 +1,5 @@
 #include "dvr/dvr_library.hpp"
+#include "base/shell.hpp"
 
 #include <cerrno>
 #include <dirent.h>
@@ -238,7 +239,10 @@ bool run_ffmpeg_thumb(const std::string& in, const std::string& out, const char*
     // None of kestrel's descriptors (the decoder's buffers among them) for ffmpeg.
     posix_spawn_file_actions_t fa;
     posix_spawn_file_actions_init(&fa);
-    posix_spawn_file_actions_addclosefrom_np(&fa, 3);
+    if (spawn_close_descriptors(&fa)) {
+        posix_spawn_file_actions_destroy(&fa);
+        return false;
+    }
     const int err = posix_spawnp(&pid, "nice", &fa, nullptr, const_cast<char* const*>(argv), ::environ);
     posix_spawn_file_actions_destroy(&fa);
     if (err != 0)
@@ -337,6 +341,7 @@ int delete_recording(const std::string& name, const std::string& active) {
     if (stat(path.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) return ENOENT;
     if (unlink(path.c_str()) != 0) return errno;
     unlink(thumb_path(name).c_str());
+    unlink((path+".telemetry.jsonl").c_str());
     // Made lasting (a power cut would bring it back) on the recordings'
     // partition alone: sync() wrote out the whole system.
     const int dfd = open(dir().c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);

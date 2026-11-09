@@ -68,6 +68,9 @@ class Ar8030Link : public radio::Link, private radio::VideoOut::Source {
         radio::State held() const override;
 
     private:
+        bool native_sdio_;
+        std::string pairing_file_;
+        std::optional<std::array<uint8_t, 4>> peer_;
         radio::Model& model_;            // what it learns goes to its model, which takes its commands
         Settings& settings_;             // the settings file: each air unit's own, the last peer
         // The streams it carries from the air unit, into the model's feeds
@@ -286,7 +289,7 @@ class Ar8030Link : public radio::Link, private radio::VideoOut::Source {
         // Persist a newly bound air unit into /factory/user_cfg.json so the
         // pairing survives a reboot. Returns false if it could not be written;
         // the bind itself still holds for this session.
-        static bool save_paired_mac(const uint8_t mac[4]);
+        bool save_paired_mac(const uint8_t mac[4]);
         uint64_t bind_started_ms_   = 0;
         uint64_t bind_next_poll_ms_ = 0;
         uint64_t bind_done_ms_      = 0;

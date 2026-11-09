@@ -75,6 +75,7 @@ void Ar8030Link::load_sky_config() {
     const uint8_t *f = ar_hs_5;
     unsigned lf = f[4] | (f[5] << 8);
     sky::read_config_payload(f + 7, (lf >> 4) - 1, &sky_cfg);
+    if (native_sdio_) { sky_cfg.ch0_w = 1920; sky_cfg.ch0_h = 1080; sky_cfg.ch0_fps = 60; }
     if (sky_cfg_key.empty()) return;
 
     Settings &st = settings_;
@@ -473,7 +474,12 @@ void Ar8030Link::scan_air_status(const uint8_t *buf, int n) {
             // clearly shows 50°C for the same state, so that field is not
             // temperature - see below for what it turned out to be instead.
             uint8_t vtx_cpu = pl[1];
-            model_.update_unit([&](air::UnitState &a) { a.vtx_cpu_c = (float)vtx_cpu; a.vtx_temp_valid = true; });
+            const bool native_report = model_.air_unit().state().info.kestrel;
+            const auto period = sky::period_status(pl, native_report);
+            model_.update_unit([&](air::UnitState &a) {
+                a.vtx_cpu_c = float(period.temperature_c);
+                a.vtx_temp_valid = period.temperature_valid;
+            });
 
             static uint64_t vtx_log_ms = 0;
             uint64_t vtx_now = now_ms();
@@ -491,20 +497,13 @@ void Ar8030Link::scan_air_status(const uint8_t *buf, int n) {
             // while this field cleanly stepped from ~840 (idle) to ~714
             // (armed) in lockstep with VTX temperature climbing 47C->64C -
             // a ~130-count gap with no overlap across ~45 samples each side.
-            // kVtxStandbyThresh sits in the middle of that gap; it is a
+            // The threshold in sky::period_status sits in the middle of that gap; it is a
             // two-sample calibration and may need retuning against more
             // hardware/distance/thermal conditions.
-            // kestrel-air's byte 29 is its own flags instead - bit 0
-            // standby, bit 1 its encoder running, bit 2 its stream paused
-            // (its src/ground/reports.c) - and byte 30 a power reading: the
-            // reading above misread it. A camera mode change stops its
-            // encoder, standby's 0x03xx became 0x01xx, under the threshold,
-            // and an air unit still in standby read as armed (bench
-            // 2026-11-01: 864p144 asked).
-            // Its bit 0 is exact.
-            static constexpr uint16_t kVtxStandbyThresh = 780;
             uint16_t b2930 = ((uint16_t)pl[29] << 8) | pl[30];
-            bool low_power = air_kestrel_ ? (pl[29] & 1) != 0 : b2930 >= kVtxStandbyThresh;
+            // fpvOS reports flags in byte 29, followed by TSSI; the stock
+            // two-byte standby heuristic does not apply to that format.
+            bool low_power = period.low_power;
             model_.low_power(low_power);
 
             static uint16_t last_b2930 = 0xFFFF;
@@ -534,6 +533,18 @@ void Ar8030Link::scan_air_status(const uint8_t *buf, int n) {
         if (pl_len > 1) {
             sky::SkyConfig air;
             if (sky::read_config_payload(pl + 1, pl_len - 1, &air)) {
+                // Kestrel's source serializer confirms these offsets. Publish
+                // actual camera readback, never a transport ACK or saved request.
+                if (air_kestrel_) {
+                    const auto previous = model_.camera().state();
+                    const int wb = static_cast<int16_t>(air.awb_cct);
+                    if (!previous.camera_n || previous.ev_x10 != air.ev_x10 || previous.awb != wb) {
+                        model_.update_camera([&](air::CameraState& c) {
+                            c.ev_x10 = air.ev_x10; c.awb = wb; ++c.camera_n;
+                        });
+                        printf("ar8030: camera readback ev=%d wb=%d\n", air.ev_x10, wb);
+                    }
+                }
                 // Re-report whenever the camera's own view changes, not just
                 // once: this is the only read-back that says whether a setting
                 // actually reached it. The ack channel cannot be relied on -

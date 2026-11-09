@@ -169,7 +169,10 @@ void Ar8030Link::send_prj_rf_config() {
 void Ar8030Link::apply_tx_power(int mw) {
     bb_dev_handle_t *dev = (bb_dev_handle_t *)bb_dev;
     if (!dev) return;
-    const ar_pwr_level &lv = kArPwrLevels[ar_pwr_index(mw)];
+    ar_pwr_level lv = kArPwrLevels[ar_pwr_index(mw)];
+    // The native Ascent profile uses dBm directly, without the VRX Pro
+    // board table correction. Its initial uplink is fixed at 25 mW.
+    if (native_sdio_) lv = {25, 14, false, "25mW"};
 
     // 3 bytes, not 1. Our bb_get_pwr_auto_out_t is a single uint8_t, but the
     // v2 table (extracted from stock) says SET 9 takes 3, so bb_ioctl copied

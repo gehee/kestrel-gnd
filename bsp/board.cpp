@@ -7,6 +7,8 @@ namespace bsp {
 const Board &board() {
 #if KESTREL_BOARD_VRXPRO
     return vrx_pro();
+#elif KESTREL_BOARD_ASCENT
+    return ascent();
 #else
     return pc();
 #endif

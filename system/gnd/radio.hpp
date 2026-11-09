@@ -45,7 +45,7 @@ struct LinkStats {
     uint32_t data_rate_kbps = 0;      // sending
     int tx_mcs_val = 0;
     uint32_t rx_data_rate_kbps = 0;   // receiving
-    int rx_mcs_val = 0;
+    int rx_mcs_val = -1;             // no receive reading yet
     bool active = false;
     uint64_t last_update_ms = 0;
     uint32_t ap_timestamp = 0;        // the radio's clock, as it last read it
