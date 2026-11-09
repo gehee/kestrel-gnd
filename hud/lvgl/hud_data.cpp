@@ -12,8 +12,7 @@ std::string number(float value, const char* format) {
 std::string Controller::recording_text(uint64_t now) const {
     if (!model_.backend.media.recording) return {};
     const auto seconds = was_recording_ && now >= recording_since_ ? (now - recording_since_) / 1000000 : 0;
-    char text[40]; std::snprintf(text, sizeof(text), "REC %llu:%02llu",
-        (unsigned long long)(seconds / 60), (unsigned long long)(seconds % 60));
+    char text[40]; canopy::recording_label(text, sizeof(text), unsigned(seconds));
     return text;
 }
 HudData Controller::hud_data(uint64_t now,bool recording_snapshot) const {
@@ -72,15 +71,15 @@ HudData Controller::hud_data(uint64_t now,bool recording_snapshot) const {
     if (distance >= 0) left.detail1 += "  • \xee\x80\x82 " + (distance >= 1000 ? number(distance / 1000.0f, "%.2fkm") : std::to_string(distance) + "m");
     left.detail1_quiet = !(fresh && f.have_mode) && distance < 0;
     const bool temperature = t.fresh(now) && t.cpu_temperature_x100 != Telemetry::unavailable;
-    auto temperature_alert = [](float c) { return c >= 85 ? 2 : c >= 70 ? 1 : 0; };
+    // The VRX Pro's thresholds and words (render/software/canopy.hpp).
+    const auto temperature_alert = canopy::temperature_alert;
     left.detail2 = "\xee\x80\x81   " + (temperature ? number(t.cpu_temperature_x100 / 100.0f, "VRX %.0fC") : "VRX --C");
     left.detail2_alert = temperature ? temperature_alert(t.cpu_temperature_x100 / 100.0f) : 0;
     // Local hardware readings may be absent independently of the RF link.
     left.detail2_tail = "  • " + (t.fresh(now) && t.voltage_mv > 0 ? number(t.voltage_mv / 1000.0f, "%.1fV") : "--V");
     if (t.fresh(now) && t.voltage_mv > 0) {
         const float volts = t.voltage_mv / 1000.0f;
-        const int cells = volts < 9 ? 2 : volts < 13 ? 3 : volts < 17.5f ? 4 : volts < 21.5f ? 5 : 6;
-        left.supply_alert = volts / cells <= 3.3f ? 2 : volts / cells <= 3.5f ? 1 : 0;
+        left.supply_alert = canopy::cell_alert(volts / canopy::supply_cells(volts));
     }
     const auto rc = m.rc_signal(now);
     right.upper_label = rc.label(); right.upper_level = rc.level(); right.lower_label = "VIDEO";
@@ -105,9 +104,7 @@ HudData Controller::hud_data(uint64_t now,bool recording_snapshot) const {
     right.detail1_alert = linked && link.vtx_temperature_valid ? temperature_alert(link.vtx_temperature_c) : 0;
     const auto& v = m.backend.video;
     const bool video_fresh = v.stamp_us && now >= v.stamp_us && now - v.stamp_us < 2000000;
-    int fps = v.fps;
-    int delta = 3;
-    for (int rate : {24,25,30,48,50,60,90,100,120}) if (std::abs(v.fps - rate) < delta) { delta = std::abs(v.fps - rate); fps = rate; }
+    const int fps = canopy::snapped_fps(v.fps);
     const std::string mode = video_fresh && v.height > 0 ? std::to_string(v.height) + "p" + (fps > 0 ? std::to_string(fps) : "--") : "--";
     right.detail2 = (linked ? number(link.video_mbps, "%.1f") + "/" + number(link.link_mbps, "%.1fMbps") : "--/--Mbps") +
         " • " + (video_fresh && v.latency_ms >= 0 ? number(v.latency_ms, "%.0fms") : "--ms") + " • " + mode + "   \xee\x80\x81";

@@ -225,8 +225,8 @@ double mp4_duration(const std::string& path) {
 static std::string g_dir = dvr::setting::dvr_dir.def;
 void set_dir(const std::string& d) { g_dir = d; }
 std::string dir() { return g_dir; }
-std::string thumb_dir() { return dir() + "/.thumbs"; }
-std::string thumb_path(const std::string& name) { return thumb_dir() + "/" + name + ".jpg"; }
+std::string thumb_dir() { return thumb_dir(dir()); }
+std::string thumb_path(const std::string& name) { return thumb_path(dir(), name); }
 
 namespace {
 
@@ -341,7 +341,7 @@ int delete_recording(const std::string& name, const std::string& active) {
     if (stat(path.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) return ENOENT;
     if (unlink(path.c_str()) != 0) return errno;
     unlink(thumb_path(name).c_str());
-    unlink((path+".telemetry.jsonl").c_str());
+    unlink(telemetry_path(path).c_str());
     // Made lasting (a power cut would bring it back) on the recordings'
     // partition alone: sync() wrote out the whole system.
     const int dfd = open(dir().c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);

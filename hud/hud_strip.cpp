@@ -2,6 +2,7 @@
 // (the clock, REC) - which also settles whether there is an aircraft - and
 // the edge glowing as the video link weakens.
 #include "hud/osd_detail.hpp"
+#include "render/software/canopy.hpp"
 
 void OSD::draw_shade(Frame& f) {
     auto& mvp_hud_c = f.mvp_hud_c;
@@ -203,7 +204,7 @@ void OSD::draw_top_strip(Frame& f) {
         if (rec_now) {
             if (rec_started_us == 0) rec_started_us = get_time_us();
             unsigned rs = (unsigned)((get_time_us() - rec_started_us) / 1000000ULL);
-            snprintf(rec_buf, sizeof(rec_buf), "REC %u:%02u", rs / 60, rs % 60);
+            canopy::recording_label(rec_buf, sizeof(rec_buf), rs);
         } else if (!panel_has_rec) {
             // REC gone off by itself, the card no longer taking it: why, where
             // it was, for 5 s (drawn before measure_link has it).
@@ -265,27 +266,20 @@ void OSD::draw_link_edge(Frame& f) {
     // Fades in fast and out slowly; red breathes so it cannot be mistaken
     // for a tint in the footage.
     {
+        // The fade and red's breathing are canopy::edge_fade / edge_pulse,
+        // which the Ascent's HUD draws too.
         uint64_t t = get_time_us();
-        float dt = link_edge_ts_ ? (float)(t - link_edge_ts_) / 1e6f : 0.0f;
-        if (dt > 0.1f) dt = 0.1f;
-        // At rest (fully off or fully on) the loop draws at 10 Hz, so the time
-        // since the last frame is no measure of the fade: start it with one
-        // animation frame, not a 100 ms jump.
-        if ((link_edge_a_ <= 0.001f || link_edge_a_ >= 0.999f) && dt > 1.0f / 60.0f) dt = 1.0f / 60.0f;
+        const float dt = link_edge_ts_ ? (float)(t - link_edge_ts_) / 1e6f : 0.0f;
         link_edge_ts_ = t;
         int lvl = link_edge_on_ ? canopy.link_warn : 0;
         if (lvl > 0) link_edge_shown_ = lvl;
-        float target = lvl > 0 ? 1.0f : 0.0f;
-        float rate   = (target > link_edge_a_) ? 1.0f / 0.15f : 1.0f / 0.60f;
-        float step   = rate * dt;
-        if (link_edge_a_ < target) link_edge_a_ = fminf(target, link_edge_a_ + step);
-        else                       link_edge_a_ = fmaxf(target, link_edge_a_ - step);
+        link_edge_a_ = canopy::edge_fade(link_edge_a_, lvl > 0 ? 1.0f : 0.0f, dt);
 
         if (link_edge_a_ > 0.001f) {
             float a = link_edge_a_, r, g, b;
             if (link_edge_shown_ >= 2) {
                 r = 1.0f; g = 0.30f; b = 0.25f;
-                a *= 0.65f + 0.35f * (0.5f + 0.5f * sinf((float)(t % 10000000ULL) / 1e6f * 7.54f));
+                a *= canopy::edge_pulse(t);
             } else {
                 r = 1.0f; g = 0.72f; b = 0.15f;
             }

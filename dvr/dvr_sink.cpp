@@ -13,10 +13,8 @@ static uint64_t now_ms() {
     return (uint64_t)ts.tv_sec * 1000ULL + ts.tv_nsec / 1000000ULL;
 }
 
-// The radio's pool keeps this many buffers free for the pictures still to
-// come (as DvrRecorder::feed does): below it, a queued reference would starve
-// them, so the picture is copied.
-static constexpr int kPoolReserve = 8;
+// The radio's pool keeps this many buffers free (dvr/recording_target.hpp).
+static constexpr int kPoolReserve = kRecordingPoolReserve;
 
 DvrSink::DvrSink(VideoCodec codec, RecordingTarget& target, std::function<bool()> screen_rec)
     : codec_(codec), target_(target), screen_rec_(std::move(screen_rec)) {
@@ -155,12 +153,7 @@ bool DvrSink::has_keyframe(const uint8_t* au, size_t n) const {
     for (size_t i = 0; i + 3 < n; i++) {
         if (au[i] != 0 || au[i + 1] != 0 || au[i + 2] != 1) continue;
         const uint8_t h = au[i + 3];
-        if (codec_ == VideoCodec::H265) {
-            const int t = (h >> 1) & 0x3F;
-            if (t >= 16 && t <= 21) return true;
-        } else if ((h & 0x1F) == 5) {
-            return true;
-        }
+        if (keyframe_nal(codec_, codec_ == VideoCodec::H265 ? (h >> 1) & 0x3F : h & 0x1F)) return true;
         i += 3;
     }
     return false;

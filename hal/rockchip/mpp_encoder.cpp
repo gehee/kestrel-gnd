@@ -1,4 +1,5 @@
 #include "hal/rockchip/mpp_encoder.hpp"
+#include "base/video_codec.hpp"
 
 // The RK3568 VEPU, reachable only through Rockchip MPP. Built only with
 // KESTREL_HAL=rockchip; other builds get the HAL's no-encoder stand-in.
@@ -174,7 +175,7 @@ bool MppH264Encoder::encode_external(void* mpp_buffer, const std::function<void(
             for (size_t i = 0; i + 4 < len && i < 128; i++) {
                 if (p[i] == 0 && p[i+1] == 0 && p[i+2] == 1) {
                     const int t = hevc_ ? (p[i+3] >> 1) & 0x3F : p[i+3] & 0x1F;
-                    if (hevc_ ? (t >= 16 && t <= 21) : t == 5) { key = true; break; }
+                    if (keyframe_nal(hevc_ ? VideoCodec::H265 : VideoCodec::H264, t)) { key = true; break; }
                 }
             }
             sink(p, len, key);

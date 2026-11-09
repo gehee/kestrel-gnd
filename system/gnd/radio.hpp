@@ -61,6 +61,18 @@ static inline const char* bw_step_label(int step) {
 // One sample of the radio's channel scan (the channel-scan screen): each
 // channel's centre and the energy the radio heard on it. Higher (less
 // negative) is busier.
+// A channel's 30 s max-hold, as both channel pages keep it (the VRX Pro's and
+// the Ascent's): raised at once when a sample is as busy or busier, held for
+// 30 s, then let down to the current level. A channel not measured (0 dBm)
+// has none. now_us: any microsecond clock.
+inline void hold_scan_peak(int& peak_dbm, uint64_t& at_us, int power_dbm, uint64_t now_us) {
+    if (power_dbm == 0) { peak_dbm = 0; at_us = 0; return; }
+    if (at_us == 0 || peak_dbm == 0 || power_dbm >= peak_dbm || now_us - at_us > 30ULL * 1000000ULL) {
+        peak_dbm = power_dbm;
+        at_us = now_us;
+    }
+}
+
 struct ScanSample {
     int chan_num = 0;           // channels (0: no data yet)
     int auto_mode = 0;          // 1: the radio picks the channel itself, 0: fixed

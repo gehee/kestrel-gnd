@@ -623,11 +623,10 @@ void View::update(uint64_t now) {
     last_tick_ = now;
     const int warning = model_.link_edge_warning ? (replay?model_.backend.playback_warning:controller_.link_warning()) : 0;
     const float edge_target = warning && model_.hud_visible() ? 1 : 0;
-    const float edge_dt = edge_fade_ == 0 || edge_fade_ == 1 ? std::min(dt, 1.0f/60) : dt;
-    edge_fade_ += std::clamp(edge_target-edge_fade_, -edge_dt/.6f, edge_dt/.15f);
+    edge_fade_ = canopy::edge_fade(edge_fade_, edge_target, dt);
     const int prior_level = edge_level_;
     if (warning) edge_level_ = warning;
-    const float pulse = edge_level_ == 2 ? .65f + .35f * (.5f + .5f * std::sin(float((replay?model_.backend.playback_position_us:now) % 10000000)/1000000*7.54f)) : 1;
+    const float pulse = edge_level_ == 2 ? canopy::edge_pulse(replay?model_.backend.playback_position_us:now) : 1;
     const int edge_opacity = int(255 * .75f * edge_fade_ * pulse);
     if (edge_opacity != edge_opacity_ || prior_level != edge_level_) {
         edge_opacity_ = edge_opacity;

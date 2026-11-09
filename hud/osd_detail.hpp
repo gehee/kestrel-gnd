@@ -39,6 +39,8 @@ std::string osd_asset(const char* name);
 #include "hal/picture.hpp"
 #include "base/settings.hpp"
 #include "region/zones.hpp"
+#include "system/air/camera.hpp"
+#include "system/air/encoder.hpp"
 #include <iostream>
 #include <unistd.h>
 #include <algorithm>
@@ -73,20 +75,8 @@ inline constexpr const char* kTabNames[8] = { "VIDEO", "RADIO", "HUD", "DISPLAY"
 static const int kArChanVals[]   = { -1, 5740000, 5770000, 5805000, 5839000 };
 static const char* kArChanLabels[] = { "AUTO", "5740", "5770", "5805", "5839" };
 static const int kArChanCount = 5;
-// Max Bitrate: kestrel-air's video bitrate cap, kbps (0 = AUTO: it follows the
-// link, up to 20 Mbps; a cap above that lets kestrel-air go to it, 40 at most,
-// on a link that carries it - 40 MHz). Below the link's own rate it buys a
-// steadier picture and shorter slices on the air; stock air units ignore it.
-static const int kArMaxBrVals[]     = { 0, 6000, 8000, 10000, 12000, 15000, 18000, 20000, 22000, 25000,
-                                        30000, 35000, 40000 };
-static const char* kArMaxBrLabels[] = { "AUTO", "6 Mbps", "8 Mbps", "10 Mbps", "12 Mbps",
-                                        "15 Mbps", "18 Mbps", "20 Mbps", "22 Mbps", "25 Mbps",
-                                        "30 Mbps", "35 Mbps", "40 Mbps" };
-static const int kArMaxBrCount = 13;
-static inline int ar_maxbr_index(int kbps) {
-    for (int i = 0; i < kArMaxBrCount; i++) if (kArMaxBrVals[i] == kbps) return i;
-    return 0;
-}
+// Max Bitrate's choices: system/air/encoder.hpp (the Ascent's menu offers them too).
+using air::kArMaxBrVals; using air::kArMaxBrLabels; using air::kArMaxBrCount; using air::ar_maxbr_index;
 // Max Bandwidth: how wide the video link may go. The goggle's radio widens it
 // by itself on a good link (bw_auto), to 40 MHz with fpvOS's radio config -
 // more throughput and a shorter frame, less range - or 20 with its 20 MHz one
@@ -124,60 +114,15 @@ static inline const char *refresh_sync_label(int v) {
     return v == 2 ? "FOLLOW" : v == 1 ? "NUDGE" : "OFF";
 }
 
-// AR8030 camera menu option tables. EV, the mode list and the anti-flicker
-// choices come from the stock GlassesUI; contrast is 0-15 because the config
-// frame packs it into a nibble. Saturation/sharpness ranges are NOT confirmed -
-// the camera acks every setting, so watch the log for a non-zero status.
-static const int   kEvSteps[]      = { -10, -7, -3, 0, 3, 7, 10 };
-static const char* kEvLabels[]     = { "-1.0", "-0.7", "-0.3", "0", "+0.3", "+0.7", "+1.0" };
-static const int   kEvCount        = 7;
-// Scene. Captured off the wire from stock (cmd 0x01): Race = 0, Standard = 2.
-// We used to send the menu index (0 = Standard, 1 = Race), i.e. both values
-// wrong. The gap at 1 is presumably a scene this unit does not offer.
-static const char* kSceneLabels[]  = { "Race", "Standard" };
-static const int   kSceneVals[]    = { 0, 2 };
-static const int   kSceneCount     = 2;
-// 3D DNR, sky cmd 0x1B. The stock goggle sends Off/Low/Mid/High/Auto as
-// 1/2/3/4/5, but the air unit - the stock app and kestrel-air alike - takes
-// 0 off, 1 its tuning bin's own noise reduction, 2/3/4 low/mid/high, and
-// anything else as 1: stock's Off (1) left it on. Off is 0 here, which both
-// turn off; Auto stays 5, the bin's.
-static const char* kDnrLabels[]    = { "Off", "Low", "Mid", "High", "Auto" };
-static const int   kDnrVals[]      = { 0, 2, 3, 4, 5 };
-static const int   kDnrCount       = 5;
-// Anti-Flicker (sky cmd 0x1F) was here but is gone: stock's own Camera menu
-// has no such row at all - confirmed against a photo of the stock UI - so it
-// was never a real setting to expose, whatever encoding the command itself
-// takes on the wire. See CMD_SET_ANTI_FLICKER in ar8030_sky.hpp.
-// White balance. The wire carries the colour temperature in Kelvin (cmd 0x05),
-// and stock offers Auto plus 4000K..7000K in 100K steps - 32 entries. The old
-// five-value table was a guess and did not match any of stock's steps except
-// 4000K. fact_env.json stores the *index*, which is why 7000K reads as 31.
-static const int   kWbCount        = 32;
-static inline int  wb_kelvin(int i) { return i <= 0 ? 0 : 3900 + i * 100; }
-static inline const char* wb_label(int i) {
-    static char buf[8];
-    if (i <= 0) return "Auto";
-    snprintf(buf, sizeof(buf), "%dK", wb_kelvin(i));
-    return buf;
-}
-// Camera rotation, stock's Camera > Rotate row (sky cmd 0x06).
-static const char* kRotateLabels[] = { "0", "180" };
-// Saturation, sharpness and contrast are Auto plus 1..10 on stock, and 0 is
-// what Auto puts on the wire - the same scheme white balance uses (0 = Auto,
-// otherwise a real value). Rendering 0 as "0" made Auto look like "minimum".
-// Contrast used to allow 15: that is the width of the nibble the config body
-// packs it into, not stock's range.
-static const int   kCamSatMax      = 10;
-static const int   kCamSharpMax    = 10;
-static const int   kCamContrastMax = 10;
-// 0 -> "Auto", anything else the number itself.
-static inline const char* cam_auto_label(int v) {
-    static char buf[8];
-    if (v <= 0) return "Auto";
-    snprintf(buf, sizeof(buf), "%d", v);
-    return buf;
-}
+// The camera's menu choices (EV, scene, 3D DNR, white balance, rotation,
+// saturation/sharpness/contrast): system/air/camera.hpp, which the native
+// Ascent's menu offers too.
+using air::kEvSteps; using air::kEvLabels; using air::kEvCount;
+using air::kSceneLabels; using air::kSceneVals; using air::kSceneCount;
+using air::kDnrLabels; using air::kDnrVals; using air::kDnrCount;
+using air::kWbCount; using air::wb_kelvin; using air::wb_label;
+using air::kRotateLabels;
+using air::kCamSatMax; using air::kCamSharpMax; using air::kCamContrastMax; using air::cam_auto_label;
 
 
 static inline int freq_to_channel(int freq) {

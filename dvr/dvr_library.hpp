@@ -16,6 +16,14 @@ void set_dir(const std::string& dir);                 // main(): the dvr_dir set
 std::string dir();                                    // it ("/media/dvr" until set)
 std::string thumb_dir();                              // <dir>/.thumbs
 std::string thumb_path(const std::string& name);      // <dir>/.thumbs/<name>.jpg
+// A recording's companions, by every part that makes, reads or deletes them
+// (the galleries, the Ascent's thumbnails and telemetry, the card's clean-up):
+// its thumbnail in a given folder, and its telemetry sidecar beside the video.
+inline std::string thumb_dir(const std::string& folder) { return folder + "/.thumbs"; }
+inline std::string thumb_path(const std::string& folder, const std::string& name) {
+    return thumb_dir(folder) + "/" + name + ".jpg";
+}
+inline std::string telemetry_path(const std::string& video) { return video + ".telemetry.jsonl"; }
 
 // Length of an MP4 in seconds, or -1 (a recording still being written, or one
 // that was cut short and has no readable length).

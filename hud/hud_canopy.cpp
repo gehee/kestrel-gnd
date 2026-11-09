@@ -16,6 +16,7 @@
 #include "base/settings.hpp"
 #include "hud/vec_icons.hpp"
 #include "hud/hud_theme.hpp"
+#include "render/software/canopy.hpp"
 #include "base/time_util.h"
 #include <cmath>
 #include <cstdio>
@@ -36,17 +37,21 @@ namespace {
 // screen, and giving one of them a colour of its own would rank them against
 // each other.
 
+// The canopy's design numbers, its frame and its link animation are shared
+// with the native Ascent's software HUD (render/software/canopy.hpp).
+using canopy::kBleed;
+using canopy::kSlantRad;
+using canopy::CanopyFrame;
+using canopy::canopy_frame;
+using canopy::kWedgeX;
+using canopy::kWedgeTop;
+using canopy::kWedgeBot;
+using canopy::kWedgeA;
+
 // Space between a track's name and the track itself, in mockup pixels. This
 // is the number the layout actually cares about; where the track starts falls
 // out of it once the label has been measured.
 constexpr float kLabelGap = 12.0f;
-
-// How far past the screen edge the frame is drawn. The dynamic HUD translates
-// the panels with the aircraft's accelerometer - about 0.025 frustum units per
-// G, with spring overshoot on top - so a rail that begins exactly at the edge
-// swings its own end into view on a hard manoeuvre. Everything anchored to the
-// edge starts out here instead, comfortably past anything the spring reaches.
-constexpr float kBleed = 60.0f;
 
 // Rest alpha for every rail line, all four of them, both panels. Was 0.95 -
 // close enough to solid that the rails read brighter than the rest of the
@@ -57,28 +62,6 @@ constexpr float kRailAlpha = 0.8f;
 // inherited from a 1200px canvas with wider margins all round; on the goggle it
 // was giving away more of the frame than the layout needs.
 constexpr float kEdge = 14.0f;
-
-// In-plane slant. Everything in a panel - the wedge, the rules, the tracks and
-// every line of type - shares this one angle, rising towards the centre of the
-// screen. The mockup gave the frame and the content slightly different slopes
-// (1.8 degrees on the wedge's top edge against 3.4 on the text), which reads
-// as a mistake rather than as depth: a blade is one object, and the moment two
-// of its edges disagree the eye stops seeing it as one.
-constexpr float kSlantRad = 0.05934f;   // 3.4 degrees
-
-// Leaving CONNECTED: hold and mark. The panel drops to half quickly, then the
-// rails pulse once and IDLE strikes in behind the pulse - the point being to
-// mark the moment the numbers stopped being true, rather than to let them fade
-// out and hope it is noticed. Losing the link is worth a beat of attention; the
-// readings on screen are about to become history without changing value.
-constexpr float kIdleBriUs   = 240000.0f;   // brightness falls to half
-constexpr float kIdlePulseUs = 360000.0f;   // ...the rails pulse once
-constexpr float kIdleMarkAt  = 440000.0f;   // ...IDLE strikes in behind it
-constexpr float kIdleMarkUs  = 240000.0f;
-constexpr float kIdleAllUs   = 800000.0f;
-// Where the dimmed panel settles. Named because three separate things have to
-// agree on it: the content, the rails, and the floor the pulse returns to.
-constexpr float kIdleFloor   = 0.5f;
 
 // How long the arm/disarm wipe takes, and how long ARMED holds the label slot
 // before the flight timer takes it over.
@@ -96,88 +79,9 @@ constexpr float kArmedHoldUs = 1800000.0f;
 // the far side of it.
 constexpr float kFrameEnd = 252.0f;
 
-// Link acquired. Not ambient motion - it marks the moment the radio finds the
-// aircraft, which is a moment you are already watching for. The phases run
-// outboard to inboard, the direction the perspective recedes, so the panel
-// reads as arriving from off-screen rather than fading up where it already is.
-constexpr float kLinkRuleUs  = 120000.0f;   // rules run in from the edges
-constexpr float kLinkShadeUs = 260000.0f;   // ...then the ground fades up
-constexpr float kLinkAllUs   = 420000.0f;   // ...then the blocks sweep in
-
 // Segment counts: the coarse "state" track and the fine "stress" one.
 constexpr int kSegsMain = 20;
 constexpr int kSegsThin = 12;     // the VIDEO track: range left, twelfths (osd.cpp)
-
-// Mockup y (from the top of its 620px frame) -> frustum y.
-// The panels sat 24 design px clear of the bottom edge. Half that reads
-// better - they are anchored to the frame, and a wide margin under them
-// makes them look like they are floating rather than sitting on it.
-constexpr float kDrop = 12.0f;
-
-// Where a mockup pixel lands in a panel's own space, before the panel yaw and
-// the slant. Worked out in one place because the labels over the blades while
-// a side is being picked (draw_canopy_pick) are drawn in it too.
-struct CanopyFrame {
-    float sd = 1.0f;          // the UI scale
-    float UX = 0, U = 0;      // one mockup column, one mockup row
-    float LX = 0, RX = 0;     // the screen edges
-    float BY = 0;             // the bottom
-    float MY(float y) const  { return BY + (620.0f - kDrop - y) * U; }
-    float LXo(float x) const { return LX + x * UX; }    // inward from the left
-    float RXo(float x) const { return RX - x * UX; }    // inward from the right
-};
-
-CanopyFrame canopy_frame(float frustum_w, float frustum_h, float overscan, float s, float depth) {
-    CanopyFrame F;
-    // Both wings are drawn through a matrix that rotates them 0.26 rad about
-    // Y, which swings their outer edge towards the camera - so a vertex at the
-    // frustum's half-width does NOT project to the screen edge, it projects
-    // well past it. Solve for the model-space x that lands on the edge:
-    //
-    //   project(x) = x*cos0 * D / (D - x*sin0) = target
-    //   =>      x  = target*D / (cos0*D + target*sin0)
-    //
-    // and take the magnification there, which every other dimension is divided
-    // by so the panel is the size it was designed at once projected. The
-    // magnification falls off inboard, which is the depth the layout wants:
-    // elements shrink as they approach the centre rather than being dimmed.
-    const float kTilt = 0.26f;
-    const float ct = cosf(kTilt), st = sinf(kTilt);
-    const float D  = depth;
-    const float target_x = frustum_w - overscan;
-    const float ex = target_x * D / (ct * D + target_x * st);
-    const float mag = D / (D - st * ex);
-
-    // One mockup pixel, mapped through the height so the panels keep the
-    // design's proportions; a wider screen widens the gap between them, which
-    // is the whole point of anchoring to the edges.
-    //
-    // The two axes are mapped differently, and deliberately.
-    //
-    // Vertically, one mockup pixel is 1/620 of the frame height and takes the
-    // UI scale: bigger type needs proportionally more room between rows.
-    //
-    // Horizontally, one mockup pixel is 1/1200 of the frame WIDTH and ignores
-    // the UI scale entirely. Two reasons. Mapping x through the height would
-    // tie the composition to the aspect ratio, so the same layout would claim
-    // more of a 16:9 frame than of the 1200x620 it was drawn on.
-    //
-    // UI Scaling scales the whole canopy, both axes alike: type, rows, and the
-    // lengths of its tracks, graphs and grounds, anchored where it is (the
-    // screen edges and the bottom). It used to take a third of the setting,
-    // and only for rows and type, so the panels kept their size while the text
-    // in them changed - at 0.5x the type sat small in full-length bars. Larger
-    // settings widen the wings towards the centre in proportion (about 23% of
-    // the width each at 1.0x, so 2.0x brings them close to meeting).
-    F.sd = s;
-    const float base = (frustum_h * 2.0f) / 620.0f;
-    F.UX = ((frustum_w * 2.0f) / 1200.0f) * F.sd / mag;  // columns
-    F.U  = (base * F.sd) / mag;                          // rows
-    F.LX = -ex;                                   // left screen edge
-    F.RX =  ex;                                   // right screen edge
-    F.BY = (-frustum_h + overscan) / mag;    // bottom
-    return F;
-}
 
 // The slant, as a matrix rather than a transform threaded through every
 // draw call: rotate in the panel's own plane about a pivot on its outer
@@ -218,32 +122,24 @@ void OSD::draw_canopy_hud(const CanopyIn& in) {
     // a colour of its own rather than the theme's - a warning has to read the
     // same on every theme, or it stops being a warning. Amber then red, not
     // themed: this is a safety signal, not a hue that changes with taste.
-    constexpr float kTempWarnC = 70.0f, kTempHotC = 85.0f;
+    // Thresholds: canopy::temperature_alert (70/85 C), shared with the Ascent.
     auto temp_rgb = [&](float c, float base_r, float base_g, float base_b,
                         float& r, float& g, float& b) {
-        if (c >= kTempHotC)       { r = 1.0f; g = 0.30f; b = 0.25f; }
-        else if (c >= kTempWarnC) { r = 1.0f; g = 0.72f; b = 0.15f; }
-        else                      { r = base_r; g = base_g; b = base_b; }
+        const int alert = canopy::temperature_alert(c);
+        if (alert == 2)      { r = 1.0f; g = 0.30f; b = 0.25f; }
+        else if (alert == 1) { r = 1.0f; g = 0.72f; b = 0.15f; }
+        else                 { r = base_r; g = base_g; b = base_b; }
     };
 
-    // The goggle's own supply. Per-cell so it reads the same on any pack:
-    // the ADC gives a raw pack voltage and the cell count is inferred from it
-    // (3S/4S/6S are what this barrel jack sees in practice). Thresholds are
-    // the usual lithium ones - 3.5V/cell is "land soon", 3.3V is "now".
-    constexpr float kCellWarnV = 3.50f, kCellLowV = 3.30f;
-    auto cells_for = [](float v) {
-        if (v <= 0.0f)  return 0;
-        if (v < 9.0f)   return 2;
-        if (v < 13.0f)  return 3;
-        if (v < 17.5f)  return 4;
-        if (v < 21.5f)  return 5;
-        return 6;
-    };
+    // The goggle's own supply, per cell: canopy::supply_cells infers the pack,
+    // canopy::cell_alert says when it is low (3.5 / 3.3 V a cell).
+    auto cells_for = [](float v) { return canopy::supply_cells(v); };
     auto volt_rgb = [&](float per_cell, float base_r, float base_g, float base_b,
                         float& r, float& g, float& b) {
-        if (per_cell <= kCellLowV)       { r = 1.0f; g = 0.30f; b = 0.25f; }
-        else if (per_cell <= kCellWarnV) { r = 1.0f; g = 0.72f; b = 0.15f; }
-        else                             { r = base_r; g = base_g; b = base_b; }
+        const int alert = canopy::cell_alert(per_cell);
+        if (alert == 2)      { r = 1.0f; g = 0.30f; b = 0.25f; }
+        else if (alert == 1) { r = 1.0f; g = 0.72f; b = 0.15f; }
+        else                 { r = base_r; g = base_g; b = base_b; }
     };
 
     // Panel height in real pixels, so the vector icons can be rasterized at
@@ -292,70 +188,28 @@ void OSD::draw_canopy_hud(const CanopyIn& in) {
     // already on screen - but one gesture for "the link is back" is worth more
     // than two that have to be told apart mid-flight, and the settle timer on
     // the rising edge is what stops a blinking link from replaying it.
-    if (have_aircraft != canopy_link_prev_)
-        (have_aircraft ? canopy_link_up_ : canopy_link_down_) = now_us;
-    canopy_link_prev_ = have_aircraft;
-    if (!canopy_link_up_) return;            // IDLE_1
-
-    // Leaving CONNECTED, in three overlapping beats. Everything below reads
-    // these rather than branching on have_aircraft, so the settled idle panel
-    // and the last frame of the transition are the same drawing.
     //
-    //   idle_dim   content and ground brightness, 1 -> kIdleFloor
-    //   rail_dim   the same, but with the pulse riding over it
-    //   mark       IDLE fading in and the rail gap opening under it
-    float idle_dim = 1.0f, rail_dim = 1.0f, mark = 0.0f;
-    if (!have_aircraft) {
-        idle_dim = rail_dim = kIdleFloor;
-        mark = 1.0f;
-        if (canopy_link_down_) {
-            const float e = (float)(now_us - canopy_link_down_);
-            if (e < kIdleAllUs) {
-                const float bri = fminf(1.0f, e / kIdleBriUs);
-                idle_dim = 1.0f - (1.0f - kIdleFloor) * bri;
-                rail_dim = idle_dim;
-                // One pulse, peaking mid-way and returning to the floor it
-                // started from - a beat, not a flash that leaves the rails
-                // brighter than they were.
-                const float pt = (e - kIdleBriUs) / kIdlePulseUs;
-                if (pt > 0.0f && pt < 1.0f)
-                    rail_dim = kIdleFloor + (1.0f - kIdleFloor) * sinf(pt * (float)M_PI);
-                mark = fmaxf(0.0f, fminf(1.0f, (e - kIdleMarkAt) / kIdleMarkUs));
-                // Nothing else need be driving repaints once the link is gone.
-                signal_render(prof::kWakeAnim);
-            }
-        }
-    } else {
-        canopy_link_down_ = 0;
-    }
-
-    // The rebuild: rails run in from the edge, the ground fades up behind them,
-    // then the blocks arrive. Past kLinkAllUs every factor is 1 and this costs
-    // nothing, which is the state IDLE_2 sits in - dimmed by idle_dim, not by
-    // these.
-    float f_rule = 1.0f, f_shade = 1.0f, f_block = 1.0f;
-    {
-        float e = (float)(now_us - canopy_link_up_);
-        if (e < kLinkAllUs) {
-            f_rule  = fminf(1.0f, e / kLinkRuleUs);
-            f_shade = fmaxf(0.0f, fminf(1.0f, (e - kLinkRuleUs) / (kLinkShadeUs - kLinkRuleUs)));
-            f_block = fmaxf(0.0f, fminf(1.0f, (e - kLinkShadeUs) / (kLinkAllUs - kLinkShadeUs)));
-            signal_render(prof::kWakeAnim);
-        }
-    }
-
+    // Leaving CONNECTED, in three overlapping beats, and the rebuild after it:
+    // canopy::link_visual, which the Ascent's software HUD draws too.
+    // Everything below reads these rather than branching on have_aircraft, so
+    // the settled idle panel and the last frame of the transition are the same
+    // drawing. Past the sweep every factor is 1 and costs nothing, which is
+    // the state IDLE_2 sits in - dimmed by idle_dim, not by these.
+    const canopy::LinkVisual link_v =
+        canopy::link_visual(have_aircraft, now_us, canopy_link_prev_, canopy_link_up_, canopy_link_down_);
+    if (!link_v.visible) return;             // IDLE_1
+    // Nothing else need be driving repaints while the panels move.
+    if (link_v.animating) signal_render(prof::kWakeAnim);
+    const float idle_dim = link_v.idle_dim, rail_dim = link_v.rail_dim, mark = link_v.mark;
+    const float f_rule = link_v.rule, f_shade = link_v.shade, f_block = link_v.block;
 
     // Text sizes, in the same units canvas_->text() takes elsewhere in the HUD.
-    const float T_BIG   = 0.185f * sd;   // 46px headline
-    const float T_UNIT  = 0.082f * sd;   // 19-20px unit / secondary figure
-    const float T_SMALL = 0.055f * sd;   // 13px unit suffix
-    const float T_ROW   = 0.058f * sd;   // 13px detail rows
-    const float T_LABEL = 0.040f * sd;   // 9px track names
-    // The flight timer and the ARMED/DISARMED word share the top rail's gap.
-    // Sized between the headline voltage and the current beside it: the timer
-    // is one of the readings, not a caption on the frame, and at anything
-    // smaller it was not legible in flight.
-    const float T_STATE = 0.125f * sd;   // between T_BIG (0.185) and T_UNIT (0.082)
+    const float T_BIG   = canopy::kTextBig   * sd;
+    const float T_UNIT  = canopy::kTextUnit  * sd;
+    const float T_SMALL = canopy::kTextSmall * sd;
+    const float T_ROW   = canopy::kTextRow   * sd;
+    const float T_LABEL = canopy::kTextLabel * sd;
+    const float T_STATE = canopy::kTextState * sd;
 
     // canvas_->text() places the BOTTOM of the glyph box at y, and the cairo
     // surface behind it draws the baseline at row 48 of 64 - a quarter of the
@@ -545,13 +399,7 @@ void OSD::draw_canopy_hud(const CanopyIn& in) {
     //
     // It starts outboard of the screen edge so the ground bleeds off rather
     // than showing a vertical seam inside the overscan margin.
-    static const float kWedgeX[]   = { -kBleed, 156.0f, 252.0f, 300.0f };
-    // The last row's baseline is 584, so a floor at 612 left 28px of empty
-    // ground under it against 4px above the headline. Brought up to match, and
-    // the tip's apex follows the new mid-line.
-    static const float kWedgeTop[] = { 462.0f, 462.0f, 462.0f, 526.0f };
-    static const float kWedgeBot[] = { 590.0f, 590.0f, 590.0f, 526.0f };
-    static const float kWedgeA[]   = {  0.66f,  0.34f,  0.11f,   0.0f };
+    // The wedge's outline and alpha: canopy::kWedge* (shared with the Ascent).
     {
         float xs[4], tops[4], bots[4];
         for (int i = 0; i < 4; i++) {
@@ -576,7 +424,7 @@ void OSD::draw_canopy_hud(const CanopyIn& in) {
         float d = 9.0f * U;
         canvas_->poly({{x, y}, {x + d, y}, {x + d, y + d}, {x, y + d}},
                   1.0f, 0.95f, 0.15f, 0.15f);
-        snprintf(buf, sizeof(buf), "REC %u:%02u", in.rec_secs / 60, in.rec_secs % 60);
+        canopy::recording_label(buf, sizeof(buf), in.rec_secs);
         canvas_->text(buf, x + d + 8.0f * U, MY(442.0f), T_ROW, false, 1.0f, 0.35f, 0.35f);
     } else if (in.rec_failed[0]) {
         // Why REC went off by itself, where it was.
@@ -1109,16 +957,8 @@ void OSD::draw_canopy_hud(const CanopyIn& in) {
     // two - 18 Mbps is generous at 1080p60 and thin at 1080p120, and neither
     // figure says anything about how long the picture takes to arrive.
     {
-        // The framerate is measured, so it lands on 59 as often as 60. Snap it
-        // to the nearest rate a camera actually sends when it is within a frame
-        // or two - "1080p59" reads as a fault where "1080p60" reads as a mode,
-        // and the difference between them is measurement noise.
-        int fps = in.fps;
-        {
-            static const int kRates[] = { 24, 25, 30, 48, 50, 60, 90, 100, 120 };
-            for (size_t i = 0; i < sizeof(kRates) / sizeof(kRates[0]); i++)
-                if (abs(fps - kRates[i]) <= 2) { fps = kRates[i]; break; }
-        }
+        // The measured framerate snapped to a camera's (canopy::snapped_fps).
+        const int fps = canopy::snapped_fps(in.fps);
         char mode[24] = "--", rate[24] = "--", lat[24] = "--";
         if (in.v_h > 0 && fps > 0)    snprintf(mode, sizeof(mode), "%dp%d", in.v_h, fps);
         else if (in.v_h > 0)          snprintf(mode, sizeof(mode), "%dp", in.v_h);

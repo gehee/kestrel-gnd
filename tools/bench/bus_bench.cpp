@@ -27,6 +27,7 @@
 //                  [--hud-hold-us 100] [--hud-draw-us 3000] [--rec]
 //                  [--to 127.0.0.1:5600] [--stall-ms 0]
 #include <algorithm>
+#include "base/video_codec.hpp"
 #include <arpa/inet.h>
 #include <cerrno>
 #include <cmath>
@@ -116,7 +117,7 @@ static bool load(const char* path, double seconds, int fps, Stream& s) {
         }
         if (!open) { cur = Chunk{}; cur.off = begin; open = true; }
         cur.nals.push_back({p + 3, end - (p + 3), type});
-        if (type >= 16 && type <= 21) cur.key = true;
+        if (hevc_irap(type)) cur.key = true;
         cur.len = end - cur.off;
         if (vcl) { pic.push_back(cur); open = false; }
     }

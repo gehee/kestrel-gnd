@@ -33,6 +33,7 @@
 // Laid out in hundredths of the band's width, from its top left.
 
 #include "hud/osd.hpp"
+#include "region/rule_label.hpp"
 #include "system/gnd/radio.hpp"
 #include "hud/hud_theme.hpp"
 #include "region/zones.hpp"
@@ -58,10 +59,7 @@ static bool unmeasured(int dbm) { return dbm == 0; }
 
 const char* kBusyName[3] = { "QUIET", "SOME TRAFFIC", "BUSY" };
 
-void cap_text(int mw, char* out, size_t n) {
-    if (mw >= 1000 && mw % 1000 == 0) snprintf(out, n, "%d W", mw / 1000);
-    else snprintf(out, n, "%d mW", mw);
-}
+using zones::cap_text;   // region/rule_label.hpp, shared with the Ascent's channel page
 
 // Close the gap to the target by 1 - e^(-dt/tau); true while still moving.
 bool glide(float& v, float target, float dt, float tau) {
@@ -137,12 +135,7 @@ void OSD::apply_chan_scan(const gnd::ScanSample& sc) {
     // busier, held for 30 s, then let down to the current level.
     const uint64_t now = get_time_us();
     for (int i = 0; i < n; i++) {
-        if (unmeasured(sc.power_dbm[i])) { scan_peak_dbm[i] = 0; scan_peak_ts[i] = 0; continue; }
-        if (scan_peak_ts[i] == 0 || unmeasured(scan_peak_dbm[i]) || sc.power_dbm[i] >= scan_peak_dbm[i] ||
-            (now - scan_peak_ts[i]) > 30ULL * 1000000ULL) {
-            scan_peak_dbm[i] = sc.power_dbm[i];
-            scan_peak_ts[i]  = now;
-        }
+        gnd::hold_scan_peak(scan_peak_dbm[i], scan_peak_ts[i], sc.power_dbm[i], now);
     }
     // Sorted once here, for the drawing and the keys alike.
     for (int i = 0; i < n; i++) chan_order_[i] = i;
@@ -411,12 +404,8 @@ bool OSD::draw_channel_band(int W, int H, float band_x, float band_y, float band
             else
                 px_hatch(X(xa), Y(ry), (xb - xa) * c, rh * c, col, 0.42f, 0.55f * c, 0.2f * c);
             if (xb - xa >= 9.0f) {
-                if (v.state == zones::kNotAllowed) snprintf(b, sizeof(b), "NOT ALLOWED");
-                else if (v.state == zones::kIndoor) snprintf(b, sizeof(b), "INDOOR ONLY");
-                else if (v.state == zones::kLicence) snprintf(b, sizeof(b), "LICENCE NEEDED");
-                else if (v.amateur) snprintf(b, sizeof(b), "OK  -  AMATEUR");
-                else if (v.cap_mw > 0) { char cb[16]; cap_text(v.cap_mw, cb, sizeof(cb)); snprintf(b, sizeof(b), "OK  -  %s MAX", cb); }
-                else snprintf(b, sizeof(b), "OK");
+                // The words are the Ascent's too (region/rule_label.hpp).
+                snprintf(b, sizeof(b), "%s", zones::rule_label(v, "  -  ").c_str());
                 const float tw = px_text_w(b, 0.8f * c) / c;
                 px_fill(X((xa + xb) * 0.5f - tw * 0.5f - 0.35f), Y(ry + 0.2f), (tw + 0.7f) * c, 1.3f * c, T.ground, 1.0f);
                 txt(b, (xa + xb) * 0.5f, ry + 0.4f, 0.8f, v.state == zones::kAllowed && v.amateur ? T.data : col, 1);

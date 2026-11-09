@@ -1227,9 +1227,8 @@ void DvrRecorder::feed(std::shared_ptr<std::vector<uint8_t>> frame, uint64_t us)
 
 void DvrRecorder::feed(const bus::PictureRef& pic, uint64_t us) {
     if (!running_ || !pic) return;   // cheap no-op when idle: nothing copied
-    // The radio's pool keeps this many free for pictures still to come; below
-    // it the card is behind, and the recording takes copies.
-    constexpr int kPoolReserve = 8;
+    // The radio's pool keeps this many free (dvr/recording_target.hpp).
+    constexpr int kPoolReserve = kRecordingPoolReserve;
     if (pic->pool->free_count() < kPoolReserve) {
         static uint64_t copied = 0;
         if (++copied <= 3 || copied % 1000 == 0)

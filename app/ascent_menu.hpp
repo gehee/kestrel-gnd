@@ -1,5 +1,6 @@
 #pragma once
 #include "hud/lvgl/backend_state.hpp"
+#include "region/rule_label.hpp"
 #include "region/zones.hpp"
 #include "system/gnd/radio.hpp"
 #include <algorithm>
@@ -73,7 +74,7 @@ public:
             for(int i=0;i<std::clamp(sample.chan_num,0,64);++i) {
                 const int freq=sample.freq_mhz[i], power=sample.power_dbm[i];
                 auto& peak=peaks_[freq];
-                if(!peak.second || now-peak.second>30000000 || power>=peak.first) peak={power,now};
+                gnd::hold_scan_peak(peak.first,peak.second,power,now);
             }
         }
         const auto radio=radio_.state();
@@ -96,16 +97,9 @@ public:
                 const int freq=scan_.freq_mhz[i], power=scan_.power_dbm[i];
                 if(freq<4000 || freq>7000 || power>0 || power< -160) continue;
                 const auto v=zones::judge(country,freq,bw,zones::licensed());
-                std::string rule;
-                switch(v.state) {
-                case zones::kAllowed: rule=v.amateur?"OK - AMATEUR":"OK"; break;
-                case zones::kIndoor: rule="INDOOR ONLY"; break;
-                case zones::kLicence: rule="LICENCE NEEDED"; break;
-                case zones::kNotAllowed: rule="NOT ALLOWED"; break;
-                default: rule="RULES UNKNOWN"; break;
-                }
-                if(v.cap_mw) rule+=" / "+std::to_string(v.cap_mw)+" mW";
-                result.readings.push_back({freq,power,peaks_[freq].first,v.state==zones::kAllowed || v.state==zones::kNoRules,rule});
+                // The VRX Pro channel page's words (region/rule_label.hpp).
+                result.readings.push_back({freq,power,peaks_[freq].first,v.state==zones::kAllowed || v.state==zones::kNoRules,
+                                           zones::rule_label(v)});
             }
             std::sort(result.readings.begin(),result.readings.end(),[](const auto& a,const auto& b){return a.mhz<b.mhz;});
             last_scan_=scan_.last_update_ms; generation_=zones::generation(); licensed_=zones::licensed(); bw_=bw;

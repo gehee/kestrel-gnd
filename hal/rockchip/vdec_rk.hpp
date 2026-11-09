@@ -69,6 +69,7 @@ class VdecRK : public Vdec {
         std::atomic<unsigned> fed_since_out_{0};
         static constexpr unsigned kKeyLostPackets = 240;
 
+        VideoCodec codec_ = VideoCodec::H265;   // what keyframe_nal tests nal_type as
         bool first_successful_decode = false;
         uint64_t last_decoded_frame_time_ms = 0;
         uint64_t last_idr_request_ms = 0;
@@ -133,7 +134,7 @@ class VdecRK : public Vdec {
         virtual ~VdecRK();
 
         VdecRK(VideoCodec codec, std::shared_ptr<hal::FrameSink> rdr, std::shared_ptr<hal::Scanout> dev_, std::atomic<bool>* signal_stop) :
-            should_stop(signal_stop), renderer(rdr), dev(dev_),
+            codec_(codec), should_stop(signal_stop), renderer(rdr), dev(dev_),
             first_successful_decode(false), last_decoded_frame_time_ms(0), last_idr_request_ms(0) {
             int ret;
             memset(&mpi, 0, sizeof(mpi));   // frm_grp/frame_to_drm must be zero before first init_buffer

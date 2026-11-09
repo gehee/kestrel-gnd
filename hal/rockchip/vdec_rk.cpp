@@ -441,7 +441,7 @@ void VdecRK::feed_packet_to_decoder(void* data_p, int data_len, int64_t pts, uin
     current_slice_buffer_idx = (current_slice_buffer_idx + 1) % NUM_SLICES_BUFFERS;
 
     int final_len = 0;
-    bool is_key = is_key_override || (nal_type >= 19 && nal_type <= 21) || nal_type == 5;
+    bool is_key = is_key_override || keyframe_nal(codec_, nal_type);
 
     if (is_key) {
         size_t vps_sz = cached_vps.size();

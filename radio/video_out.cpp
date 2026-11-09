@@ -281,7 +281,7 @@ bool VideoOut::nal(const uint8_t* nal, size_t len, uint64_t recv_us, SliceHeader
     // until kestrel-gnd restarted (2026-10-22, 864p120). Until the decoder
     // has one, only keyframes pass, and one is asked for every 1.5 s.
     if (codec_ == VideoCodec::H265 && is_vcl && vdec_ && decode_enabled_ && !vdec_->keyframe_in() &&
-        !(nal_type >= 19 && nal_type <= 21)) {
+        !hevc_irap(nal_type)) {
         src_.ask_keyframe("the decoder has no keyframe to decode against - asking for one");
         return false;
     }
@@ -403,7 +403,7 @@ bool VideoOut::nal(const uint8_t* nal, size_t len, uint64_t recv_us, SliceHeader
                     au_times_->frame_cap_us = pt.frame_cap_us;
                     au_times_->readout_us = pt.readout_us;
                     au_times_->exposure_us = pt.exposure_us;
-                    au_times_->key = nal_type >= 16 && nal_type <= 21;
+                    au_times_->key = keyframe_nal(codec_, nal_type);
                     au_times_->pts = (int64_t)frame_pts_;
                 }
                 // The air unit's capture stamp of this picture: its clock, not
@@ -412,8 +412,7 @@ bool VideoOut::nal(const uint8_t* nal, size_t len, uint64_t recv_us, SliceHeader
                 au_cap_us_ = pt.cap_us;
                 au_pts_ = frame_pts_;
                 au_nal_type_ = nal_type;   // picture key-ness (IDR vs trailing)
-                au_pic_->keyframe = (codec_ == VideoCodec::H265) ? (nal_type >= 16 && nal_type <= 21)
-                                                                : nal_type == 5;
+                au_pic_->keyframe = keyframe_nal(codec_, nal_type);
                 au_first_recv_us_ = recv_us;  // zero point for this picture
                 au_max_addr_ = 0;
                 au_hseq_ = hseq;
@@ -464,7 +463,7 @@ bool VideoOut::nal(const uint8_t* nal, size_t len, uint64_t recv_us, SliceHeader
                 // needs to start on (see keyframe_in), and with intra refresh
                 // come only when asked for - not worth a half-built start.
                 if (decoding && stream_decode_ && !stream_paused_ && Vdec::stream_holds().load() == 0 &&
-                    !last && last_slice_addr_ > 0 && !(nal_type >= 19 && nal_type <= 21) &&
+                    !last && last_slice_addr_ > 0 && !keyframe_nal(codec_, nal_type) &&
                     last_slice_count_ > 1 && vdec_->stream_supported()) {
                     if (!stream_pics_++)
                         printf("%s: decoding each picture from its first slice "
@@ -802,7 +801,7 @@ void VideoOut::flush_access_unit(uint64_t recv_us) {
             static std::vector<float> span[2];
             static double bytes[2] = {0, 0};
             static uint64_t last_print = 0;
-            const bool key = (codec_ == VideoCodec::H265) ? (au_nal_type_ >= 19 && au_nal_type_ <= 21) : (au_nal_type_ == 5);
+            const bool key = keyframe_nal(codec_, au_nal_type_);
             span[key ? 1 : 0].push_back((float)(au_last_recv_us_ - au_recv) / 1000.0f);
             bytes[key ? 1 : 0] += (double)au_pic_->len;
             const uint64_t tnow = now_us();

@@ -1,4 +1,5 @@
 #include "telemetry_track.hpp"
+#include "dvr_library.hpp"
 #include "third_party/nlohmann/json.hpp"
 #include <algorithm>
 #include <cerrno>
@@ -98,7 +99,7 @@ void TelemetryWriter::run() {
         Job job;{std::unique_lock<std::mutex> l(mutex_);wake_.wait(l,[&]{return quit_ || !jobs_.empty();});if(jobs_.empty() && quit_)break;
             job=std::move(jobs_.front());jobs_.pop_front();busy_=true;}
         try {
-            if(job.kind==Job::Begin){close();{std::lock_guard<std::mutex> l(mutex_);disabled_=false;error_.clear();}path=job.path+".telemetry.jsonl";
+            if(job.kind==Job::Begin){close();{std::lock_guard<std::mutex> l(mutex_);disabled_=false;error_.clear();}path=dvr_lib::telemetry_path(job.path);
                 int fd=open(path.c_str(),O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC|O_NOFOLLOW,0644);
                 if(fd<0)throw std::runtime_error("Cannot create telemetry sidecar");
                 f=fdopen(fd,"w");if(!f){::close(fd);throw std::runtime_error("Cannot open telemetry writer");}
@@ -149,7 +150,7 @@ void TelemetryWriter::run() {
     try{close();}catch(...){}
 }
 TelemetryReader::TelemetryReader(const std::string& video) {
-    int fd=open((video+".telemetry.jsonl").c_str(),O_RDONLY|O_CLOEXEC|O_NOFOLLOW|O_NONBLOCK);
+    int fd=open(dvr_lib::telemetry_path(video).c_str(),O_RDONLY|O_CLOEXEC|O_NOFOLLOW|O_NONBLOCK);
     if(fd<0){if(errno!=ENOENT)error_="Cannot open telemetry";return;}
     struct stat s{};if(fstat(fd,&s) || !S_ISREG(s.st_mode) || s.st_size>256*1024*1024){::close(fd);error_="Invalid telemetry file";return;}
     file_=fdopen(fd,"r");if(!file_){::close(fd);error_="Cannot read telemetry";return;}

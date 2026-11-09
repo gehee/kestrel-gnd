@@ -1,4 +1,5 @@
 #include "writer.hpp"
+#include "dvr_library.hpp"
 #include "base/time_util.h"
 #include <algorithm>
 #include <cerrno>
@@ -10,9 +11,7 @@
 #include <sys/statvfs.h>
 #include <unistd.h>
 namespace {
-bool ends_with(const std::string& s, const std::string& suffix) {
-    return s.size() >= suffix.size() && s.compare(s.size()-suffix.size(), suffix.size(), suffix)==0;
-}
+using dvr_lib::ends_with;
 // A recording purge_oldest_recordings may delete.
 bool purgeable(const std::string& name, const std::string& keep) {
     if (name.rfind("fpvOS_", 0) != 0 && name.rfind("kestrel_", 0) != 0 && name.rfind("recording_", 0) != 0) return false;
@@ -43,7 +42,7 @@ std::vector<std::pair<time_t, std::string>> recordings_in(const std::string& dir
 // A recording's companions: its gallery thumbnail and its telemetry sidecar.
 std::vector<std::string> companions(const std::string& dir, const std::string& path) {
     const std::string name = path.substr(path.find_last_of('/') + 1);
-    return {dir + "/.thumbs/" + name + ".jpg", path + ".telemetry.jsonl"};
+    return {dvr_lib::thumb_path(dir, name), dvr_lib::telemetry_path(path)};
 }
 }
 // The free space kept on the card while recording: a minute of the recording

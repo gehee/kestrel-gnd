@@ -259,9 +259,9 @@ void Ar8030Link::emit_nal(const uint8_t* nal, size_t len) {
         const bool ps = (codec == VideoCodec::H265)
                             ? (nal_type == 32 || nal_type == 33 || nal_type == 34)
                             : (nal_type == 7 || nal_type == 8);
-        // The same test the decoder uses for is_key, so what opens the stream
-        // here is exactly what it will treat as a keyframe.
-        const bool key = (nal_type >= 19 && nal_type <= 21) || nal_type == 5;
+        // The same test the decoder uses for is_key (keyframe_nal), so what
+        // opens the stream here is exactly what it will treat as a keyframe.
+        const bool key = keyframe_nal(codec, nal_type);
         if (!ps) {
             const uint64_t held = now_ms() - resync_start_ms_;
             const bool timed_out = held > kResyncMaxMs;

@@ -16,7 +16,7 @@
 #include "third_party/stb/stb_image_write.h"
 namespace dvr {
 namespace {
-std::string path(const std::string& dir,const std::string& name) {return dir+"/.thumbs/"+name+".jpg";}
+std::string path(const std::string& dir,const std::string& name) {return dvr_lib::thumb_path(dir,name);}
 std::shared_ptr<media::Thumbnail> resize(const unsigned char* rgb,int sw,int sh,int w,int h,int channels) {
     auto out=std::make_shared<media::Thumbnail>();out->width=w;out->height=h;out->argb.resize(size_t(w)*h);
     for(int y=0;y<h;++y)for(int x=0;x<w;++x) {
@@ -122,7 +122,7 @@ void Thumbnails::run() {
             // Keep a valid existing preview. Playback of an older clip supplies
             // its first thumbnail without opening a competing video decoder.
             if(!read(file,320,180)) {
-                mkdir((directory_+"/.thumbs").c_str(),0755);
+                mkdir(dvr_lib::thumb_dir(directory_).c_str(),0755);
                 if(!write(file,*job.image))fprintf(stderr,"thumbnail: cannot save %s\n",job.name.c_str());
             }
             // A clip can be deleted while this worker encodes its last frame.

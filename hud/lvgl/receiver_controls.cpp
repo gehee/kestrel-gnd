@@ -1,4 +1,6 @@
 #include "receiver_controls.hpp"
+#include "system/air/camera.hpp"
+#include "system/air/encoder.hpp"
 #include "system/air/power.hpp"
 #include <algorithm>
 #include <cstdio>
@@ -47,26 +49,34 @@ void ReceiverControls::update(BackendState& state, uint64_t now) {
     };
     const bool native_ev=p1 && supports("ev"), native_wb=p1 && supports("wb_lock");
     bool camera = u.stock || (!p1 && u.info.kestrel && !u.info.get("model").empty());
-    choice("Rotate",c.angle,c.angle_n || c.camera_n,camera,{{0,"0"},{180,"180"}},p1_reason);
-    choice("Scene",c.scene,c.camera_n,camera,{{0,"Race"},{2,"Standard"}},p1_reason);
-    choice("EV",c.ev_x10,c.camera_n,camera || native_ev,{{-10,"-1.0"},{-7,"-0.7"},{-3,"-0.3"},{0,"0"},{3,"+0.3"},{7,"+0.7"},{10,"+1.0"}},p1_reason);
-    std::vector<ReceiverChoice> wb{{0,"Auto"}}, level{{0,"Auto"}};
-    for(int k=4000;k<=7000;k+=100) wb.push_back({k,std::to_string(k)+"K"});
-    for(int k=1;k<=10;++k) level.push_back({k,std::to_string(k)});
+    // The VRX Pro's own tables (system/air/camera.hpp), by the value on the wire.
+    auto table=[](const int* values,const char* const* labels,int n) {
+        std::vector<ReceiverChoice> out;
+        for(int i=0;i<n;++i) out.push_back({values?values[i]:i,labels[i]});
+        return out;
+    };
+    auto levels=[](int max) {
+        std::vector<ReceiverChoice> out;
+        for(int k=0;k<=max;++k) out.push_back({k,air::cam_auto_label(k)});
+        return out;
+    };
+    choice("Rotate",c.angle,c.angle_n || c.camera_n,camera,table(nullptr,air::kRotateLabels,2),p1_reason);
+    choice("Scene",c.scene,c.camera_n,camera,table(air::kSceneVals,air::kSceneLabels,air::kSceneCount),p1_reason);
+    choice("EV",c.ev_x10,c.camera_n,camera || native_ev,table(air::kEvSteps,air::kEvLabels,air::kEvCount),p1_reason);
+    std::vector<ReceiverChoice> wb;
+    for(int i=0;i<air::kWbCount;++i) wb.push_back({air::wb_kelvin(i),air::wb_label(i)});
     if(native_wb) wb={{0,"Auto"},{-1,"Lock current"}};
     choice("White Balance",c.awb,c.camera_n,camera || native_wb,wb,p1_reason);
     if(native_wb && controls_["White Balance"].enabled)
         controls_["White Balance"].reason="Auto adapts white balance; Lock current holds the current colors across restarts.";
-    choice("Saturation",c.sat,c.camera_n,camera,level,p1_reason);
-    choice("Contrast",c.contrast,c.camera_n,camera,level,p1_reason);
-    choice("Sharpness",c.sharp,c.camera_n,camera,level,p1_reason);
-    choice("3D DNR",c.dnr3d,c.dnr_n || c.camera_n,camera,{{0,"Off"},{2,"Low"},{3,"Mid"},{4,"High"},{5,"Auto"}},p1_reason);
+    choice("Saturation",c.sat,c.camera_n,camera,levels(air::kCamSatMax),p1_reason);
+    choice("Contrast",c.contrast,c.camera_n,camera,levels(air::kCamContrastMax),p1_reason);
+    choice("Sharpness",c.sharp,c.camera_n,camera,levels(air::kCamSharpMax),p1_reason);
+    choice("3D DNR",c.dnr3d,c.dnr_n || c.camera_n,camera,table(air::kDnrVals,air::kDnrLabels,air::kDnrCount),p1_reason);
     choice("Focus Mode",c.focus,c.camera_n,camera,{{0,"OFF"},{1,"ON"}},p1_reason);
     choice("Video Mode",0,true,false,{{0,"1920x1080 @ 60"}},"This native display/decoder currently supports 1080p60 only.");
-    std::vector<ReceiverChoice> rates{{0,"AUTO"}};
-    for(int kbps : {6000,8000,10000,12000,15000,18000,20000,22000,25000,30000,35000,40000})
-        rates.push_back({kbps,std::to_string(kbps/1000)+" Mbps"});
-    choice("Max Bitrate",e.max_kbps,true,u.info.kestrel,rates,"Requires an fpvOS air unit.");
+    choice("Max Bitrate",e.max_kbps,true,u.info.kestrel,table(air::kArMaxBrVals,air::kArMaxBrLabels,air::kArMaxBrCount),
+           "Requires an fpvOS air unit.");
     auto offer=ar_pwr_offered(a.prj,a.fine); std::vector<ReceiverChoice> powers;
     for(int i=0;i<offer.n;++i) powers.push_back({offer.mw[i],kArPwrLevels[ar_pwr_index(offer.mw[i])].label});
     choice("power",a.tx_power_want_mw,a.tx_power_want_mw>0,g.rf_caps & gnd::RF_CAP_POWER,powers,"The radio does not expose power control.");

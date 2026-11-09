@@ -64,6 +64,17 @@ int main() {
               "HUD consumes calibrated native units and actual standby without fabricating temperature");
         check(!state.controls.at("EV").enabled,"P1 settings echoes must not enable missing ISP controls");
         check(state.controls.at("Max Bitrate").enabled,"P1 bitrate is supported");
+        {
+            // The VRX Pro's tables, by the value on the wire.
+            const auto& rotate=state.controls.at("Rotate").choices;
+            check(rotate.size()==2 && rotate[0].value==0 && rotate[1].value==1 && rotate[1].label=="180",
+                  "Rotate sends 0/1 as the VRX Pro does, shown as 0/180");
+            const auto& wb=state.controls.at("White Balance").choices;
+            check(wb.size()==32 && wb.front().label=="Auto" && wb[1].value==4000 && wb.back().value==7000 && wb.back().label=="7000K",
+                  "White balance is Auto plus 4000-7000 K");
+            const auto& rates=state.controls.at("Max Bitrate").choices;
+            check(rates.size()==13 && rates.front().label=="AUTO" && rates.back().value==40000,"Bitrate list is the VRX Pro's");
+        }
         controls.apply("Max Bitrate",18000,now);
         check(encoder.calls==1 && encoder.last==18000,"Bitrate uses kbps, not an option index");
         bool rejected=false;

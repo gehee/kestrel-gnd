@@ -136,7 +136,7 @@ void VdecV4l2::feed_packet_to_decoder(void *data, int len, int64_t pts, uint64_t
     }
     if (hevc ? nal > 31 : nal != 1 && nal != 5)
         return;
-    key = key || (hevc ? nal >= 16 && nal <= 21 : nal == 5);
+    key = key || keyframe_nal(codec_, nal);
     if (!ready_ && !key) {
         ++dropped_;
         return;

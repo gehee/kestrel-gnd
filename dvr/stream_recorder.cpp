@@ -50,7 +50,7 @@ void StreamRecorder::enqueue(Item item) {
 void StreamRecorder::set_parameter_sets(const std::vector<std::vector<uint8_t>>& ps) {Item i;i.kind=Item::Params;i.params=ps;enqueue(std::move(i));}
 void StreamRecorder::feed(std::shared_ptr<std::vector<uint8_t>> data,uint64_t us) {Item i;i.data=std::move(data);i.us=us;enqueue(std::move(i));}
 void StreamRecorder::feed(const bus::PictureRef& p,uint64_t us) {
-    if(p->pool->free_count()<8) {feed(std::make_shared<std::vector<uint8_t>>(p->data(),p->data()+p->len),us);return;}
+    if(p->pool->free_count()<kRecordingPoolReserve) {feed(std::make_shared<std::vector<uint8_t>>(p->data(),p->data()+p->len),us);return;}
     Item i;i.picture=p;i.us=us;enqueue(std::move(i));
 }
 void StreamRecorder::run() {

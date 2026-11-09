@@ -1,5 +1,6 @@
 #include "stream_player.hpp"
 #include "third_party/minimp4.h"
+#include "base/video_codec.hpp"
 #include "base/time_util.h"
 #include <cerrno>
 #include <algorithm>
@@ -181,7 +182,7 @@ void StreamPlayer::play_file(const std::string& name,uint64_t generation) {
             uint32_t len=0;for(unsigned j=0;j<length_bytes;++j)len=(len<<8)|header[j];
             if(len<2 || len>bytes-at-length_bytes)throw std::runtime_error("Invalid seek NAL length");
             const auto nal=(header[length_bytes]>>1)&63;
-            if(nal<=31)return nal>=16 && nal<=21;
+            if(nal<=31)return hevc_irap(nal);
             at+=length_bytes+len;
         }
         return false;
@@ -282,7 +283,7 @@ void StreamPlayer::play_file(const std::string& name,uint64_t generation) {
             uint32_t len=0;for(unsigned j=0;j<length_bytes;++j)len=(len<<8)|packet[p++];
             if(len<2 || len>packet.size()-p)throw std::runtime_error("Invalid MP4 NAL length");
             const uint8_t nal=(packet[p]>>1)&63;
-            if(nal<=31) {type=nal;key|=nal>=16 && nal<=21;}
+            if(nal<=31) {type=nal;key|=hevc_irap(nal);}
             annex.insert(annex.end(),{0,0,0,1});annex.insert(annex.end(),packet.begin()+p,packet.begin()+p+len);p+=len;
         }
         auto recorded=telemetry.at(position);
