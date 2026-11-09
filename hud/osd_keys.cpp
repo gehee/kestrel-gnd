@@ -375,7 +375,8 @@ void OSD::handle_key(int key) {
             if (menu_tab == 0) {
                 // 0x01 = video mode (routed to SET_CHN_RES in main); 0x300+n are
                 // the AR8030 camera settings, kept out of the kestrel-air id space.
-                switch (video_row(menu_index)) {
+                // A camera row the air unit does not apply sends nothing.
+                switch (cam_row_ok(video_row(menu_index)) ? video_row(menu_index) : -1) {
                     case 0: parts_.camera.set_mode(menu_video_mode); break;
                     case 3: parts_.camera.set(air::CameraField::EV, kEvSteps[menu_cam_ev]); break;
                     case 5: parts_.camera.set(air::CameraField::SAT, menu_cam_sat); break;

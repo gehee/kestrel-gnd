@@ -56,10 +56,15 @@ static const int   kDnrCount       = 5;
 // and stock offers Auto plus 4000K..7000K in 100K steps - 32 entries. The old
 // five-value table was a guess and did not match any of stock's steps except
 // 4000K. fact_env.json stores the *index*, which is why 7000K reads as 31.
+// After them Lock (kWbLock, -1 on the wire): the air unit holds the gains it
+// has now - offered only by one whose info says wb_lock (the P1), as the
+// kelvin presets only by one that says wb or says nothing (stock, the Lite).
 static const int   kWbCount        = 32;
-static inline int  wb_kelvin(int i) { return i <= 0 ? 0 : 3900 + i * 100; }
+static const int   kWbLock         = 32;
+static inline int  wb_kelvin(int i) { return i == kWbLock ? -1 : i <= 0 ? 0 : 3900 + i * 100; }
 inline const char* wb_label(int i) {
     static char buf[8];
+    if (i == kWbLock) return "Lock";
     if (i <= 0) return "Auto";
     snprintf(buf, sizeof(buf), "%dK", wb_kelvin(i));
     return buf;

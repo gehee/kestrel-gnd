@@ -342,6 +342,10 @@ class OSD : public display::VideoListener {
         std::vector<std::string> video_mode_names;
         std::vector<uint16_t> video_mode_needs;  // per mode: the air features it takes
         std::atomic<uint16_t> air_feat_{0};
+        // The camera rows the air unit applies (air::UnitState::cam_settings,
+        // bit n for video_row n); the others are greyed.
+        std::atomic<uint16_t> air_cam_{0xffff};
+        bool cam_row_ok(int row) const { return row < 1 || row > 9 || (air_cam_.load() >> row & 1); }
         // VIDEO: the row the handlers number a listed index as - Max Bitrate
         // (10) and Max Exposure (11) right after Video Mode, Max Exposure
         // listed only where it can be had, then the camera rows 1-9; -1 past

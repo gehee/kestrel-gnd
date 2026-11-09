@@ -515,6 +515,7 @@ class Ar8030Link : public radio::Link, private radio::VideoOut::Source {
         // Atomic: reset with the info by the link-down event too (ar_libre's thread).
         std::atomic<uint16_t> air_info_feat_{0};   // those bits, from its info (reset with the info)
         std::atomic<bool> air_info_seen_{false};   // its info has come since the link came up
+        uint16_t air_cam_ = air::kCamAll;           // its info's cam= (UnitState::cam_settings)
         // The mode stored for this air unit, if it lacks it: the default asked
         // for. Bits said in the info only once it has come.
         void check_air_modes();

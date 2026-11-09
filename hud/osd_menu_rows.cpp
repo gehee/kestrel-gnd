@@ -448,6 +448,14 @@ std::vector<OSD::MenuItem> OSD::menu_items(int tab) const {
     std::vector<MenuItem> items;
     if (tab == 0) { // Video Tab
         {
+            // A camera row the air unit does not apply (its info's cam=, the
+            // P1 Air: Rotate and EV), greyed.
+            auto cam_item = [this](const char *label, int row) {
+                return cam_row_ok(row)
+                    ? MenuItem{label, 1}
+                    : MenuItem{label, 0, "Not on this air unit: its camera has no such setting "
+                                         "(the P1 Air takes Rotate and EV).", nullptr, true};
+            };
             // Grouped by what the setting acts on: the format block first,
             // then the capture settings, then everything applied to the image
             // after it has been captured. Rows render bottom-up, so index 0
@@ -475,15 +483,16 @@ std::vector<OSD::MenuItem> OSD::menu_items(int tab) const {
                     : MenuItem{"Max Bitrate", 1, "Cap on the video bitrate. AUTO follows the link. A cap "
                                                  "below it gives a steadier picture and less time on the "
                                                  "air per frame. fpvOS air units only."},
-                {"Rotate", 1},
-                {"Scene", 1}, {"EV", 1}, {"White Balance", 1},
-                {"Saturation", 1}, {"Contrast", 1}, {"Sharpness", 1}, {"3D DNR", 1},
+                cam_item("Rotate", 1),
+                cam_item("Scene", 2), cam_item("EV", 3), cam_item("White Balance", 4),
+                cam_item("Saturation", 5), cam_item("Contrast", 6), cam_item("Sharpness", 7),
+                cam_item("3D DNR", 8),
                 // Stock's own Display tab (photo-confirmed), not Camera - but
                 // it is still a sky-wire command to the air unit (cmd 0x0E,
                 // CMD_SET_CHN_FOCUS), so it lives with the other AR8030
                 // camera settings here rather than in our DISPLAY tab, which
                 // only holds goggle-local drawing settings.
-                {"Focus Mode", 1}
+                cam_item("Focus Mode", 9)
             };
             // After Max Bitrate, Max Exposure (row 11): listed only where the
             // air unit's kestrel-air takes it while it runs (the P1 Air) - not
@@ -946,6 +955,7 @@ int OSD::menu_first_selectable_row(int tab) {
 // table of every setting's domain to keep in sync.
 void OSD::menu_apply_change(int tab, int index, int dir) {
     const int menu_tab = tab, menu_index = index;
+    if (menu_tab == 0 && !cam_row_ok(video_row(menu_index))) return;
             if (menu_tab == 0) {
        switch (video_row(menu_index)) {
            case 0: {
@@ -964,7 +974,19 @@ void OSD::menu_apply_change(int tab, int index, int dir) {
            case 1: menu_cam_flip = menu_step(menu_cam_flip ? 1 : 0, dir, 2) != 0; break;
            case 2: menu_cam_scene    = menu_step(menu_cam_scene, dir, kSceneCount); break;
            case 3: menu_cam_ev       = menu_step(menu_cam_ev, dir, kEvCount); break;
-           case 4: menu_cam_wb       = menu_step(menu_cam_wb, dir, kWbCount); break;
+           case 4: {   // Auto, the kelvin presets and Lock: those the air unit takes
+               const uint16_t cam = air_cam_.load();
+               auto ok = [&](int i) {
+                   return i == 0 || (i == kWbLock ? air::cam_wb_lock(cam) : air::cam_wb_kelvin(cam));
+               };
+               int v = menu_cam_wb;
+               for (int k = 0; k <= kWbLock; k++) {
+                   v = menu_step(v, dir, kWbLock + 1);
+                   if (ok(v)) break;
+               }
+               if (ok(v)) menu_cam_wb = v;
+               break;
+           }
            case 5: menu_cam_sat      = std::min(kCamSatMax,      std::max(0, menu_cam_sat + dir)); break;
            case 6: menu_cam_contrast = std::min(kCamContrastMax, std::max(0, menu_cam_contrast + dir)); break;
            case 7: menu_cam_sharp    = std::min(kCamSharpMax,    std::max(0, menu_cam_sharp + dir)); break;
@@ -1231,6 +1253,7 @@ void OSD::menu_value_text(int tab, int i, char* val_buf, size_t cap) {
     val_buf[0] = '\0';
     
     if (menu_tab == 0) {
+        if (!cam_row_ok(video_row(i))) { snprintf(val_buf, cap, "NOT ON THIS UNIT"); return; }
         switch (video_row(i)) {
             case 0: {
                 int idx = menu_video_mode;

@@ -9,6 +9,7 @@ void OSD::apply_camera_config(int ev_x10, int sat, int contrast, int sharp,
                               int dnr3d, int focus) {
     for (int i = 0; i < kEvCount; i++)      if (kEvSteps[i]    == ev_x10)  menu_cam_ev      = i;
     for (int i = 0; i < kWbCount; i++)      if (wb_kelvin(i)   == awb)     menu_cam_wb      = i;
+    if (awb == -1) menu_cam_wb = kWbLock;
     menu_cam_sat      = std::min(kCamSatMax,      std::max(0, sat));
     menu_cam_contrast = std::min(kCamContrastMax, std::max(0, contrast));
     menu_cam_sharp    = std::min(kCamSharpMax,    std::max(0, sharp));
@@ -64,6 +65,7 @@ void OSD::sync_radio() {
     air_unit_ = parts_.air_unit.state();
     const air::UnitState& as = air_unit_;
     air_feat_ = as.features;
+    air_cam_ = as.cam_settings;
     air_stock_ = as.stock;
     air_max_bw_ = as.max_bw;
     vtx_low_power = as.low_power;

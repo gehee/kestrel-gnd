@@ -50,6 +50,10 @@ void Ar8030Link::clear_air_info() {
         air_info_feat_ = 0;
         air_info_seen_ = false;
     }
+    if (air_cam_ != air::kCamAll) {
+        air_cam_ = air::kCamAll;
+        model_.update_unit([&](air::UnitState &a) { a.cam_settings = air::kCamAll; });
+    }
     publish_air_info();
 }
 
@@ -906,6 +910,19 @@ void Ar8030Link::note_air_info(const uint8_t *pl, size_t n) {
             // Max Exposure: once a link, when its info first says it takes it
             // (it keeps the launcher's until then).
             if (new_maxexp) request_setting(CAM_MAX_EXP_US, max_exp_us.load());
+        }
+    }
+    // The camera settings it applies, where not all (cam_ctrl=, the P1; cam=
+    // from an older kestrel-air): the VIDEO tab greys the rest.
+    {
+        uint16_t cam = air::kCamAll;
+        for (const auto &e : kv)
+            if (e.first == "cam_ctrl" || e.first == "cam") cam = air::cam_settings_of(e.second);
+        if (cam != air_cam_) {
+            air_cam_ = cam;
+            model_.update_unit([&](air::UnitState &a) { a.cam_settings = cam; });
+            printf("ar8030: the air unit's camera settings: %s\n",
+                   cam == air::kCamAll ? "all" : "only those its info lists");
         }
     }
     // The sensor's readout and exposure: ours, they change as it runs, so not

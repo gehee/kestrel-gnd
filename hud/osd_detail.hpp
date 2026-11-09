@@ -125,7 +125,7 @@ static inline const char *refresh_sync_label(int v) {
 using air::kEvSteps; using air::kEvLabels; using air::kEvCount;
 using air::kSceneLabels; using air::kSceneVals; using air::kSceneCount;
 using air::kDnrLabels; using air::kDnrVals; using air::kDnrCount;
-using air::kWbCount; using air::wb_kelvin; using air::wb_label;
+using air::kWbCount; using air::kWbLock; using air::wb_kelvin; using air::wb_label;
 using air::kRotateLabels;
 using air::kCamSatMax; using air::kCamSharpMax; using air::kCamContrastMax; using air::cam_auto_label;
 

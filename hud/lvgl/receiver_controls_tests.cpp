@@ -104,6 +104,16 @@ int main() {
         std::strcpy(unit.value.info.kv[1].value,"not_ev,wb_lock_extra");++unit.revision;
         controls.update(state,now);
         check(!state.controls.at("EV").enabled && !state.controls.at("White Balance").enabled,"Capability tokens require an exact match");
+        std::strcpy(unit.value.info.kv[1].value,"rotate,ev,wb,wb_lock,sat,contrast,sharpness,3dnr");++unit.revision;
+        controls.update(state,now);
+        check(state.controls.at("Rotate").enabled && state.controls.at("Saturation").enabled &&
+              state.controls.at("Contrast").enabled && state.controls.at("Sharpness").enabled &&
+              state.controls.at("3D DNR").enabled,"P1 advertising its ISP settings enables them");
+        check(!state.controls.at("Scene").enabled && !state.controls.at("Focus Mode").enabled,"Unlisted P1 controls stay unavailable");
+        controls.apply("White Balance",5200,now);
+        check(camera.field==air::CameraField::AWB && camera.last==5200,"P1 advertising wb takes Kelvin presets");
+        controls.apply("White Balance",-1,now);
+        check(camera.field==air::CameraField::AWB && camera.last==-1,"P1 keeps Lock current beside Kelvin presets");
         unit.value.info.kv_n=1;++unit.revision;controls.update(state,now);
         check(!state.controls.at("EV").enabled,"Reconnecting to older P1 firmware disables missing controls");
         std::strcpy(unit.value.info.kv[0].value,"Ascent Lite"); ++unit.revision;

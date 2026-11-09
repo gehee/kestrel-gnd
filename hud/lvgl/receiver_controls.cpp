@@ -47,7 +47,12 @@ void ReceiverControls::update(BackendState& state, uint64_t now) {
         const auto list=","+camera_controls+",";
         return u.info.kestrel && list.find(std::string(",")+name+",")!=std::string::npos;
     };
-    const bool native_ev=p1 && supports("ev"), native_wb=p1 && supports("wb_lock");
+    // A P1 offers what its cam_ctrl lists: EV, White Balance Auto with Lock
+    // current (wb_lock) and the kelvin presets (wb, locked at its tuning's
+    // white points), Rotate, Saturation, Contrast, Sharpness and 3D DNR.
+    auto p1_has=[&](const char* name){return p1 && supports(name);};
+    const bool native_ev=p1_has("ev"), native_lock=p1_has("wb_lock"), native_kelvin=p1_has("wb");
+    const bool native_wb=native_lock || native_kelvin;
     bool camera = u.stock || (!p1 && u.info.kestrel && !u.info.get("model").empty());
     // The VRX Pro's own tables (system/air/camera.hpp), by the value on the wire.
     auto table=[](const int* values,const char* const* labels,int n) {
@@ -60,19 +65,28 @@ void ReceiverControls::update(BackendState& state, uint64_t now) {
         for(int k=0;k<=max;++k) out.push_back({k,air::cam_auto_label(k)});
         return out;
     };
-    choice("Rotate",c.angle,c.angle_n || c.camera_n,camera,table(nullptr,air::kRotateLabels,2),p1_reason);
+    choice("Rotate",c.angle,c.angle_n || c.camera_n,camera || p1_has("rotate"),table(nullptr,air::kRotateLabels,2),p1_reason);
     choice("Scene",c.scene,c.camera_n,camera,table(air::kSceneVals,air::kSceneLabels,air::kSceneCount),p1_reason);
     choice("EV",c.ev_x10,c.camera_n,camera || native_ev,table(air::kEvSteps,air::kEvLabels,air::kEvCount),p1_reason);
+    // The VRX Pro's table; a P1 that lists its white balance offers Auto and
+    // what it lists: Lock current (wb_lock), the kelvin presets (wb).
     std::vector<ReceiverChoice> wb;
-    for(int i=0;i<air::kWbCount;++i) wb.push_back({air::wb_kelvin(i),air::wb_label(i)});
-    if(native_wb) wb={{0,"Auto"},{-1,"Lock current"}};
+    if(!native_wb) for(int i=0;i<air::kWbCount;++i) wb.push_back({air::wb_kelvin(i),air::wb_label(i)});
+    else {
+        wb.push_back({0,"Auto"});
+        if(native_lock) wb.push_back({-1,"Lock current"});
+        if(native_kelvin) for(int i=1;i<air::kWbCount;++i) wb.push_back({air::wb_kelvin(i),air::wb_label(i)});
+    }
     choice("White Balance",c.awb,c.camera_n,camera || native_wb,wb,p1_reason);
     if(native_wb && controls_["White Balance"].enabled)
-        controls_["White Balance"].reason="Auto adapts white balance; Lock current holds the current colors across restarts.";
-    choice("Saturation",c.sat,c.camera_n,camera,levels(air::kCamSatMax),p1_reason);
-    choice("Contrast",c.contrast,c.camera_n,camera,levels(air::kCamContrastMax),p1_reason);
-    choice("Sharpness",c.sharp,c.camera_n,camera,levels(air::kCamSharpMax),p1_reason);
-    choice("3D DNR",c.dnr3d,c.dnr_n || c.camera_n,camera,table(air::kDnrVals,air::kDnrLabels,air::kDnrCount),p1_reason);
+        controls_["White Balance"].reason=native_kelvin && native_lock ?
+            "Auto adapts white balance; Lock current holds the current colors, a Kelvin preset the camera tuning's for that light, across restarts." :
+            native_lock ? "Auto adapts white balance; Lock current holds the current colors across restarts." :
+            "Auto adapts white balance; a Kelvin preset holds the camera tuning's colors for that light.";
+    choice("Saturation",c.sat,c.camera_n,camera || p1_has("sat"),levels(air::kCamSatMax),p1_reason);
+    choice("Contrast",c.contrast,c.camera_n,camera || p1_has("contrast"),levels(air::kCamContrastMax),p1_reason);
+    choice("Sharpness",c.sharp,c.camera_n,camera || p1_has("sharpness"),levels(air::kCamSharpMax),p1_reason);
+    choice("3D DNR",c.dnr3d,c.dnr_n || c.camera_n,camera || p1_has("3dnr"),table(air::kDnrVals,air::kDnrLabels,air::kDnrCount),p1_reason);
     choice("Focus Mode",c.focus,c.camera_n,camera,{{0,"OFF"},{1,"ON"}},p1_reason);
     choice("Video Mode",0,true,false,{{0,"1920x1080 @ 60"}},"This native display/decoder currently supports 1080p60 only.");
     choice("Max Bitrate",e.max_kbps,true,u.info.kestrel,table(air::kArMaxBrVals,air::kArMaxBrLabels,air::kArMaxBrCount),
