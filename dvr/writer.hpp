@@ -49,6 +49,17 @@ class DvrWriter {
 };
 
 
-// Make room for recordings, preserving the named active file.
+// The free space kept on the recordings' card: what REC start makes, and the
+// least a recording's writer keeps (DvrWriter::headroom).
+inline constexpr uint64_t kDvrMinFreeBytes = 300ull << 20;
+
+// Deletes the oldest recordings in dir - fpvOS_*.mp4 / .h265, and kestrel_* and
+// recording_*, what earlier builds (the VRX Pro's, the Ascent's) named them -
+// with their thumbnail and telemetry sidecar, until free space clears
+// min_free_bytes or nothing is left; never `keep`, never anything else (the SD
+// logs and the radio's .frames.csv share the folder and the prefix). Returns
+// the bytes freed.
 uint64_t purge_oldest_recordings(const std::string& dir, uint64_t min_free_bytes,
                                  const std::string& keep = "");
+// The bytes purge_oldest_recordings could free in dir, `keep` aside.
+uint64_t reclaimable_recording_bytes(const std::string& dir, const std::string& keep = "");

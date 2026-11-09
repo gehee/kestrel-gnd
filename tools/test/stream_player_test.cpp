@@ -1,6 +1,7 @@
 #include "dvr/stream_player.hpp"
 #include "dvr/stream_recorder.hpp"
 #include "recording_fixture.hpp"
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <fstream>

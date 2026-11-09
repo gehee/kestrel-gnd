@@ -14,6 +14,7 @@ void ReceiverControls::update(BackendState& state, uint64_t now) {
     details.distance_m = linked ? g.dist_m : -1;
     details.bandwidth_step = linked ? g.link.bw_step : -1;
     details.air_power_mw = linked ? g.link.air_pwr_mw : 0;
+    details.air_live_dbm = linked ? air_.state().live_dbm : 0;
     details.video_mbps = linked ? g.video_mbps : 0;
     details.link_mbps = linked ? g.link.rx_data_rate_kbps / 1000.0f : 0;
     details.standby = linked && unit.low_power;

@@ -8,6 +8,7 @@
 #include "kestrel_gnd_config.h"
 #include "radio/ar8030_link.hpp"
 #include "radio/native_pairing.hpp"
+#include "system/air/power.hpp"
 #include "hud/lvgl/display.hpp"
 #include "hud/lvgl/input.hpp"
 #include "hud/lvgl/preferences.hpp"
@@ -279,6 +280,10 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
             }
             if(id=="record") {
                 if(player.state().deleting)throw std::runtime_error("Wait for recording deletion to finish");
+                // A trial that runs out restarts the session, which would end
+                // a recording started during it.
+                if(!recorder.is_recording() && mode.pending)
+                    throw std::runtime_error("Keep or revert the new screen mode first");
                 if(!recorder.is_recording() && (player.state().busy || !model.backend.media.video_fresh(kestrel_ui::monotonic_us()) || !recorder.state().storage_ready))
                     throw std::runtime_error("Recording needs live video and writable storage");
                 recorder.toggle(); return std::string("Recording change requested");
@@ -286,6 +291,7 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
             if(id.compare(0,5,"play:")==0) {
                 const auto rec=recorder.state();
                 if(recorder.is_recording() || rec.finishing)throw std::runtime_error("Stop recording and wait for it to finish saving first");
+                if(mode.pending)throw std::runtime_error("Keep or revert the new screen mode first");
                 player.play(id.substr(5));playback=player.state();playback_checked=0;return std::string("Opening recording");
             }
             if(id.compare(0,7,"delete:")==0) {
@@ -329,12 +335,13 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
         const auto start = kestrel_ui::monotonic_us();
         mode.started(start);
         if(mode.pending) {
-            controller.open_menu(); model.side=0; model.tab=5; model.selected=3;
-            model.stage=kestrel_ui::MenuStage::Browse;
+            controller.open_menu();
+            if(model.focus_row("screen_mode",start)) model.stage=kestrel_ui::MenuStage::Browse;
         }
         uint64_t drawn = 0, frame_deadline=start;
+        bool was_browsing=false; int recording_listed=0;
         int previous_bind = gnd::BIND_IDLE;
-        std::string recording_error,telemetry_error,thumbnail_session;
+        std::string recording_error,telemetry_error,thumbnail_session,unsupported_video;
         std::vector<uint8_t> playback_hud_bytes;
         std::shared_ptr<const kestrel_ui::HudData> playback_hud;
         uint64_t profile_start = start, profile_loops = 0, profile_drawn = 0, profile_presented = 0, profile_ui_flips = 0;
@@ -377,6 +384,10 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
             }
             model.backend.media.video_stamp_us = receiver.decoder->last_frame_us();
             const auto video = receiver.screen->video_stats();
+            // Decoded pictures the display drops (another size) are no video
+            // on the screen: the idle status shows, not RECEIVING VIDEO.
+            if(video.rejected_us && now>=video.rejected_us && now-video.rejected_us<2000000)
+                model.backend.media.video_stamp_us=0;
             model.backend.video = {video.stamp_us, video.width, video.height, video.fps, video.latency_ms};
             const auto state = radio_model.radio().state();
             auto &telemetry = model.backend.vrx;
@@ -393,8 +404,9 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
                 flight_controller.reset_hud_motion();model.backend.hud_dx=model.backend.hud_dy=model.backend.hud_bank=0;
             }
             if(telemetry.link_valid(now)) {
+                // rx_mcs_val is the radio's index: the MCS it names is two under it.
                 char details[128];std::snprintf(details,sizeof(details),"%.0f us / %s / %s MHz / MCS %d",state.link.frame_us,
-                    state.link.frame_mode_asked==2?"SHORT":"STANDARD",gnd::bw_step_label(state.link.bw_step),state.link.rx_mcs_val);
+                    state.link.frame_mode_asked==2?"SHORT":"STANDARD",gnd::bw_step_label(state.link.bw_step),ar_mcs_label(state.link.rx_mcs_val));
                 model.backend.radio_debug=details;
             } else model.backend.radio_debug="";
             // Native ranging is metres; the legacy raw field is not reused.
@@ -441,6 +453,13 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
             auto& gallery=model.backend.controls["gallery"];gallery={};gallery.known=true;gallery.enabled=true;gallery.action=true;
             gallery.text=std::to_string(playback.recordings.size())+" RECORDINGS";
             const auto recording=recorder.state();
+            // The recordings' folder is listed when someone looks at it (the
+            // menu or the gallery opens) or a recording starts or is saved,
+            // not twice a second from boot.
+            const bool browsing=model.menu_open || model.scene==kestrel_ui::SceneMode::GalleryBrowse;
+            const int listed_state=(recording.recording?1:0)|(recording.finishing?2:0);
+            if((browsing && !was_browsing) || listed_state!=recording_listed) player.refresh();
+            was_browsing=browsing; recording_listed=listed_state;
             const auto thumbnail_id=recording.recording && recording.frames?recording.file:std::string();
             if(thumbnail_id!=thumbnail_session) {
                 thumbnails.cancel();thumbnail_session=thumbnail_id;
@@ -470,6 +489,12 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
                 ++model.menu_version;
                 printf("panel: %s\n", text);
             };
+            const std::string unsupported=video.rejected_us ?
+                std::to_string(video.rejected_width)+"x"+std::to_string(video.rejected_height) : std::string();
+            if(unsupported!=unsupported_video) {
+                unsupported_video=unsupported;
+                if(!unsupported.empty()) notice(("Video "+unsupported+" is not supported here; the air unit must send 1080p").c_str());
+            }
             if(recording.telemetry_error!=telemetry_error) {
                 telemetry_error=recording.telemetry_error;
                 if(!telemetry_error.empty()){notice(telemetry_error.c_str());panel.beep(platform::PanelTone::Failure);}

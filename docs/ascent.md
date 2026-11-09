@@ -158,8 +158,9 @@ a known-compatible mode missing from EDID. Always verify actual visible output;
 page-flip completion alone is insufficient.
 
 For reception, pass the air unit's four-byte radio MAC with `--peer`. This is a
-session setting and does not modify a factory pairing file. The receiver starts
-at fixed 25 mW with a 1080p60 stream request. Optional `--control PATH` provides a
+session setting and does not modify a factory pairing file. The receiver's own
+uplink runs a fixed 14 dBm (25 mW), and it asks for a 1080p60 stream; the air
+unit takes the TX Power chosen in the menu. Optional `--control PATH` provides a
 local UI socket, `--input DEVICE` reads Linux evdev buttons, and `SIGUSR1` toggles
 the menu. Send keys using a second invocation with `--control PATH --send-key
 enter` (or menu/up/down/left/right/back/quit). `--preferences FILE` persists visual

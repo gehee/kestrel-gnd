@@ -27,6 +27,10 @@ class PlaneScreen : public hal::FrameSink {
         int width = 0, height = 0, fps = 0;
         float latency_ms = -1;
         uint64_t pts_us = 0; // timestamp of the last completed video flip
+        // The last decoded picture this pipeline could not scan out (its size
+        // or format): dropped, not shown, not a display failure.
+        uint64_t rejected_us = 0;
+        int rejected_width = 0, rejected_height = 0;
     };
     virtual VideoStats video_stats() const { return {}; }
     virtual bool supports_mode(AscentMode mode) const { return mode == AscentMode{}; }

@@ -2,6 +2,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <cerrno>
 #include <cstring>
 #include <fcntl.h>
 #include <filesystem>
@@ -28,13 +29,16 @@ struct Fd {
             close(value);
     }
 };
-bool write_value(const std::string &path, unsigned value) {
+// 0, or the errno of the failed open/write.
+int write_error(const std::string &path, unsigned value) {
     Fd fd{open(path.c_str(), O_WRONLY | O_CLOEXEC)};
     if (fd.value < 0)
-        return false;
+        return errno;
     const auto text = std::to_string(value);
-    return write(fd.value, text.data(), text.size()) == ssize_t(text.size());
+    const ssize_t n = write(fd.value, text.data(), text.size());
+    return n == ssize_t(text.size()) ? 0 : n < 0 ? errno : EIO;
 }
+bool write_value(const std::string &path, unsigned value) { return write_error(path, value) == 0; }
 struct Pwm {
     std::string chip, channel;
     bool owned = false;
@@ -51,7 +55,9 @@ struct Pwm {
             fprintf(stderr, "panel: PWM disable failed\n");
         return ok;
     }
-    bool start() {
+    // reclaim: this process holds the panel's lock (the ADC's flock), which no
+    // other kestrel-gnd can, so a channel found exported is a dead run's.
+    bool start(bool reclaim) {
         std::error_code ec;
         for (const auto &entry : std::filesystem::directory_iterator("/sys/class/pwm", ec)) {
             auto device = std::filesystem::canonical(entry.path() / "device", ec);
@@ -59,8 +65,14 @@ struct Pwm {
                 continue;
             chip = entry.path();
             channel = chip + "/pwm" + std::to_string(board::pwm_channel);
-            // An existing export belongs to someone else; never take it over.
-            if (!write_value(chip + "/export", board::pwm_channel))
+            // An existing export belongs to someone else; never take it over -
+            // unless it is an earlier kestrel-gnd's: a crash or a SIGKILL
+            // leaves the channel exported with nobody to unexport it, and the
+            // beeper stayed silent until a reboot.
+            const int err = write_error(chip + "/export", board::pwm_channel);
+            if (err == EBUSY && reclaim && std::filesystem::is_directory(channel, ec))
+                fprintf(stderr, "panel: reclaiming the beeper PWM an earlier run left exported\n");
+            else if (err)
                 return false;
             owned = true;
             return off() && write_value(channel + "/duty_cycle", 0) &&
@@ -104,7 +116,7 @@ struct AscentPanel::Impl {
                 gpio.value = request.fd;
             break;
         }
-        pwm_ready = pwm.start();
+        pwm_ready = pwm.start(adc.value >= 0);
         printf("panel: ADC=%s LINK=%s beeper=%s\n", adc.value >= 0 ? "ready" : "unavailable",
                gpio.value >= 0 ? "ready" : "unavailable", pwm_ready ? "ready" : "unavailable");
         try {

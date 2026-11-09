@@ -414,6 +414,25 @@ void Ar8030Link::sky_ack_done(int status) {
             default: break;
         }
         save_sky_config();
+        // What the camera runs now, in the model too: a reader of its state
+        // (the Ascent menu) shows it, and the next report of the whole config
+        // (camera_n, the EV/WB readback) carries it - not the handshake's
+        // values. No report count moves here: the VRX Pro menu already holds
+        // the value it asked for.
+        model_.update_camera([&](air::CameraState& c) {
+            switch (sky_ack_.field) {
+                case CAM_3DNR:      c.dnr3d    = v; break;
+                case CAM_EV:        c.ev_x10   = v; break;
+                case CAM_SAT:       c.sat      = v; break;
+                case CAM_CONTRAST:  c.contrast = v; break;
+                case CAM_SHARPNESS: c.sharp    = v; break;
+                case CAM_SCENE:     c.scene    = v; break;
+                case CAM_AWB:       c.awb      = v; break;
+                case CAM_ANGLE:     c.angle    = v; break;
+                case CAM_FOCUS:     c.focus    = v; break;
+                default: break;
+            }
+        });
     }
     sky_ack_ = SkyAckWait();
 }

@@ -1,7 +1,13 @@
 # Native Ascent recordings
 
 The recorder saves the received HEVC stream in MP4 without decoding or
-re-encoding it. Two optional companion files provide gallery and playback UI:
+re-encoding it, as `fpvOS_YYYYMMDD_HHMMSS.mp4` like the VRX Pro. The card is
+kept as the VRX Pro keeps it: REC start clears 300 MiB, and while recording the
+writer keeps a minute of the recording's rate free, deleting the oldest
+finished recordings (`fpvOS_`, and `kestrel_`/`recording_` from earlier builds)
+with their companion files. A full card with nothing left to delete ends the
+recording with "card full". Two optional companion files provide gallery and
+playback UI:
 
 - `.thumbs/<video filename>.jpg`: 320×180 preview, generated once from an
   already decoded frame. Existing videos acquire a preview on first playback.

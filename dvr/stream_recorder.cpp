@@ -59,12 +59,19 @@ void StreamRecorder::run() {
     std::vector<std::vector<uint8_t>> params;
     uint64_t previous=0,frames=0,ticks=0;
     std::string file;
+    // Ready: 64 MiB free, or that much to be had from the oldest finished
+    // recordings, which REC start and the writer clear (purge_oldest_recordings)
+    // as the VRX Pro does - a full card of old clips must not refuse REC.
     auto storage=[&] {
         struct statvfs space{};
         const bool ok=!directory_.empty() && !statvfs(directory_.c_str(),&space);
+        const uint64_t free_bytes=ok?uint64_t(space.f_bavail)*space.f_frsize:0;
+        const std::string active=file.empty()?std::string():file.substr(file.find_last_of('/')+1);
+        const bool ready=ok && (free_bytes>=(64u<<20) ||
+            free_bytes+reclaimable_recording_bytes(directory_,active)>=(64u<<20));
         std::lock_guard<std::mutex> lock(mutex_);
-        state_.free_bytes=ok?uint64_t(space.f_bavail)*space.f_frsize:0;
-        state_.storage_ready=ok && state_.free_bytes>=(64u<<20);
+        state_.free_bytes=free_bytes;
+        state_.storage_ready=ready;
     };
     storage();
     auto storage_time=std::chrono::steady_clock::now();
@@ -105,18 +112,31 @@ void StreamRecorder::run() {
                 {std::lock_guard<std::mutex> lock(mutex_);state_.error.clear();state_.frames=state_.dropped=0;}
                 struct statvfs space{};
                 if(directory_.empty()) throw std::runtime_error("No recording folder configured");
+                // Room on the card first, from the oldest finished recordings.
+                purge_oldest_recordings(directory_,kDvrMinFreeBytes);
                 if(statvfs(directory_.c_str(),&space)) throw std::runtime_error(std::string("Recording folder: ")+strerror(errno));
                 if(uint64_t(space.f_bavail)*space.f_frsize<(64u<<20)) throw std::runtime_error("Less than 64 MiB recording space remains");
                 std::time_t wall=std::time(nullptr);std::tm tm{};localtime_r(&wall,&tm);
                 char stamp[32];std::strftime(stamp,sizeof(stamp),"%Y%m%d_%H%M%S",&tm);
                 for(int suffix=0;suffix<1000;++suffix) {
-                    file=directory_+"/recording_"+stamp+(suffix?"_"+std::to_string(suffix):"")+".mp4";
+                    // The VRX Pro's names: the gallery, the web view and the
+                    // card's clean-up (purge_oldest_recordings) take them as recordings.
+                    file=directory_+"/fpvOS_"+stamp+(suffix?"_"+std::to_string(suffix):"")+".mp4";
                     fd=open(file.c_str(),O_RDWR|O_CREAT|O_EXCL|O_CLOEXEC,0644);
                     if(fd>=0 || errno!=EEXIST) break;
                 }
                 if(fd<0) {file.clear();throw std::runtime_error(std::string("Create recording: ")+strerror(errno));}
                 telemetry_.begin(file);
-                writer=std::make_unique<DvrWriter>(fd,8u<<20);
+                // The writer keeps room on the card while it writes (never
+                // this file) and says when the card stops taking it: the
+                // recording ends then, with the reason shown.
+                const std::string name=file.substr(file.find_last_of('/')+1);
+                writer=std::make_unique<DvrWriter>(fd,directory_,name,[this](const char* why) {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    state_.error=std::string("Recording stopped: ")+(std::strcmp(why,"CARD FULL")==0?"card full":"card error");
+                    if(requested_.exchange(false)) {Item stop;stop.kind=Item::Stop;queue_.push_back(std::move(stop));}
+                    wake_.notify_one();
+                },8u<<20);
                 mux=MP4E_open(0,1,writer.get(),[](int64_t off,const void* p,size_t n,void* w){return static_cast<DvrWriter*>(w)->write(off,p,n);});
                 if(!mux) throw std::runtime_error("Cannot open MP4 writer");
                 MP4E_set_finalize(mux);MP4E_set_full_frame_rate(mux);
@@ -138,7 +158,9 @@ void StreamRecorder::run() {
             {std::lock_guard<std::mutex> lock(mutex_);if(rc==MP4E_STATUS_OK)state_.frames=++frames;else ++state_.dropped;}
         } catch(const std::exception& e) {
             requested_=false; close();
-            std::lock_guard<std::mutex> lock(mutex_);state_.error=e.what();
+            // The writer's own reason (card full) when it gave one: the muxer's
+            // failure after it says less.
+            std::lock_guard<std::mutex> lock(mutex_);if(state_.error.empty())state_.error=e.what();
         }
     }
     close();

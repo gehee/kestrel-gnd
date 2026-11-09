@@ -169,10 +169,14 @@ void Ar8030Link::send_prj_rf_config() {
 void Ar8030Link::apply_tx_power(int mw) {
     bb_dev_handle_t *dev = (bb_dev_handle_t *)bb_dev;
     if (!dev) return;
-    ar_pwr_level lv = kArPwrLevels[ar_pwr_index(mw)];
-    // The native Ascent profile uses dBm directly, without the VRX Pro
-    // board table correction. Its initial uplink is fixed at 25 mW.
-    if (native_sdio_) lv = {25, 14, false, "25mW"};
+    // The level chosen: what the air unit is asked (cmd 0x22) and runs.
+    const ar_pwr_level &want = kArPwrLevels[ar_pwr_index(mw)];
+    // This radio's own uplink runs it too, by the VRX Pro's table - but not on
+    // the native Ascent profile, whose board has no table of its own: its uplink
+    // stays at a fixed 14 dBm (25 mW), its own adaptation off, whatever level
+    // the air unit is given. (It used to give the air unit 25 mW as well,
+    // whatever the menu said.)
+    const ar_pwr_level lv = native_sdio_ ? ar_pwr_level{25, 14, false, "25mW"} : want;
 
     // 3 bytes, not 1. Our bb_get_pwr_auto_out_t is a single uint8_t, but the
     // v2 table (extracted from stock) says SET 9 takes 3, so bb_ioctl copied
@@ -200,16 +204,16 @@ void Ar8030Link::apply_tx_power(int mw) {
     p.pwr = (uint8_t)lv.dbm;
     int rc_pwr = ar_ioctl(dev, BB_SET_POWER, &p, NULL);
 
-    printf("ar8030: TX power %s (%d dBm, auto=%d) -> auto:%d set:%d\n",
-           lv.label, lv.dbm, lv.automode ? 1 : 0, rc_auto, rc_pwr);
+    printf("ar8030: TX power %s (uplink %d dBm, auto=%d) -> auto:%d set:%d\n",
+           want.label, lv.dbm, lv.automode ? 1 : 0, rc_auto, rc_pwr);
     tx_power_dbm  = lv.dbm;
-    tx_power_mw   = lv.mw;
-    tx_power_auto = lv.automode;
+    tx_power_mw   = want.mw;          // the air unit's level (LinkStats::air_pwr_mw)
+    tx_power_auto = want.automode;
     if (rc_pwr == 0) rf_caps |= gnd::RF_CAP_POWER;
 
     // Mirror it to the air unit. Guarded because configure_link() calls this
     // before the control socket exists; the post-handshake call covers startup.
-    if (ctrl_sockfd >= 0) request_setting(CAM_PWR, sky_pwr_mw(lv));
+    if (ctrl_sockfd >= 0) request_setting(CAM_PWR, sky_pwr_mw(want));
 }
 
 void Ar8030Link::apply_bandwidth() {

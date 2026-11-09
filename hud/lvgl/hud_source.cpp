@@ -7,7 +7,7 @@
 #include <cstring>
 #include <fcntl.h>
 #include <stdexcept>
-#include <sys/prctl.h>
+#include <spawn.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -92,24 +92,45 @@ struct HudClient::Impl {
         }
         ++revision;
     }
+    // Spawned, not forked: fork() copies this whole process's memory map, which
+    // holds the radio's real-time threads up while it is made (base/shell.cpp)
+    // - and the renderer is restarted at run time, in flight, when it stalls.
+    // The renderer needs no parent-death signal: it ends at the IPC socket's
+    // EOF, which the kernel delivers however this process goes.
     void start() {
         int pair[2];
         if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, pair)) throw std::runtime_error("Cannot create HUD IPC pair");
-        const std::string w = std::to_string(width), h = std::to_string(height);
-        const pid_t owner = getpid();
-        child = fork();
-        if (child < 0) { close(pair[0]); close(pair[1]); throw std::runtime_error("Cannot fork HUD"); }
-        if (child == 0) {
-            close(pair[0]);
-            if (pair[1] != 3) { if (dup2(pair[1], 3) < 0) _exit(126); close(pair[1]); }
-            if (fcntl(3, F_SETFD, 0) < 0 || prctl(PR_SET_PDEATHSIG, SIGTERM) || getppid() != owner) _exit(126);
-            const int input = open("/dev/null", O_RDONLY | O_CLOEXEC);
-            if (input < 0 || dup2(input, STDIN_FILENO) < 0) _exit(126);
-            if (input != STDIN_FILENO) close(input);
-            execl(executable.c_str(), executable.c_str(), "--ipc-fd", "3", "--width", w.c_str(), "--height", h.c_str(), "--assets", assets.c_str(), static_cast<char*>(nullptr));
-            std::perror("Cannot exec kestrel-hud"); _exit(127);
+        // The child's end becomes its fd 3. A dup2 onto the same number would
+        // keep its close-on-exec flag, so it is moved off 3 first.
+        if (pair[1] == 3) {
+            const int moved = fcntl(pair[1], F_DUPFD_CLOEXEC, 4);
+            close(pair[1]);
+            if (moved < 0) { close(pair[0]); throw std::runtime_error("Cannot prepare HUD IPC"); }
+            pair[1] = moved;
         }
-        close(pair[1]); socket = pair[0]; progress_at = monotonic_us();
+        const std::string w = std::to_string(width), h = std::to_string(height);
+        const char* argv[] = {executable.c_str(), "--ipc-fd", "3", "--width", w.c_str(), "--height", h.c_str(),
+                              "--assets", assets.c_str(), nullptr};
+        posix_spawn_file_actions_t fa;
+        posix_spawnattr_t at;
+        posix_spawn_file_actions_init(&fa);
+        posix_spawnattr_init(&at);
+        sigset_t none, defaults;
+        sigemptyset(&none);
+        sigemptyset(&defaults);
+        for (int s : {SIGPIPE, SIGTERM, SIGINT, SIGUSR1}) sigaddset(&defaults, s);
+        int rc = posix_spawn_file_actions_adddup2(&fa, pair[1], 3);
+        if (!rc) rc = posix_spawn_file_actions_addopen(&fa, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
+        if (!rc) rc = posix_spawnattr_setsigmask(&at, &none);
+        if (!rc) rc = posix_spawnattr_setsigdefault(&at, &defaults);
+        if (!rc) rc = posix_spawnattr_setflags(&at, POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF);
+        pid_t pid = -1;
+        if (!rc) rc = posix_spawn(&pid, executable.c_str(), &fa, &at, const_cast<char* const*>(argv), ::environ);
+        posix_spawn_file_actions_destroy(&fa);
+        posix_spawnattr_destroy(&at);
+        close(pair[1]);
+        if (rc) { close(pair[0]); throw std::runtime_error(std::string("Cannot start kestrel-hud: ") + std::strerror(rc)); }
+        child = pid; socket = pair[0]; progress_at = monotonic_us();
         std::printf("HUD_PROCESS pid=%d executable=%s restarts=%llu\n", int(child), executable.c_str(), (unsigned long long)restarts);
     }
     void packet(hud_ipc::Packet& p, uint64_t now) {

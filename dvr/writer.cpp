@@ -13,11 +13,43 @@ namespace {
 bool ends_with(const std::string& s, const std::string& suffix) {
     return s.size() >= suffix.size() && s.compare(s.size()-suffix.size(), suffix.size(), suffix)==0;
 }
+// A recording purge_oldest_recordings may delete.
+bool purgeable(const std::string& name, const std::string& keep) {
+    if (name.rfind("fpvOS_", 0) != 0 && name.rfind("kestrel_", 0) != 0 && name.rfind("recording_", 0) != 0) return false;
+    return (ends_with(name, ".mp4") || ends_with(name, ".h265")) && name != keep;
+}
+uint64_t size_of(const std::string& path) {
+    struct stat st;
+    return stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode) ? (uint64_t)st.st_size : 0;
+}
+// dir's purgeable recordings, oldest first: their mtime and path.
+std::vector<std::pair<time_t, std::string>> recordings_in(const std::string& dir, const std::string& keep) {
+    std::vector<std::pair<time_t, std::string>> files;
+    DIR* d = opendir(dir.c_str());
+    if (!d) return files;
+    struct dirent* ent;
+    while ((ent = readdir(d)) != nullptr) {
+        const std::string name = ent->d_name;
+        if (!purgeable(name, keep)) continue;
+        const std::string path = dir + "/" + name;
+        struct stat fst;
+        if (stat(path.c_str(), &fst) != 0 || !S_ISREG(fst.st_mode)) continue;
+        files.emplace_back(fst.st_mtime, path);
+    }
+    closedir(d);
+    std::sort(files.begin(), files.end());
+    return files;
+}
+// A recording's companions: its gallery thumbnail and its telemetry sidecar.
+std::vector<std::string> companions(const std::string& dir, const std::string& path) {
+    const std::string name = path.substr(path.find_last_of('/') + 1);
+    return {dir + "/.thumbs/" + name + ".jpg", path + ".telemetry.jsonl"};
+}
 }
 // The free space kept on the card while recording: a minute of the recording
 // at its rate so far, and at least what REC start makes (no rate known yet).
 // Looked at every 32 MB written or every 5 s, whichever comes first.
-constexpr uint64_t kMinFreeBytes    = 300ull << 20;
+constexpr uint64_t kMinFreeBytes    = kDvrMinFreeBytes;
 constexpr uint64_t kHeadroomUs      = 60000000;
 constexpr uint64_t kSpaceCheckBytes = 32ull << 20;
 constexpr uint64_t kSpaceCheckUs    = 5000000;
@@ -134,34 +166,30 @@ uint64_t purge_oldest_recordings(const std::string& dir, uint64_t min_free_bytes
     uint64_t avail = (uint64_t)st.f_bavail * (uint64_t)st.f_frsize;
     if (avail >= min_free_bytes) return 0;
 
-    DIR* d = opendir(dir.c_str());
-    if (!d) return 0;
-    std::vector<std::pair<time_t, std::string>> files;
-    struct dirent* ent;
-    while ((ent = readdir(d)) != nullptr) {
-        std::string name = ent->d_name;
-        if (name.rfind("fpvOS_", 0) != 0 && name.rfind("kestrel_", 0) != 0) continue;
-        if (!(ends_with(name, ".mp4") || ends_with(name, ".h265")) || name == keep) continue;
-        std::string path = dir + "/" + name;
-        struct stat fst;
-        if (stat(path.c_str(), &fst) != 0 || !S_ISREG(fst.st_mode)) continue;
-        files.emplace_back(fst.st_mtime, path);
-    }
-    closedir(d);
-    std::sort(files.begin(), files.end());
-
     uint64_t total = 0;
-    for (const auto& f : files) {
+    for (const auto& f : recordings_in(dir, keep)) {
         if (avail >= min_free_bytes) break;
-        struct stat fst;
-        uint64_t freed = (stat(f.second.c_str(), &fst) == 0) ? (uint64_t)fst.st_size : 0;
+        uint64_t freed = size_of(f.second);
         if (remove(f.second.c_str()) == 0) {
             printf("DVR: low on space, removed oldest recording %s\n", f.second.c_str());
+            for (const auto& c : companions(dir, f.second)) {
+                const uint64_t n = size_of(c);
+                if (n && remove(c.c_str()) == 0) freed += n;
+            }
             avail += freed;
             total += freed;
         } else {
             printf("DVR: low on space, failed to remove %s: %s\n", f.second.c_str(), strerror(errno));
         }
+    }
+    return total;
+}
+
+uint64_t reclaimable_recording_bytes(const std::string& dir, const std::string& keep) {
+    uint64_t total = 0;
+    for (const auto& f : recordings_in(dir, keep)) {
+        total += size_of(f.second);
+        for (const auto& c : companions(dir, f.second)) total += size_of(c);
     }
     return total;
 }

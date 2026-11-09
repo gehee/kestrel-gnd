@@ -14,7 +14,7 @@ void Controller::tick(uint64_t now) {
         } else ++i;
     }
     const auto& media = m.backend.media;
-    warning_.update(now, m.backend.vrx.link_valid(now), m.backend.vrx.mcs,
+    warning_.update(now, m.backend.vrx.link_valid(now), m.link_range(now).warning(),
                     media.video_monitored, media.video_stamp_us, m.backend.playback_busy);
     if (media.recording && (!was_recording_ || media.recording_id != recording_id_)) recording_since_ = now;
     was_recording_ = media.recording; recording_id_ = media.recording_id;

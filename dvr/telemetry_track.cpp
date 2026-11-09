@@ -91,7 +91,7 @@ bool TelemetryWriter::pending() const {std::lock_guard<std::mutex> l(mutex_);ret
 void TelemetryWriter::drain(){std::unique_lock<std::mutex> l(mutex_);drained_.wait(l,[&]{return jobs_.empty() && !busy_;});}
 void TelemetryWriter::run() {
     pthread_setname_np(pthread_self(),"dvr-telem");sched_param p{};pthread_setschedparam(pthread_self(),SCHED_OTHER,&p);
-    FILE* f=nullptr;std::string path;uint64_t last_full=0,last_flush=0,last_us=0;bool have=false;Json previous;std::shared_ptr<const media::TelemetrySample> previous_sample;
+    FILE* f=nullptr;std::string path;uint64_t last_full=0,last_flush=0,last_us=0;bool have=false;std::shared_ptr<const media::TelemetrySample> previous_sample;
     auto close=[&]{if(f){bool failed=fflush(f)!=0;if(fsync(fileno(f)))failed=true;if(fclose(f))failed=true;f=nullptr;
         if(!have)unlink(path.c_str());if(failed)throw std::runtime_error("Cannot finish telemetry");}};
     for(;;) {
@@ -102,7 +102,7 @@ void TelemetryWriter::run() {
                 int fd=open(path.c_str(),O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC|O_NOFOLLOW,0644);
                 if(fd<0)throw std::runtime_error("Cannot create telemetry sidecar");
                 f=fdopen(fd,"w");if(!f){::close(fd);throw std::runtime_error("Cannot open telemetry writer");}
-                setvbuf(f,nullptr,_IOFBF,65536);have=false;last_full=last_flush=last_us=0;previous={};previous_sample.reset();
+                setvbuf(f,nullptr,_IOFBF,65536);have=false;last_full=last_flush=last_us=0;previous_sample.reset();
                 put(f,Json{{"format","kestrel.telemetry"},{"version",1},{"timebase","mp4_microseconds"},{"hud_codec",1}});
             } else if(job.kind==Job::End)close();
             else if(f) {
@@ -111,25 +111,33 @@ void TelemetryWriter::run() {
                 const bool same=previous_sample && previous_sample->values==job.sample->values && previous_sample->text==job.sample->text &&
                     previous_sample->grid==job.sample->grid && previous_sample->hud==job.sample->hud;
                 if(full || !same) {
-                const auto state=encode(*job.sample);
+                // A snapshot encodes the whole state; an update only what
+                // changed, found on the samples themselves - encoding the
+                // whole state (its 1060-cell grid, the HUD) at every video
+                // frame only to compare it cost the most.
                 Json update=Json::object();
-                if(full)update=state;
+                if(full) update=encode(*job.sample);
                 else {
-                    for(const char* key:{"values","text"}) {
+                    const auto& was=*previous_sample;const auto& now=*job.sample;
+                    auto changes=[](const auto& before,const auto& after) {
                         Json changed=Json::object();
-                        for(auto it=state[key].begin();it!=state[key].end();++it)
-                            if(!previous[key].contains(it.key()) || previous[key][it.key()]!=it.value())changed[it.key()]=it.value();
-                        for(auto it=previous[key].begin();it!=previous[key].end();++it)if(!state[key].contains(it.key()))changed[it.key()]=nullptr;
-                        if(!changed.empty())update[key]=std::move(changed);
-                    }
-                    if(state["grid"]!=previous["grid"]) {
+                        for(const auto& [key,value]:after) {
+                            const auto it=before.find(key);
+                            if(it==before.end() || it->second!=value) changed[key]=value;
+                        }
+                        for(const auto& entry:before) if(!after.count(entry.first)) changed[entry.first]=nullptr;
+                        return changed;
+                    };
+                    if(auto changed=changes(was.values,now.values);!changed.empty()) update["values"]=std::move(changed);
+                    if(auto changed=changes(was.text,now.text);!changed.empty()) update["text"]=std::move(changed);
+                    if(now.grid!=was.grid) {
                         Json cells=Json::array();
-                        for(size_t i=0;i<job.sample->grid.size();++i)if(state["grid"][i]!=previous["grid"][i])cells.push_back(Json::array({i,job.sample->grid[i]}));
+                        for(size_t i=0;i<now.grid.size();++i)if(now.grid[i]!=was.grid[i])cells.push_back(Json::array({i,now.grid[i]}));
                         update["grid_updates"]=std::move(cells);
                     }
-                    if(state["hud_v1"]!=previous["hud_v1"])update["hud_v1"]=state["hud_v1"];
+                    if(now.hud!=was.hud)update["hud_v1"]=hex(now.hud);
                 }
-                if(!update.empty()){put(f,Json{{"t_us",job.us},{"type",full?"snapshot":"update"},{"data",std::move(update)}});previous=state;}
+                if(!update.empty())put(f,Json{{"t_us",job.us},{"type",full?"snapshot":"update"},{"data",std::move(update)}});
                 previous_sample=job.sample;
                 }
                 have=true;last_us=job.us;if(full)last_full=job.us;

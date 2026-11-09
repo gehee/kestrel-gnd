@@ -18,7 +18,7 @@
 #include "display/screen_tap.hpp"
 #include "hal/picture.hpp"   // DecodedUnit, for the RGA recorder
 
-constexpr uint64_t kMinFreeBytes = 300ull << 20;
+constexpr uint64_t kMinFreeBytes = kDvrMinFreeBytes;
 
 int write_callback(int64_t offset, const void *buffer, size_t size, void *token){
     return static_cast<DvrWriter*>(token)->write(offset, buffer, size);

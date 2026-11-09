@@ -113,44 +113,97 @@ class Ar9311Screen final : public PlaneScreen {
         uint64_t size = 0;
         uint8_t *pixels = nullptr;
     };
-    struct Imported {
-        int fd;
-        uint32_t handle = 0, fb = 0;
-        std::shared_ptr<DecodedUnit> frame;
-        Imported(int drm, std::shared_ptr<DecodedUnit> f) : fd(drm), frame(std::move(f)) {
-            try {
-                drm_prime_handle prime{};
-                prime.fd = frame->prime_fd;
-                ctl(fd, DRM_IOCTL_PRIME_FD_TO_HANDLE, &prime, "import decoded DMA-BUF");
-                handle = prime.handle;
-                drm_mode_fb_cmd2 cmd{};
-                cmd.width = frame->width;
-                cmd.height = frame->height;
-                cmd.pixel_format = DRM_FORMAT_YUV420;
-                for (int i = 0; i < 3; ++i) {
-                    cmd.handles[i] = handle;
-                    cmd.pitches[i] = frame->pitches[i];
-                    cmd.offsets[i] = frame->offsets[i];
-                }
-                ctl(fd, DRM_IOCTL_MODE_ADDFB2, &cmd, "decoded framebuffer");
-                fb = cmd.fb_id;
-            } catch (...) {
-                release();
-                throw;
-            }
-        }
-        ~Imported() { release(); }
-        void release() {
-            if (fb)
-                ioctl(fd, DRM_IOCTL_MODE_RMFB, &fb);
-            if (handle) {
-                drm_gem_close close{};
-                close.handle = handle;
-                ioctl(fd, DRM_IOCTL_GEM_CLOSE, &close);
-            }
-            fb = handle = 0;
-        }
+    // A decoder buffer's framebuffer, made the first time the buffer is shown
+    // and kept while the decoder holds that buffer (its frame_ref): the
+    // capture pool is a fixed set of DMA-BUFs, and importing every picture
+    // again was four ioctls a frame on this thread (PRIME + ADDFB2, then RMFB
+    // + GEM_CLOSE). Owners are matched by their control block, which a
+    // weak_ptr keeps from being reused while the entry exists.
+    struct CachedFb {
+        std::weak_ptr<void> owner;
+        uint32_t handle = 0, fb = 0, width = 0, height = 0;
+        std::array<uint32_t, 3> pitches{}, offsets{};
     };
+    // A picture on its way to the screen or on it: its lease, and its fb.
+    struct Shown {
+        std::shared_ptr<DecodedUnit> frame;
+        uint32_t fb = 0;
+    };
+    std::vector<CachedFb> fbs_;   // the KMS thread's (run)
+    void release(CachedFb &c) {
+        if (c.fb)
+            ioctl(fd_, DRM_IOCTL_MODE_RMFB, &c.fb);
+        if (c.handle) {
+            drm_gem_close close{};
+            close.handle = c.handle;
+            ioctl(fd_, DRM_IOCTL_GEM_CLOSE, &close);
+        }
+        c.fb = c.handle = 0;
+    }
+    static bool same_owner(const std::weak_ptr<void> &a, const std::shared_ptr<void> &b) {
+        return !a.owner_before(b) && !b.owner_before(a);
+    }
+    // Buffers their decoder has let go. None is on the screen: a shown
+    // picture's lease (Shown::frame) keeps its owner alive.
+    void drop_expired_fbs() {
+        for (auto it = fbs_.begin(); it != fbs_.end();) {
+            if (it->owner.expired()) {
+                release(*it);
+                it = fbs_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+    void drop_all_fbs() {
+        for (auto &c : fbs_)
+            release(c);
+        fbs_.clear();
+    }
+    uint32_t framebuffer(const DecodedUnit &f) {
+        drop_expired_fbs();
+        const std::array<uint32_t, 3> pitches{f.pitches[0], f.pitches[1], f.pitches[2]},
+            offsets{f.offsets[0], f.offsets[1], f.offsets[2]};
+        for (auto it = fbs_.begin(); it != fbs_.end(); ++it) {
+            if (!same_owner(it->owner, f.frame_ref))
+                continue;
+            if (it->width == f.width && it->height == f.height && it->pitches == pitches && it->offsets == offsets)
+                return it->fb;
+            // The same buffer laid out anew: it is not on the screen, since
+            // the decoder could not have handed it out again while leased.
+            release(*it);
+            fbs_.erase(it);
+            break;
+        }
+        CachedFb c;
+        c.owner = f.frame_ref;
+        c.width = f.width;
+        c.height = f.height;
+        c.pitches = pitches;
+        c.offsets = offsets;
+        try {
+            drm_prime_handle prime{};
+            prime.fd = f.prime_fd;
+            ctl(fd_, DRM_IOCTL_PRIME_FD_TO_HANDLE, &prime, "import decoded DMA-BUF");
+            c.handle = prime.handle;
+            drm_mode_fb_cmd2 cmd{};
+            cmd.width = f.width;
+            cmd.height = f.height;
+            cmd.pixel_format = DRM_FORMAT_YUV420;
+            for (int i = 0; i < 3; ++i) {
+                cmd.handles[i] = c.handle;
+                cmd.pitches[i] = pitches[i];
+                cmd.offsets[i] = offsets[i];
+            }
+            ctl(fd_, DRM_IOCTL_MODE_ADDFB2, &cmd, "decoded framebuffer");
+            c.fb = cmd.fb_id;
+        } catch (...) {
+            release(c);
+            throw;
+        }
+        fbs_.push_back(std::move(c));
+        return fbs_.back().fb;
+    }
     enum class Slot { Free, Writing, Ready, Pending, Active };
     int width_, height_;
     int fd_ = -1;
@@ -178,6 +231,7 @@ class Ar9311Screen final : public PlaneScreen {
     std::atomic<bool> hold_video_{false};
     uint64_t video_updates_ = 0;
     std::atomic<uint64_t> ui_updates_{0};
+    std::atomic<uint64_t> rejected_frames_{0};
 
     void destroy(Buffer &b) {
         if (b.pixels)
@@ -210,6 +264,7 @@ class Ar9311Screen final : public PlaneScreen {
         } catch (const std::exception &e) {
             fprintf(stderr, "display stop: %s\n", e.what());
         }
+        drop_all_fbs();
         for (auto &b : ui_)
             destroy(b);
         destroy(black_);
@@ -399,10 +454,22 @@ class Ar9311Screen final : public PlaneScreen {
     }
     ~Ar9311Screen() override { close_display(); }
     void queue_frame(std::shared_ptr<DecodedUnit> frame) override {
-        if (!frame || !((frame->width == 1920 && frame->height == 1080) || (frame->width == width_ && frame->height == height_)) || !frame->has_prime_fd ||
-            frame->prime_fd < 0 || frame->drm_pixel_format != DRM_FORMAT_YUV420) {
-            failed_ = true;
-            wake_.notify_all();
+        if (!frame)
+            return;
+        if (!((frame->width == 1920 && frame->height == 1080) || (frame->width == width_ && frame->height == height_)) ||
+            !frame->has_prime_fd || frame->prime_fd < 0 || frame->drm_pixel_format != DRM_FORMAT_YUV420 || !frame->frame_ref) {
+            // A picture this pipeline cannot scan out (another size or
+            // format) says nothing about HDMI: dropped, and said, rather than
+            // a display failure that rolled the screen mode back or ended the
+            // session in a restart loop.
+            const auto n = ++rejected_frames_;
+            if (n == 1 || n % 600 == 0)
+                fprintf(stderr, "display: %llu decoded frames dropped as unsupported (last %ux%u, format %08x)\n",
+                        (unsigned long long)n, frame->width, frame->height, frame->drm_pixel_format);
+            std::lock_guard<std::mutex> lock(mutex_);
+            video_stats_.rejected_us = clock_us();
+            video_stats_.rejected_width = int(frame->width);
+            video_stats_.rejected_height = int(frame->height);
             return;
         }
         {
@@ -480,7 +547,7 @@ class Ar9311Screen final : public PlaneScreen {
     void hold_video(bool on) override { hold_video_=on;wake_.notify_all(); }
     bool failed() const override { return failed_.load(); }
     void run() override {
-        std::unique_ptr<Imported> showing, pending;
+        Shown showing, pending;
         int active_ui = 0, next_ui = -1;
         int source_width = width_, source_height = height_;
         uint64_t cookie = 0;
@@ -505,6 +572,7 @@ class Ar9311Screen final : public PlaneScreen {
                 source_width=1920; source_height=1080;
             }
             while (!*stop_ && !failed_) {
+                drop_expired_fbs();
                 std::shared_ptr<DecodedUnit> frame;
                 {
                     std::unique_lock<std::mutex> lock(mutex_);
@@ -517,21 +585,21 @@ class Ar9311Screen final : public PlaneScreen {
                             next_ui = i;
                             slots_[i] = Slot::Pending;
                         }
-                    if (frame == (showing ? showing->frame : nullptr) && next_ui == active_ui) {
+                    if (frame == showing.frame && next_ui == active_ui) {
                         wake_.wait_for(lock, std::chrono::milliseconds(2));
                         continue;
                     }
                     // Include the import/commit interval in flush ownership.
-                    video_active_ = bool(frame) || bool(showing);
+                    video_active_ = bool(frame) || bool(showing.frame);
                 }
-                const bool video_changed = frame != (showing ? showing->frame : nullptr);
+                const bool video_changed = frame != showing.frame;
                 if (video_changed && frame)
-                    pending = std::make_unique<Imported>(fd_, frame);
+                    pending = {frame, framebuffer(*frame)};
                 const int next_width = frame ? frame->width : source_width;
                 const int next_height = frame ? frame->height : source_height;
                 const uint32_t blank_fb = next_height == 720 ? black_720_.fb : black_.fb;
                 uint32_t video_fb =
-                    video_changed ? (pending ? pending->fb : blank_fb) : (showing ? showing->fb : blank_fb);
+                    video_changed ? (pending.frame ? pending.fb : blank_fb) : (showing.frame ? showing.fb : blank_fb);
                 Atomic a;
                 a.plane(primary_, crtc_.id, video_fb, next_width, next_height, width_, height_);
                 a.plane(overlay_, crtc_.id, next_ui < 0 ? 0 : ui_[next_ui].fb, width_, height_, width_, height_);
@@ -548,6 +616,7 @@ class Ar9311Screen final : public PlaneScreen {
                 source_height = next_height;
                 if (video_changed) {
                     showing = std::move(pending);
+                    pending = {};
                     ++video_updates_;
                 }
                 if (next_ui != active_ui)
@@ -559,7 +628,7 @@ class Ar9311Screen final : public PlaneScreen {
                     active_ui = next_ui;
                     if (active_ui >= 0)
                         slots_[active_ui] = Slot::Active;
-                    video_active_ = bool(showing);
+                    video_active_ = bool(showing.frame);
                     if (video_changed && frame) {
                         const uint64_t stamp = clock_us();
                         if (!stats_start_) stats_start_ = stamp;
@@ -567,6 +636,7 @@ class Ar9311Screen final : public PlaneScreen {
                         if (frame->recv_ts && stamp >= frame->recv_ts && frame->tx_processing_delay_us != kAirUnknown)
                             latency_samples_.push_back(float(stamp - frame->recv_ts + uint64_t(frame->tx_encode_delay_us) + frame->tx_processing_delay_us) / 1000);
                         video_stats_.stamp_us = stamp;video_stats_.pts_us=frame->pts;
+                        video_stats_.rejected_us = 0;
                         video_stats_.width = frame->width; video_stats_.height = frame->height;
                         if (stamp - stats_start_ >= 1000000) {
                             video_stats_.fps = int(std::lround(stats_frames_ * 1000000.0 / (stamp - stats_start_)));
@@ -579,7 +649,11 @@ class Ar9311Screen final : public PlaneScreen {
                             latency_samples_.clear(); stats_frames_ = 0; stats_start_ = stamp;
                         }
                     } else if (video_changed) {
+                        const auto rejected = video_stats_;
                         video_stats_ = {}; stats_start_ = stats_frames_ = 0; latency_samples_.clear();
+                        video_stats_.rejected_us = rejected.rejected_us;
+                        video_stats_.rejected_width = rejected.rejected_width;
+                        video_stats_.rejected_height = rejected.rejected_height;
                     }
                 }
                 ++presented_;
@@ -596,8 +670,10 @@ class Ar9311Screen final : public PlaneScreen {
             failed_ = true;
             fprintf(stderr, "display stop: %s\n", e.what());
         }
-        pending.reset();
-        showing.reset();
+        pending = {};
+        showing = {};
+        // Scanout is stopped (or the device is gone): no fb is on the screen.
+        drop_all_fbs();
         // UI buffers/mappings stay alive until the UI caller has stopped too.
         {
             std::lock_guard<std::mutex> lock(mutex_);

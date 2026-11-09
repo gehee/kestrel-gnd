@@ -335,34 +335,53 @@ int main(int argc, char** argv) {
         }
         {
             LinkWarning warning;
-            warning.update(1000000,true,8,true,0,false);
+            warning.update(1000000,true,0,true,0,false);
             check(warning.level()==0,"No stall before first frame on connection");
-            warning.update(1100000,true,5,true,1100000,false);
-            check(warning.level()==1,"MCS 5 amber");
+            warning.update(1100000,true,1,true,1100000,false);
+            check(warning.level()==1,"Amber range");
             warning.update(1200000,true,2,true,1200000,false);
-            check(warning.level()==2,"MCS 2 immediately red");
-            warning.update(1300000,true,8,true,1300000,false);
-            warning.update(3299999,true,8,true,3299999,false);
+            check(warning.level()==2,"Red range immediately");
+            warning.update(1300000,true,0,true,1300000,false);
+            warning.update(3299999,true,0,true,3299999,false);
             check(warning.level()==2,"Recovery holds two seconds");
-            warning.update(3300000,true,8,true,3300000,false);
+            warning.update(3300000,true,0,true,3300000,false);
             check(warning.level()==0,"Stable recovery clears warning");
-            warning.update(3700000,true,8,true,3300000,false);
+            warning.update(3700000,true,0,true,3300000,false);
             check(warning.level()==0,"400ms boundary still healthy");
-            warning.update(3700001,true,8,true,3300000,false);
-            check(warning.level()==2,"Video stall overrides good MCS");
-            warning.update(3800000,false,-1,true,3300000,false);
-            warning.update(5900000,false,-1,true,3300000,false);
+            warning.update(3700001,true,0,true,3300000,false);
+            check(warning.level()==2,"Video stall overrides a good range");
+            warning.update(3800000,false,0,true,3300000,false);
+            warning.update(5900000,false,0,true,3300000,false);
             check(warning.level()==0,"Disconnect clears held warning");
-            warning.update(6000000,true,10,true,3300000,false);
+            warning.update(6000000,true,0,true,3300000,false);
             check(warning.level()==0,"Old connection frame cannot trigger a new stall");
-            warning.update(6100000,true,10,true,6000000,true);
-            warning.update(7200000,true,10,true,6000000,true);
+            warning.update(6100000,true,0,true,6000000,true);
+            warning.update(7200000,true,0,true,6000000,true);
             check(warning.level()==0,"Paused gallery is not a live video stall");
+        }
+        {
+            // The VRX Pro's range blocks (system/gnd/link_range.hpp), by the
+            // radio's MCS index (MCS + 2) and bandwidth step (4 = 20 MHz).
+            const auto full=gnd::link_range(true,8,4,501,26);
+            check(full.blocks==8 && full.warning()==0,"20 MHz MCS 6 at full AUTO power is 8 blocks, fine");
+            check(gnd::link_range(true,7,4,501,26).warning()==1,"20 MHz MCS 5 is amber");
+            check(gnd::link_range(true,5,3,501,26).warning()==2,"10 MHz MCS 3 is red");
+            check(gnd::link_range(true,8,4,500,0).blocks==9,"A fixed power has no power lever");
+            check(gnd::link_range(true,0,4,501,26).blocks<0 && gnd::link_range(false,8,4,501,26).blocks<0,
+                  "No MCS reading or no link: no verdict");
+            Model m; const uint64_t now=10000000;
+            m.backend.vrx.connected=true; m.backend.vrx.stamp_us=now; m.backend.vrx.mcs=8;
+            m.backend.link.bandwidth_step=4; m.backend.link.air_power_mw=501; m.backend.link.air_live_dbm=26;
+            check(m.link_range(now).blocks==8,"Model reads the range from the backend");
+            check(m.focus_row("screen_mode",now) && m.side==0 && m.rows(now)[m.selected].id=="screen_mode",
+                  "Focus finds the Screen Mode row wherever it is");
+            check(!m.focus_row("no such row",now),"Focus on a missing row fails");
         }
         {
             Model m; Controller c(m); auto& b=m.backend;
             uint64_t now=10000000;
-            b.vrx.connected=true; b.vrx.mcs=7; b.vrx.stamp_us=now; b.vrx.frequency_mhz=5839;
+            // MCS index 5 (MCS 3) at 20 MHz on 100 mW AUTO: 6 of 12 range blocks, amber.
+            b.vrx.connected=true; b.vrx.mcs=5; b.vrx.stamp_us=now; b.vrx.frequency_mhz=5839;
             b.link={1234,4,101,4.4f,9.7f,true,true,88};
             b.video={now,1920,1080,59,42};
             b.media.recording=true; b.media.recording_id="first";

@@ -24,7 +24,7 @@ inline std::shared_ptr<const media::TelemetrySample> record_hud(const kestrel_ui
 #undef VRX
     v["vrx.fresh"]=b.vrx.fresh(now);v["vrx.link_valid"]=b.vrx.link_valid(now);
 #define LINK(field) v["link." #field]=b.link.field
-    LINK(distance_m);LINK(bandwidth_step);LINK(air_power_mw);LINK(video_mbps);LINK(link_mbps);
+    LINK(distance_m);LINK(bandwidth_step);LINK(air_power_mw);LINK(air_live_dbm);LINK(video_mbps);LINK(link_mbps);
     LINK(standby);LINK(vtx_temperature_valid);LINK(vtx_temperature_c);
 #undef LINK
     v["video.width"]=b.video.width;v["video.height"]=b.video.height;v["video.fps"]=b.video.fps;v["video.latency_ms"]=b.video.latency_ms;

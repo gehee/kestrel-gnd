@@ -3,6 +3,7 @@
 // snapshot under osd_mutex, the video's state, the panels' matrices, the
 // link as measured.
 #include "hud/osd_detail.hpp"
+#include "system/gnd/link_range.hpp"
 
 void OSD::render_frame() {
     if (!layer_ready_) return;
@@ -591,57 +592,18 @@ void OSD::measure_link(Frame& f) {
             quality = quality_ewma;
         }
         // Range left: what the link can still give up to hold on as the
-        // signal fades, in dB of SNR, summed over its three levers (the user,
-        // 2026-10-29: the gauge and its warning are about what is left to gain
-        // range, not the MCS):
-        //   MCS   - the current rung's down threshold over the lowest's
-        //           (the radio's own rows, SET 36: down at -0.9 2.6 5.2 8.3
-        //           11.2 14.2 16.1 dB for MCS -1 0 3 5 6 8 10)
-        //   width - 3 dB a halving left, down to 5 MHz (the narrowest used)
-        //   power - the air's cap over its power now (AUTO; a fixed power
-        //           has none to give)
-        // Full is 40 MHz MCS 8 with the AUTO cap's dB over 22 (where the model
-        // sits close by) - 28 dB on 500 mW AUTO. The VIDEO track shows it in
-        // twelve blocks (~2.3 dB each): amber at 5-7, red at 4 or fewer -
-        // 20 MHz MCS 6 at full power is 18 dB, 8 blocks, still fine; 20 MHz
-        // MCS 5 and 10 MHz MCS 5 (5.9 Mbit/s) are amber; 10 MHz MCS 3 (3.9
-        // Mbit/s, 9 dB, the user: should be red) and 5 MHz under MCS 6 are red.
-        float range_norm = 0.0f;
-        int range_blocks = -1;   // -1: no MCS reading, no verdict
-        {
-            static const struct { int mcs; float down_db; } kRows[] = {
-                { -1, -0.9f }, { 0, 2.6f }, { 3, 5.2f }, { 5, 8.3f },
-                { 6, 11.2f }, { 8, 14.2f }, { 10, 16.1f } };
-            const int mcs = ar_mcs_label(link_copy.rx_mcs_val);
-            float mcs_db = -1.0f;
-            for (const auto &r : kRows) if (mcs >= r.mcs) mcs_db = r.down_db - kRows[0].down_db;
-            const int gear = link_copy.bw_step;   // 2 = 5 MHz .. 5 = 40 MHz
-            const float width_db = gear > 2 && gear < 6 ? 3.0f * (gear - 2) : 0.0f;
-            float power_db = 0.0f, power_full_db = 0.0f;
-            if (link_copy.air_pwr_mw > 0) {
-                const ar_pwr_level &lv = kArPwrLevels[ar_pwr_index(link_copy.air_pwr_mw)];
-                if (lv.automode) {
-                    int cap_dbm = 0;   // the air's dBm for the AUTO cap, on its own scale
-                    for (int d = 9; d <= 28; d++) if (ar_air_mw_from_dbm(d) <= lv.mw - 1) cap_dbm = d;
-                    const int live = air_live_dbm();
-                    power_db = live > 0 && cap_dbm > live ? (float)(cap_dbm - live) : 0.0f;
-                    power_full_db = cap_dbm > 22 ? (float)(cap_dbm - 22) : 0.0f;
-                }
-            }
-            if (connected && mcs_db >= 0.0f) {
-                const float full = (14.2f - kRows[0].down_db) + 9.0f + power_full_db;
-                range_norm = std::max(0.0f, std::min(1.0f, (mcs_db + width_db + power_db) / full));
-                range_blocks = (int)(range_norm * 12.0f + 0.5f);
-            }
-        }
+        // signal fades - its levers and blocks in system/gnd/link_range.hpp,
+        // which the native Ascent's canopy reads too.
+        const gnd::LinkRange range = gnd::link_range(connected, link_copy.rx_mcs_val, link_copy.bw_step,
+                                                     link_copy.air_pwr_mw, air_live_dbm());
+        const float range_norm = range.norm;
         // Video link warning, for the screen-edge glow and the canopy's VIDEO
         // track, off the range left above (the track's own blocks, so the two
         // never disagree): amber at 5-7 of 12, red at 4 or fewer; or no
         // frame for 400 ms on a link that was delivering them - frozen.
         int warn = 0;
         if (connected) {
-            if (range_blocks >= 0 && range_blocks <= 4)      warn = 2;
-            else if (range_blocks >= 0 && range_blocks <= 7) warn = 1;
+            warn = range.warning();
             const uint64_t t = get_time_us(), last = last_fpv_frame_us_;
             if (seen_this_link && t > last && t - last > 400000ULL)   // a newer stamp is no freeze
                 warn = 2;

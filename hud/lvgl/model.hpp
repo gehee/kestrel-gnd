@@ -3,6 +3,7 @@
 #include "backend_state.hpp"
 #include "hud_data.hpp"
 #include "clock.hpp"
+#include "system/gnd/link_range.hpp"
 #include <string>
 #include <vector>
 #include <functional>
@@ -79,6 +80,10 @@ public:
     void set_preferences(const UiPreferences& p);
     std::vector<int> side_tabs() const;
     int first_row(uint64_t now) const;
+    // Opens the tab holding the row `id` and selects it (false: no such row).
+    bool focus_row(const std::string& id, uint64_t now);
+    // The video link's range left and its warning, as the VRX Pro shows them.
+    gnd::LinkRange link_range(uint64_t now) const;
     int remembered_section() const;
     std::string describe() const;
     std::string selected_help(uint64_t now) const;

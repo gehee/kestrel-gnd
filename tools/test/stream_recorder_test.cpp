@@ -43,6 +43,7 @@ int main(int argc,char** argv) {
             check(duration>.13 && duration<.14,"MP4 uses 60fps capture timestamps");
         }
         check(files[0]!=files[1],"Same-second recording names cannot overwrite earlier clips");
+        check(std::filesystem::path(files[0]).filename().string().rfind("fpvOS_",0)==0,"Recordings take the VRX Pro's names");
     }
     {
         dvr::StreamRecorder missing(std::string(dir)+"/missing",VideoCodec::H265,64,64,60);
@@ -61,12 +62,18 @@ int main(int argc,char** argv) {
     {
         const auto storage=std::filesystem::path(dir)/"cleanup";
         std::filesystem::create_directory(storage);
-        for(const char* name:{"fpvOS_old.mp4","kestrel_old.h265","fpvOS_active.mp4","fpvOS_radio.log","other.mp4"}) {
+        std::filesystem::create_directory(storage/".thumbs");
+        for(const char* name:{"fpvOS_old.mp4","kestrel_old.h265","recording_old.mp4","fpvOS_active.mp4","fpvOS_radio.log","other.mp4",
+                              "fpvOS_old.mp4.telemetry.jsonl",".thumbs/fpvOS_old.mp4.jpg",".thumbs/other.mp4.jpg"}) {
             FILE* f=fopen((storage/name).c_str(),"w");check(f,"Create storage fixture");fputs("data",f);fclose(f);
         }
-        check(purge_oldest_recordings(storage.string(),UINT64_MAX,"fpvOS_active.mp4")==8,"Reclaim only finished recordings");
+        check(reclaimable_recording_bytes(storage.string(),"fpvOS_active.mp4")==20,"Reclaimable: finished recordings and their companions");
+        check(purge_oldest_recordings(storage.string(),UINT64_MAX,"fpvOS_active.mp4")==20,"Reclaim only finished recordings, with their companions");
         check(std::filesystem::exists(storage/"fpvOS_active.mp4") && std::filesystem::exists(storage/"fpvOS_radio.log") &&
-              std::filesystem::exists(storage/"other.mp4"),"Keep active video, radio logs and unrelated files");
+              std::filesystem::exists(storage/"other.mp4") && std::filesystem::exists(storage/".thumbs/other.mp4.jpg"),
+              "Keep active video, radio logs and unrelated files");
+        check(!std::filesystem::exists(storage/"fpvOS_old.mp4.telemetry.jsonl") && !std::filesystem::exists(storage/".thumbs/fpvOS_old.mp4.jpg"),
+              "A purged recording takes its sidecar and thumbnail with it");
     }
     // The shared stream sink asks for a keyframe and never starts a file on P frames.
     {

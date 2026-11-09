@@ -73,13 +73,16 @@ void StreamPlayer::erase(const std::string& name) {
     if(state_.deleting)throw std::runtime_error("Wait for recording deletion to finish");
     state_.deleting=true;state_.deletion_message.clear();delete_requested_=name;wake_.notify_one();
 }
+void StreamPlayer::refresh() {
+    std::lock_guard<std::mutex> lock(mutex_);refresh_=true;wake_.notify_one();
+}
 void StreamPlayer::run() {
     dvr_lib::set_dir(directory_);
     while(!quit_) {
-        std::string file,remove;uint64_t generation;
-        {std::unique_lock<std::mutex> lock(mutex_);wake_.wait_for(lock,std::chrono::milliseconds(500),[&]{return quit_ || !requested_.empty() || !delete_requested_.empty();});
+        std::string file,remove;uint64_t generation;bool list;
+        {std::unique_lock<std::mutex> lock(mutex_);wake_.wait(lock,[&]{return quit_ || refresh_ || !requested_.empty() || !delete_requested_.empty();});
          if(quit_)break;file=std::move(requested_);requested_.clear();generation=generation_;
-         remove=std::move(delete_requested_);delete_requested_.clear();}
+         remove=std::move(delete_requested_);delete_requested_.clear();list=refresh_;refresh_=false;}
         const int deletion_error=remove.empty()?0:dvr_lib::delete_recording(remove,"");
         if(!file.empty()) {
             try {play_file(file,generation);}
@@ -89,6 +92,7 @@ void StreamPlayer::run() {
             if(generation==generation_)state_.playing=state_.busy=state_.seeking=false;
             ++state_.revision;
         }
+        if(!list && file.empty() && remove.empty())continue;
         const auto recordings=dvr_lib::list_recordings();
         {std::lock_guard<std::mutex> lock(mutex_);state_.recordings=recordings;++state_.revision;
          if(!remove.empty()) {

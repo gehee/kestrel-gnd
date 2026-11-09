@@ -89,10 +89,9 @@ HudData Controller::hud_data(uint64_t now,bool recording_snapshot) const {
     if (linked && link.standby) { right.state = "STANDBY"; right.state_opacity = 1; }
     if (visual.mark > 0) { right.state = "IDLE"; right.state_opacity = visual.mark; }
     right.lower_alert = warning_.level();
-    constexpr int ladder[] = {1, 2, 5, 7, 8, 10, 12};
-    int rung = 0;
-    if (t.link_valid(now)) for (int value : ladder) if (t.mcs >= value) ++rung;
-    right.lower_level = float(rung) / 7;
+    // The VIDEO track is the range left, the warning's own blocks (as on the
+    // VRX Pro), not the MCS rung.
+    right.lower_level = m.link_range(now).norm;
     const bool frequency_valid = t.link_valid(now) && (t.frequency_mhz > 0 || t.frequency_raw != Telemetry::unavailable);
     const std::string frequency = t.frequency_mhz > 0 ? std::to_string(t.frequency_mhz) + " MHz" : std::to_string(t.frequency_raw);
     std::string power = "--mW";
@@ -127,7 +126,8 @@ HudData Controller::hud_data(uint64_t now,bool recording_snapshot) const {
     add(HudMetricId::Current, "CURRENT", fresh && f.have_amps, number(f.amps, "%.2f"), "A");
     auto& signal = add(HudMetricId::Rc, rc.label(), rc.source != RcSource::Unavailable, std::to_string(rc.percent), "%");
     signal.metered = true; signal.level = rc.level(); signal.scale = {"0", "25", "50", "75", "100"};
-    auto& video = add(HudMetricId::Mcs, "VIDEO MCS", t.link_valid(now), std::to_string(t.mcs));
+    // t.mcs is the radio's index; the MCS it names is two under it (ar_mcs_label).
+    auto& video = add(HudMetricId::Mcs, "VIDEO MCS", t.link_valid(now) && t.mcs >= 0, std::to_string(ar_mcs_label(t.mcs)));
     video.metered = true; video.level = right.lower_level;
     add(HudMetricId::FrequencyRaw, t.frequency_mhz > 0 ? "FREQUENCY" : "FREQ RAW", frequency_valid, frequency);
     add(HudMetricId::ReceiverVoltage, "RX SUPPLY", t.fresh(now) && t.voltage_mv > 0, number(t.voltage_mv / 1000.0f, "%.2f"), "V");

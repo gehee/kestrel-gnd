@@ -36,6 +36,10 @@ public:
     // Snap the requested time to a keyframe in the requested direction.
     void seek_relative(int seconds,uint64_t presented_us);
     void erase(const std::string& name);
+    // Lists the folder again (State::recordings) - when the gallery or the
+    // menu opens, or a recording starts or ends. Played and deleted clips
+    // list it on their own; nothing else does, so an idle card is not read.
+    void refresh();
     State state() const;
     std::shared_ptr<const media::TelemetrySample> telemetry_at(uint64_t position_us) const;
 private:
@@ -45,6 +49,7 @@ private:
     mutable std::mutex mutex_;std::condition_variable wake_;
     State state_;std::string requested_,delete_requested_;
     std::atomic<bool> quit_{false},paused_{false};
+    bool refresh_=true;   // under mutex_: list the folder at the next wake
     std::atomic<uint64_t> generation_{0};
     std::atomic<uint64_t> seek_revision_{0};
     struct PresentedSample {uint64_t us;std::shared_ptr<const media::TimedTelemetry> data;};

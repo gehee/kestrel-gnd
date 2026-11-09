@@ -60,6 +60,7 @@ struct LinkDetails {
     float video_mbps = 0, link_mbps = 0;
     bool standby = false, vtx_temperature_valid = false;
     float vtx_temperature_c = 0;
+    int air_live_dbm = 0;   // the air unit's power now (air::RadioState::live_dbm); 0: not known
 };
 struct VideoDetails {
     uint64_t stamp_us = 0;

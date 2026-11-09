@@ -86,6 +86,27 @@ int Model::first_row(uint64_t now) const {
     for (size_t i = 0; i < items.size(); ++i) if (!items[i].heading) return int(i);
     return 0;
 }
+bool Model::focus_row(const std::string& id, uint64_t now) {
+    const int was_side = side, was_tab = tab;
+    for (int s : {0, 1}) {
+        side = s;
+        for (int t : side_tabs()) {
+            tab = t;
+            const auto items = rows(now);
+            for (size_t i = 0; i < items.size(); ++i)
+                if (!items[i].heading && items[i].id == id) {
+                    remembered_tab_[s] = t; selected = int(i); ++menu_version;
+                    return true;
+                }
+        }
+    }
+    side = was_side; tab = was_tab;
+    return false;
+}
+gnd::LinkRange Model::link_range(uint64_t now) const {
+    return gnd::link_range(backend.vrx.link_valid(now), backend.vrx.mcs, backend.link.bandwidth_step,
+                           backend.link.air_power_mw, backend.link.air_live_dbm);
+}
 std::vector<MenuRow> Model::rows(uint64_t now) const {
     // Labels/order/help mirror hud/osd_menu_rows.cpp. Do not give a control a
     // pretend value or accept an edit when this platform cannot apply it.
