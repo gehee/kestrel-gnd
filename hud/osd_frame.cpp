@@ -163,8 +163,11 @@ void OSD::frame_timers() {
     // Armed: the menu gets out of the way, wherever it is - a blade picked,
     // a row, a value being changed, the channel page. Only on the arming
     // itself, so it can still be opened while armed (on the bench). A screen
-    // mode on trial is kept rather than restarting the app in the air.
-    if (arm == 1 && arm_seen_ != 1 && menu_open) {
+    // mode on trial is kept rather than restarting the app in the air. The
+    // arming is a change from disarmed: not the first word after a start (a
+    // trial's restart with the craft armed on the bench would keep a mode
+    // nobody has seen), nor one after the FC went quiet (-1) while armed.
+    if (arm == 1 && arm_seen_ == 0 && menu_open) {
         if (screen_confirm_) {
             screen_confirm_ = false;
             settings_.set(display::setting::screen_mode(screen_id_),
@@ -179,7 +182,7 @@ void OSD::frame_timers() {
         printf("menu: closed - armed\n");
         render_requested = true;
     }
-    arm_seen_ = arm;
+    if (arm >= 0) arm_seen_ = arm;
     // SYSTEM > Time Zone, picked in the menu or from a phone: its TZ goes into
     // force here, on the thread that draws the clock (setenv() must not race
     // the time functions), and the menu's mirror follows a change made elsewhere.

@@ -129,7 +129,7 @@ void OSD::log_csv_row() {
             (unsigned long long)get_time_ms(),
             osd_vars.video_bandwidth,
             osd_vars.radio_link.rx_data_rate_kbps / 1000.0f,
-            ar_mcs_label(osd_vars.radio_link.rx_mcs_val),
+            osd_vars.radio_link.rx_mcs_val < 0 ? -1 : ar_mcs_label(osd_vars.radio_link.rx_mcs_val),
             osd_vars.radio_link.snr,
             parts_.radio.state().frames_lost,
             osd_vars.total_latency_avg,

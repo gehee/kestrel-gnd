@@ -89,6 +89,12 @@ public:
         sinks_.push_back(s);
         if (s->wants_pictures()) picture_sinks_ = true;
     }
+    // A sink records the stream as it comes right now (bus::VideoSink::needs_stream).
+    bool sinks_need_stream() const {
+        for (const bus::VideoSink* s : sinks_)
+            if (s->needs_stream()) return true;
+        return false;
+    }
 
     // One NAL of video, no start code, its bytes in at recv_us. False: not
     // taken (held back, or not this picture's) - not counted as video.

@@ -75,9 +75,6 @@ class Ar8030Link : public radio::Link, private radio::VideoOut::Source {
             strip_joiner_ = std::move(join);
         }
         bool strips_supported() const { return strip_decoder_ && strip_joiner_; }
-        // Pictures are coming in strips now (the DVR records the screen then:
-        // there is no one stream of them to record).
-        bool strips_active() const { return strips_on_.load(); }
         void apply(const radio::Command& c) override;
         radio::State held() const override;
 
@@ -104,7 +101,10 @@ class Ar8030Link : public radio::Link, private radio::VideoOut::Source {
         std::function<std::unique_ptr<hal::StripJoiner>()> strip_joiner_;
         std::unique_ptr<radio::StripVideo> strips_;
         bool vstrip_ = false;                 // the header says its slice is a strip
-        std::atomic<bool> strips_on_{false};  // strips are what comes now
+        // A STREAM recording runs: the sinks get whole pictures only, so the
+        // air unit is asked for those meanwhile (strips_wanted).
+        std::atomic<bool> rec_stream_{false};
+        void check_rec_stream();
         void drop_pictures() { video_.drop_picture(); if (strips_) strips_->drop_picture(); }
         void vhdr_strip_seen(bool strip);   // the header's strip bit (a change drops the other way's picture)
         void picture_start(uint64_t recv_us, radio::VideoOut::PictureTiming& t) override;
@@ -181,7 +181,8 @@ class Ar8030Link : public radio::Link, private radio::VideoOut::Source {
         // The air unit's project number (TLV 0x11: 4 Lite, 6 RC, 7 Lite+), 0 until
         // it reports; picks the power levels it is offered (ar_pwr_offered).
         std::atomic<int> air_prj{0};
-        void clear_air_info();
+        void clear_air_info();       // the radio thread's
+        std::atomic<bool> air_info_clear_{false};   // the link went down: clear_air_info on the radio thread
         // A setting the radio loads with (its firmware, a stock radio's
         // bandwidth cap) changed: saved now, then the radio and kestrel-gnd
         // restarted with it, from a shell of their own.
@@ -218,7 +219,7 @@ class Ar8030Link : public radio::Link, private radio::VideoOut::Source {
         std::string air_run_;
         int strips_wanted() const {
             const int s = strips.load(), m = air_strips_max_.load();
-            return !strips_supported() || s < 2 || m < 2 ? 1 : std::min(s, m);
+            return !strips_supported() || s < 2 || m < 2 || rec_stream_ ? 1 : std::min(s, m);
         }
         std::atomic<bool> air_logs;   // hud_debug: the air unit's flight logs, sent at link-up
         bool stream_decode;   // KESTREL_STREAM_DECODE / stream_decode: 0 (default on)

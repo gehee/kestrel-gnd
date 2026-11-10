@@ -301,6 +301,10 @@ if(KESTREL_TESTS)
     kestrel_test(hevc_repair_test dvr)
     kestrel_test(model_test radio)
     kestrel_test(mode_pick_test)
+    # The strip joiner with RGA and the DRM device stubbed (see the source).
+    kestrel_test(strip_joiner_test SOURCES hal/rockchip/rga_strips.cpp)
+    target_compile_definitions(strip_joiner_test PRIVATE USE_RGA)
+    target_include_directories(strip_joiner_test PRIVATE ${DRM_INCLUDE_DIRS})
     # base/sd_log.cpp first: the order in which the old exit crash showed
     # every time (see the test's header).
     add_executable(sd_log_test base/sd_log.cpp tools/test/sd_log_test.cpp)

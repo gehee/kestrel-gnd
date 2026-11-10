@@ -90,7 +90,9 @@ void Ar8030Link::on_link_event(const uint8_t* p) {
         link_bw_mhz = 20;          // the next link starts narrow
         air_prj.store(0);          // the next air unit says what it is
         model_.update_air_radio([](air::RadioState& r) { r.prj = 0; });
-        clear_air_info();
+        // On the radio thread, which reads and writes what it clears (this is
+        // the radio library's event thread).
+        air_info_clear_.store(true);
     }
     printf("ar8030: event: link state %u -> %u\n", p[2], p[1]);
     if (p[1] == 2) frame_clock_.reframe();   // a new link, its own frame

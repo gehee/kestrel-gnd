@@ -12,15 +12,16 @@ namespace hal {
 class StripJoiner {
 public:
     virtual ~StripJoiner() = default;
-    // Strip k of the n strips of picture du->pts (the air unit's picture
-    // number), decoded. Strips stack top to bottom in index order, each at the
-    // rows the ones above it fill. Each codes ov rows past each of its joins
-    // (the air unit's overlap, so no join is at a strip's coded edge): its
-    // first ov rows (but strip 0's) and its last ov (but the last strip's)
-    // are not shown. A picture goes on once all n are in; one missing a strip
-    // is never shown (the screen keeps the one before). From the strips'
-    // decoder threads.
-    virtual void strip(int k, int n, int ov, std::shared_ptr<DecodedUnit> du) = 0;
+    // Strip k of picture du->pts (the air unit's picture number), decoded;
+    // last: it is the picture's bottom strip - both as its header said when
+    // it arrived. Strips stack top to bottom in index order, each at the rows
+    // the ones above it fill. Each codes ov rows past each of its joins (the
+    // air unit's overlap, so no join is at a strip's coded edge): its first
+    // ov rows (but strip 0's) and its last ov (but the last strip's) are not
+    // shown. A picture goes on once all its strips are in; one missing a
+    // strip is never shown (the screen keeps the one before). From the
+    // strips' decoder threads.
+    virtual void strip(int k, bool last, int ov, std::shared_ptr<DecodedUnit> du) = 0;
     // The picture being joined goes (the link lost, the strips stopped).
     virtual void drop() = 0;
 };

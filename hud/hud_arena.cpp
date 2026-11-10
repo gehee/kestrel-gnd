@@ -354,8 +354,11 @@ void OSD::draw_arena_right(Frame& f) {
         // getting for it, which is the pair worth watching in flight. Gain,
         // LDPC, frequency and bandwidth are diagnostics and stay FULL-only.
         if (legacy_panels) {
-            sprintf(buf, "RX MCS%d  %.2f Mbps", ar_mcs_label(link_copy.rx_mcs_val),
-                    link_copy.rx_data_rate_kbps / 1000.0f);
+            if (link_copy.rx_mcs_val < 0)   // no receive reading yet
+                sprintf(buf, "RX MCS-  %.2f Mbps", link_copy.rx_data_rate_kbps / 1000.0f);
+            else
+                sprintf(buf, "RX MCS%d  %.2f Mbps", ar_mcs_label(link_copy.rx_mcs_val),
+                        link_copy.rx_data_rate_kbps / 1000.0f);
             canvas_->text(buf, outer_x, current_ry, 0.07f * s, true, dim, dim, dim);
             current_ry += rs;
         }

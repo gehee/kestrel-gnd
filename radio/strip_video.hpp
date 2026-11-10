@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <pthread.h>
 #include "hal/strip_joiner.hpp"
 #include "radio/video_out.hpp"
@@ -51,6 +52,17 @@ private:
         std::unique_ptr<VideoOut> out;
         pthread_t thread = 0;
     };
+    // What strip k's header said of picture pic as it arrived (the radio
+    // thread), for its decoder's thread once the picture is decoded.
+    struct Said {
+        int64_t pic = -1;
+        bool last = false;
+        int ov = 0;
+    };
+    static constexpr int kSaid = 32;
+    std::mutex said_m_;
+    Said said_[kMax][kSaid];
+    bool said_of(int k, int64_t pic, Said& out);
     void picture_start(int k, uint64_t recv_us, VideoOut::PictureTiming& t);
     void picture_done(int k, const VideoOut::PictureDone& d);
     bool make_strip(int k);
@@ -63,7 +75,6 @@ private:
     std::atomic<bool> stop_{false};
     Strip strip_[kMax];
     std::atomic<int> n_{0};          // strips a picture has (the last one's index + 1)
-    std::atomic<int> ov_{0};         // rows each strip codes past each of its joins
     int64_t pic_ = -1;               // the picture number, counted on from the header's 16 bits
     // The picture's capture, timed for its first strip to arrive, for the rest.
     int64_t timed_pic_ = -1;
