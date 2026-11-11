@@ -31,6 +31,8 @@ public:
     void on_parameter_sets(const std::vector<std::vector<uint8_t>>& ps) override;
     // A recording waiting for its keyframe: the radio asks the air unit.
     bool take_keyframe_request() override { return keyframe_wanted_.exchange(false); }
+    // A recording of the stream (not the screen) is running.
+    bool needs_stream() const override { return target_.is_recording() && !(screen_rec_ && screen_rec_()); }
 
 private:
     using ParamSets = std::shared_ptr<const std::vector<std::vector<uint8_t>>>;

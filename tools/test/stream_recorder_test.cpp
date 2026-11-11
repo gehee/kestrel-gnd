@@ -43,6 +43,25 @@ int main(int argc,char** argv) {
             check(duration>.13 && duration<.14,"MP4 uses 60fps capture timestamps");
         }
         check(files[0]!=files[1],"Same-second recording names cannot overwrite earlier clips");
+        // A gap in the stream (a radio dropout): the picture before it lasts
+        // until the next one, the one after it the usual time - not the other
+        // way (shown early, then holding through the gap).
+        rec.toggle();wait([&]{return rec.state().recording;});
+        for(size_t i=0;i<recording_frames.size();++i)
+            rec.feed(std::make_shared<std::vector<uint8_t>>(recording_frames[i]),1000000+i*16667+(i>=5?500000:0));
+        wait([&]{return rec.state().frames==recording_frames.size();});
+        const std::string gap=rec.state().file;rec.stop();
+        wait([&]{const auto s=rec.state();return !s.recording && !s.finishing;});
+        FILE* g=fopen(gap.c_str(),"rb");check(g,"Gap recording exists");
+        fseek(g,0,SEEK_END);const auto gsize=ftell(g);
+        MP4D_demux_t gm{};
+        check(MP4D_open(&gm,[](int64_t off,void* buf,size_t n,void* ctx)->int {FILE* f=static_cast<FILE*>(ctx);return fseek(f,off,SEEK_SET)||fread(buf,1,n,f)!=n;},g,gsize),"Gap recording can be demuxed");
+        const auto& gt=gm.track[0];
+        check(gt.sample_count==8 && gt.timestamp_count==8,"Gap recording keeps every picture, one time each");
+        const unsigned scale=gt.timescale?gt.timescale:90000;
+        const double before=double(gt.duration[4])/scale, after=double(gt.duration[5])/scale;
+        check(before>.51 && before<.52 && after>.016 && after<.018,"The picture before a gap holds through it, the one after does not");
+        MP4D_close(&gm);fclose(g);
         check(std::filesystem::path(files[0]).filename().string().rfind("fpvOS_",0)==0,"Recordings take the VRX Pro's names");
     }
     {

@@ -27,7 +27,13 @@ bool StripVideo::make_strip(int k) {
     static const char* const tags[kMax] = {"strip0", "strip1", "strip2", "strip3"};
     std::unique_ptr<Vdec> dec;
     if (decode_enabled_) {
-        dec = make_([this, k](std::shared_ptr<DecodedUnit> du) { joiner_->strip(k, n_.load(), ov_.load(), std::move(du)); },
+        dec = make_([this, k](std::shared_ptr<DecodedUnit> du) {
+                        // What its header said when it came, not what the
+                        // strips coming now say (the count may have changed).
+                        Said said;
+                        if (du && said_of(k, (int64_t)du->pts, said))
+                            joiner_->strip(k, said.last, said.ov, std::move(du));
+                    },
                     &stop_);
         if (!dec) return false;
     }
@@ -49,11 +55,17 @@ bool StripVideo::nal(const uint8_t* nal, size_t len, uint64_t recv_us, VideoOut:
     const int k = hdr.idx;
     if (k < 0 || k >= kMax || !make_strip(k)) return false;
     if (hdr.last) n_ = k + 1;
-    ov_ = hdr.strip_ov;
     // The picture's number on: the header has its low 16 bits.
     if (hdr.hseq >= 0) {
         if (pic_ < 0) pic_ = (uint16_t)hdr.hseq;
         else pic_ += (int16_t)((uint16_t)hdr.hseq - (uint16_t)pic_);
+    }
+    {
+        std::lock_guard<std::mutex> lk(said_m_);
+        Said& s = said_[k][(uint64_t)pic_ % kSaid];
+        s.pic = pic_;
+        s.last = hdr.last;
+        s.ov = hdr.strip_ov;
     }
     // To the strip's own stream a picture is one slice, which ends it.
     VideoOut::SliceHeader h = hdr;
@@ -67,6 +79,15 @@ bool StripVideo::nal(const uint8_t* nal, size_t len, uint64_t recv_us, VideoOut:
     hdr.out_us = h.out_us;
     if (h.idx < 0) { hdr.idx = -1; hdr.last = false; hdr.ends = false; }
     return taken;
+}
+
+bool StripVideo::said_of(int k, int64_t pic, Said& out) {
+    if (pic < 0) return false;
+    std::lock_guard<std::mutex> lk(said_m_);
+    const Said& s = said_[k][(uint64_t)pic % kSaid];
+    if (s.pic != pic) return false;   // long gone: not this picture's
+    out = s;
+    return true;
 }
 
 void StripVideo::picture_start(int k, uint64_t recv_us, VideoOut::PictureTiming& t) {

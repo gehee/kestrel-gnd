@@ -39,6 +39,10 @@ class VdecV4l2 final : public Vdec {
     std::atomic<bool> *stop_;
     std::mutex mutex_;
     std::deque<Packet> packets_;
+    // Signalled for each packet queued: the decoder thread, waiting on its
+    // device, takes a picture at once instead of at the next 5 ms poll.
+    int wake_fd_ = -1;
+    void wake();
     std::array<std::vector<uint8_t>, 3> parameters_;
     std::atomic<bool> ready_{false}, failed_{false}, quit_{false};
     std::atomic<bool> paused_{false};

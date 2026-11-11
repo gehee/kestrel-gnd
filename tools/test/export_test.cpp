@@ -6,6 +6,8 @@
 #include <fcntl.h>
 #include <filesystem>
 #include <fstream>
+#include <algorithm>
+#include <iterator>
 #include <sys/stat.h>
 #include <thread>
 #include <unistd.h>
@@ -84,6 +86,20 @@ int main(int argc, char **argv) {
                 ticks += s.ticks;
             }
             check(source.duration_us == ticks * 1000000 / 90000, "duration preserved");
+        }
+        {
+            std::ifstream in(input, std::ios::binary);
+            std::vector<char> bytes{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+            const std::string tag="stts";
+            auto at=std::search(bytes.begin(),bytes.end(),tag.begin(),tag.end());
+            check(at!=bytes.end() && bytes.end()-at>=16,"fixture timing box");
+            // Remove one timestamp while leaving eight indexed picture samples.
+            std::fill(at+12,at+16,0);
+            const auto path=directory+"/short-timing.mp4";
+            {std::ofstream out(path,std::ios::binary);out.write(bytes.data(),bytes.size());}
+            bool rejected=false;
+            try{dvr::ExportSource bad(path);}catch(const std::exception&){rejected=true;}
+            check(rejected,"short MP4 timestamp table rejected before indexing");
         }
         fs::create_symlink(input, directory + "/symlink.mp4");
         bool rejected = false;

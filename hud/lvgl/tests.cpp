@@ -50,6 +50,21 @@ int main(int argc, char** argv) {
         check(next_frame_deadline(1000, 1090, 100) == 1100, "Small render/poll jitter does not move cadence phase");
         check(next_frame_deadline(1000, 1100, 100) == 1200, "A missed exact deadline is skipped, not retried");
         check(next_frame_deadline(1000, 1435, 100) == 1500, "Long overruns skip stale animation poses");
+        {
+            // Arming closes the menu: only an arming seen (disarmed, then armed).
+            Model m; Controller c(m); auto& b = m.backend; const uint64_t t0 = 10000000;
+            c.open_menu(); b.flight.stamp_us = t0; b.flight.arm = 1; c.tick(t0);
+            check(m.menu_open && !c.take_arming(), "Armed at start (a trial's restart): no arming, the menu stays");
+            b.flight.arm = 0; b.flight.stamp_us = t0 + 100000; c.tick(t0 + 100000);
+            b.flight.arm = 1; b.flight.stamp_us = t0 + 200000; c.tick(t0 + 200000);
+            check(!m.menu_open && c.take_arming() && !c.take_arming(), "Disarmed then armed closes the menu, one arming");
+            c.open_menu(); c.tick(t0 + 300000);
+            check(m.menu_open && c.armed(t0 + 300000), "The menu opens while armed (bench)");
+            c.tick(t0 + 3000000);                       // the FC quiet: not known
+            check(c.arm_state(t0 + 3000000) == -1, "Arm state unknown after 2 s without the FC");
+            b.flight.stamp_us = t0 + 3100000; c.tick(t0 + 3100000);
+            check(m.menu_open && !c.take_arming(), "Armed again after the FC went quiet: no arming");
+        }
         Telemetry t;
         t.stamp_us = 1000000; t.connected = true; t.mcs = -1;
         t.voltage_mv = 11512; t.cpu_temperature_x100 = 4889;

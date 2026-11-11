@@ -1,4 +1,6 @@
 #include "hal/rockchip/rga_strips.hpp"
+#include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
@@ -17,8 +19,13 @@ bool RgaStripJoiner::available() {
     return access("/dev/rga", R_OK | W_OK) == 0;
 }
 
-RgaStripJoiner::RgaStripJoiner(std::shared_ptr<hal::FrameSink> out, int scanout_fd)
-    : out_(std::move(out)), drm_fd_(scanout_fd) {
+// Each set of picture buffers made its own DecodedUnit::buf_epoch, apart from
+// the decoders' (counted from 1): the screen recording keeps its RGA imports
+// by epoch and fd, and a new set may come back with the old fd numbers.
+static std::atomic<uint32_t> s_epoch{0};
+
+RgaStripJoiner::RgaStripJoiner(std::shared_ptr<hal::FrameSink> out, std::shared_ptr<hal::Scanout> scanout)
+    : out_(std::move(out)), scanout_(std::move(scanout)), drm_fd_(scanout_ ? scanout_->scanout_fd() : -1) {
     const char* c = getenv("KESTREL_STRIP_CHECK");
     check_ = c && atoi(c) > 0;
     if (check_) printf("strips: KESTREL_STRIP_CHECK - every joined picture checked for strips of other captures\n");
@@ -74,6 +81,7 @@ bool RgaStripJoiner::alloc(uint32_t w, uint32_t h) {
     }
     w_ = w;
     h_ = h;
+    epoch_out_ = 0x80000000u | (++s_epoch & 0x7fffffffu);
     printf("strips: joining %ux%u pictures in RGA (%s)\n", w, h, querystring(RGA_VERSION));
     return true;
 }
@@ -127,67 +135,121 @@ bool RgaStripJoiner::copy(int k, const DecodedUnit& du, uint32_t y, uint32_t top
     return true;
 }
 
-void RgaStripJoiner::strip(int k, int n, int ov, std::shared_ptr<DecodedUnit> du) {
-    if (!du || !du->has_prime_fd || k < 0 || n < 2 || n > kStrips || k >= n || ov < 0 || ov > 64) return;
-    std::shared_ptr<DecodedUnit> whole;
-    bool flush = false;
-    {
-        std::lock_guard<std::mutex> lk(mtx_);
-        const int64_t pic = (int64_t)du->pts;
-        // A picture given up on already - unless far behind: the air unit
-        // counting from 0 again (its kestrel-air started again).
-        if (cur_.pic >= 0 && pic < cur_.pic) {
-            if (cur_.pic - pic < 64) return;
-            cur_ = Picture();
-            clean_ = false;
-        }
-        if (pic != cur_.pic) {
-            // A newer picture: the one being joined lacks a strip, and goes.
-            if (cur_.pic >= 0 && cur_.n) incomplete_++;
-            cur_ = Picture();
-            cur_.pic = pic;
-            cur_.n = n;
-            cur_.ov = ov;
-        }
-        if (n != cur_.n || ov != cur_.ov || cur_.s[k].du || (cur_.placed >> k & 1)) return;   // not this picture's
-        // Each strip's rows, from its own pictures: a new size, and every
-        // buffer is made again once all the strips have said theirs.
-        if (rows_[k] != du->height) {
-            rows_[k] = du->height;
-            flush = w_ != 0;
-            w_ = h_ = 0;
-        }
-        cur_.s[k].du = std::move(du);
-        if (!flush) whole = place();
-    }
-    // The renderer lets go of the old buffers before they go (it keeps their
-    // framebuffers by fd number, which new ones may come back with).
-    if (flush) {
-        out_->request_flush();
-        std::lock_guard<std::mutex> lk(mtx_);
-        free_slots();
-        whole = place();
-    }
-    if (whole) out_->queue_frame(std::move(whole));
+void RgaStripJoiner::give_up() {
+    if (cur_.pic >= 0 && cur_.n && !cur_.given_up) incomplete_++;
+    const int64_t pic = cur_.pic;
+    cur_ = Picture();
+    cur_.pic = pic;
+    cur_.given_up = true;
 }
 
-std::shared_ptr<DecodedUnit> RgaStripJoiner::place() {
-    // Where each strip goes needs every strip's height: from this picture,
-    // or the last one, which had the same strips.
+bool RgaStripJoiner::layout(uint32_t* w, uint32_t* h) const {
     uint32_t total = 0, width = 0;
     for (int k = 0; k < cur_.n; k++) {
-        if (!shown(k)) return nullptr;
+        if (!shown(k) || rows_pic_[k] < layout_pic_) return false;
         total += shown(k);
     }
     for (int k = 0; k < cur_.n && !width; k++)
         if (cur_.s[k].du) width = cur_.s[k].du->width;
-    if (!width) return nullptr;
-    if ((w_ != width || h_ != total) && !alloc(width, total)) return nullptr;
+    if (!width) return false;
+    *w = width;
+    *h = total;
+    return true;
+}
+
+void RgaStripJoiner::strip(int k, bool last, int ov, std::shared_ptr<DecodedUnit> du) {
+    if (!du || !du->has_prime_fd || k < 0 || k >= kStrips || ov < 0 || ov > 64) return;
+    std::shared_ptr<DecodedUnit> whole;
+    std::unique_lock<std::mutex> lk(mtx_);
+    const int64_t pic = (int64_t)du->pts;
+    // A picture given up on already - unless far behind: the air unit
+    // counting from 0 again (its kestrel-air started again).
+    if (cur_.pic >= 0 && pic < cur_.pic) {
+        if (cur_.pic - pic < 64) return;
+        cur_ = Picture();
+        clean_ = false;
+        layout_pic_ = -1;
+        for (int64_t& p : rows_pic_) p = -1;
+    }
+    // How many strips a picture has: its last one says; one that is not the
+    // last, at or past that count, says there are more.
+    const int n = last ? k + 1 : std::max(n_, k + 2);
+    if (n < 2 || n > kStrips) return;
+    // Each strip's rows, from its own pictures. A change (or a new count)
+    // and the rest's are the old layout's until they say theirs again: the
+    // buffers are sized from this picture's strips on, not from a mix.
+    if (rows_[k] != du->height) {
+        rows_[k] = du->height;
+        layout_pic_ = pic;
+        // Strips below this one placed already went to rows from the old height.
+        if (cur_.pic == pic && (cur_.placed >> (k + 1))) give_up();
+    }
+    rows_pic_[k] = pic;
+    // The picture being joined was laid out for the old count (or overlap): it goes.
+    if (n != n_ || ov != ov_) {
+        if (cur_.pic == pic) give_up();
+        n_ = n;
+        ov_ = ov;
+        layout_pic_ = pic;
+    }
+    if (pic != cur_.pic) {
+        // A newer picture: the one being joined lacks a strip, and goes.
+        give_up();
+        cur_ = Picture();
+        cur_.pic = pic;
+        cur_.n = n_;
+        cur_.ov = ov_;
+    }
+    if (cur_.given_up || cur_.s[k].du || (cur_.placed >> k & 1)) return;   // not wanted, or had
+    cur_.s[k].du = std::move(du);
+    if (resizing_) return;   // the strip resizing places this one once done
+    uint32_t w = 0, h = 0;
+    if (!layout(&w, &h)) return;
+    if (w != w_ || h != h_) {
+        // A new size: every buffer made again. The renderer and the screen
+        // recording let go of the old pictures first - the renderer keeps
+        // their framebuffers by fd number, which new buffers may come back
+        // with - and so do pictures on their way to it.
+        const uint64_t now = get_time_us() / 1000;
+        if (alloc_failed_ms_ && now - alloc_failed_ms_ < 1000) { give_up(); return; }
+        resizing_ = true;
+        idle_.wait(lk, [this] { return queuing_ == 0; });
+        const bool had = w_ != 0;
+        lk.unlock();
+        if (had) {
+            out_->request_flush();
+            if (scanout_) scanout_->drop_screen_pictures();
+        }
+        lk.lock();
+        resizing_ = false;
+        // The strips that came meanwhile may have changed it again.
+        if (!layout(&w, &h)) return;
+        // What went to the old buffers is gone with them.
+        if (cur_.placed) { give_up(); return; }
+        cur_.slot = -1;
+        if ((w != w_ || h != h_) && !alloc(w, h)) {
+            alloc_failed_ms_ = now ? now : 1;
+            give_up();
+            return;
+        }
+        alloc_failed_ms_ = 0;
+    }
+    whole = place();
+    if (!whole) return;
+    queuing_++;
+    lk.unlock();
+    out_->queue_frame(std::move(whole));
+    lk.lock();
+    if (--queuing_ == 0) idle_.notify_all();
+}
+
+std::shared_ptr<DecodedUnit> RgaStripJoiner::place() {
+    if (!w_ || !h_) return nullptr;
     if (cur_.slot < 0) {
         cur_.slot = take_slot();
         if (cur_.slot < 0) {   // all of them on screen still: not this picture
             no_slot_++;
-            cur_ = Picture();
+            give_up();
             return nullptr;
         }
     }
@@ -195,7 +257,10 @@ std::shared_ptr<DecodedUnit> RgaStripJoiner::place() {
     for (int k = 0; k < cur_.n; k++) {
         Strip& s = cur_.s[k];
         if (s.du && !(cur_.placed >> k & 1)) {
-            if (s.du->width != width || !copy(k, *s.du, y, top(k), shown(k))) { cur_ = Picture(); return nullptr; }
+            if (s.du->width != w_ || y + shown(k) > h_ || !copy(k, *s.du, y, top(k), shown(k))) {
+                give_up();
+                return nullptr;
+            }
             s.placed_us = get_time_us();
             cur_.placed |= 1u << k;
             cur_.times[k] = s.du->slices;
@@ -246,7 +311,7 @@ std::shared_ptr<DecodedUnit> RgaStripJoiner::finish() {
     auto hold = std::make_shared<int>(0);
     slot_[cur_.slot].out = hold;
     du->frame_ref = hold;
-    du->buf_epoch = 0x80000000u;   // not a decoder's: RGA's recording import keeps these apart
+    du->buf_epoch = epoch_out_;   // not a decoder's, and new with each set of buffers
     // The strips' own times, each the slice its rows are of.
     const SliceTimes* top = cur_.times[0].get();
     if (top && top->frame_cap_us && top->height) {
@@ -290,7 +355,7 @@ std::shared_ptr<DecodedUnit> RgaStripJoiner::finish() {
     }
     cur_ = Picture();
     cur_.pic = (int64_t)du->pts;   // its strips, should any come again, are not a new picture's
-    cur_.n = 0;
+    cur_.given_up = true;          // ...nor this one's (n 0: not counted as given up)
     return du;
 }
 
@@ -350,6 +415,7 @@ void RgaStripJoiner::check_picture() {
 
 void RgaStripJoiner::drop() {
     std::lock_guard<std::mutex> lk(mtx_);
+    give_up();
     cur_ = Picture();
     clean_ = false;
 }
@@ -357,10 +423,10 @@ void RgaStripJoiner::drop() {
 #else   // no RGA: strips cannot be joined, so they are never asked for
 
 bool RgaStripJoiner::available() { return false; }
-RgaStripJoiner::RgaStripJoiner(std::shared_ptr<hal::FrameSink> out, int scanout_fd)
-    : out_(std::move(out)), drm_fd_(scanout_fd) {}
+RgaStripJoiner::RgaStripJoiner(std::shared_ptr<hal::FrameSink> out, std::shared_ptr<hal::Scanout> scanout)
+    : out_(std::move(out)), scanout_(std::move(scanout)), drm_fd_(-1) {}
 RgaStripJoiner::~RgaStripJoiner() {}
-void RgaStripJoiner::strip(int, int, int, std::shared_ptr<DecodedUnit>) {}
+void RgaStripJoiner::strip(int, bool, int, std::shared_ptr<DecodedUnit>) {}
 void RgaStripJoiner::drop() {}
 
 #endif

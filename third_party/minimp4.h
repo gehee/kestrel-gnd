@@ -271,7 +271,13 @@ typedef struct
 #if MP4D_TIMESTAMPS_SUPPORTED
     unsigned *timestamp;
     unsigned *duration;
+    unsigned timestamp_count;   // fpvOS: entries in both (the stts total), which sample_count may exceed
 #endif
+    // fpvOS: the sync sample table (stss), 1-based sample numbers, if the file
+    // has one (none: every sample is a sync sample, by the standard).
+    unsigned *sync_sample;
+    unsigned sync_count;
+    int has_sync;
 
 } MP4D_track_t;
 
@@ -518,6 +524,14 @@ int MP4E_flush(MP4E_mux_t *mux);
 */
 int MP4E_hevc_sps_config(const void *sps, int bytes, unsigned char ptl[12],
                          int *chroma_format, int *luma_minus8, int *chroma_minus8);
+
+/**
+*   fpvOS: the picture size an HEVC SPS gives, its conformance window cut
+*   off (what a player shows). sps as for MP4E_hevc_sps_config.
+*
+*   return 1 if the SPS parsed, 0 if not
+*/
+int MP4E_hevc_sps_size(const void *sps, int bytes, int *width, int *height);
 
 #ifdef __cplusplus
 }
@@ -1317,6 +1331,7 @@ typedef struct
 {
     unsigned char ptl[12];  // general profile_tier_level, as hvcC carries it
     int chroma_format, luma_minus8, chroma_minus8;
+    int width, height;      // the picture's, its conformance window cut off
 } hevc_sps_info_t;
 
 static unsigned hevc_bits(const unsigned char *b, int nbytes, int *pos, int n)
@@ -1377,11 +1392,19 @@ static int hevc_parse_sps(const unsigned char *nal, int bytes, hevc_sps_info_t *
     info->chroma_format = hevc_ue(r, n, &pos) & 3;
     if (info->chroma_format == 3)
         pos++;                                  // separate_colour_plane_flag
-    hevc_ue(r, n, &pos);                        // pic_width_in_luma_samples
-    hevc_ue(r, n, &pos);                        // pic_height_in_luma_samples
+    info->width = (int)hevc_ue(r, n, &pos);     // pic_width_in_luma_samples
+    info->height = (int)hevc_ue(r, n, &pos);    // pic_height_in_luma_samples
     if (hevc_bits(r, n, &pos, 1))               // conformance_window_flag
+    {
+        // its offsets in chroma samples: 2 luma across but for 4:4:4, 2 down for 4:2:0
+        const int sw = info->chroma_format == 1 || info->chroma_format == 2 ? 2 : 1;
+        const int sh = info->chroma_format == 1 ? 2 : 1;
+        int win[4];
         for (k = 0; k < 4; k++)
-            hevc_ue(r, n, &pos);
+            win[k] = (int)hevc_ue(r, n, &pos);
+        info->width -= sw * (win[0] + win[1]);
+        info->height -= sh * (win[2] + win[3]);
+    }
     info->luma_minus8 = hevc_ue(r, n, &pos) & 7;
     info->chroma_minus8 = hevc_ue(r, n, &pos) & 7;
     return pos <= 8*n;
@@ -1397,6 +1420,17 @@ int MP4E_hevc_sps_config(const void *sps, int bytes, unsigned char ptl[12],
     *chroma_format = info.chroma_format;
     *luma_minus8 = info.luma_minus8;
     *chroma_minus8 = info.chroma_minus8;
+    return 1;
+}
+
+int MP4E_hevc_sps_size(const void *sps, int bytes, int *width, int *height)
+{
+    hevc_sps_info_t info;
+    if (!sps || bytes <= 0 || !hevc_parse_sps((const unsigned char *)sps, bytes, &info) ||
+        info.width <= 0 || info.height <= 0 || info.width > 8192 || info.height > 8192)
+        return 0;
+    *width = info.width;
+    *height = info.height;
     return 1;
 }
 
@@ -2951,6 +2985,7 @@ int MP4D_open(MP4D_demux_t *mp4, int (*read_callback)(int64_t offset, void *buff
             {BOX_stsc, 0, 1},
             {BOX_stco, 0, 1},
             {BOX_co64, 0, 1},
+            {BOX_stss, 0, 1},   /* fpvOS: the sync samples, for seeking */
             {BOX_stsd, 0, 0},
             {BOX_esds, 0, 1}    // esds does not use track, but switches to OD mode. Check here, to avoid OD check
         };
@@ -3140,6 +3175,24 @@ broken_android_meta_hack:
         // Read box header
         switch(box_name)
         {
+        case BOX_stss:  // fpvOS: ISO/IEC 14496-12 8.6.2 - Sync Sample Box
+            {
+                unsigned count = READ(4);
+                if (count > payload_bytes / 4)
+                    ERROR("invalid stss size (broken file?)");
+                if (tr->sync_sample)
+                {
+                    free(tr->sync_sample);
+                    tr->sync_sample = NULL;
+                }
+                tr->sync_count = 0;
+                MALLOC(unsigned int*, tr->sync_sample, (count ? count : 1)*4);
+                for (i = 0; i < count; i++)
+                    tr->sync_sample[i] = READ(4);
+                tr->sync_count = count;
+                tr->has_sync = 1;
+            }
+            break;
         case BOX_stz2:  //ISO/IEC 14496-1 Page 38. Section 8.17.2 - Sample Size Box.
         case BOX_stsz:
             {
@@ -3218,6 +3271,9 @@ broken_android_meta_hack:
                     }
 #endif
                 }
+#if MP4D_TIMESTAMPS_SUPPORTED
+                tr->timestamp_count = k;
+#endif
             }
             break;
         case BOX_ctts:
@@ -3620,7 +3676,7 @@ MP4D_file_offset_t MP4D_frame_offset(const MP4D_demux_t *mp4, unsigned ntrack, u
     if (timestamp)
     {
 #if MP4D_TIMESTAMPS_SUPPORTED
-        *timestamp = tr->timestamp[ns];
+        *timestamp = ns < tr->timestamp_count ? tr->timestamp[ns] : 0;
 #else
         *timestamp = 0;
 #endif
@@ -3628,7 +3684,7 @@ MP4D_file_offset_t MP4D_frame_offset(const MP4D_demux_t *mp4, unsigned ntrack, u
     if (duration)
     {
 #if MP4D_TIMESTAMPS_SUPPORTED
-        *duration = tr->duration[ns];
+        *duration = ns < tr->timestamp_count ? tr->duration[ns] : 0;
 #else
         *duration = 0;
 #endif
@@ -3650,6 +3706,7 @@ void MP4D_close(MP4D_demux_t *mp4)
         FREE(tr->timestamp);
         FREE(tr->duration);
 #endif
+        FREE(tr->sync_sample);
         FREE(tr->sample_to_chunk);
         FREE(tr->chunk_offset);
         FREE(tr->dsi);

@@ -39,7 +39,7 @@ bool has_strip_joiner() { return RgaStripJoiner::available(); }
 std::unique_ptr<hal::StripJoiner> make_strip_joiner(std::shared_ptr<hal::FrameSink> out,
                                                     std::shared_ptr<hal::Scanout> scanout) {
     if (!RgaStripJoiner::available() || !out || !scanout) return nullptr;
-    return std::unique_ptr<hal::StripJoiner>(new RgaStripJoiner(std::move(out), scanout->scanout_fd()));
+    return std::unique_ptr<hal::StripJoiner>(new RgaStripJoiner(std::move(out), std::move(scanout)));
 }
 
 bool screen_compositor_available() { return RgaCompositor::available(); }

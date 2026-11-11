@@ -2,6 +2,7 @@
 
 
 #include "dvr/dvr.hpp"
+#include <cmath>
 #include "platform/platform.hpp"
 #include <unistd.h>
 #include <time.h>
@@ -97,10 +98,11 @@ int DVR::init(int frm_width, int frm_height) {
 	// ffmpeg is not an option for the encode: this board's libavcodec has
 	// only h264_v4l2m2m and no /dev/video* node for it to bind to.
 	//
-	// The file is on the slot grid (H264Cfr makes an unchanged slot a skip
-	// frame): at most enc_fps_cap a second - for a recording dvr_screen_fps,
-	// 100 unless set: a 100 Hz screen records every refresh, a 120 Hz one
-	// every other (60), 240 Hz every third (80).
+	// The file is on the slot grid, one frame length all through (H264Cfr
+	// makes an unchanged slot a skip frame; H.265 encodes the last picture
+	// again): what the screen showed, refresh by refresh, at 60 fps at most -
+	// a 60 Hz screen records every refresh, a 120 Hz one every other, 144 Hz
+	// every third (48). The web view's encoder: at most enc_fps_cap.
 	const int bitrate = enc_bitrate > 0 ? enc_bitrate
 	                                    : settings_.get(dvr::setting::dvr_screen_kbps) * 1000;
 	if (!disp_dev) {
@@ -126,25 +128,45 @@ int DVR::init(int frm_width, int frm_height) {
 		// lock's target, not the refresh of the moment - a recording started
 		// while the lock was not holding (the video back after a drop) read the
 		// mode's 120 Hz and kept every 2nd refresh, 60 fps, for the whole file.
+		// One refresh per camera frame - or per half, third... of one, as the
+		// lock holds it (display::follow_period_us): a 60 fps camera on a
+		// 120 Hz mode runs it at two a frame, 120 Hz. Taken as one, the file
+		// was stamped 60 fps with a slot each 120th of a second: half speed.
 		double period_us = disp_dev->frame_period_us();
 		const display::RefreshSync rs = disp_dev->refresh_sync();
-		const float cam_fps = rs.camera_fps;
-		if (rs.mode == 2 && cam_fps > 0 &&
-		    1e6 / cam_fps >= period_us * 0.999)
-			period_us = 1e6 / cam_fps;
-		const int hz = period_us > 0 ? (int)(1e6 / period_us + 0.5) : disp_dev->refresh_hz();
-		const int want = enc_fps_cap;
-		rga_div = (hz + want - 1) / want;
+		const double mode_hz = disp_dev->mode_refresh_hz();
+		if (rs.mode == 2 && rs.camera_fps > 0 && mode_hz > 0) {
+			const double p = display::follow_period_us(1e6 / mode_hz, 1e6 / rs.camera_fps);
+			if (p > 0) period_us = p;
+		}
+		const double hzd = period_us > 0 ? 1e6 / period_us : disp_dev->refresh_hz();
+		// A file: 60 fps at most (YouTube plays no faster, and drops or
+		// repeats frames of anything over), within 1% (a 120.19 Hz screen
+		// records every 2nd refresh, not every 3rd).
+		const double want = to_file ? std::min(enc_fps_cap, 60) * 1.01 : enc_fps_cap;
+		rga_div = (int)std::ceil(hzd / want - 1e-6);
 		if (rga_div < 1) rga_div = 1;
-		fps = (hz + rga_div / 2) / rga_div;
-		if (fps > enc_fps_cap) fps = enc_fps_cap;
+		const double fps_d = hzd > 0 ? hzd / rga_div : 60;
+		fps = (int)(fps_d + 0.5);
 		if (fps < 1) fps = 1;
-		rga_slot_ticks = period_us > 0 ? (int)(period_us * rga_div * 0.09 + 0.5) : 90000 / fps;
+		rga_slot_ticks = (int)(90000.0 / fps_d + 0.5);
+		// A file's rate is one of the usual ones when within 2% of it - a
+		// 118.7 Hz screen's every 2nd refresh (59.37) is stamped 60 - so a
+		// player or YouTube takes every frame as it is: each slot is still one
+		// frame, the file only plays that much faster or slower. Its rate as
+		// measured otherwise.
+		if (to_file) {
+			for (int c : {60, 50, 48, 30, 25, 24}) {
+				if (std::fabs(fps_d / c - 1) <= 0.02) { fps = c; rga_slot_ticks = 90000 / c; break; }
+			}
+		}
+		screen_fps_exact = fps_d;
 	}
 	screen_fps = fps;
 	if (leader) screen_enc->set_input_count(0);   // it reads the leader's
 	// H.265 (dvr_screen_codec): the same picture in fewer bits. No skip
-	// frames for it yet - an unchanged refresh lengthens the picture before.
+	// frames for it: an unchanged slot is the last picture encoded again
+	// (next to no bits), so the file keeps one frame length all through.
 	screen_enc->set_hevc(codec == VideoCodec::H265);
 	if (!screen_enc->init(frm_width, frm_height, fps, bitrate, true /*BT.601, RGA's*/, enc_max_bps)) {
 		printf("DVR: hardware encoder unavailable - screen recording disabled\n");
@@ -194,10 +216,12 @@ int DVR::init(int frm_width, int frm_height) {
 	else if (leader)
 		; // said by DvrRecorder ("follows the screen recording")
 	else
-		printf("DVR: screen recording %dx%d at %d fps, RGA composite of every %s\n",
-		       frm_width, frm_height, screen_fps,
+		printf("DVR: screen recording %dx%d, RGA composite of every %s (%.3f a second), "
+		       "stamped %.3f fps, constant\n",
+		       frm_width, frm_height,
 		       rga_div == 1 ? "refresh" : rga_div == 2 ? "2nd refresh" : rga_div == 3 ? "3rd refresh"
-		                    : (std::to_string(rga_div) + "th refresh").c_str());
+		                    : (std::to_string(rga_div) + "th refresh").c_str(),
+		       screen_fps_exact, 90000.0 / rga_slot_ticks);
 	return 0;
 }
 
@@ -344,9 +368,25 @@ void DVR::run_screen_rga() {
 		if (!(MP4E_STATUS_OK == r || MP4E_STATUS_BAD_ARGUMENTS == r))
 			printf("DVR: rga mp4_h26x_write_nal err %d\n", r);
 	};
-	int held = 0;   // H.265: slots the next picture's duration takes in (no skip frames)
+	int held = 0;   // H.265 with nothing to encode again: slots the next picture's duration takes in
+	// H.265 (no skip frames): the last composite, kept to be encoded again
+	// for an unchanged slot. At most kMaxRepeat in a row for one gap (each
+	// is an encode, ~9 ms); past that the last of them is held longer.
+	const bool repeat_last = screen_enc->hevc() && !leader;
+	const int64_t kMaxRepeat = 8;
+	int latest = -1;
+	auto repeat = [&](int dur) {
+		screen_enc->encode_buffer(latest, [&](const uint8_t* p_hw, size_t len, bool) {
+			pkt_copy_.assign(p_hw, p_hw + len);
+			write(pkt_copy_.data(), len, dur + held);
+			held = 0;
+		});
+	};
 	auto skip = [&]() {
-		if (screen_enc->hevc()) { held += period; skips++; return true; }
+		if (screen_enc->hevc()) {
+			if (repeat_last && latest >= 0) { repeat(period); skips++; return true; }
+			held += period; skips++; return true;
+		}
 		std::vector<uint8_t> sk = screen_cfr.skip_frame();
 		if (sk.empty()) return false;
 		write(sk.data(), sk.size(), period);
@@ -354,14 +394,14 @@ void DVR::run_screen_rga() {
 		return true;
 	};
 	// Leader: the latest composite, kept back from the sampler while a
-	// follower may still want it, and what the follower was last handed.
-	int latest = -1;
+	// follower may still want it (or for H.265's repeats), and what the
+	// follower was last handed.
 	uint64_t latest_seq = 0, taken_seq = 0;
 	int64_t f_slot = -1;
 	auto keep_latest = [&](int idx) {
 		bool following;
 		{ std::lock_guard<std::mutex> lk(follow_m); following = follower != nullptr; }
-		if (!following) { release_buf(idx); return; }
+		if (!following && !repeat_last) { release_buf(idx); return; }
 		if (latest >= 0) release_buf(latest);
 		latest = idx;
 		latest_seq++;
@@ -369,7 +409,7 @@ void DVR::run_screen_rga() {
 	auto hand_on = [&](int64_t slot) {
 		std::lock_guard<std::mutex> lk(follow_m);
 		if (!follower) {
-			if (latest >= 0) { release_buf(latest); latest = -1; }
+			if (latest >= 0 && !repeat_last) { release_buf(latest); latest = -1; }
 			f_slot = -1;
 			return;
 		}
@@ -401,7 +441,14 @@ void DVR::run_screen_rga() {
 		if (last_written >= 0) {
 			int64_t gap = s.slot - last_written - 1;
 			if (gap > kMaxGap) gap = kMaxGap;
-			for (int64_t i = 0; i < gap; i++) if (!skip()) break;
+			if (repeat_last && latest >= 0 && gap > 0) {
+				const int64_t n = std::min(gap, kMaxRepeat);
+				for (int64_t i = 0; i < n; i++)
+					repeat((int)(period * (i == n - 1 ? 1 + gap - n : 1)));
+				skips += gap;
+			} else {
+				for (int64_t i = 0; i < gap; i++) if (!skip()) break;
+			}
 		}
 		if (s.idx < 0) skip();
 		if (s.idx >= 0) {
@@ -935,9 +982,9 @@ bool DvrRecorder::start_recording() {
                                 fmt == DvrFormat::MP4 ? DvrFormat::MP4 : DvrFormat::FMP4, stop_signal, true,
                                 true, false)
         : std::make_shared<DVR>(*settings_, path, codec, fps, fmt, stop_signal, false, true, false);
-    // The screen sampled at most this often (dvr_screen_fps): 100, every
-    // refresh of a 100 Hz screen, the camera's rate in its usual modes -
-    // measured on the VRX with H.265: no picture missed, none with the
+    // The screen sampled at most this often (dvr_screen_fps) - a file at 60
+    // at most whatever is set (start_screen: YouTube plays no faster).
+    // Measured on the VRX with H.265 at 100: no picture missed, none with the
     // encoder behind, RGA ~5.3 ms a frame, the live picture ~0.5 ms later.
     if (screen) dvr->set_fps_cap(settings_->get(dvr::setting::dvr_screen_fps));
     // Room kept on the card while it records, and the recording ended when

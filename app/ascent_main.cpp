@@ -361,7 +361,7 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
         uint64_t drawn = 0, frame_deadline=start;
         bool was_browsing=false; int recording_listed=0;
         int previous_bind = gnd::BIND_IDLE;
-        std::string recording_error,telemetry_error,thumbnail_session,unsupported_video;
+        std::string recording_error,telemetry_error,thumbnail_session,unsupported_video,held_notice;
         std::vector<uint8_t> playback_hud_bytes;
         std::shared_ptr<const kestrel_ui::HudData> playback_hud;
         uint64_t profile_start = start, profile_loops = 0, profile_drawn = 0, profile_presented = 0, profile_ui_flips = 0;
@@ -370,6 +370,18 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
         while (!interrupted && !model.quit && !source_exited && !receiver.screen->failed() &&
                !receiver.decoder->failed()) {
             const auto now = kestrel_ui::monotonic_us();
+            // A screen mode on trial is kept when the craft arms, as on the VRX
+            // Pro; one tried while armed is not reverted in the air (that
+            // restarts the session, radio and HDMI included) but once it has
+            // landed.
+            if(controller.take_arming() && mode.pending) {
+                mode.keep();
+                settings.set(display::setting::ascent_screen_height,mode.current.height);
+                settings.set(display::setting::ascent_screen_hz,mode.current.hz);
+                settings.flush();
+                printf("menu: screen mode %s kept (armed)\n",mode.current.label().c_str());
+            }
+            if(mode.pending && mode.deadline && now>=mode.deadline && controller.armed(now)) mode.deadline=now+1000000;
             if(mode.tick(now)) break;
             air::FcChunk chunk;
             while(radio_model.fc().take(chunk)) {
@@ -510,12 +522,20 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
             space.text=std::to_string(recording.free_bytes/(1024*1024))+" MiB";
             space.reason=recording.storage_ready?"":"Storage unavailable or less than 64 MiB free.";
             input.poll(controller, now);
+            // A notice opens the menu with it - but not over the picture in
+            // flight: armed, the last one waits, and shows once disarmed.
             auto notice = [&](const char* text) {
+                printf("panel: %s\n", text);
+                if (controller.armed(now)) { held_notice = text; return; }
                 if (!model.menu_open) controller.open_menu();
                 model.feedback = text;
                 ++model.menu_version;
-                printf("panel: %s\n", text);
             };
+            if (!held_notice.empty() && controller.arm_state(now) == 0) {
+                const std::string text = std::move(held_notice);
+                held_notice.clear();
+                notice(text.c_str());
+            }
             const std::string unsupported=video.rejected_us ?
                 std::to_string(video.rejected_width)+"x"+std::to_string(video.rejected_height) : std::string();
             if(unsupported!=unsupported_video) {

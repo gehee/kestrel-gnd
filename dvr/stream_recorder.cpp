@@ -1,4 +1,5 @@
 #include "stream_recorder.hpp"
+#include "dvr_recover.hpp"
 #include "writer.hpp"
 #include "third_party/minimp4.h"
 #include <algorithm>
@@ -6,13 +7,29 @@
 #include <cstring>
 #include <ctime>
 #include <fcntl.h>
+#include <pthread.h>
 #include <stdexcept>
+#include <sys/resource.h>
+#include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <unistd.h>
 
 namespace dvr {
 StreamRecorder::StreamRecorder(std::string dir,VideoCodec codec,int width,int height,int fps)
-    :directory_(std::move(dir)),codec_(codec),width_(width),height_(height),fps_(std::max(1,fps)),worker_([this]{run();}) {}
+    :directory_(std::move(dir)),codec_(codec),width_(width),height_(height),fps_(std::max(1,fps)),worker_([this]{run();}) {
+    // Recordings a power cut or a crash left fragmented (the file is made
+    // plain only when REC stops), made playable: once, at start, on a thread
+    // of its own at the lowest priority - a long one takes a while to read.
+    // It only reads the name of the one being recorded, kept apart from the
+    // recorder so that the thread may outlive it.
+    struct stat st{};
+    if(directory_.empty() || stat(directory_.c_str(),&st) || !S_ISDIR(st.st_mode)) return;
+    std::thread([dir=directory_,active=active_] {
+        pthread_setname_np(pthread_self(),"dvr-recover");
+        setpriority(PRIO_PROCESS,0,19);   // this thread only, on Linux
+        dvr_recover_recordings(dir,[active] {std::lock_guard<std::mutex> lock(active->mutex);return active->name;});
+    }).detach();
+}
 StreamRecorder::~StreamRecorder() {
     stop();
     {std::lock_guard<std::mutex> lock(mutex_);shutdown_=true;}
@@ -57,8 +74,14 @@ void StreamRecorder::run() {
     int fd=-1; MP4E_mux_t* mux=nullptr; mp4_h26x_writer_t video{};
     std::unique_ptr<DvrWriter> writer;
     std::vector<std::vector<uint8_t>> params;
-    uint64_t previous=0,frames=0,ticks=0;
+    uint64_t frames=0,ticks=0;
     std::string file;
+    // A picture is written once the next is in: its duration is the time to
+    // the next, not since the one before (DVR::run_dvr's rule). After a gap
+    // the picture past it came early and then stood - a jump, then a freeze,
+    // where the screen had frozen on the one before it.
+    Item held;
+    bool have_held=false;
     // Ready: 64 MiB free, or that much to be had from the oldest finished
     // recordings, which REC start and the writer clear (purge_oldest_recordings)
     // as the VRX Pro does - a full card of old clips must not refuse REC.
@@ -76,7 +99,51 @@ void StreamRecorder::run() {
     storage();
     auto storage_time=std::chrono::steady_clock::now();
     const int nominal=90000/fps_;
+    // Within a quarter of the nominal interval it snaps to nominal.
+    auto duration=[&](uint64_t from,uint64_t to) {
+        int d=nominal;
+        if(from && to>from) {
+            const int measured=int(std::clamp<uint64_t>(to-from,1000,1000000)*90000/1000000);
+            if(std::abs(measured-nominal)>nominal/4) d=measured;
+        }
+        return d;
+    };
+    // The held picture out, lasting until next_us (0: unknown, nominal).
+    // Its telemetry at its own start. It counted as recorded once taken
+    // (state_.frames); one the muxer refuses counts as dropped instead.
+    auto put_held=[&](uint64_t next_us) {
+        if(!have_held) return;
+        have_held=false;
+        const Item h=std::move(held);
+        held=Item();
+        const int d=duration(h.us,next_us);
+        const int rc=mp4_h26x_write_nal(&video,h.bytes(),int(h.size()),d);
+        if(rc!=MP4E_STATUS_OK && rc!=MP4E_STATUS_BAD_ARGUMENTS) throw std::runtime_error("Recording write failed");
+        if(rc==MP4E_STATUS_OK){telemetry_.append(ticks*1000000/90000,h.telemetry);ticks+=d;}
+        else {std::lock_guard<std::mutex> lock(mutex_);state_.frames=--frames;++state_.dropped;}
+    };
+    auto set_active=[&](const std::string& path) {
+        std::lock_guard<std::mutex> lock(active_->mutex);
+        active_->name=path.empty()?std::string():path.substr(path.find_last_of('/')+1);
+    };
+    // The size the stream's SPS gives (HEVC), else the one configured.
+    auto stream_size=[&](int& w,int& h) {
+        w=width_;h=height_;
+        if(codec_!=VideoCodec::H265) return;
+        for(const auto& p:params) {
+            size_t at=0;   // past its start code (Annex-B), if it has one
+            if(p.size()>=4 && !p[0] && !p[1] && !p[2] && p[3]==1) at=4;
+            else if(p.size()>=3 && !p[0] && !p[1] && p[2]==1) at=3;
+            if(at+2>p.size() || ((p[at]>>1)&63)!=33) continue;
+            int sw=0,sh=0;
+            if(MP4E_hevc_sps_size(p.data()+at,int(p.size()-at),&sw,&sh)) {w=sw;h=sh;return;}
+        }
+    };
     auto close=[&] {
+        // The last picture first, nominal: there is no next.
+        if(mux) {try{put_held(0);}catch(const std::exception&){}}
+        have_held=false;held=Item();
+        set_active(std::string());
         if(fd>=0)telemetry_.finish();
         {std::lock_guard<std::mutex> lock(mutex_);state_.recording=false;state_.finishing=fd>=0;}
         if(mux) {MP4E_close(mux);mp4_h26x_write_close(&video);mux=nullptr;}
@@ -97,7 +164,15 @@ void StreamRecorder::run() {
     for(;;) {
         Item item;
         {std::unique_lock<std::mutex> lock(mutex_);wake_.wait_for(lock,std::chrono::seconds(1),[&]{return shutdown_ || !queue_.empty();});
-         if(queue_.empty()) {if(shutdown_) break;lock.unlock();storage();continue;}
+         // Idle, the card is asked only every 5 s (statvfs; the oldest
+         // recordings listed only when it is nearly full).
+         if(queue_.empty()) {
+             if(shutdown_) break;
+             lock.unlock();
+             const auto now=std::chrono::steady_clock::now();
+             if(mux || now-storage_time>=std::chrono::seconds(5)) {storage();storage_time=now;}
+             continue;
+         }
          item=std::move(queue_.front());queue_.pop_front();queued_-=item.size();}
         try {
             const auto now=std::chrono::steady_clock::now();
@@ -108,7 +183,7 @@ void StreamRecorder::run() {
             if(item.kind==Item::Stop) {close();continue;}
             if(item.kind==Item::Params) {params=std::move(item.params);header();continue;}
             if(item.kind==Item::Start) {
-                close(); previous=0;frames=0;ticks=0;file.clear(); video={};
+                close(); frames=0;ticks=0;file.clear(); video={};
                 {std::lock_guard<std::mutex> lock(mutex_);state_.error.clear();state_.frames=state_.dropped=0;}
                 struct statvfs space{};
                 if(directory_.empty()) throw std::runtime_error("No recording folder configured");
@@ -126,6 +201,7 @@ void StreamRecorder::run() {
                     if(fd>=0 || errno!=EEXIST) break;
                 }
                 if(fd<0) {file.clear();throw std::runtime_error(std::string("Create recording: ")+strerror(errno));}
+                set_active(file);
                 telemetry_.begin(file);
                 // The writer keeps room on the card while it writes (never
                 // this file) and says when the card stops taking it: the
@@ -140,22 +216,17 @@ void StreamRecorder::run() {
                 mux=MP4E_open(0,1,writer.get(),[](int64_t off,const void* p,size_t n,void* w){return static_cast<DvrWriter*>(w)->write(off,p,n);});
                 if(!mux) throw std::runtime_error("Cannot open MP4 writer");
                 MP4E_set_finalize(mux);MP4E_set_full_frame_rate(mux);
-                if(mp4_h26x_write_init(&video,mux,width_,height_,codec_==VideoCodec::H265)!=MP4E_STATUS_OK) throw std::runtime_error("Cannot initialize MP4 track");
+                int w=0,h=0;stream_size(w,h);
+                if(mp4_h26x_write_init(&video,mux,w,h,codec_==VideoCodec::H265)!=MP4E_STATUS_OK) throw std::runtime_error("Cannot initialize MP4 track");
                 header();
                 {std::lock_guard<std::mutex> lock(mutex_);state_.recording=true;state_.file=file;}
                 continue;
             }
             if(!mux) continue;
-            int duration=nominal;
-            if(previous && item.us>previous) {
-                const int measured=int(std::clamp<uint64_t>(item.us-previous,1000,1000000)*90000/1000000);
-                if(std::abs(measured-nominal)>nominal/4) duration=measured;
-            }
-            previous=item.us;
-            const int rc=mp4_h26x_write_nal(&video,item.bytes(),int(item.size()),duration);
-            if(rc!=MP4E_STATUS_OK && rc!=MP4E_STATUS_BAD_ARGUMENTS) throw std::runtime_error("Recording write failed");
-            if(rc==MP4E_STATUS_OK){telemetry_.append(ticks*1000000/90000,item.telemetry);ticks+=duration;}
-            {std::lock_guard<std::mutex> lock(mutex_);if(rc==MP4E_STATUS_OK)state_.frames=++frames;else ++state_.dropped;}
+            put_held(item.us);
+            held=std::move(item);
+            have_held=true;
+            {std::lock_guard<std::mutex> lock(mutex_);state_.frames=++frames;}
         } catch(const std::exception& e) {
             requested_=false; close();
             // The writer's own reason (card full) when it gave one: the muxer's

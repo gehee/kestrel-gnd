@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdio>
 #include "display/lock_step.hpp"
+#include "display/display.hpp"   // follow_period_us
 
 static int fails;
 #define CHECK(c) do { if (!(c)) { fails++; std::printf("FAIL line %d: %s\n", __LINE__, #c); } } while (0)
@@ -90,7 +91,21 @@ static void test_step_direction() {
     CHECK(s.lines == 0 && !s.moving && s.arrived);
 }
 
+// FOLLOW's refresh, which a screen recording takes as the screen's rate: one
+// per camera frame, or two, three... where the mode is that many times faster.
+static void test_follow_period() {
+    const double m120 = 8320.0, m60 = 16666.7, m144 = 6944.4, m100 = 10000.0;
+    CHECK(std::fabs(display::follow_period_us(m120, 16666.1) - 8333.05) < 0.1);   // 60 fps on 120 Hz: two a frame
+    CHECK(std::fabs(display::follow_period_us(m120, 9987.0) - 9987.0) < 0.1);     // 100.13 fps on 120 Hz: one, stretched
+    CHECK(std::fabs(display::follow_period_us(m144, 16666.1) - 8333.05) < 0.1);   // 60 fps on 144 Hz: two
+    CHECK(std::fabs(display::follow_period_us(m60, 16658.0) - 16658.0) < 0.1);    // 60.03 fps on 60 Hz: a little shorter
+    CHECK(std::fabs(display::follow_period_us(m100, 9960.0) - 9960.0) < 0.1);     // within 0.5% faster
+    CHECK(display::follow_period_us(m60, 10000.0) == 0);                          // the camera faster: no FOLLOW
+    CHECK(display::follow_period_us(0, 16666.0) == 0 && display::follow_period_us(m60, 0) == 0);
+}
+
 int main() {
+    test_follow_period();
     test_faster_screen();
     test_slower_screen_longer_only();
     test_slower_screen_shorter();

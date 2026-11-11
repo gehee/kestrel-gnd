@@ -297,6 +297,10 @@ struct VideoSink {
     // It needs a keyframe (a recording starts on one): true once per need,
     // and the radio asks the air unit for one. Polled after each picture.
     virtual bool take_keyframe_request() { return false; }
+    // It records the camera's stream as it comes (a STREAM recording) right
+    // now: pictures in strips are no one stream, so while this is true the
+    // air unit is asked for whole pictures. Polled on the radio thread.
+    virtual bool needs_stream() const { return false; }
 };
 
 }  // namespace bus

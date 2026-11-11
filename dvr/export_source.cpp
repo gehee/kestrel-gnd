@@ -90,7 +90,7 @@ ExportSource::ExportSource(const std::string &path) {
                 "Unsupported recording dimensions");
         count = t.sample_count;
         timescale = t.timescale;
-        require(count && count <= 2000000 && timescale && t.dsi_bytes >= 23 && t.timestamp && t.duration,
+        require(count && count <= 2000000 && timescale && t.dsi_bytes >= 23 && t.timestamp && t.duration && t.timestamp_count >= count,
                 "Invalid MP4 timing");
         const auto *cfg = t.dsi;
         length_ = (cfg[21] & 3) + 1;

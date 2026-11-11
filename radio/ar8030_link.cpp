@@ -187,6 +187,7 @@ void Ar8030Link::run() {
 
     while (!*should_stop) {
         bb_watchdog_alive();   // the loop is still going round
+        if (air_info_clear_.exchange(false)) clear_air_info();   // the link went down (on_link_event)
         model_.take_commands(*this);   // the menu's, since the last pass
         bw_poll();
         if (sockfd < 0) {

@@ -90,7 +90,6 @@ void Ar8030Link::vhdr_strip_seen(bool strip) {
                                      : "whole pictures again");
     }
     vstrip_ = strip;
-    strips_on_ = strip;
 }
 
 bool Ar8030Link::ask_keyframe(const char* why) {
@@ -418,6 +417,22 @@ void Ar8030Link::consume(const uint8_t* data, size_t len) {
     consume_bytes(data, len);
     video_.end_of_read();
     if (strips_) strips_->end_of_read();
+    check_rec_stream();
+}
+
+// A recording of the stream: strips are no one stream to record (each its
+// own, of its rows), so while it runs the air unit is asked for whole
+// pictures, and for its strips again once it stops. A SCREEN recording takes
+// the joined pictures and needs none of this.
+void Ar8030Link::check_rec_stream() {
+    const bool rec = video_.sinks_need_stream();
+    if (rec == rec_stream_) return;
+    rec_stream_ = rec;
+    if (air_strips_max_ < 2 || strips.load() < 2) return;
+    printf("ar8030: %s\n", rec ? "a STREAM recording - whole pictures asked of the air unit while it runs"
+                               : "the STREAM recording stopped - strips asked of the air unit again");
+    strips_asked_ms_ = now_ms();
+    request_setting(CAM_STRIPS, strips_wanted());
 }
 
 
