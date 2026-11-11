@@ -12,8 +12,10 @@
 #include <unistd.h>
 
 namespace kestrel_ui {
-Display::Display(int w, int h, const std::string& framebuffer, int draw_rows) : width_(w), height_(h) {
+Display::Display(int w, int h, const std::string& framebuffer, int draw_rows, int direct_buffers) : width_(w), height_(h) {
     if (draw_rows < 0 || draw_rows > 512) throw std::invalid_argument("Invalid partial draw-buffer height");
+    if (direct_buffers < 1 || direct_buffers > 2 || (direct_buffers == 2 && draw_rows))
+        throw std::invalid_argument("Two buffers are for direct rendering only");
     if (!framebuffer.empty()) {
         fd_ = open(framebuffer.c_str(), O_RDWR | O_CLOEXEC);
         if (fd_ < 0) throw std::runtime_error("Cannot open framebuffer: " + std::string(std::strerror(errno)));
@@ -62,11 +64,12 @@ Display::Display(int w, int h, const std::string& framebuffer, int draw_rows) : 
     // repaints only damaged regions; no staging-to-overlay copy is needed.
     // Partial buffers remain available to compare rendering paths in tools.
     pixels_.resize(size_t(width_) * height_);
+    if (direct_buffers == 2) second_.resize(pixels_.size());
     draw_buffer_.resize(size_t(width_) * draw_rows);
     display_ = lv_display_create(width_, height_);
     if (!display_) throw std::runtime_error("Cannot create LVGL display");
     lv_display_set_color_format(display_, LV_COLOR_FORMAT_ARGB8888);
-    lv_display_set_buffers(display_, draw_rows ? draw_buffer_.data() : pixels_.data(), nullptr,
+    lv_display_set_buffers(display_, draw_rows ? draw_buffer_.data() : pixels_.data(), second_.empty() ? nullptr : second_.data(),
         draw_rows ? draw_buffer_.size() * 4 : pixels_.size() * 4,
         draw_rows ? LV_DISPLAY_RENDER_MODE_PARTIAL : LV_DISPLAY_RENDER_MODE_DIRECT);
     lv_display_set_user_data(display_, this);
@@ -83,6 +86,7 @@ Display::~Display() {
 }
 void Display::flush_cb(lv_display_t* display, const lv_area_t* area, uint8_t* pixels) {
     auto* self = static_cast<Display*>(lv_display_get_user_data(display));
+    if (!self->second_.empty()) self->front_ = pixels == reinterpret_cast<uint8_t*>(self->second_.data());
     self->flush(*area, pixels);
     if (lv_display_flush_is_last(display)) ++self->presentations;
     lv_display_flush_ready(display);
@@ -100,7 +104,7 @@ void Display::flush(const lv_area_t& a, const uint8_t* source) {
     const bool direct=draw_buffer_.empty();
     if(direct) source += (size_t(a.y1)*width_+a.x1)*4;
     for (int y = a.y1; y <= a.y2; ++y) {
-        auto* dest = pixels_.data() + size_t(y) * width_ + a.x1;
+        auto* dest = (front_ ? second_ : pixels_).data() + size_t(y) * width_ + a.x1;
         if(!direct) std::memcpy(dest, source, row_bytes);
         if (mapping_) {
             auto* fb = mapping_ + size_t(y + yoffset_) * stride_ + size_t(a.x1 + xoffset_) * 4;
@@ -122,7 +126,7 @@ void Display::dump(const std::string& path) const {
     std::ofstream out(path, std::ios::binary);
     if (!out) throw std::runtime_error("Cannot open screenshot output");
     out << "P7\nWIDTH " << width_ << "\nHEIGHT " << height_ << "\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n";
-    for (uint32_t p : pixels_) {
+    for (uint32_t p : pixels()) {
         const char rgba[] = {char(p >> 16), char(p >> 8), char(p), char(p >> 24)};
         out.write(rgba, 4);
     }
@@ -132,14 +136,14 @@ void Display::verify_framebuffer() const {
     if (!mapping_) return;
     size_t mismatches = 0;
     for (int y = 0; y < height_; ++y) for (int x = 0; x < width_; ++x) {
-        const uint32_t p = pixels_[size_t(y) * width_ + x];
+        const uint32_t p = pixels()[size_t(y) * width_ + x];
         const uint32_t expected = ((p >> 16) & 255) << red_ | ((p >> 8) & 255) << green_ |
                                   (p & 255) << blue_ | (p >> 24) << alpha_;
         uint32_t actual;
         std::memcpy(&actual, mapping_ + size_t(y + yoffset_) * stride_ + size_t(x + xoffset_) * 4, 4);
         if (actual != expected) ++mismatches;
     }
-    std::printf("FB_READBACK pixels=%zu mismatches=%zu\n", pixels_.size(), mismatches);
+    std::printf("FB_READBACK pixels=%zu mismatches=%zu\n", pixels().size(), mismatches);
     if (mismatches) throw std::runtime_error("Framebuffer readback differs from rendered overlay");
 }
 } // namespace kestrel_ui

@@ -27,14 +27,69 @@
 #include "hal/v4l2/find_encoder.hpp"
 #include "hud/lvgl/view.hpp"
 #include "render/software/frame_cadence.hpp"
+#include <condition_variable>
 #include <csignal>
+#include <exception>
 #include <filesystem>
 #include <cstdio>
+#include <mutex>
 #include <stdexcept>
 #include <thread>
+#include <utility>
 
 namespace {
 volatile sig_atomic_t interrupted = 0, menu_requested = 0;
+// Copies each UI frame's damage to the overlay plane on the other core while
+// LVGL draws the next frame into its other buffer. The only overlay producer.
+class OverlayCopier {
+public:
+    OverlayCopier(display::PlaneScreen& screen, unsigned width, unsigned height)
+        : screen_(screen), width_(width), height_(height), thread_([this] { run(); }) {}
+    ~OverlayCopier() {
+        { std::lock_guard<std::mutex> lock(mutex_); stop_ = true; }
+        wake_.notify_all();
+        thread_.join();
+    }
+    // Waits for the previous copy: it reads the buffer LVGL draws into next.
+    void submit(const uint32_t* pixels, std::vector<base::Damage> damage) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        wake_.wait(lock, [this] { return !pending_; });
+        if (error_) std::rethrow_exception(std::exchange(error_, nullptr));
+        pixels_ = pixels; damage_ = std::move(damage); pending_ = true;
+        wake_.notify_all();
+    }
+    uint64_t copy_us() const { return copy_us_.load(); }
+private:
+    void run() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        for (;;) {
+            wake_.wait(lock, [this] { return stop_ || pending_; });
+            if (!pending_) return;
+            const uint32_t* pixels = pixels_;
+            const auto damage = std::move(damage_);
+            lock.unlock();
+            const auto started = kestrel_ui::monotonic_us();
+            std::exception_ptr error;
+            try { screen_.overlay_damage(pixels, width_, height_, damage); }
+            catch (...) { error = std::current_exception(); }
+            copy_us_ += kestrel_ui::monotonic_us() - started;
+            lock.lock();
+            if (error) error_ = error;
+            pending_ = false;
+            wake_.notify_all();
+        }
+    }
+    display::PlaneScreen& screen_;
+    const unsigned width_, height_;
+    std::mutex mutex_;
+    std::condition_variable wake_;
+    bool pending_ = false, stop_ = false;
+    const uint32_t* pixels_ = nullptr;
+    std::vector<base::Damage> damage_;
+    std::exception_ptr error_;
+    std::atomic<uint64_t> copy_us_{0};
+    std::thread thread_;
+};
 void signal_handler(int signal) {
     if (signal == SIGUSR1)
         menu_requested = 1;
@@ -246,7 +301,8 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
         lv_init();
         struct LvLifetime { ~LvLifetime() { lv_deinit(); } } lv_lifetime;
         lv_tick_set_cb([] { return uint32_t(kestrel_ui::monotonic_us() / 1000); });
-        kestrel_ui::Display display(screen_w, screen_h, "");
+        kestrel_ui::Display display(screen_w, screen_h, "", 0, 2);
+        OverlayCopier copier(*receiver.screen, unsigned(screen_w), unsigned(screen_h));
         kestrel_ui::Model model;
         model.build = kestrel_gnd_build_time;
         model.version = std::string(kestrel_gnd_version) + " (" + kestrel_gnd_git_hash + ")";
@@ -369,6 +425,7 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
         uint64_t profile_start = start, profile_loops = 0, profile_drawn = 0, profile_presented = 0, profile_ui_flips = 0;
         uint64_t render_us = 0, overlay_us = 0, longest_loop_us = 0;
         uint64_t longest_render_us = 0, longest_overlay_us = 0;
+        uint64_t rate_start = start, rate_loops = 0, rate_slowest_us = 0, profile_copy_us = 0;
         while (!interrupted && !model.quit && !source_exited && !receiver.screen->failed() &&
                !receiver.decoder->failed()) {
             const auto now = kestrel_ui::monotonic_us();
@@ -639,12 +696,22 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
             const auto render_start = kestrel_ui::monotonic_us();
             view.update(ui_now);
             model.hud_pid=hud.pid();model.hud_restarts=hud.restarts();
+            const auto presented = display.presentations;
             lv_timer_handler();
-            lv_refr_now(display.lv_display());
+            // LVGL pauses its refresh timer until something is invalidated.
+            // Refreshing anyway is not free with two buffers: it would copy
+            // the whole last frame into the other one, which the next frame
+            // does for less (leaving out what it redraws). Nor when the timer
+            // has just drawn this frame itself (a layout in that refresh
+            // leaves it unpaused): a second one would copy into the buffer
+            // the overlay copier may still be reading.
+            if (display.presentations == presented &&
+                !lv_timer_get_paused(lv_display_get_refr_timer(display.lv_display())))
+                lv_refr_now(display.lv_display());
             const auto overlay_start = kestrel_ui::monotonic_us();
             if (display.presentations != drawn) {
                 drawn = display.presentations;
-                receiver.screen->overlay_damage(display.pixels().data(), screen_w, screen_h, display.take_damage());
+                copier.submit(display.pixels().data(), display.take_damage());
             }
             const auto rendered = kestrel_ui::monotonic_us();
             // Keep an absolute phase: sleep/wakeup overhead must not lower
@@ -652,8 +719,20 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
             const uint64_t frame_us = 1000000 / std::max(1, model.fps);
             frame_deadline=kestrel_ui::next_frame_deadline(frame_deadline,rendered,frame_us);
             usleep(frame_deadline-rendered);
+            const auto ended = kestrel_ui::monotonic_us();
+            // The FPS counter: loops (one a refresh while they keep up) and the
+            // slowest one's work, its sleep left out, over the last second.
+            ++rate_loops; rate_slowest_us = std::max(rate_slowest_us, rendered - now);
+            if (ended - rate_start >= 1000000) {
+                if (model.fps_counter) {
+                    char rate[48];
+                    std::snprintf(rate, sizeof(rate), "%.0f FPS  MAX %.1f MS", rate_loops * 1e6 / double(ended - rate_start),
+                                  rate_slowest_us / 1000.0);
+                    model.backend.frame_rate = rate;
+                } else model.backend.frame_rate.clear();
+                rate_start = ended; rate_loops = rate_slowest_us = 0;
+            }
             if (o.profile) {
-                const auto ended = kestrel_ui::monotonic_us();
                 ++profile_loops;
                 render_us += overlay_start - render_start;
                 overlay_us += rendered - overlay_start;
@@ -664,12 +743,17 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
                     const double seconds = double(ended - profile_start) / 1000000;
                     const auto presented = receiver.screen->presented();
                     const auto ui_flips=receiver.screen->overlay_presented();
+                    // overlay: the UI thread's handover (a wait for the previous
+                    // copy); copy: the copier's own time, on the other core.
+                    const auto copied_us = copier.copy_us();
                     printf("profile: target=%d loops=%.2f/s UI=%.2f fps UI_scanout=%.2f/s HDMI_updates=%.2f/s "
-                           "render=%.1fms overlay=%.1fms max_loop=%.1fms max_render=%.1fms max_overlay=%.1fms\n",
+                           "render=%.1fms overlay=%.1fms copy=%.1fms max_loop=%.1fms max_render=%.1fms max_overlay=%.1fms\n",
                            model.fps, profile_loops / seconds, (drawn - profile_drawn) / seconds,
                            (ui_flips-profile_ui_flips)/seconds, (presented - profile_presented) / seconds,
                            render_us / (1000.0 * profile_loops), overlay_us / (1000.0 * profile_loops),
+                           (copied_us - profile_copy_us) / (1000.0 * profile_loops),
                            longest_loop_us / 1000.0, longest_render_us / 1000.0, longest_overlay_us / 1000.0);
+                    profile_copy_us = copied_us;
                     profile_start = ended; profile_drawn = drawn; profile_presented = presented;profile_ui_flips=ui_flips;
                     profile_loops = render_us = overlay_us = longest_loop_us = 0;
                     longest_render_us = longest_overlay_us = 0;

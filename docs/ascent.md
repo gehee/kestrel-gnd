@@ -207,6 +207,23 @@ and background. Render tests also compare incremental frames against full redraw
 during opening and closing, and check that passive counters refresh at a bounded
 rate while navigation remains immediate.
 
+The menu blade unfolds and folds in 0.24 s. The full-screen dimmer behind it
+takes its opened or folded level in the frame that brings the blade to rest, not
+step by step: a level that changes every frame repaints all 1920x1080 pixels,
+which these receivers cannot blend 60 times a second. A moving frame repaints
+only the blade's old and new bounds and the fading picker labels, and under the
+blade the dimmer and the blade's ground are applied in one pass. On the
+SteadyView (two Cortex-A53 at 800 MHz, the Gnd485's SoC),
+`kestrel-ui-animation-bench <assets>/1920x1080 60 0 paced` measures the unfold
+at about 13 ms a frame (32 ms before), and the frame that lands it, a full
+repaint, at about 30 ms. Without a link the idle artwork lies under the menu.
+The dimmer then stores the artwork already dimmed, and under the moving blade
+with the blade's ground too, in one pass that reads the artwork and never the
+screen; the artwork is drawn on its own only below HUD regions, which lie
+between the two. On the SteadyView a moving frame over the artwork renders in 7
+to 13 ms (12 to 25 ms before), and the frame that lands the blade in about 32 ms
+(61 ms).
+
 ## Dynamic HUD movement
 
 At 720p and 1080p, Dynamic HUD moves the cached panels horizontally and vertically
@@ -242,7 +259,16 @@ not the frame rate of a stationary UI or the capture card.
 
 `--profile` on the receiver reports UI-loop cadence, redraws and HDMI updates
 separately. Rendering is included in the configured frame budget rather than
-followed by an unconditional extra sleep.
+followed by an unconditional extra sleep. HUD > FPS Counter shows the same on
+screen, in the top right corner and over the menu too: the loops of the last
+second (60 when every one makes its refresh) and the slowest one's work.
+
+The UI draws each frame into one of two buffers while another thread copies the
+last one's changes to the overlay plane on the other core; LVGL brings each
+buffer up to date with what the other last drew, and is not asked to refresh
+when nothing changed (that would copy the whole last frame across). Text over
+a flat panel, such as the menu blade, blends from a table of the 256 exact
+results for its color, opacity and background.
 
 For frame timing, create a writable diagnostic directory and pass
 `--trace-dir DIR`. Writing `20` to `DIR/ltrace.req` records twenty seconds of
@@ -261,8 +287,14 @@ This is an initial bring-up target, not a flight-ready receiver.
 - Hardware scanout sustained 600 video updates over a ten-second interval with
   the UI uploaded exactly once. HDMI capture confirmed moving decoded video,
   opaque red/white patches, half-transparent green and fully transparent pixels.
-  This verifies the video/display path at 60 updates/s; LVGL animation rendering
-  is separate and is not yet demonstrated at 60 FPS.
+  This verifies the video/display path at 60 updates/s. LVGL animation rendering
+  is separate and not yet at 60 FPS throughout: with a link up, folding and
+  unfolding the blade twice a second, Kestrel ran about 47 loops/s (40 before
+  the copy moved to the other core), and about two thirds of the moving frames
+  finished within one refresh, the larger ones near full unfold within two.
+  Memory bandwidth is the limit: scanning out both planes and decoding share it
+  with drawing, and the overlay mapping reads at about 120 MB/s, so LVGL cannot
+  draw into it directly.
 - The LVGL menu, control socket, hardware decoding, buffer recycling and orderly
   shutdown have been exercised. Visible menu output is confirmed on a directly
   connected HDMI monitor and through a USB HDMI capture card. The recreated

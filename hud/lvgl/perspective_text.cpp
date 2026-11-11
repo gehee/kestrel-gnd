@@ -1,4 +1,5 @@
 #include "perspective_text.hpp"
+#include <algorithm>
 #include <filesystem>
 
 namespace kestrel_ui {
@@ -99,6 +100,11 @@ void PerspectiveText::paint(lv_layer_t* layer, const std::string& text, const st
     image.opa = lv_opa_t(std::clamp(alpha * 255, 0.0f, 255.0f));
     const int x = c.surface.x + offset_x, y = c.surface.y + offset_y;
     lv_area_t area{x, y, x + c.surface.width - 1, y + c.surface.height - 1};
+    if (bounds_) {
+        if (bounds_->x1 > bounds_->x2) *bounds_ = area;
+        else { bounds_->x1 = std::min(bounds_->x1, area.x1); bounds_->y1 = std::min(bounds_->y1, area.y1);
+               bounds_->x2 = std::max(bounds_->x2, area.x2); bounds_->y2 = std::max(bounds_->y2, area.y2); }
+    }
     lv_draw_image(layer, &image, &area);
 }
 } // namespace kestrel_ui

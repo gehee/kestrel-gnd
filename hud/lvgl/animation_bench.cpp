@@ -36,7 +36,7 @@ int main(int argc, char** argv) {
             const uint64_t started = kestrel_ui::monotonic_us();
             uint64_t next = started;
             const double cpu_start = cpu_us();
-            uint64_t animated = 0, painted = 0, missed = 0, update_us = 0, refresh_us = 0;
+            uint64_t animated = 0, painted = 0, missed = 0, update_us = 0, refresh_us = 0, damage_px = 0;
             std::vector<uint64_t> costs;
             while (kestrel_ui::monotonic_us() - started < 6000000) {
                 const uint64_t now = kestrel_ui::monotonic_us();
@@ -52,8 +52,12 @@ int main(int argc, char** argv) {
                 lv_timer_handler();
                 if (paced) lv_refr_now(display.lv_display());
                 const uint64_t finished = kestrel_ui::monotonic_us();
+                // What the receiver would copy to its overlay plane this tick.
+                uint64_t damaged = 0;
+                for (const auto& d : display.take_damage()) damaged += uint64_t(d.width) * d.height;
                 if (now - started > 1000000 && (navigate || view.animating())) {
                     ++animated; if (display.presentations != before) ++painted;
+                    damage_px += damaged;
                     costs.push_back(finished - now);
                     update_us += updated - now; refresh_us += finished - updated;
                 }
@@ -69,14 +73,15 @@ int main(int argc, char** argv) {
             std::sort(costs.begin(), costs.end());
             uint64_t sum = 0; for (auto us : costs) sum += us;
             rusage usage{}; getrusage(RUSAGE_SELF, &usage);
-            std::printf("BENCH mode=%s fps=%d rows=%d animated_ticks=%llu painted=%llu avg_us=%llu p95_us=%llu max_us=%llu skipped_deadlines=%llu cpu_one_core_pct=%.2f rss_kib=%ld text_bytes=%zu snapshots=%llu update_us=%llu refresh_us=%llu\n",
+            std::printf("BENCH mode=%s fps=%d rows=%d animated_ticks=%llu painted=%llu avg_us=%llu p95_us=%llu max_us=%llu skipped_deadlines=%llu cpu_one_core_pct=%.2f rss_kib=%ld text_bytes=%zu snapshots=%llu update_us=%llu refresh_us=%llu damage_kpx=%llu\n",
                         mode.c_str(), fps, rows, (unsigned long long)animated, (unsigned long long)painted,
                         (unsigned long long)(costs.empty() ? 0 : sum / costs.size()),
                         (unsigned long long)(costs.empty() ? 0 : costs[(costs.size() - 1) * 95 / 100]),
                         (unsigned long long)(costs.empty() ? 0 : costs.back()), (unsigned long long)missed,
                          cpu, usage.ru_maxrss, view.text_cache_bytes(), (unsigned long long)view.menu_snapshots(),
                          (unsigned long long)(animated ? update_us / animated : 0),
-                         (unsigned long long)(animated ? refresh_us / animated : 0));
+                         (unsigned long long)(animated ? refresh_us / animated : 0),
+                         (unsigned long long)(animated ? damage_px / animated / 1000 : 0));
         }
         lv_deinit(); return 0;
     } catch (const std::exception& e) { std::fprintf(stderr, "%s\n", e.what()); return 1; }

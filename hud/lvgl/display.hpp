@@ -13,14 +13,18 @@ class Display {
 public:
     // draw_rows == 0 renders directly into the retained overlay. A positive
     // value enables the staging-buffer path for comparison and regression tools.
-    Display(int width, int height, const std::string& framebuffer, int draw_rows = 0);
+    // Two direct buffers alternate: LVGL draws a frame into one while the last
+    // one is still being read (copied to a scanout plane by another thread);
+    // LVGL brings each up to date with what the other last drew.
+    Display(int width, int height, const std::string& framebuffer, int draw_rows = 0, int direct_buffers = 1);
     ~Display();
     Display(const Display&) = delete;
     Display& operator=(const Display&) = delete;
     int width() const { return width_; }
     int height() const { return height_; }
     lv_display_t* lv_display() const { return display_; }
-    const std::vector<uint32_t>& pixels() const { return pixels_; }
+    // The last complete frame (with two buffers, the one LVGL drew last).
+    const std::vector<uint32_t>& pixels() const { return front_ ? second_ : pixels_; }
     std::vector<base::Damage> take_damage() { auto result = std::move(damage_); damage_.clear(); return result; }
     void dump(const std::string& path) const;
     void verify_framebuffer() const;
@@ -32,7 +36,8 @@ private:
     uint8_t* mapping_ = nullptr;
     size_t mapping_size_ = 0;
     lv_display_t* display_ = nullptr;
-    std::vector<uint32_t> pixels_, draw_buffer_, backup_;
+    std::vector<uint32_t> pixels_, second_, draw_buffer_, backup_;
+    bool front_ = false; // second_ holds the last frame
     std::vector<base::Damage> damage_;
     void flush(const lv_area_t& area, const uint8_t* pixels);
     static void flush_cb(lv_display_t* display, const lv_area_t* area, uint8_t* pixels);

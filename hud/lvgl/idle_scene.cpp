@@ -60,19 +60,25 @@ void IdleScene::prepare(const Model& model, uint64_t now) {
     }
     throw std::runtime_error("Static idle theme missing; rebuild assets: " + theme);
 }
+bool IdleScene::paints(const Model& model, uint64_t now) const {
+    return model.hud_visible() && model.show_status(now) && !(model.backend.vrx.link_valid(now) && model.menu_open);
+}
+const uint32_t* IdleScene::artwork(const Model& model, uint64_t now) const {
+    if (!paints(model, now) || model.backend.vrx.link_valid(now) || pixels_.empty()) return nullptr;
+    return reinterpret_cast<const uint32_t*>(pixels_.data());
+}
 void IdleScene::draw(lv_layer_t* layer, const Model& model, uint64_t now) {
-    if (!model.hud_visible() || !model.show_status(now)) return;
+    if (!paints(model, now)) return;
     const auto& theme = hud_theme_at(model.theme);
     if (model.backend.vrx.link_valid(now)) {
-        // A radio link is not a decoded picture. Keep acquisition status live.
-        if (!model.menu_open) {
-            const std::string title = "ACQUIRING VIDEO", status = "WAITING FOR VIDEO";
-            const float size = 34 * height_ / 1080.0f;
-            text_.canvas(layer, title, (width_ - text_.canvas_advance(title,size)) / 2,
-                         height_ * 0.48f, size, false, theme.text, 1);
-            text_.canvas(layer, status, (width_ - text_.canvas_advance(status,size*.5f)) / 2,
-                         height_ * 0.53f, size * 0.5f, false, theme.accent, 1);
-        }
+        // A radio link is not a decoded picture. Keep acquisition status live
+        // while the menu is closed.
+        const std::string title = "ACQUIRING VIDEO", status = "WAITING FOR VIDEO";
+        const float size = 34 * height_ / 1080.0f;
+        text_.canvas(layer, title, (width_ - text_.canvas_advance(title,size)) / 2,
+                     height_ * 0.48f, size, false, theme.text, 1);
+        text_.canvas(layer, status, (width_ - text_.canvas_advance(status,size*.5f)) / 2,
+                     height_ * 0.53f, size * 0.5f, false, theme.accent, 1);
         return;
     }
     if (!pixels_.empty()) {

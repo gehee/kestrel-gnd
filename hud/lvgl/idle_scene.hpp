@@ -10,6 +10,11 @@ public:
     ~IdleScene();
     void prepare(const Model& model, uint64_t now);
     void draw(lv_layer_t* layer, const Model& model, uint64_t now);
+    // Whether draw() puts any pixel on the screen for this model.
+    bool paints(const Model& model, uint64_t now) const;
+    // The artwork's pixels (width x height, ARGB8888) when draw() puts exactly
+    // that image on the whole screen, else null.
+    const uint32_t* artwork(const Model& model, uint64_t now) const;
 private:
     std::string path_;
     int width_, height_;

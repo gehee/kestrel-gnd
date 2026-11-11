@@ -114,6 +114,8 @@ struct BackendState : ReceiverState {
     bool bf_available=false;
     float hud_dx=0,hud_dy=0,hud_bank=0;
     std::string radio_debug;
+    // The FPS counter's text, from the main loop once a second (empty: hidden).
+    std::string frame_rate;
     ChannelState channels;
     std::map<std::string, ReceiverControl> controls;
     std::map<std::string, std::string> air_info;

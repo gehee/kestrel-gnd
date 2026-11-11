@@ -20,6 +20,8 @@ public:
     void canvas(lv_layer_t* layer, const std::string& text, float x, float baseline,
                 float pixels, bool right_align, const float* rgb, float alpha,
                 int offset_x = 0, int offset_y = 0);
+    // While set, every painted text's bounds are added to *area (x1 > x2: empty).
+    void collect_bounds(lv_area_t* area) { bounds_ = area; }
     size_t cached_bytes() const { return bytes_; }
     uint64_t rasterizations() const { return rasterizations_; }
 private:
@@ -37,6 +39,7 @@ private:
     float scale_=1;
     size_t bytes_ = 0;
     size_t budget_;
+    lv_area_t* bounds_ = nullptr;
     uint64_t clock_ = 0, rasterizations_ = 0;
     std::map<Key, Cached> cache_;
     void paint(lv_layer_t* layer, const std::string& text, const std::array<canopy::Point, 4>& quad,
