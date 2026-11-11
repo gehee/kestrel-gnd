@@ -64,12 +64,15 @@ void SourceDecoder::run_frame() {
              }}
             next->run_frame();
             {std::lock_guard<std::mutex> lock(mutex_);
+             // A live decoder that showed pictures gives the retry back, however
+             // it ended: one that ran and made way for a playback too, or a
+             // failure at boot used it up for the whole session.
+             if(!session_playback && next->last_frame_us())live_retries=0;
              if(next->failed() && session_generation==generation_) {
                  if(!session_playback) {
                      // A stalled decoder can be recreated without restarting
                      // RF, the recorder, UI or HDMI. Bound failures that never
                      // produce a frame; device-open failures remain terminal.
-                     if(next->last_frame_us())live_retries=0;
                      if(!quit_ && !*stop_ && live_retries++==0)
                          fprintf(stderr,"decoder source: restarting failed live decoder\n");
                      else failed_=true;

@@ -138,8 +138,11 @@ void StreamPlayer::play_file(const std::string& name,uint64_t generation) {
     // minimp4's frame_offset walks from chunk zero on every lookup. Build
     // byte offsets once so pre-roll and keyframe searches remain linear even
     // in long recordings with a separate chunk for every captured picture.
+    // The sample times as many as the samples: a damaged or crafted file with
+    // fewer would have them read past their end.
     if(!t.chunk_count || !t.sample_to_chunk_count || !t.chunk_offset || !t.sample_to_chunk ||
-       !t.entry_size || !t.timestamp || !t.duration || t.sample_to_chunk[0].first_chunk!=1)
+       !t.entry_size || !t.timestamp || !t.duration || t.sample_to_chunk[0].first_chunk!=1 ||
+       t.timestamp_count<t.sample_count)
         throw std::runtime_error("Invalid MP4 sample index");
     std::vector<uint64_t> offsets(t.sample_count);
     unsigned sample=0,group=0;
@@ -192,8 +195,16 @@ void StreamPlayer::play_file(const std::string& name,uint64_t generation) {
     };
     // Index random-access timestamps once. Arrow handling then needs only a
     // binary search, and the UI can show the actual landing point immediately.
+    // The file's sync sample table where it has one (kestrel's always do):
+    // a long clip was one SD read per picture before anything showed.
     std::vector<uint64_t> keyframes;
-    for(unsigned i=0;i<t.sample_count;++i) {
+    if(t.has_sync && t.sync_count) {
+        for(unsigned i=0;i<t.sync_count;++i) {
+            const unsigned n=t.sync_sample[i];
+            if(!n || n>t.sample_count)throw std::runtime_error("Invalid MP4 sync sample");
+            if(keyframes.empty() || timestamp(n-1)>keyframes.back())keyframes.push_back(timestamp(n-1));
+        }
+    } else for(unsigned i=0;i<t.sample_count;++i) {
         if(quit_ || generation!=generation_)return;
         if(random_access(i))keyframes.push_back(timestamp(i));
     }

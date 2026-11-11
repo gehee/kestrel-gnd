@@ -55,6 +55,23 @@ int main() {
         player.pause();wait([&]{return !player.state().busy;});check(pictures==8,"Resume completes the clip");
         player.play(name);player.stop();check(!player.state().busy,"Cancelling queued playback clears busy state");
         bool rejected=false;try{player.play("../escape.mp4");}catch(const std::invalid_argument&){rejected=true;}check(rejected,"Traversal rejected");
+        {
+            // Fewer sample times than samples (a damaged index): refused, not
+            // read past the times' end.
+            std::ifstream in(std::string(path)+"/"+name,std::ios::binary);
+            std::string bytes((std::istreambuf_iterator<char>(in)),std::istreambuf_iterator<char>());
+            const auto at=bytes.rfind("stts");   // the moov's, at the end (a free box ahead holds an old copy)
+            check(at!=std::string::npos && at+16<=bytes.size(),"Recording has a sample time table");
+            // version/flags, entry count, then the first entry's sample count (big-endian).
+            uint8_t* first=reinterpret_cast<uint8_t*>(&bytes[at+12]);
+            const uint32_t count=(uint32_t(first[0])<<24)|(first[1]<<16)|(first[2]<<8)|first[3];
+            check(count>1,"First sample time entry covers pictures");
+            const uint32_t fewer=count-1;
+            first[0]=uint8_t(fewer>>24);first[1]=uint8_t(fewer>>16);first[2]=uint8_t(fewer>>8);first[3]=uint8_t(fewer);
+            std::ofstream(std::string(path)+"/short-times.mp4",std::ios::binary)<<bytes;
+            player.play("short-times.mp4");wait([&]{return !player.state().busy;});
+            check(player.state().error.find("sample index")!=std::string::npos && !selected,"A sample time table shorter than the samples is refused");
+        }
         std::ofstream(std::string(path)+"/broken.mp4")<<"truncated MP4 file contents";
         player.play("broken.mp4");wait([&]{return !player.state().busy;});check(!player.state().error.empty() && !selected,"Bad file leaves live source selected");
         const auto pipe=std::string(path)+"/pipe.mp4";check(!mkfifo(pipe.c_str(),0600),"Create nonregular test file");

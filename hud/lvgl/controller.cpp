@@ -18,10 +18,27 @@ void Controller::tick(uint64_t now) {
                     media.video_monitored, media.video_stamp_us, m.backend.playback_busy);
     if (media.recording && (!was_recording_ || media.recording_id != recording_id_)) recording_since_ = now;
     was_recording_ = media.recording; recording_id_ = media.recording_id;
-    const bool armed = m.backend.flight.arm == 1 && m.backend.flight.stamp_us &&
-        now >= m.backend.flight.stamp_us && now - m.backend.flight.stamp_us < 2000000;
+    const int arm = arm_state(now);
+    const bool armed = arm == 1;
     if (armed && !was_armed_) armed_since_ = now;
     was_armed_ = armed;
+    // Armed: the menu gets out of the way, wherever it is - a row, a value
+    // being changed. Only on the arming itself, so it can still be opened
+    // while armed (on the bench).
+    if (arm >= 0) {
+        if (arm == 1 && arm_seen_ == 0) {
+            armed_edge_ = true;
+            if (m.menu_open || m.scene == SceneMode::Menu) {
+                if (m.stage == MenuStage::Edit) cancel_edit();
+                m.menu_open = false;
+                if (m.scene == SceneMode::Menu) m.scene = SceneMode::Live;
+                m.stage = MenuStage::Pick;
+                m.feedback.clear();
+                ++m.menu_version;
+            }
+        }
+        arm_seen_ = arm;
+    }
     m.visual = canopy::link_visual(m.backend.vrx.link_valid(now), now, previous_, up_, down_);
     const auto& f = m.backend.flight;
     if (f.stamp_us && now >= f.stamp_us && now - f.stamp_us < 2000000 && f.have_cell_v)
@@ -35,6 +52,11 @@ void Controller::tick(uint64_t now) {
         if (m.stage == MenuStage::Edit && !m.edit_intact()) cancel_edit();
         m.selected = std::clamp(m.selected, 0, std::max(0, int(menu.size()) - 1));
     }
+}
+int Controller::arm_state(uint64_t now) const {
+    const auto& f = model_.backend.flight;
+    if (!f.stamp_us || now < f.stamp_us || now - f.stamp_us >= 2000000) return -1;
+    return f.arm == 1 ? 1 : f.arm == 0 ? 0 : -1;
 }
 void Controller::open_menu() { model_.menu_open = true; model_.stage = MenuStage::Pick; model_.scene = SceneMode::Live; model_.feedback.clear(); ++model_.menu_version; }
 void Controller::set_scene(SceneMode scene) {

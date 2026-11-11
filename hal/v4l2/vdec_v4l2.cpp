@@ -10,6 +10,7 @@
 #include <fcntl.h>
 #include <linux/videodev2.h>
 #include <poll.h>
+#include <sys/eventfd.h>
 #include <stdexcept>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
@@ -119,8 +120,17 @@ void queue(int fd, v4l2_buf_type type, unsigned index, size_t size, size_t used,
 } // namespace
 VdecV4l2::VdecV4l2(VideoCodec codec, std::string device, std::shared_ptr<hal::FrameSink> sink,
                    std::atomic<bool> *stop)
-    : codec_(codec), device_(std::move(device)), sink_(std::move(sink)), stop_(stop) {}
-VdecV4l2::~VdecV4l2() { cleanup(); }
+    : codec_(codec), device_(std::move(device)), sink_(std::move(sink)), stop_(stop),
+      wake_fd_(eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC)) {}
+VdecV4l2::~VdecV4l2() {
+    cleanup();
+    if (wake_fd_ >= 0) close(wake_fd_);
+}
+void VdecV4l2::wake() {
+    if (wake_fd_ < 0) return;
+    const uint64_t one = 1;
+    if (write(wake_fd_, &one, sizeof(one)) < 0 && errno != EAGAIN) { /* full counter: already woken */ }
+}
 void VdecV4l2::cleanup() { quit_ = true; }
 void VdecV4l2::feed_packet_to_decoder(void *data, int len, int64_t pts, uint64_t recv, uint8_t nal,
                                       uint32_t enc, uint32_t proc, bool key) {
@@ -176,6 +186,7 @@ void VdecV4l2::feed_packet_to_decoder(void *data, int len, int64_t pts, uint64_t
     packets_.push_back(std::move(p));
     if (packets_.size() > peak_pending_) peak_pending_ = packets_.size();
     ready_ = true;
+    wake();
 }
 void VdecV4l2::run_frame() {
     try {
@@ -276,13 +287,18 @@ void VdecV4l2::decode() {
                     last_progress = now_us();
                 }
             }
+        // The device's output, or a packet queued (wake_fd_): whichever first.
+        pollfd poller[2] = {{dev.fd, short(POLLIN | POLLPRI), 0}, {wake_fd_, POLLIN, 0}};
+        const int nfds = wake_fd_ >= 0 ? 2 : 1;
         if (!dev.output_on) {
-            usleep(2000);
+            if (poll(poller + 1, wake_fd_ >= 0 ? 1 : 0, 2) < 0 && errno != EINTR)
+                throw std::runtime_error("decoder poll");
+            if (wake_fd_ >= 0) { uint64_t n; if (read(wake_fd_, &n, sizeof(n)) < 0) { /* not signalled */ } }
             continue;
         }
-        pollfd poller{dev.fd, short(POLLIN | POLLPRI), 0};
-        if (poll(&poller, 1, 5) < 0 && errno != EINTR)
+        if (poll(poller, nfds, 5) < 0 && errno != EINTR)
             throw std::runtime_error("decoder poll");
+        if (nfds == 2 && (poller[1].revents & POLLIN)) { uint64_t n; if (read(wake_fd_, &n, sizeof(n)) < 0) { /* raced */ } }
         v4l2_event ev{};
         while (ioctl_retry(dev.fd, VIDIOC_DQEVENT, &ev) == 0)
             if (ev.type == V4L2_EVENT_SOURCE_CHANGE) {

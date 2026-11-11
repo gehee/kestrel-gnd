@@ -142,7 +142,10 @@ void TelemetryWriter::run() {
                 previous_sample=job.sample;
                 }
                 have=true;last_us=job.us;if(full)last_full=job.us;
-                if(job.us-last_flush>=1000000){if(fflush(f))throw std::runtime_error("Cannot flush telemetry");last_flush=job.us;}
+                // To the card each second, as the video is: on FAT/exFAT the
+                // file's length is not saved otherwise, and a power cut left it
+                // empty. Its own thread: the sync waits for no one else.
+                if(job.us-last_flush>=1000000){if(fflush(f) || fsync(fileno(f)))throw std::runtime_error("Cannot flush telemetry");last_flush=job.us;}
             }
         }catch(const std::exception& e){if(f){fclose(f);f=nullptr;}std::lock_guard<std::mutex> l(mutex_);error_=e.what();disabled_=true;fprintf(stderr,"telemetry: %s\n",e.what());}
         {std::lock_guard<std::mutex> l(mutex_);busy_=false;if(jobs_.empty())drained_.notify_all();}

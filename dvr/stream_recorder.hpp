@@ -57,6 +57,10 @@ private:
     bool shutdown_=false;
     State state_;
     TelemetryWriter telemetry_;
+    // The recording being written (a basename, "" none), for the recovery of
+    // interrupted ones at start, which may outlive the recorder.
+    struct Active {std::mutex mutex;std::string name;};
+    std::shared_ptr<Active> active_=std::make_shared<Active>();
     std::shared_ptr<const media::TelemetrySample> latest_telemetry_;
     std::thread worker_;
 };
