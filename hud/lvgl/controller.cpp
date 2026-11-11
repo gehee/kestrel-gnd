@@ -36,8 +36,9 @@ void Controller::tick(uint64_t now) {
         m.selected = std::clamp(m.selected, 0, std::max(0, int(menu.size()) - 1));
     }
 }
-void Controller::open_menu() { model_.menu_open = true; model_.stage = MenuStage::Pick; model_.scene = SceneMode::Live; model_.feedback.clear(); ++model_.menu_version; }
+void Controller::open_menu() { model_.gallery_action_name.clear(); model_.gallery_delete_name.clear(); model_.menu_open = true; model_.stage = MenuStage::Pick; model_.scene = SceneMode::Live; model_.feedback.clear(); ++model_.menu_version; }
 void Controller::set_scene(SceneMode scene) {
+    model_.gallery_action_name.clear();model_.gallery_action=RecordingAction::Export;
     model_.gallery_delete_name.clear();model_.gallery_delete_chosen=false;
     if (model_.stage == MenuStage::Edit) cancel_edit();
     if(scene==SceneMode::GalleryPlayback) {
@@ -66,16 +67,39 @@ void Controller::key(Key key, bool repeat) {
         if(m.scene==SceneMode::GalleryBrowse && !m.gallery_delete_name.empty()) {
             if(key==Key::Back || key==Key::Menu || key==Key::Record) {
                 m.gallery_delete_name.clear();m.gallery_delete_chosen=false;
+                if(key!=Key::Back)m.gallery_action_name.clear();
             } else if(key==Key::Left) m.gallery_delete_chosen=false;
             else if(key==Key::Right) m.gallery_delete_chosen=true;
             else if(key==Key::Enter) {
                 const auto name=m.gallery_delete_name;
                 const bool remove=m.gallery_delete_chosen;
                 m.gallery_delete_name.clear();m.gallery_delete_chosen=false;
+                if(remove)m.gallery_action_name.clear();
                 if(remove)try {
                     if(!apply_receiver)throw std::runtime_error("Recording storage is not connected");
                     m.feedback=apply_receiver("delete:"+name,0);
                 }catch(const std::exception& e){m.feedback=e.what();}
+            }
+            return;
+        }
+        if(m.scene==SceneMode::GalleryBrowse && !m.gallery_action_name.empty()) {
+            if(key==Key::Back || key==Key::Menu || key==Key::Record) {
+                m.gallery_action_name.clear();m.feedback.clear();
+            } else if(key==Key::Up || key==Key::Left) {
+                m.gallery_action=RecordingAction::Export;m.feedback.clear();
+            } else if(key==Key::Down || key==Key::Right) {
+                m.gallery_action=RecordingAction::Delete;m.feedback.clear();
+            } else if(key==Key::Enter) {
+                if(m.gallery_action==RecordingAction::Delete) {
+                    m.gallery_delete_name=m.gallery_action_name;
+                    m.gallery_delete_chosen=false;m.feedback.clear();
+                } else if(!m.recording_export_available()) {
+                    m.feedback="HUD export unavailable";
+                } else try {
+                    if(!apply_receiver)throw std::runtime_error("Recording export is not connected");
+                    m.feedback=apply_receiver("export:"+m.gallery_action_name,0);
+                    m.gallery_action_name.clear();
+                } catch(const std::exception& e) {m.feedback=e.what();}
             }
             return;
         }
@@ -100,8 +124,8 @@ void Controller::key(Key key, bool repeat) {
             if(key==Key::Down || key==Key::Right) m.gallery_selected=std::clamp(m.gallery_selected+1,0,last);
             if(key==Key::Record && !clips.empty()) {
                 m.gallery_selected=std::clamp(m.gallery_selected,0,last);
-                m.gallery_delete_name=clips[m.gallery_selected].name;
-                m.gallery_delete_chosen=false;m.feedback.clear();
+                m.gallery_action_name=clips[m.gallery_selected].name;
+                m.gallery_action=RecordingAction::Export;m.feedback.clear();
             }
             if(key==Key::Enter && !clips.empty()) {
                 m.gallery_selected=std::clamp(m.gallery_selected,0,last);

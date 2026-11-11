@@ -396,8 +396,26 @@ void View::draw_gallery(lv_layer_t* layer) {
         label(std::to_string(clips[i].bytes/(1024*1024))+" MiB",x+365,y+122,23,theme.quiet);
         label("OK  PLAY",x+365,y+190,20,i==selected?theme.accent:theme.quiet);
     }
-    label("ARROWS  Select     OK  Play     REC  Delete     BACK  Live video",48,1000,24,theme.text);
+    label("ARROWS  Select     OK  Play     REC  Actions     BACK  Live video",48,1000,24,theme.text);
     label(model_.feedback,48,1045,20,theme.quiet);
+    if(!model_.gallery_action_name.empty() && model_.gallery_delete_name.empty()) {
+        rect(layer,0,0,width_,height_,theme.ground,.65f);
+        rect(layer,int(390*u),int(300*u),int(1140*u),int(480*u),theme.ground,1);
+        rect(layer,int(390*u),int(300*u),int(1140*u),int(480*u),theme.accent,1,2);
+        label("RECORDING ACTIONS",440,365,32,theme.text);
+        const auto& name=model_.gallery_action_name;
+        label(name.size()>70?name.substr(0,32)+"..."+name.substr(name.size()-32):name,440,420,24,theme.text);
+        for(int i=0;i<2;++i) {
+            const bool chosen=i==int(model_.gallery_action);
+            const bool available=i || model_.recording_export_available();
+            const int y=455+i*95;
+            rect(layer,int(440*u),int(y*u),int(1040*u),int(80*u),chosen?theme.accent:theme.quiet,1,chosen?3:1);
+            label(i?"DELETE":"EXPORT WITH HUD",470,y+52,28,available?theme.text:theme.quiet);
+            if(!available)label("UNAVAILABLE",1180,y+50,20,theme.quiet);
+        }
+        if(!model_.feedback.empty())label(model_.feedback,440,695,20,theme.quiet);
+        label("ARROWS  Select     OK  Choose     BACK / REC  Close",440,750,20,theme.text);
+    }
     if(!model_.gallery_delete_name.empty()) {
         rect(layer,0,0,width_,height_,theme.ground,.65f);
         rect(layer,int(390*u),int(325*u),int(1140*u),int(430*u),theme.ground,1);
@@ -564,6 +582,7 @@ void View::update(uint64_t now) {
         }
         std::ostringstream signature;
         signature<<int(model_.scene)<<':'<<model_.gallery_selected<<':'<<model_.theme<<':'<<model_.feedback<<':'
+            <<model_.gallery_action_name<<':'<<int(model_.gallery_action)<<':'<<model_.recording_export_available()<<':'
             <<model_.gallery_delete_name<<':'<<model_.gallery_delete_chosen<<':'
             <<model_.backend.playback_position_us/100000<<':'<<model_.backend.playback_duration_us/1000000<<':'<<model_.backend.playback_seeking<<':'
             <<model_.playback_hud_enabled<<bool(model_.backend.playback_hud)<<model_.backend.playback_telemetry_error<<model_.backend.playback_paused<<':'<<model_.backend.media.playback_id<<':'<<model_.backend.playback_error;

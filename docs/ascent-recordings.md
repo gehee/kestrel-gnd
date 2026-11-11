@@ -69,12 +69,18 @@ empty sidecars. The catalog delete operation removes both companion files.
 
 ## Playback
 
-In the gallery, REC opens a deletion confirmation for the selected clip.
-LEFT selects CANCEL, RIGHT selects DELETE, and OK confirms the highlighted
-choice. CANCEL is selected initially; BACK or REC dismisses the prompt.
-The confirmation stays tied to the original filename if the catalog refreshes.
-Deletion removes the video, preview and telemetry sidecar on the storage worker,
-then refreshes the gallery. Recording/saving and playback must finish first.
+In the gallery, REC opens the selected recording's actions menu with EXPORT
+WITH HUD and DELETE. UP/LEFT selects Export; DOWN/RIGHT selects Delete; OK opens
+the selected action. BACK or REC closes the menu. Export is visibly unavailable
+until the receiver provides the export worker; selecting it cannot start an
+unsupported operation.
+
+DELETE opens a separate confirmation with CANCEL selected initially. LEFT
+selects CANCEL, RIGHT selects DELETE, and OK confirms. Cancel or BACK returns to
+the actions menu; REC closes both dialogs. The actions and confirmation stay
+tied to the original filename if the catalog refreshes. Deletion removes the
+video, preview and telemetry sidecar on the storage worker, then refreshes the
+gallery. Recording/saving and playback must finish first.
 
 The hardware decoder receives MP4-relative presentation timestamps. Completed
 video flips expose those timestamps to the application; the HUD selects the
@@ -151,5 +157,7 @@ should bypass composition. An engine timeout disables composition until reboot.
 `ascent-export-probe` (720p) and `ascent-export-probe 1080` exercise imported DRM
 buffers, clipped panels and invalid requests without changing HDMI's mode or
 acquiring DRM master. `ge2d_compositor_test` checks request layout and clipping on
-the host. The export worker, encoded MP4 output and gallery controls are separate
-integration work; this initial backend does not expose an end-user export action.
+the host. The gallery includes the Export with HUD action, gated by the backend
+`recording_export` control. A working backend handles `export:<filename>`. The
+export worker and encoded MP4 output remain separate integration work; the action
+is disabled until that backend is connected.

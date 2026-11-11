@@ -44,6 +44,8 @@ struct MenuRow {
 
 // Graphics-independent menu state. Rows follow the VRX Pro UI; unsupported
 // controls remain disabled until the platform provides a working backend.
+enum class RecordingAction { Export, Delete };
+
 class Model {
 public:
     BackendState backend;
@@ -52,6 +54,12 @@ public:
     bool channel_open = false;
     int channel_mhz = 0;
     int gallery_selected=0;
+    std::string gallery_action_name; // pinned when REC opens the actions menu
+    RecordingAction gallery_action = RecordingAction::Export;
+    bool recording_export_available() const {
+        const auto i = backend.controls.find("recording_export");
+        return i != backend.controls.end() && i->second.known && i->second.enabled;
+    }
     std::string gallery_delete_name;
     bool gallery_delete_chosen=false;
     int tab = 0, selected = 0, theme = 0;
