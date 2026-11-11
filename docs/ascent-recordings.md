@@ -133,3 +133,23 @@ retains independent hardware video and UI planes. HUD translation redraws only
 affected regions; its render cost can still prevent a 60 Hz UI cadence at 1080p.
 The timeline refreshes at 10 Hz and invalidates only the playback header while
 the scene is unchanged. A paused, unchanged timeline does not trigger redraws.
+
+## HUD export implementation
+
+The initial export backend is `hal/artosyn/ge2d_compositor.*`. It imports decoded
+YUV DMA buffers and separate ARGB HUD panels, clips translated panels to the
+output bounds, and asks fpvOS's native GE2D driver to compose into a separate
+encoder input buffer. It never modifies decoder reference pictures. The kernel
+UAPI copy in `hal/artosyn/ar9311_ge2d.h` must match fpvOS's `ar9311-ge2d` package.
+
+This backend supports BT.709 limited-range planar YUV and straight-alpha ARGB up
+to 1920x1080. Calls are synchronous; callers retain all buffers until return and
+must not queue unsuccessful output to an encoder. The bitmap path passes YUV
+through RGB, which can round or clip out-of-gamut colors. Clean-video exports
+should bypass composition. An engine timeout disables composition until reboot.
+
+`ascent-export-probe` (720p) and `ascent-export-probe 1080` exercise imported DRM
+buffers, clipped panels and invalid requests without changing HDMI's mode or
+acquiring DRM master. `ge2d_compositor_test` checks request layout and clipping on
+the host. The export worker, encoded MP4 output and gallery controls are separate
+integration work; this initial backend does not expose an end-user export action.
