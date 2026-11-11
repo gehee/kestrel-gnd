@@ -63,6 +63,12 @@ void Controller::key(Key key, bool repeat) {
     if (repeat && (!m.key_repeat || !arrow)) return;
     ++m.key_count; m.last_key = key_name(key); ++m.menu_version;
     if (key == Key::Quit) { if (m.stage == MenuStage::Edit) cancel_edit(); m.quit = true; return; }
+    if(m.backend.export_busy) {
+        if(key==Key::Back && !repeat && apply_receiver) {
+            try{m.feedback=apply_receiver("export_cancel",0);}catch(const std::exception& e){m.feedback=e.what();}
+        }
+        return;
+    }
     if(m.scene==SceneMode::GalleryBrowse || m.scene==SceneMode::GalleryPlayback) {
         if(m.scene==SceneMode::GalleryBrowse && !m.gallery_delete_name.empty()) {
             if(key==Key::Back || key==Key::Menu || key==Key::Record) {

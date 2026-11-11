@@ -112,6 +112,13 @@ int main(int argc, char** argv) {
             check(display.pixels()==delete_action,"Cancel did not restore recording actions");
             controller.key(kestrel_ui::Key::Back);draw();full_matches();
             check(display.pixels()==gallery,"Closing actions left stale dialog pixels");
+            model.backend.export_busy=true;model.backend.export_file="recording_test.mp4";
+            model.backend.export_message="Exporting with HUD";model.backend.export_percent=12;draw();full_matches();
+            const auto progress=display.pixels();
+            model.backend.export_percent=75;draw();full_matches();
+            check(display.pixels()!=progress,"Export progress did not redraw");
+            model.backend.export_busy=false;draw();full_matches();
+            check(display.pixels()==gallery,"Completed export left stale progress pixels");
         }
         lv_deinit();
         std::printf("PASS: %dp live/replay translation, bank ignored, held pose and damage\n",height);

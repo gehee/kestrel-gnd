@@ -398,6 +398,22 @@ void View::draw_gallery(lv_layer_t* layer) {
     }
     label("ARROWS  Select     OK  Play     REC  Actions     BACK  Live video",48,1000,24,theme.text);
     label(model_.feedback,48,1045,20,theme.quiet);
+    if(model_.backend.export_busy) {
+        rect(layer,0,0,width_,height_,theme.ground,.65f);
+        rect(layer,int(390*u),int(325*u),int(1140*u),int(430*u),theme.ground,1);
+        rect(layer,int(390*u),int(325*u),int(1140*u),int(430*u),theme.accent,1,2);
+        label("EXPORT WITH HUD",440,390,32,theme.text);
+        auto name=model_.backend.export_file;
+        if(name.size()>64)name=name.substr(0,61)+"...";
+        label(name,440,450,24,theme.text);
+        label(model_.backend.export_message,440,510,22,theme.quiet);
+        const auto progress=std::clamp(model_.backend.export_percent,0,100);
+        rect(layer,int(440*u),int(565*u),int(940*u),int(10*u),theme.quiet,.5f);
+        if(progress)rect(layer,int(440*u),int(565*u),int(940*u*progress/100),int(10*u),theme.accent,1);
+        label(std::to_string(progress)+"%",1400,580,24,theme.text);
+        label("BACK  Cancel export",440,710,24,theme.text);
+        return;
+    }
     if(!model_.gallery_action_name.empty() && model_.gallery_delete_name.empty()) {
         rect(layer,0,0,width_,height_,theme.ground,.65f);
         rect(layer,int(390*u),int(300*u),int(1140*u),int(480*u),theme.ground,1);
@@ -582,6 +598,7 @@ void View::update(uint64_t now) {
         }
         std::ostringstream signature;
         signature<<int(model_.scene)<<':'<<model_.gallery_selected<<':'<<model_.theme<<':'<<model_.feedback<<':'
+            <<model_.backend.export_busy<<':'<<model_.backend.export_percent<<':'<<model_.backend.export_file<<':'<<model_.backend.export_message<<':'
             <<model_.gallery_action_name<<':'<<int(model_.gallery_action)<<':'<<model_.recording_export_available()<<':'
             <<model_.gallery_delete_name<<':'<<model_.gallery_delete_chosen<<':'
             <<model_.backend.playback_position_us/100000<<':'<<model_.backend.playback_duration_us/1000000<<':'<<model_.backend.playback_seeking<<':'

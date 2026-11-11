@@ -157,7 +157,48 @@ should bypass composition. An engine timeout disables composition until reboot.
 `ascent-export-probe` (720p) and `ascent-export-probe 1080` exercise imported DRM
 buffers, clipped panels and invalid requests without changing HDMI's mode or
 acquiring DRM master. `ge2d_compositor_test` checks request layout and clipping on
-the host. The gallery includes the Export with HUD action, gated by the backend
-`recording_export` control. A working backend handles `export:<filename>`. The
-export worker and encoded MP4 output remain separate integration work; the action
-is disabled until that backend is connected.
+the host.
+
+In the gallery, REC opens recording actions. Choose **Export with HUD** and press
+OK. Progress appears in the gallery; BACK cancels. Recording, playback, deletion
+and screen changes are excluded during export. Live decoding is suspended, then
+restored on success, failure or cancellation. HDMI stays in its current mode.
+The capability remains unavailable on firmware without the encoder/GE2D devices
+or a packaged `kestrel-export` executable.
+
+`kestrel-export` runs in a separate process so its synchronous LVGL renderer does
+not contend with the menu's LVGL instance. It uses the same playback View,
+including Canopy/Vector panels, recorded telemetry, translated motion, optional
+Betaflight OSD, clock and link warning edges. Current visual preferences apply;
+Export with HUD explicitly includes the HUD, while Dynamic HUD still controls
+movement. Playback controls and the timeline are omitted. Missing telemetry is
+reported as an error; stale intervals hide the HUD just as in playback.
+
+The worker accepts native single-track HEVC MP4 recordings at 720p or 1080p. It
+preserves every sample duration, including variable timing, using cumulative
+90 kHz timestamps. Imported audio tracks and composition-offset/reordered video
+are rejected rather than silently discarded or assigned incorrect HUD timing.
+The encoder produces HEVC at 8 Mbps. CPU work renders only the UI: GE2D reads the
+decoder's DMA-BUF, composites the ARGB overlay into a separate YUV DMA-BUF, and
+the hardware encoder imports that output. The first integration uses a retained
+full-size UI surface; tighter overlay rectangles remain an optimization.
+
+Completed videos appear in `exports/<original-stem>-hud-<unique-id>.mp4` beneath
+the recording directory. Original video, thumbnail and telemetry are unchanged.
+Exports are kept outside the recording gallery to avoid applying the HUD twice.
+Output is first written to a private partial file, flushed and finalized, then
+published atomically without overwriting an earlier export. Cancellation and
+ordinary failures remove the partial file; a power interruption can leave a
+hidden partial file, never a completed-looking gallery entry.
+
+Ascent fpvOS needs a 64 MiB CMA pool for the three 1080p scanout buffers plus
+export's ARGB/YUV surfaces. Unused CMA pages remain usable for movable system
+allocations. The offline decoder uses a smaller queue and capture pool than live
+reception, with one outstanding picture and explicit buffer ownership. Decoder
+references remain read-only until composition returns. The export worker never
+acquires DRM master or changes HDMI timing.
+
+`export_test` covers MP4 timing, safe filenames, child failure/cancellation,
+no-overwrite publication and preservation of originals. The source-decoder test
+covers hardware release/resume; LVGL tests cover the progress dialog and input
+exclusion at both supported UI resolutions.

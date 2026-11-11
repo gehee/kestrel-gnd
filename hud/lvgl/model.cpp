@@ -296,6 +296,7 @@ std::string Model::describe() const {
         << " pack_v=" << (backend.flight.have_pack_v ? backend.flight.pack_v : -1.0f)
         << " scene=" << int(scene_mode()) << " recording=" << backend.media.recording
         << " gallery_selected=" << gallery_selected << " delete_confirm=" << !gallery_delete_name.empty()
+        << " exporting=" << backend.export_busy << " export_percent=" << backend.export_percent
         << " gallery_actions=" << !gallery_action_name.empty() << " gallery_action=" << int(gallery_action)
         << " gallery_count=" << backend.recordings.size()
         << " delete_chosen=" << gallery_delete_chosen

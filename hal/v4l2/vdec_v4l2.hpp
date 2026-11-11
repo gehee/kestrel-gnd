@@ -11,7 +11,8 @@
 // submits complete access units into a bounded queue and never waits for it.
 class VdecV4l2 final : public Vdec {
   public:
-    VdecV4l2(VideoCodec codec, std::string device, std::shared_ptr<hal::FrameSink> sink, std::atomic<bool> *stop);
+    // Offline callers submit one picture at a time and can use smaller pools.
+    VdecV4l2(VideoCodec codec, std::string device, std::shared_ptr<hal::FrameSink> sink, std::atomic<bool> *stop, bool offline = false);
     ~VdecV4l2();
     void feed_packet_to_decoder(void *, int, int64_t, uint64_t, uint8_t, uint32_t, uint32_t,
                                 bool = false) override;
@@ -31,6 +32,7 @@ class VdecV4l2 final : public Vdec {
         timing_stats timing{};
     };
     void decode();
+    bool offline_;
     VideoCodec codec_;
     std::string device_;
     std::shared_ptr<hal::FrameSink> sink_;

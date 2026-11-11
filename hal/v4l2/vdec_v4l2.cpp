@@ -118,8 +118,8 @@ void queue(int fd, v4l2_buf_type type, unsigned index, size_t size, size_t used,
 }
 } // namespace
 VdecV4l2::VdecV4l2(VideoCodec codec, std::string device, std::shared_ptr<hal::FrameSink> sink,
-                   std::atomic<bool> *stop)
-    : codec_(codec), device_(std::move(device)), sink_(std::move(sink)), stop_(stop) {}
+                   std::atomic<bool> *stop, bool offline)
+    : offline_(offline), codec_(codec), device_(std::move(device)), sink_(std::move(sink)), stop_(stop) {}
 VdecV4l2::~VdecV4l2() { cleanup(); }
 void VdecV4l2::cleanup() { quit_ = true; }
 void VdecV4l2::feed_packet_to_decoder(void *data, int len, int64_t pts, uint64_t recv, uint8_t nal,
@@ -211,9 +211,9 @@ void VdecV4l2::decode() {
     fmt.fmt.pix_mp.pixelformat = codec_ == VideoCodec::H265 ? V4L2_PIX_FMT_HEVC : V4L2_PIX_FMT_H264;
     fmt.fmt.pix_mp.width = 1920;
     fmt.fmt.pix_mp.height = 1080;
-    fmt.fmt.pix_mp.plane_fmt[0].sizeimage = packet_bytes;
+    fmt.fmt.pix_mp.plane_fmt[0].sizeimage = offline_ ? 2 * 1024 * 1024 : packet_bytes;
     checked(dev.fd, VIDIOC_S_FMT, &fmt, "compressed format");
-    const unsigned nout = allocate(dev.fd, output_type, 4, out);
+    const unsigned nout = allocate(dev.fd, output_type, offline_ ? 1 : 4, out);
     std::array<bool, max_buffers> busy{}, held{};
     std::unordered_map<uint64_t, timing_stats> stamps;
     unsigned ncap = 0, stride = 0, coded_height = 0, width = 0, height = 0, left = 0, top = 0;
@@ -315,7 +315,7 @@ void VdecV4l2::decode() {
                 checked(dev.fd, VIDIOC_G_CTRL, &c, "capture buffer minimum");
                 if (c.value < 1 || c.value > int(max_buffers) - 3)
                     throw std::runtime_error("capture pool too large");
-                ncap = allocate(dev.fd, capture_type, c.value + 3, cap);
+                ncap = allocate(dev.fd, capture_type, c.value + (offline_ ? 1 : 3), cap);
                 for (unsigned i = 0; i < ncap; ++i) {
                     if (cap[i]->size < size_t(stride) * coded_height * 3 / 2)
                         throw std::runtime_error("short capture allocation");

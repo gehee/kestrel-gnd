@@ -18,6 +18,9 @@ public:
     bool playback_failed() const {return playback_failed_;}
     void feed_playback(void* data,int len,int64_t pts,uint64_t recv,uint8_t nal,bool key=false);
     void feed_packet_to_decoder(void*,int,int64_t,uint64_t,uint8_t,uint32_t,uint32_t,bool=false) override;
+    // Temporarily yield the hardware to an offline export. HDMI/UI stay alive.
+    void suspend(bool on);
+    bool suspended() const;
     void run_frame() override;
     void cleanup() override;
     bool keyframe_in() const override;
@@ -28,6 +31,7 @@ private:
     mutable std::mutex mutex_;
     std::shared_ptr<Vdec> active_;
     std::array<std::vector<uint8_t>,3> live_parameters_;
+    bool suspended_=false;
     bool wanted_=false,playing_=false,paused_=false;
     uint64_t generation_=0,active_generation_=0;
     std::atomic<bool> quit_{false},failed_{false},playback_failed_{false};

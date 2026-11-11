@@ -165,6 +165,11 @@ int main(int argc, char** argv) {
             gallery.backend.controls["recording_export"].enabled=true;
             gc.key(Key::Record);gc.key(Key::Down);gc.key(Key::Up);gc.key(Key::Enter);
             check(action=="export:two.mp4" && gallery.gallery_action_name.empty(),"Ready export dispatches selected filename");
+            gallery.backend.export_busy=true;action.clear();const auto selected=gallery.gallery_selected;
+            gc.key(Key::Down);gc.key(Key::Enter);gc.key(Key::Record);gc.key(Key::Menu);
+            check(action.empty() && gallery.gallery_selected==selected && gallery.scene==SceneMode::GalleryBrowse,"Export blocks conflicting gallery actions");
+            gc.key(Key::Back);check(action=="export_cancel","Back requests export cancellation");
+            gallery.backend.export_busy=false;
             gc.apply_receiver=[](const std::string&,int)->std::string{throw std::runtime_error("Storage busy");};
             gc.key(Key::Record);gc.key(Key::Enter);
             check(gallery.feedback=="Storage busy" && !gallery.gallery_action_name.empty(),"Export errors keep actions available");

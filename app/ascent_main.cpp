@@ -23,6 +23,7 @@
 #include "motion/imu_reader.hpp"
 #include "hal/source_decoder.hpp"
 #include "dvr/stream_player.hpp"
+#include "dvr/export_job.hpp"
 #include "hud/lvgl/view.hpp"
 #include "render/software/frame_cadence.hpp"
 #include <csignal>
@@ -235,6 +236,11 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
                 source_exited = true;
             });
         }
+        const auto export_executable=std::filesystem::read_symlink("/proc/self/exe").parent_path()/"kestrel-export";
+        auto exporter=std::make_unique<dvr::ExportJob>(o.recordings,export_executable.string(),dvr::ExportJob::Media{
+            [&](bool on){source_decoder->suspend(on);},[&]{return source_decoder->suspended();}});
+        const bool export_available=exporter->available() && access("/dev/ar9311-ge2d",R_OK|W_OK)==0 && access("/dev/video1",R_OK|W_OK)==0;
+        uint64_t export_revision=0;
         lv_init();
         struct LvLifetime { ~LvLifetime() { lv_deinit(); } } lv_lifetime;
         lv_tick_set_cb([] { return uint32_t(kestrel_ui::monotonic_us() / 1000); });
@@ -263,6 +269,20 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
             std::filesystem::is_directory(assets_root/(candidate.height==720?"1280x720":"1920x1080")))
             screen_choices.push_back({candidate.id(),candidate.label()});
         controller.apply_receiver=[&](const std::string& id,int value) {
+            if(id=="export_cancel") {exporter->cancel();return std::string("Canceling export...");}
+            if(exporter->state().busy)throw std::runtime_error("Wait for export or cancel it first");
+            if(id.compare(0,7,"export:")==0) {
+                const auto rec=recorder.state();const auto play=player.state();
+                if(recorder.is_recording() || rec.finishing || play.busy || play.deleting || mode.pending)
+                    throw std::runtime_error("Stop recording/playback and finish screen changes before exporting");
+                if(access("/dev/ar9311-ge2d",R_OK|W_OK) || access("/dev/video1",R_OK|W_OK))
+                    throw std::runtime_error("Hardware export needs updated fpvOS firmware");
+                exporter->start(id.substr(7),{assets_root.string(),o.preferences.empty()?"-":o.preferences,
+                    o.platform.decoder_device,"/dev/video1",o.vector?"vector":"canopy"});
+                model.backend.export_busy=true;model.backend.export_percent=0;
+                model.backend.export_file=id.substr(7);model.backend.export_message="Preparing export";
+                return std::string("Export started");
+            }
             if(id=="screen_mode") {
                 if(mode.pending) {
                     mode.keep();
@@ -427,6 +447,13 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
                 if(screen_control.choices.size()<2) screen_control.reason="Additional modes require compatible firmware, monitor and compiled assets.";
             }
 
+            const auto exporting=exporter->state();
+            model.backend.export_busy=exporting.busy;model.backend.export_percent=exporting.percent;
+            model.backend.export_file=exporting.file;model.backend.export_message=exporting.message;
+            auto& export_control=model.backend.controls["recording_export"];
+            export_control={};export_control.known=true;export_control.action=true;
+            export_control.enabled=!exporting.busy && export_available;
+            if(exporting.revision!=export_revision){export_revision=exporting.revision;model.feedback=exporting.message;}
             region_menu.update(model.backend);
             channel_menu.update(model.backend,now,model.channel_open);
             if(!playback_checked || now-playback_checked>=250000) {
@@ -625,6 +652,7 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
             display.dump(o.screenshot);
         const bool source_failed = source_exited.load();
         player.stop();
+        exporter.reset();
         workers.finish();
         printf("ascent: HDMI presentations=%llu UI presentations=%llu\n",
                (unsigned long long)receiver.screen->presented(), (unsigned long long)display.presentations);
