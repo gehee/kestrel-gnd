@@ -52,6 +52,13 @@ int main() {
     decoder.feed_playback(packet,6,1,1,1);check(session(3)->packets==3,"Playback must not enter live decoder");
     check(!session(3)->paused,"Returning live restores the watchdog");
     decoder.feed_packet_to_decoder(packet,6,1,1,1,0,0);check(session(3)->packets==4,"Live resumes with cached parameter sets");
+    decoder.suspend(true);wait([&]{return decoder.suspended();});
+    check(count()==4 && session(3)->quit && decoder.keyframe_in(),"Export releases decoder and suppresses live IDR requests");
+    decoder.feed_packet_to_decoder(packet,6,1,1,1,0,0);
+    check(session(3)->packets==4,"Live packets are excluded while exporting");
+    decoder.suspend(false);wait([&]{return count()==5 && session(4)->packets==3;});
+    // Remove the export-only session from test numbering for the existing recovery cases.
+    {std::lock_guard<std::mutex> lock(mutex);sessions.erase(sessions.begin()+3);}
     decoder.playback(true);wait([&]{return decoder.playback_ready();});session(4)->error=true;
     wait([&]{return decoder.playback_failed() && count()==6;});check(!decoder.failed(),"Playback failure recovers live reception");
     throw_next=true;decoder.playback(true);wait([&]{return decoder.playback_failed() && count()==7;});

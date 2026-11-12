@@ -69,12 +69,18 @@ empty sidecars. The catalog delete operation removes both companion files.
 
 ## Playback
 
-In the gallery, REC opens a deletion confirmation for the selected clip.
-LEFT selects CANCEL, RIGHT selects DELETE, and OK confirms the highlighted
-choice. CANCEL is selected initially; BACK or REC dismisses the prompt.
-The confirmation stays tied to the original filename if the catalog refreshes.
-Deletion removes the video, preview and telemetry sidecar on the storage worker,
-then refreshes the gallery. Recording/saving and playback must finish first.
+In the gallery, REC opens the selected recording's actions menu with EXPORT
+WITH HUD and DELETE. UP/LEFT selects Export; DOWN/RIGHT selects Delete; OK opens
+the selected action. BACK or REC closes the menu. Export is visibly unavailable
+until the receiver provides the export worker; selecting it cannot start an
+unsupported operation.
+
+DELETE opens a separate confirmation with CANCEL selected initially. LEFT
+selects CANCEL, RIGHT selects DELETE, and OK confirms. Cancel or BACK returns to
+the actions menu; REC closes both dialogs. The actions and confirmation stay
+tied to the original filename if the catalog refreshes. Deletion removes the
+video, preview and telemetry sidecar on the storage worker, then refreshes the
+gallery. Recording/saving and playback must finish first.
 
 The hardware decoder receives MP4-relative presentation timestamps. Completed
 video flips expose those timestamps to the application; the HUD selects the
@@ -133,3 +139,66 @@ retains independent hardware video and UI planes. HUD translation redraws only
 affected regions; its render cost can still prevent a 60 Hz UI cadence at 1080p.
 The timeline refreshes at 10 Hz and invalidates only the playback header while
 the scene is unchanged. A paused, unchanged timeline does not trigger redraws.
+
+## HUD export implementation
+
+The initial export backend is `hal/artosyn/ge2d_compositor.*`. It imports decoded
+YUV DMA buffers and separate ARGB HUD panels, clips translated panels to the
+output bounds, and asks fpvOS's native GE2D driver to compose into a separate
+encoder input buffer. It never modifies decoder reference pictures. The kernel
+UAPI copy in `hal/artosyn/ar9311_ge2d.h` must match fpvOS's `ar9311-ge2d` package.
+
+This backend supports BT.709 limited-range planar YUV and straight-alpha ARGB up
+to 1920x1080. Calls are synchronous; callers retain all buffers until return and
+must not queue unsuccessful output to an encoder. The bitmap path passes YUV
+through RGB, which can round or clip out-of-gamut colors. Clean-video exports
+should bypass composition. An engine timeout disables composition until reboot.
+
+`ascent-export-probe` (720p) and `ascent-export-probe 1080` exercise imported DRM
+buffers, clipped panels and invalid requests without changing HDMI's mode or
+acquiring DRM master. `ge2d_compositor_test` checks request layout and clipping on
+the host.
+
+In the gallery, REC opens recording actions. Choose **Export with HUD** and press
+OK. Progress appears in the gallery; BACK cancels. Recording, playback, deletion
+and screen changes are excluded during export. Live decoding is suspended, then
+restored on success, failure or cancellation. HDMI stays in its current mode.
+The capability remains unavailable on firmware without the encoder/GE2D devices
+or a packaged `kestrel-export` executable.
+
+`kestrel-export` runs in a separate process so its synchronous LVGL renderer does
+not contend with the menu's LVGL instance. It uses the same playback View,
+including Canopy/Vector panels, recorded telemetry, translated motion, optional
+Betaflight OSD, clock and link warning edges. Current visual preferences apply;
+Export with HUD explicitly includes the HUD, while Dynamic HUD still controls
+movement. Playback controls and the timeline are omitted. Missing telemetry is
+reported as an error; stale intervals hide the HUD just as in playback.
+
+The worker accepts native single-track HEVC MP4 recordings at 720p or 1080p. It
+preserves every sample duration, including variable timing, using cumulative
+90 kHz timestamps. Imported audio tracks and composition-offset/reordered video
+are rejected rather than silently discarded or assigned incorrect HUD timing.
+The encoder produces HEVC at 8 Mbps. CPU work renders only the UI: GE2D reads the
+decoder's DMA-BUF, composites the ARGB overlay into a separate YUV DMA-BUF, and
+the hardware encoder imports that output. The first integration uses a retained
+full-size UI surface; tighter overlay rectangles remain an optimization.
+
+Completed videos appear in `exports/<original-stem>-hud-<unique-id>.mp4` beneath
+the recording directory. Original video, thumbnail and telemetry are unchanged.
+Exports are kept outside the recording gallery to avoid applying the HUD twice.
+Output is first written to a private partial file, flushed and finalized, then
+published atomically without overwriting an earlier export. Cancellation and
+ordinary failures remove the partial file; a power interruption can leave a
+hidden partial file, never a completed-looking gallery entry.
+
+Ascent fpvOS needs a 64 MiB CMA pool for the three 1080p scanout buffers plus
+export's ARGB/YUV surfaces. Unused CMA pages remain usable for movable system
+allocations. The offline decoder uses a smaller queue and capture pool than live
+reception, with one outstanding picture and explicit buffer ownership. Decoder
+references remain read-only until composition returns. The export worker never
+acquires DRM master or changes HDMI timing.
+
+`export_test` covers MP4 timing, safe filenames, child failure/cancellation,
+no-overwrite publication and preservation of originals. The source-decoder test
+covers hardware release/resume; LVGL tests cover the progress dialog and input
+exclusion at both supported UI resolutions.

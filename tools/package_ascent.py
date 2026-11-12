@@ -40,8 +40,8 @@ def main():
     with tempfile.TemporaryDirectory(dir=args.output.parent) as tmp:
         root = Path(tmp)/"runtime"
         (root/"bin").mkdir(parents=True)
-        for name in ("kestrel-gnd", "kestrel-hud", "kestrel-hud-vector"):
-            source = args.build/(name if name == "kestrel-gnd" else "hud/lvgl/"+name)
+        for name in ("kestrel-gnd", "kestrel-export", "kestrel-hud", "kestrel-hud-vector"):
+            source = args.build/(name if name in ("kestrel-gnd", "kestrel-export") else "hud/lvgl/"+name)
             info = subprocess.check_output(["file", "-b", str(source)], text=True)
             if "ARM aarch64" not in info or "statically linked" not in info:
                 raise SystemExit(f"{source}: expected a static AArch64 executable")

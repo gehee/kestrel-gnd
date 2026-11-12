@@ -2096,6 +2096,7 @@ int MP4E_close(MP4E_mux_t *mux)
     for (ntr = 0; ntr < ntracks; ntr++)
     {
         track_t *tr = ((track_t*)mux->tracks.data) + ntr;
+        minimp4_vector_reset(&tr->vvps); // HEVC parameter storage, also owned by the muxer
         minimp4_vector_reset(&tr->vsps);
         minimp4_vector_reset(&tr->vpps);
         minimp4_vector_reset(&tr->smpl);

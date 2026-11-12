@@ -98,6 +98,9 @@ struct ReceiverControl {
 struct BackendState : ReceiverState {
     struct Recording {std::string name;uint64_t bytes=0;std::shared_ptr<const media::Thumbnail> thumbnail;};
     std::vector<Recording> recordings;
+    bool export_busy=false;
+    int export_percent=0;
+    std::string export_file,export_message;
     bool playback_busy=false,playback_paused=false,playback_seeking=false;
     uint64_t playback_position_us=0,playback_duration_us=0;
     std::string playback_error,playback_telemetry_error;
