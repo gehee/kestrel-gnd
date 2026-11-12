@@ -36,6 +36,10 @@ struct Telemetry {
     bool connected = false;
     int mcs = -1, quality_raw = unavailable, frequency_raw = unavailable, distance_raw = unavailable;
     int voltage_mv = 0, cpu_temperature_x100 = unavailable, rf_temperature_raw = unavailable;
+    // The receiver's own readings (its SoC temperature) are read here, not
+    // carried by the link: fresh on their own stamp, link or not.
+    uint64_t local_stamp_us = 0;
+    bool local_fresh(uint64_t now) const { return local_stamp_us && now >= local_stamp_us && now - local_stamp_us < 5000000; }
     unsigned status_payload_bytes = 0;
     uint64_t status_frames = 0, unknown_frames = 0, bad_frames = 0;
     bool fresh(uint64_t now) const { return stamp_us && now >= stamp_us && now - stamp_us < freshness_us; }

@@ -44,7 +44,9 @@ HudData Controller::hud_data(uint64_t now,bool recording_snapshot) const {
         p.dim = visual.idle_dim; p.rail_dim = visual.rail_dim;
     }
     auto& left = data.panels[0]; auto& right = data.panels[1];
-    left.armed = fresh && f.arm == 1;
+    // Armed colours both canopies' rules, as on the VRX Pro (hud_canopy.cpp);
+    // only the left one says ARMED.
+    left.armed = right.armed = fresh && f.arm == 1;
     const bool use_cell = m.per_cell && f.have_cell_v;
     left.upper_label = "CELL";
     left.recording = recording_text(now);
@@ -63,20 +65,23 @@ HudData Controller::hud_data(uint64_t now,bool recording_snapshot) const {
         left.upper_level = std::clamp((f.cell_v - 3.3f) / 0.9f, 0.0f, 1.0f);
         left.lower_level = std::clamp((cell_peak_ - f.cell_v) / 0.5f, 0.0f, 1.0f);
     }
-    left.detail1 = fresh && f.have_mode ? std::string("\xee\x80\x80   ") +
-        std::string(f.mode, std::find(f.mode, f.mode + sizeof(f.mode), '\0')) : "\xee\x80\x80   FC TELEMETRY --";
+    // The rows read as on the VRX Pro's canopy (hud/hud_canopy.cpp): what is
+    // known, nothing in place of what is not.
+    const bool have_mode = fresh && f.have_mode;
+    left.detail1 = std::string("\xee\x80\x80   ") +
+        (have_mode ? std::string(f.mode, std::find(f.mode, f.mode + sizeof(f.mode), '\0')) : std::string());
     const auto& link = m.backend.link;
     const bool linked = t.link_valid(now);
     const int distance = linked ? link.distance_m : -1;
-    if (distance >= 0) left.detail1 += "  • \xee\x80\x82 " + (distance >= 1000 ? number(distance / 1000.0f, "%.2fkm") : std::to_string(distance) + "m");
-    left.detail1_quiet = !(fresh && f.have_mode) && distance < 0;
-    const bool temperature = t.fresh(now) && t.cpu_temperature_x100 != Telemetry::unavailable;
+    if (distance >= 0) left.detail1 += std::string(have_mode ? "  • " : "• ") + "\xee\x80\x82 " + (distance >= 1000 ? number(distance / 1000.0f, "%.2fkm") : std::to_string(distance) + "m");
+    left.detail1_quiet = !have_mode && distance < 0;
+    const bool temperature = t.local_fresh(now) && t.cpu_temperature_x100 != Telemetry::unavailable;
     // The VRX Pro's thresholds and words (render/software/canopy.hpp).
     const auto temperature_alert = canopy::temperature_alert;
     left.detail2 = "\xee\x80\x81   " + (temperature ? number(t.cpu_temperature_x100 / 100.0f, "VRX %.0fC") : "VRX --C");
     left.detail2_alert = temperature ? temperature_alert(t.cpu_temperature_x100 / 100.0f) : 0;
     // Local hardware readings may be absent independently of the RF link.
-    left.detail2_tail = "  • " + (t.fresh(now) && t.voltage_mv > 0 ? number(t.voltage_mv / 1000.0f, "%.1fV") : "--V");
+    left.detail2_tail = t.fresh(now) && t.voltage_mv > 0 ? "   " + number(t.voltage_mv / 1000.0f, "%.1fV") : std::string();
     if (t.fresh(now) && t.voltage_mv > 0) {
         const float volts = t.voltage_mv / 1000.0f;
         left.supply_alert = canopy::cell_alert(volts / canopy::supply_cells(volts));
@@ -98,16 +103,25 @@ HudData Controller::hud_data(uint64_t now,bool recording_snapshot) const {
         power = std::to_string(link.air_power_mw) + "mW";
         for (const auto& level : kArPwrLevels) if (level.mw == link.air_power_mw) power = level.label;
     }
-    right.detail1 = (frequency_valid ? std::to_string(t.frequency_mhz) : "--") + "@" +
-        (linked ? gnd::bw_step_label(link.bandwidth_step) : "--") + "MHz • " + power;
-    right.detail1_tail = " • " + (linked && link.vtx_temperature_valid ? number(link.vtx_temperature_c, "%.0fC") : "--C") + "   \xee\x80\x80";
-    right.detail1_alert = linked && link.vtx_temperature_valid ? temperature_alert(link.vtx_temperature_c) : 0;
+    std::string channel;
+    if (frequency_valid && t.frequency_mhz > 0)
+        channel = std::to_string(t.frequency_mhz) + (linked ? std::string("@") + gnd::bw_step_label(link.bandwidth_step) : std::string()) + "MHz";
+    const bool have_power = linked && link.air_power_mw > 0;
+    const bool have_temp = linked && link.vtx_temperature_valid;
+    std::string lead = !channel.empty() && have_power ? "VTX " + channel + " • " + power :
+                       !channel.empty() ? "VTX " + channel : have_power ? "VTX " + power : std::string();
+    if (have_temp) right.detail1 = lead.empty() ? std::string("VTX ") : lead + " • ";
+    else right.detail1 = lead;
+    right.detail1_tail = (have_temp ? number(link.vtx_temperature_c, "%.0fC") : std::string()) + "   \xee\x80\x80";
+    right.detail1_alert = have_temp ? temperature_alert(link.vtx_temperature_c) : 0;
     const auto& v = m.backend.video;
     const bool video_fresh = v.stamp_us && now >= v.stamp_us && now - v.stamp_us < 2000000;
     const int fps = canopy::snapped_fps(v.fps);
-    const std::string mode = video_fresh && v.height > 0 ? std::to_string(v.height) + "p" + (fps > 0 ? std::to_string(fps) : "--") : "--";
-    right.detail2 = (linked ? number(link.video_mbps, "%.1f") + "/" + number(link.link_mbps, "%.1fMbps") : "--/--Mbps") +
-        " • " + (video_fresh && v.latency_ms >= 0 ? number(v.latency_ms, "%.0fms") : "--ms") + " • " + mode + "   \xee\x80\x81";
+    const std::string mode = video_fresh && v.height > 0 ? std::to_string(v.height) + "p" + (fps > 0 ? std::to_string(fps) : std::string()) : "--";
+    const std::string rate = linked && link.video_mbps > 0.05f && link.link_mbps > 0.05f ?
+        number(link.video_mbps, "%.1f") + "/" + number(link.link_mbps, "%.1fMbps") :
+        linked && link.video_mbps > 0.05f ? number(link.video_mbps, "%.1fMbps") : "--";
+    right.detail2 = rate + " • " + (video_fresh && v.latency_ms >= 0 ? number(v.latency_ms, "%.0fms") : "--") + " • " + mode + "   \xee\x80\x81";
     // Renderer-neutral, display-ready instruments. The passive View never
     // infers units, cell count, capacity, signal source or telemetry freshness.
     auto add = [&](HudMetricId id, const char* label, bool valid, std::string value, const char* unit = "") -> HudMetric& {
@@ -128,7 +142,7 @@ HudData Controller::hud_data(uint64_t now,bool recording_snapshot) const {
     video.metered = true; video.level = right.lower_level;
     add(HudMetricId::FrequencyRaw, t.frequency_mhz > 0 ? "FREQUENCY" : "FREQ RAW", frequency_valid, frequency);
     add(HudMetricId::ReceiverVoltage, "RX SUPPLY", t.fresh(now) && t.voltage_mv > 0, number(t.voltage_mv / 1000.0f, "%.2f"), "V");
-    add(HudMetricId::CpuTemperature, "VRX CPU", t.fresh(now) && t.cpu_temperature_x100 != Telemetry::unavailable, number(t.cpu_temperature_x100 / 100.0f, "%.0f"), "C");
+    add(HudMetricId::CpuTemperature, "VRX CPU", t.local_fresh(now) && t.cpu_temperature_x100 != Telemetry::unavailable, number(t.cpu_temperature_x100 / 100.0f, "%.0f"), "C");
     add(HudMetricId::RfTemperatureRaw, "RF TEMP RAW", t.fresh(now) && t.rf_temperature_raw != Telemetry::unavailable, std::to_string(t.rf_temperature_raw));
     add(HudMetricId::FlightState, "FC STATE", fresh && f.arm >= 0, f.arm == 1 ? "ARMED" : "DISARMED");
     add(HudMetricId::FlightMode, "MODE", fresh && f.have_mode, std::string(f.mode, std::find(f.mode, f.mode + sizeof(f.mode), '\0')));

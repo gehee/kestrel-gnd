@@ -31,6 +31,7 @@
 #include <csignal>
 #include <exception>
 #include <filesystem>
+#include <fstream>
 #include <cstdio>
 #include <mutex>
 #include <stdexcept>
@@ -321,11 +322,16 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
         ascent::ChannelMenu channel_menu(radio_model.radio());
         dvr::StreamPlayer::State playback;
         uint64_t playback_checked=0;
-        kestrel_ui::ReceiverControls controls(radio_model.camera(),radio_model.encoder(),radio_model.air_radio(),radio_model.air_unit(),radio_model.radio());
+        std::vector<kestrel_ui::ReceiverControls::VideoMode> video_modes;
+        for(int i=0;i<sky::kFpvModeCount;i++) video_modes.push_back({sky::kFpvModes[i].name,sky::kFpvModes[i].need});
+        kestrel_ui::ReceiverControls controls(radio_model.camera(),radio_model.encoder(),radio_model.air_radio(),radio_model.air_unit(),radio_model.radio(),
+                                              std::move(video_modes));
         std::vector<kestrel_ui::ReceiverChoice> screen_choices;
         for(const auto candidate:display::ascent_modes) if(receiver.screen->supports_mode(candidate) &&
             std::filesystem::is_directory(assets_root/(candidate.height==720?"1280x720":"1920x1080")))
             screen_choices.push_back({candidate.id(),candidate.label()});
+        std::string temperature_path;
+        uint64_t temperature_next=0,temperature_search=0;
         controller.apply_receiver=[&](const std::string& id,int value) {
             if(id=="export_cancel") {exporter->cancel();return std::string("Canceling export...");}
             if(exporter->state().busy)throw std::runtime_error("Wait for export or cancel it first");
@@ -488,6 +494,27 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
             model.backend.video = {video.stamp_us, video.width, video.height, video.fps, video.latency_ms};
             const auto state = radio_model.radio().state();
             auto &telemetry = model.backend.vrx;
+            // The receiver's SoC temperature (fpvOS ar9311_temp, hwmon), once
+            // a second; looked for again every 10 s while it is not there.
+            if(now>=temperature_next) {
+                temperature_next=now+1000000;
+                if(temperature_path.empty() && now>=temperature_search) {
+                    temperature_search=now+10000000;
+                    std::error_code ec;
+                    for(const auto& entry:std::filesystem::directory_iterator("/sys/class/hwmon",ec)) {
+                        std::ifstream name(entry.path()/"name");std::string text;
+                        if(std::getline(name,text) && text=="ar9311_temp") {temperature_path=(entry.path()/"temp1_input").string();break;}
+                    }
+                }
+                long millidegrees=0;
+                std::ifstream input(temperature_path);
+                if(!temperature_path.empty() && (input>>millidegrees) && millidegrees>-40000 && millidegrees<150000) {
+                    telemetry.cpu_temperature_x100=int(millidegrees/10);telemetry.local_stamp_us=now;
+                } else {
+                    telemetry.cpu_temperature_x100=kestrel_ui::Telemetry::unavailable;
+                    if(!temperature_path.empty()) temperature_path.clear();
+                }
+            }
             telemetry.stamp_us = state.link.last_update_ms * 1000;
             telemetry.connected = state.link.active && state.link.state == gnd::kLinkUp;
             // The video arrives on RX; link.mcs is this receiver's uplink TX MCS.

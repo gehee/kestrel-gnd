@@ -171,7 +171,7 @@ void HudView::panel(lv_layer_t* layer, bool left) {
     track(layer, left, start, 271, 525, 9, 20, p.upper_level, th.data, content, p.block);
     track(layer, left, start, 271, 534, 4, left ? 20 : 7, p.lower_level, alert_color(p.lower_alert, th.accent), content, p.block);
     if (!p.state.empty()) text_.panel(layer, p.state, left, state_x, 456 + canopy::kTextState / frame.U / 2,
-        canopy::kTextState, !left, p.armed ? th.accent : th.quiet, left ? content * p.state_opacity : p.state_opacity);
+        canopy::kTextState, !left, left && p.armed ? th.accent : th.quiet, left ? content * p.state_opacity : p.state_opacity);
     if (!data_.details) return;
     auto row = [&](const std::string& body, const std::string& tail, float y, const float* body_color, const float* tail_color) {
         if (left) {
