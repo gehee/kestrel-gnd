@@ -22,6 +22,7 @@
 #include "kestrel_gnd_features.h"
 #include "radio/bb_watchdog.hpp"
 #include "radio/settings.hpp"
+#include "radio/ar8030_policy.hpp"
 #include "region/zones.hpp"
 #include "render/gl_context.hpp"
 
@@ -286,16 +287,7 @@ int read_start_options(int argc, char** argv, Settings& settings, StartOptions& 
 	ar_cfg.strips        = settings.get(radio::setting::ar8030_strips);
 	// The cap on the video link's bandwidth (RF menu, Max Bandwidth): 20 or 40 MHz,
 	// with Open8030 here also AUTO (0: nothing sent), 5 or 10.
-	{
-		const int bw = settings.get(radio::setting::ar8030_max_bw_mhz);
-		ar_cfg.max_bw_mhz = bw == 0 || bw == 5 || bw == 10 || bw == 20 ? bw : 40;
-		const int mcs = settings.get(radio::setting::ar8030_max_mcs);
-		ar_cfg.max_mcs = mcs >= 0 && mcs <= 11 ? mcs : -1;   // the menu's range, AUTO + MCS 0..11
-		ar_cfg.steady = settings.get(radio::setting::ar8030_steady) == 1 ? 1 : 0;
-		ar_cfg.chan_hop = settings.get(radio::setting::ar8030_chan_hop) == 1 ? 1 : 0;
-		const int fixed = settings.get(radio::setting::ar8030_chan_mhz);
-		ar_cfg.chan_fixed_mhz = fixed >= 2000 && fixed <= 7000 ? fixed : 0;
-	}
+	ar8030_load_policy(ar_cfg, settings, bsp::board().radio.default_max_bw_mhz);
 	// RADIO > VRX Radio Firmware: Open8030 when its image is on the unit, unless
 	// the menu said STOCK (0) - as bb_only.sh decides what it uploads.
 	printf("board: %s\n", bsp::board().name);

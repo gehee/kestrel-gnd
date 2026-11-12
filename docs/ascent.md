@@ -166,6 +166,14 @@ the menu. Send keys using a second invocation with `--control PATH --send-key
 enter` (or menu/up/down/left/right/back/quit). `--preferences FILE` persists visual
 preferences; without it they last for the session. `--vector` selects Vector.
 `--replay FILE` plays a recorded framed radio stream without opening the radio.
+
+Ascent VRX defaults to a 20 MHz bandwidth cap when no choice is saved; other
+boards retain their existing defaults. Saved bandwidth, MCS, steady-latency,
+and channel policies are restored at startup using the same validation in
+both receiver launchers. The tested stock Ascent Lite link repeatedly dropped
+when asked for 40 MHz, while 20 MHz remained connected. AUTO leaves the loader
+policy in control, which held this stock-derived configuration at 5 MHz.
+Explicit bandwidth choices are still honored.
 `--screenshot FILE` saves the final ARGB HUD as PAM, including transparency.
 
 ## UI reference and verification

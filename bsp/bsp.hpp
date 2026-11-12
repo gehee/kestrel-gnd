@@ -53,6 +53,8 @@ struct Radio {
     // The Open8030 radio firmware this box uploads when Open8030 is chosen;
     // its presence on the unit is what makes Open8030 selectable.
     const char *open8030_fw;
+    // Startup bandwidth cap when no user choice is saved.
+    int default_max_bw_mhz = 40;
 };
 
 struct Board {
