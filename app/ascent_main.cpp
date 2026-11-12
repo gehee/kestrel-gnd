@@ -636,7 +636,7 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
                 std::to_string(video.rejected_width)+"x"+std::to_string(video.rejected_height) : std::string();
             if(unsupported!=unsupported_video) {
                 unsupported_video=unsupported;
-                if(!unsupported.empty()) notice(("Video "+unsupported+" is not supported here; the air unit must send 1080p").c_str());
+                if(!unsupported.empty()) notice(("Video "+unsupported+" cannot be shown on this screen").c_str());
             }
             if(recording.telemetry_error!=telemetry_error) {
                 telemetry_error=recording.telemetry_error;
