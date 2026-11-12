@@ -78,6 +78,10 @@ public:
     uint64_t menu_version = 0, key_count = 0, rejected_inputs = 0;
     std::string last_key = "--", input_sources = "stdin", control_path;
     std::string feedback;
+    // Binding progress for the over-video bind overlay (gnd::BindState; 0 = idle).
+    int bind_state = 0;
+    int bind_secs_left = 0;
+    unsigned bind_peer = 0;
     std::string build = "--", version = "--", decoder = "--", screen_mode = "--";
     int display_width = 1920, display_height = 1080;
     int hud_pid = -1;

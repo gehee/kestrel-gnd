@@ -592,7 +592,11 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
             auto notice = [&](const char* text) {
                 printf("panel: %s\n", text);
                 if (controller.armed(now)) { held_notice = text; return; }
-                if (!model.menu_open) controller.open_menu();
+                // Over the gallery it is said there: opening the menu would
+                // leave a recording playing behind it with no way to stop it.
+                const bool gallery = model.scene == kestrel_ui::SceneMode::GalleryBrowse ||
+                                     model.scene == kestrel_ui::SceneMode::GalleryPlayback;
+                if (!model.menu_open && !gallery) controller.open_menu();
                 model.feedback = text;
                 ++model.menu_version;
             };
@@ -623,15 +627,19 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
                     if(model.scene==kestrel_ui::SceneMode::GalleryBrowse) {
                         controller.key(kestrel_ui::Key::Record);panel.beep();continue;
                     }
+                    // Not a recording key while one plays (nothing to record).
+                    if(model.scene==kestrel_ui::SceneMode::GalleryPlayback) continue;
                     try {model.feedback=controller.apply_receiver("record",0);panel.beep();}
                     catch(const std::exception& e) {notice(e.what());panel.beep(platform::PanelTone::Failure);}
                 } else if (event.key == platform::PanelKey::Upgrade) {
                     notice("Button-triggered upgrade is not available yet");
                     panel.beep(platform::PanelTone::Failure);
                 } else if (event.key == platform::PanelKey::Link) {
+                    // The over-video bind overlay (model.bind_state) shows the
+                    // progress; the bind button must not open the menu.
                     if (o.radio && o.link.replay_path.empty()) {
                         radio_model.radio().bind();
-                        notice("Binding request sent");
+                        printf("panel: bind button -> binding\n");
                         panel.beep();
                     } else {
                         notice("Binding requires a running radio");
@@ -645,19 +653,25 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
                     }
                 }
             }
+            // The bind overlay draws from these; it replaces the menu notices
+            // so binding never pops the menu over the video.
+            model.bind_state = state.bind_state;
+            model.bind_secs_left = state.bind_secs_left;
+            model.bind_peer = state.bind_peer;
             if (state.bind_state != previous_bind) {
                 previous_bind = state.bind_state;
+                ++model.menu_version;
                 switch (state.bind_state) {
                 case gnd::BIND_RUNNING:
-                    notice("Binding: press LINK again to cancel");
+                    printf("panel: binding (press LINK again to cancel)\n");
                     panel.beep(platform::PanelTone::Notice); break;
                 case gnd::BIND_OK:
-                    notice("Binding succeeded");
+                    printf("panel: binding succeeded\n");
                     panel.beep(platform::PanelTone::Success); break;
                 case gnd::BIND_FAILED:
-                    notice("Binding failed");
+                    printf("panel: binding failed\n");
                     panel.beep(platform::PanelTone::Failure); break;
-                case gnd::BIND_IDLE: notice("Binding ended"); break;
+                case gnd::BIND_IDLE: printf("panel: binding ended\n"); break;
                 default: break;
                 }
             }

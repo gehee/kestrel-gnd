@@ -6,9 +6,12 @@
 #include <cstring>
 #include <fcntl.h>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <linux/gpio.h>
 #include <linux/i2c-dev.h>
 #include <linux/i2c.h>
+#include <linux/input.h>
 #include <mutex>
 #include <sys/file.h>
 #include <sys/ioctl.h>
@@ -39,13 +42,56 @@ int write_error(const std::string &path, unsigned value) {
     return n == ssize_t(text.size()) ? 0 : n < 0 ? errno : EIO;
 }
 bool write_value(const std::string &path, unsigned value) { return write_error(path, value) == 0; }
+// Device-tree compatible list (NUL-separated); the panel is board wiring.
+bool board_is(const char *compatible) {
+    std::ifstream file("/proc/device-tree/compatible", std::ios::binary);
+    const std::string list((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    for (size_t at = 0; at < list.size();) {
+        const size_t end = list.find('\0', at);
+        if (list.compare(at, (end == std::string::npos ? list.size() : end) - at, compatible) == 0)
+            return true;
+        if (end == std::string::npos)
+            break;
+        at = end + 1;
+    }
+    return false;
+}
+// The evdev node whose device name matches, opened read-only.
+int open_evdev(const char *name) {
+    for (unsigned i = 0; i < 32; ++i) {
+        const int fd = open(("/dev/input/event" + std::to_string(i)).c_str(), O_RDONLY | O_CLOEXEC);
+        if (fd < 0)
+            continue;
+        char got[64]{};
+        if (ioctl(fd, EVIOCGNAME(sizeof(got) - 1), got) >= 0 && std::string(got) == name)
+            return fd;
+        close(fd);
+    }
+    return -1;
+}
+bool key_down(const unsigned long *bits, unsigned code) {
+    const unsigned width = 8 * sizeof(unsigned long);
+    return (bits[code / width] >> (code % width)) & 1;
+}
+// The SteadyDigital's keys, one at a time as the Gnd485's ADC reports its
+// own: the first held in the board's order wins.
+PanelKey steadydigital_key(int fd, bool &ok) {
+    unsigned long bits[(KEY_MAX + 8 * sizeof(unsigned long)) / (8 * sizeof(unsigned long))]{};
+    ok = ioctl(fd, EVIOCGKEY(sizeof(bits)), bits) >= 0;
+    if (!ok)
+        return PanelKey::None;
+    for (const auto &button : board::steadydigital::buttons)
+        if (key_down(bits, button.code))
+            return button.key;
+    return PanelKey::None;
+}
 struct Pwm {
     std::string chip, channel;
     bool owned = false;
     ~Pwm() {
         if (owned) {
             off();
-            if (!write_value(chip + "/unexport", board::pwm_channel))
+            if (!write_value(chip + "/unexport", board::gnd485::pwm_channel))
                 fprintf(stderr, "panel: PWM unexport failed\n");
         }
     }
@@ -61,23 +107,23 @@ struct Pwm {
         std::error_code ec;
         for (const auto &entry : std::filesystem::directory_iterator("/sys/class/pwm", ec)) {
             auto device = std::filesystem::canonical(entry.path() / "device", ec);
-            if (ec || device.filename() != board::pwm_controller)
+            if (ec || device.filename() != board::gnd485::pwm_controller)
                 continue;
             chip = entry.path();
-            channel = chip + "/pwm" + std::to_string(board::pwm_channel);
+            channel = chip + "/pwm" + std::to_string(board::gnd485::pwm_channel);
             // An existing export belongs to someone else; never take it over -
             // unless it is an earlier kestrel-gnd's: a crash or a SIGKILL
             // leaves the channel exported with nobody to unexport it, and the
             // beeper stayed silent until a reboot.
-            const int err = write_error(chip + "/export", board::pwm_channel);
+            const int err = write_error(chip + "/export", board::gnd485::pwm_channel);
             if (err == EBUSY && reclaim && std::filesystem::is_directory(channel, ec))
                 fprintf(stderr, "panel: reclaiming the beeper PWM an earlier run left exported\n");
             else if (err)
                 return false;
             owned = true;
             return off() && write_value(channel + "/duty_cycle", 0) &&
-                   write_value(channel + "/period", board::period_ns) &&
-                   write_value(channel + "/duty_cycle", board::duty_ns);
+                   write_value(channel + "/period", board::gnd485::period_ns) &&
+                   write_value(channel + "/duty_cycle", board::gnd485::duty_ns);
         }
         return false;
     }
@@ -85,7 +131,7 @@ struct Pwm {
 } // namespace
 
 struct AscentPanel::Impl {
-    Fd adc, gpio;
+    Fd adc, gpio, keys;
     Pwm pwm;
     bool pwm_ready = false;
     std::mutex mutex;
@@ -95,7 +141,30 @@ struct AscentPanel::Impl {
     std::optional<PanelTone> tone;
     std::thread inputs, sound;
     Impl() {
-        adc.value = open(board::adc_device, O_RDWR | O_CLOEXEC);
+        if (board_is(board::steadydigital::compatible)) {
+            keys.value = open_evdev(board::steadydigital::keys_device);
+            // Another kestrel-gnd holding the keys gets them, as with the ADC.
+            if (keys.value >= 0 && flock(keys.value, LOCK_EX | LOCK_NB) != 0) {
+                close(keys.value);
+                keys.value = -1;
+            }
+            printf("panel: SteadyDigital keys=%s\n", keys.value >= 0 ? "ready" : "unavailable");
+        } else if (!board_is(board::gnd485::compatible)) {
+            printf("panel: no front panel known for this board\n");
+        } else {
+            open_gnd485();
+        }
+        try {
+            inputs = std::thread([this] { poll(); });
+            if (pwm_ready)
+                sound = std::thread([this] { play(); });
+        } catch (...) {
+            finish();
+            throw;
+        }
+    }
+    void open_gnd485() {
+        adc.value = open(board::gnd485::adc_device, O_RDWR | O_CLOEXEC);
         // Prevent another Kestrel instance consuming the same ADC presses.
         if (adc.value >= 0 && flock(adc.value, LOCK_EX | LOCK_NB) != 0) {
             close(adc.value);
@@ -105,10 +174,10 @@ struct AscentPanel::Impl {
             Fd chip{open(("/dev/gpiochip" + std::to_string(i)).c_str(), O_RDONLY | O_CLOEXEC)};
             gpiochip_info info{};
             if (chip.value < 0 || ioctl(chip.value, GPIO_GET_CHIPINFO_IOCTL, &info) < 0 ||
-                std::string(info.label) != board::gpio_label)
+                std::string(info.label) != board::gnd485::gpio_label)
                 continue;
             gpiohandle_request request{};
-            request.lineoffsets[0] = board::link_offset;
+            request.lineoffsets[0] = board::gnd485::link_offset;
             request.flags = GPIOHANDLE_REQUEST_INPUT;
             request.lines = 1;
             strcpy(request.consumer_label, "kestrel-panel");
@@ -119,14 +188,6 @@ struct AscentPanel::Impl {
         pwm_ready = pwm.start(adc.value >= 0);
         printf("panel: ADC=%s LINK=%s beeper=%s\n", adc.value >= 0 ? "ready" : "unavailable",
                gpio.value >= 0 ? "ready" : "unavailable", pwm_ready ? "ready" : "unavailable");
-        try {
-            inputs = std::thread([this] { poll(); });
-            if (pwm_ready)
-                sound = std::thread([this] { play(); });
-        } catch (...) {
-            finish();
-            throw;
-        }
     }
     ~Impl() { finish(); }
     void finish() {
@@ -142,8 +203,8 @@ struct AscentPanel::Impl {
             inputs.join();
     }
     void poll() {
-        PanelDebouncer keys, link;
-        bool adc_failed = false, gpio_failed = false;
+        PanelDebouncer adc_keys, link, gpio_keys;
+        bool adc_failed = false, gpio_failed = false, keys_failed = false;
         for (;;) {
             {
                 std::unique_lock<std::mutex> lock(mutex);
@@ -151,13 +212,19 @@ struct AscentPanel::Impl {
                     return;
             }
             if (adc.value >= 0) {
-                uint8_t reg = board::adc_register, bytes[2]{};
-                i2c_msg messages[] = {{board::adc_address, 0, 1, &reg},
-                                      {board::adc_address, I2C_M_RD, 2, bytes}};
+                uint8_t reg = board::gnd485::adc_register, bytes[2]{};
+                i2c_msg messages[] = {{board::gnd485::adc_address, 0, 1, &reg},
+                                      {board::gnd485::adc_address, I2C_M_RD, 2, bytes}};
                 i2c_rdwr_ioctl_data transfer{messages, 2};
                 const bool ok = ioctl(adc.value, I2C_RDWR, &transfer) == 2;
                 report(ok, adc_failed, "ADC");
-                push(keys.sample(board::decode(uint16_t(bytes[0]) << 8 | bytes[1]), ok, now_ms()));
+                push(adc_keys.sample(board::gnd485::decode(uint16_t(bytes[0]) << 8 | bytes[1]), ok, now_ms()));
+            }
+            if (keys.value >= 0) {
+                bool ok = false;
+                const PanelKey key = steadydigital_key(keys.value, ok);
+                report(ok, keys_failed, "keys");
+                push(gpio_keys.sample(key, ok, now_ms()));
             }
             if (gpio.value >= 0) {
                 gpiohandle_data data{};
@@ -243,6 +310,6 @@ void AscentPanel::beep(PanelTone tone) {
 }
 std::string AscentPanel::sources() const {
     return std::string(impl_->adc.value >= 0 ? ", panel ADC" : "") +
-           (impl_->gpio.value >= 0 ? ", LINK GPIO" : "");
+           (impl_->gpio.value >= 0 ? ", LINK GPIO" : "") + (impl_->keys.value >= 0 ? ", panel keys" : "");
 }
 } // namespace platform

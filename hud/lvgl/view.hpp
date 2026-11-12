@@ -99,6 +99,10 @@ private:
     uint64_t last_tick_ = 0;
     lv_obj_t* channel_ = nullptr;
     lv_obj_t* clock_ = nullptr;
+    // The idle status word ("Ready" / live binding state) over the idle artwork.
+    lv_obj_t* status_ = nullptr;
+    bool old_status_ready_ = false;
+    int old_bind_state_ = 0, old_bind_secs_ = 0;
     std::string clock_text_, recording_text_;
     std::array<lv_obj_t*,2> edge_objects_{};
     std::array<std::vector<uint8_t>,2> edge_pixels_;
@@ -129,6 +133,7 @@ private:
     lv_area_t menu_reveal(float progress) const;
     void draw_picker(lv_layer_t* layer);
     void draw_channel(lv_layer_t* layer);
+    void draw_status(lv_layer_t* layer);
     void draw_gallery(lv_layer_t* layer);
     void prepare_menu_snapshot();
     void drop_menu_snapshot();

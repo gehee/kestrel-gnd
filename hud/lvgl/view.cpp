@@ -2,6 +2,7 @@
 #include "argb_blend.h"
 #include "src/draw/lv_draw_private.h"
 #include "hud/hud_theme.hpp"
+#include "system/gnd/radio.hpp"
 #include <algorithm>
 #include <array>
 #include <cstdio>
@@ -140,6 +141,15 @@ View::View(const Controller& controller, int w, int h, const std::string& assets
     lv_obj_remove_flag(channel_,LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(channel_,draw_event,LV_EVENT_DRAW_MAIN,this);
     lv_obj_add_flag(channel_,LV_OBJ_FLAG_HIDDEN);
+    // The idle status word ("Ready", or the live binding state) over the idle
+    // artwork, where the artwork used to bake "Ready".
+    status_=lv_obj_create(screen_);
+    lv_obj_remove_style_all(status_);
+    lv_obj_set_pos(status_,0,int(h*0.80f));
+    lv_obj_set_size(status_,w,int(h*0.14f));
+    lv_obj_remove_flag(status_,LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(status_,draw_event,LV_EVENT_DRAW_MAIN,this);
+    lv_obj_add_flag(status_,LV_OBJ_FLAG_HIDDEN);
     clock_=lv_obj_create(screen_);
     lv_obj_remove_style_all(clock_);
     lv_obj_set_pos(clock_,w/3,0);
@@ -311,6 +321,7 @@ void View::draw_event(lv_event_t* e) {
     else if (target == self->menu_ || target == self->menu_capture_) self->draw_menu(layer);
     else if (target == self->picker_) self->draw_picker(layer);
     else if (target == self->channel_) self->draw_channel(layer);
+    else if (target == self->status_) self->draw_status(layer);
     else if (target == self->clock_) {
         const float size=24.0f*self->height_/1080;
         const float x=(self->width_-self->text_.canvas_advance(self->clock_text_,size))/2;
@@ -522,6 +533,36 @@ void View::draw_channel(lv_layer_t* layer) {
     }
     label("LEFT / RIGHT  Select     UP  Quietest     DOWN  Current     OK  Apply     BACK  Close",pad,height_-46*u,20,theme.text);
     label(!scan.fresh?"Scan stale; waiting for radio":model_.feedback,pad,height_-17*u,18,theme.quiet);
+}
+void View::draw_status(lv_layer_t* layer) {
+    // Where the artwork used to bake "Ready": the idle status word, same font,
+    // size and place, swapped for the live binding state while a bind runs.
+    const auto& theme = hud_theme_at(model_.theme);
+    const float px = 45.8f * height_ / 1080.0f, baseline = height_ * 0.867f;
+    char s[48];
+    const unsigned p = model_.bind_peer;
+    switch (model_.bind_state) {
+    case gnd::BIND_RUNNING: std::snprintf(s, sizeof s, "BINDING  %ds", model_.bind_secs_left); break;
+    case gnd::BIND_OK:      std::snprintf(s, sizeof s, "BOUND  %02X:%02X:%02X:%02X",
+                                          (p >> 24) & 0xFF, (p >> 16) & 0xFF, (p >> 8) & 0xFF, p & 0xFF); break;
+    case gnd::BIND_FAILED:  std::snprintf(s, sizeof s, "NO AIR UNIT FOUND"); break;
+    case gnd::BIND_LINKED:  std::snprintf(s, sizeof s, "ALREADY LINKED"); break;
+    default:                std::snprintf(s, sizeof s, "Ready"); break;
+    }
+    const float x = (width_ - text_.canvas_advance(s, px)) / 2;
+    const int ts = std::max(1, int(height_ * 0.00238f + 0.5f));
+    static const float shadow[] = {0, 0, 0.05f};
+    text_.canvas(layer, s, x, baseline, px, false, shadow, 0.35f, 2 * ts, 2 * ts);
+    text_.canvas(layer, s, x, baseline, px, false, shadow, 0.60f, ts, ts);
+    text_.canvas(layer, s, x, baseline, px, false, theme.accent, 1.0f);
+    // A cancel hint under the word while the bind window is open.
+    if (model_.bind_state == gnd::BIND_RUNNING) {
+        const char* c = "Press bind again to cancel";
+        const float cpx = px * 0.52f, cby = baseline + px * 0.62f;
+        const float cx = (width_ - text_.canvas_advance(c, cpx)) / 2;
+        text_.canvas(layer, c, cx, cby, cpx, false, shadow, 0.55f, ts, ts);
+        text_.canvas(layer, c, cx, cby, cpx, false, theme.quiet, 1.0f);
+    }
 }
 void View::draw_gallery(lv_layer_t* layer) {
     const auto& theme=hud_theme_at(model_.theme);const float u=height_/1080.0f;
@@ -885,6 +926,15 @@ void View::update(uint64_t now) {
     if(model_.channel_open && (old_channel_!=model_.channel_open || channel_revision_!=model_.backend.channels.revision ||
                               menu_version_!=model_.menu_version || old_theme_!=model_.theme)) lv_obj_invalidate(channel_);
     old_channel_=model_.channel_open; channel_revision_=model_.backend.channels.revision;
+    // The idle status word: "Ready" (or the live binding state) shows wherever
+    // the idle artwork does. Repaint it when it appears, the bind state or its
+    // countdown changes, or the theme changes.
+    const bool show_status = idle_.paints(model_, now_) && !model_.backend.vrx.link_valid(now_);
+    hidden(status_, !show_status);
+    if (show_status && (!old_status_ready_ || model_.bind_state != old_bind_state_ ||
+                        model_.bind_secs_left != old_bind_secs_ || old_theme_ != model_.theme))
+        lv_obj_invalidate(status_);
+    old_status_ready_ = show_status; old_bind_state_ = model_.bind_state; old_bind_secs_ = model_.bind_secs_left;
     const auto& t = model_.backend.vrx;
     const auto& flight = model_.backend.flight;
     const bool flight_fresh = flight.stamp_us && now >= flight.stamp_us && now - flight.stamp_us < 2000000;
