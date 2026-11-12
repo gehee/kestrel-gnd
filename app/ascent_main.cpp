@@ -24,6 +24,7 @@
 #include "hal/source_decoder.hpp"
 #include "dvr/stream_player.hpp"
 #include "dvr/export_job.hpp"
+#include "hal/v4l2/find_encoder.hpp"
 #include "hud/lvgl/view.hpp"
 #include "render/software/frame_cadence.hpp"
 #include <csignal>
@@ -239,7 +240,8 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
         const auto export_executable=std::filesystem::read_symlink("/proc/self/exe").parent_path()/"kestrel-export";
         auto exporter=std::make_unique<dvr::ExportJob>(o.recordings,export_executable.string(),dvr::ExportJob::Media{
             [&](bool on){source_decoder->suspend(on);},[&]{return source_decoder->suspended();}});
-        const bool export_available=exporter->available() && access("/dev/ar9311-ge2d",R_OK|W_OK)==0 && access("/dev/video1",R_OK|W_OK)==0;
+        const auto export_encoder=hal::find_hevc_encoder();
+        const bool export_available=exporter->available() && access("/dev/ar9311-ge2d",R_OK|W_OK)==0 && !export_encoder.empty();
         uint64_t export_revision=0;
         lv_init();
         struct LvLifetime { ~LvLifetime() { lv_deinit(); } } lv_lifetime;
@@ -275,10 +277,10 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
                 const auto rec=recorder.state();const auto play=player.state();
                 if(recorder.is_recording() || rec.finishing || play.busy || play.deleting || mode.pending)
                     throw std::runtime_error("Stop recording/playback and finish screen changes before exporting");
-                if(access("/dev/ar9311-ge2d",R_OK|W_OK) || access("/dev/video1",R_OK|W_OK))
+                if(access("/dev/ar9311-ge2d",R_OK|W_OK) || export_encoder.empty())
                     throw std::runtime_error("Hardware export needs updated fpvOS firmware");
                 exporter->start(id.substr(7),{assets_root.string(),o.preferences.empty()?"-":o.preferences,
-                    o.platform.decoder_device,"/dev/video1",o.vector?"vector":"canopy"});
+                    o.platform.decoder_device,export_encoder,o.vector?"vector":"canopy"});
                 model.backend.export_busy=true;model.backend.export_percent=0;
                 model.backend.export_file=id.substr(7);model.backend.export_message="Preparing export";
                 return std::string("Export started");
@@ -374,12 +376,18 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
             // Pro; one tried while armed is not reverted in the air (that
             // restarts the session, radio and HDMI included) but once it has
             // landed.
-            if(controller.take_arming() && mode.pending) {
+            const bool arming=controller.take_arming();
+            if(arming && mode.pending) {
                 mode.keep();
                 settings.set(display::setting::ascent_screen_height,mode.current.height);
                 settings.set(display::setting::ascent_screen_hz,mode.current.hz);
                 settings.flush();
                 printf("menu: screen mode %s kept (armed)\n",mode.current.label().c_str());
+            }
+            // An export holds the live decoder: arming brings the video back.
+            if(arming && exporter->state().busy) {
+                exporter->cancel();
+                printf("export: canceled (armed)\n");
             }
             if(mode.pending && mode.deadline && now>=mode.deadline && controller.armed(now)) mode.deadline=now+1000000;
             if(mode.tick(now)) break;

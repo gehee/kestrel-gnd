@@ -146,7 +146,9 @@ The initial export backend is `hal/artosyn/ge2d_compositor.*`. It imports decode
 YUV DMA buffers and separate ARGB HUD panels, clips translated panels to the
 output bounds, and asks fpvOS's native GE2D driver to compose into a separate
 encoder input buffer. It never modifies decoder reference pictures. The kernel
-UAPI copy in `hal/artosyn/ar9311_ge2d.h` must match fpvOS's `ar9311-ge2d` package.
+UAPI copy in `hal/artosyn/ar9311_ge2d.h` must match fpvOS's `ar9311-ge2d` package
+(kestrel-gnd builds outside Buildroot). Change both together and bump the ABI
+version: struct sizes are checked at compile time, the version when opening.
 
 This backend supports BT.709 limited-range planar YUV and straight-alpha ARGB up
 to 1920x1080. Calls are synchronous; callers retain all buffers until return and
@@ -160,7 +162,8 @@ acquiring DRM master. `ge2d_compositor_test` checks request layout and clipping 
 the host.
 
 In the gallery, REC opens recording actions. Choose **Export with HUD** and press
-OK. Progress appears in the gallery; BACK cancels. Recording, playback, deletion
+OK. Progress appears in the gallery; BACK cancels, and so does arming the
+aircraft (live video comes back at once). Recording, playback, deletion
 and screen changes are excluded during export. Live decoding is suspended, then
 restored on success, failure or cancellation. HDMI stays in its current mode.
 The capability remains unavailable on firmware without the encoder/GE2D devices
@@ -172,16 +175,22 @@ including Canopy/Vector panels, recorded telemetry, translated motion, optional
 Betaflight OSD, clock and link warning edges. Current visual preferences apply;
 Export with HUD explicitly includes the HUD, while Dynamic HUD still controls
 movement. Playback controls and the timeline are omitted. Missing telemetry is
-reported as an error; stale intervals hide the HUD just as in playback.
+reported as an error; stale intervals hide the HUD just as in playback. A
+snapshot that failed while recording (stored empty) keeps the previous HUD on
+screen while that one is fresh, instead of failing the export.
 
 The worker accepts native single-track HEVC MP4 recordings at 720p or 1080p. It
 preserves every sample duration, including variable timing, using cumulative
 90 kHz timestamps. Imported audio tracks and composition-offset/reordered video
 are rejected rather than silently discarded or assigned incorrect HUD timing.
-The encoder produces HEVC at 8 Mbps. CPU work renders only the UI: GE2D reads the
+The encoder produces HEVC at 8 Mbps. It is the V4L2 memory-to-memory node whose
+output is HEVC, found when kestrel-gnd starts, not a fixed `/dev/videoN`. Packets
+are written as the encoder returns them; at the end it is drained with
+`V4L2_ENC_CMD_STOP` if it still holds pictures. CPU work renders only the UI: GE2D reads the
 decoder's DMA-BUF, composites the ARGB overlay into a separate YUV DMA-BUF, and
-the hardware encoder imports that output. The first integration uses a retained
-full-size UI surface; tighter overlay rectangles remain an optimization.
+the hardware encoder imports that output. The UI surface is full-size, but only
+the regions LVGL redrew are copied into it, and the recorded HUD is decoded
+again only when it changes.
 
 Completed videos appear in `exports/<original-stem>-hud-<unique-id>.mp4` beneath
 the recording directory. Original video, thumbnail and telemetry are unchanged.
@@ -189,7 +198,10 @@ Exports are kept outside the recording gallery to avoid applying the HUD twice.
 Output is first written to a private partial file, flushed and finalized, then
 published atomically without overwriting an earlier export. Cancellation and
 ordinary failures remove the partial file; a power interruption can leave a
-hidden partial file, never a completed-looking gallery entry.
+hidden partial file, never a completed-looking gallery entry. The worker dies
+with kestrel-gnd (parent-death signal), so a crash never leaves it holding the
+compositor and a decoder; partial files left that way are removed when
+kestrel-gnd starts and before each export.
 
 Ascent fpvOS needs a 64 MiB CMA pool for the three 1080p scanout buffers plus
 export's ARGB/YUV surfaces. Unused CMA pages remain usable for movable system

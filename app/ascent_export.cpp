@@ -13,6 +13,7 @@
 #include <condition_variable>
 #include <csignal>
 #include <filesystem>
+#include <sys/prctl.h>
 #include <thread>
 using namespace kestrel_ui;
 namespace {
@@ -66,7 +67,14 @@ struct Decode {
             thread.join();
     }
 };
-void hud_sample(Model &m, const std::shared_ptr<const media::TimedTelemetry> &s, uint64_t us) {
+// The HUD of the last sample shown: decoded again only when its bytes change
+// (samples last many frames).
+struct HudCache {
+    std::shared_ptr<const media::TimedTelemetry> sample;
+    std::vector<uint8_t> bytes;
+    std::shared_ptr<const HudData> data;
+};
+void hud_sample(Model &m, HudCache &cache, std::shared_ptr<const media::TimedTelemetry> s, uint64_t us) {
     auto &b = m.backend;
     b.playback_position_us = us;
     b.playback_hud.reset();
@@ -74,11 +82,21 @@ void hud_sample(Model &m, const std::shared_ptr<const media::TimedTelemetry> &s,
     b.playback_dx = b.playback_dy = b.playback_bank = 0;
     b.playback_warning = 0;
     b.playback_clock.clear();
+    // A snapshot that failed while recording is stored empty (ascent_main):
+    // the last good one stays on screen while it is fresh enough.
+    if (s && s->sample.hud.empty())
+        s = cache.sample;
     if (!s || us < s->us || us - s->us > 2500000)
         return;
     const auto &sample = s->sample;
-    require(!sample.hud.empty(), "Telemetry snapshot has no HUD data");
-    b.playback_hud = std::make_shared<HudData>(hud_ipc::decode_data(sample.hud));
+    if (s != cache.sample) {
+        cache.sample = s;
+        if (sample.hud != cache.bytes) {
+            cache.data = std::make_shared<HudData>(hud_ipc::decode_data(sample.hud));
+            cache.bytes = sample.hud;
+        }
+    }
+    b.playback_hud = cache.data;
     b.playback_grid = sample.grid;
     auto get = [&](const char *key) {
         const auto i = sample.values.find(key);
@@ -87,6 +105,7 @@ void hud_sample(Model &m, const std::shared_ptr<const media::TimedTelemetry> &s,
     b.playback_osd_fresh = get("osd.fresh") != 0;
     b.playback_dx = std::clamp(get("motion.dx"), -1., 1.);
     b.playback_dy = std::clamp(get("motion.dy"), -1., 1.);
+    b.playback_bank = std::clamp(get("motion.bank_rad"), -1., 1.);
     b.playback_warning = int(std::clamp(get("link.warning"), 0., 2.));
     const auto clock = sample.text.find("clock");
     if (clock != sample.text.end())
@@ -140,6 +159,7 @@ void run(int argc, char **argv) {
     Decode decode(argv[5]);
     for (auto &p : source.parameters)
         decode.decoder.feed_packet_to_decoder(p.data(), p.size(), 0, 0, (p[4] >> 1) & 63, 0, 0);
+    HudCache hud_cache;
     bool had_hud = false;
     int percent = -1;
     uint64_t presented = ~uint64_t(0);
@@ -156,21 +176,23 @@ void run(int argc, char **argv) {
                 "Export decoder picture/timestamp mismatch");
         auto recorded = telemetry.at(sample.us);
         require(telemetry.error().empty(), "Recorded HUD data is damaged");
-        hud_sample(model, recorded, sample.us);
+        hud_sample(model, hud_cache, recorded, sample.us);
         had_hud |= bool(model.backend.playback_hud);
         video_ms = 1000 + sample.us / 1000;
         view.update(1000000 + sample.us);
         lv_timer_handler();
         lv_refr_now(display.lv_display());
         if (presented != display.presentations) {
+            // Only CPU-rendered UI pixels are copied, and only where LVGL
+            // drew (the first frame is all of it). Video stays in DMA-BUFs.
+            const auto damage = display.take_damage();
             overlay.sync(DMA_BUF_SYNC_START | DMA_BUF_SYNC_WRITE);
-            // Only CPU-rendered UI pixels are copied. Video stays in DMA-BUFs.
-            for (unsigned y = 0; y < source.height; ++y)
-                memcpy(overlay.data + y * overlay.stride, display.pixels().data() + size_t(y) * source.width,
-                       source.width * 4);
+            for (const auto &d : damage)
+                for (int y = d.y; y < d.y + d.height; ++y)
+                    memcpy(overlay.data + size_t(y) * overlay.stride + size_t(d.x) * 4,
+                           display.pixels().data() + size_t(y) * source.width + d.x, size_t(d.width) * 4);
             overlay.sync(DMA_BUF_SYNC_END | DMA_BUF_SYNC_WRITE);
             presented = display.presentations;
-            display.take_damage();
         }
         ar_ge2d_image input{};
         input.width = source.width;
@@ -201,6 +223,12 @@ void run(int argc, char **argv) {
 }
 } // namespace
 int main(int argc, char **argv) {
+    // Dies with kestrel-gnd's export thread: an orphan would keep GE2D (one
+    // opener at a time) and a decoder instance. Its partial file is removed
+    // by the next ExportJob.
+    const pid_t parent = getppid();
+    if (prctl(PR_SET_PDEATHSIG, SIGKILL) || getppid() != parent)
+        return 1;
     setpriority(PRIO_PROCESS, 0, 10);
     setvbuf(stdout, nullptr, _IOLBF, 0);
     signal(SIGTERM, signal_stop);

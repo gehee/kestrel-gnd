@@ -164,6 +164,16 @@ int main(int argc, char **argv) {
         check(fs::file_size(input) == original && held == resumed,
               "original preserved and all resource leases released");
         {
+            // What a worker that outlived a crashed kestrel-gnd leaves behind.
+            std::ofstream(directory + "/exports/.hud-Stale1") << "partial";
+            std::ofstream(directory + "/exports/.hud-notours") << "kept";
+            dvr::ExportJob restarted(directory, fs::read_symlink("/proc/self/exe"),
+                                     {[](bool) {}, [] { return true; }});
+            check(!fs::exists(directory + "/exports/.hud-Stale1") && fs::exists(directory + "/exports/.hud-notours"),
+                  "stale partial removed at start, other files kept");
+            fs::remove(directory + "/exports/.hud-notours");
+        }
+        {
             dvr::ExportJob shutdown(directory, fs::read_symlink("/proc/self/exe"),
                                     {[&](bool on) { suspended = on; }, [&] { return suspended.load(); }});
             shutdown.start("clip.mp4", {"cancel"});

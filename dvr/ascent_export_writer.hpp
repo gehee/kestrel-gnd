@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <fcntl.h>
 #include <linux/videodev2.h>
 #include <poll.h>
@@ -172,6 +173,50 @@ class AscentExportWriter {
         fprintf(stderr, "encoder ready %dx%d stride=%d/%d/%d coded=%zu\n", w, h, strides[0], strides[1],
                 strides[2], coded.size() * coded[0].n);
     }
+    // Packets are taken as the encoder hands them out, not one per frame:
+    // each keeps the duration of the picture it came from (no reordering).
+    std::deque<unsigned> pending;
+    bool take_packets(bool &last) {
+        bool any = false;
+        for (;;) {
+            v4l2_plane q{};
+            auto d = buf(CAP, 0, 1, &q);
+            if (io(fd, VIDIOC_DQBUF, &d) < 0) {
+                if (errno == EPIPE) // drained after the stop command
+                    last = true;
+                else
+                    ck(errno == EAGAIN, "encoder coded dequeue");
+                return any;
+            }
+            ck(d.index < coded.size() && q.bytesused >= q.data_offset && q.bytesused <= coded[d.index].n &&
+                   !(d.flags & V4L2_BUF_FLAG_ERROR),
+               "encoder packet invalid");
+            const size_t n = q.bytesused - q.data_offset;
+            if (d.flags & V4L2_BUF_FLAG_LAST)
+                last = true;
+            if (n) {
+                ck(!pending.empty(), "encoder packet without a picture");
+                ck(mp4_h26x_write_nal(&mp4, coded[d.index].p + q.data_offset, n, pending.front()) ==
+                       MP4E_STATUS_OK,
+                   "MP4 packet");
+                pending.pop_front();
+                frames++;
+                bytes += n;
+                any = true;
+            } else
+                ck(last, "encoder packet invalid");
+            if (last)
+                return any;
+            ck(io(fd, VIDIOC_QBUF, &d) == 0, "encoder coded requeue");
+        }
+    }
+    void wait(double deadline) {
+        ck(seconds() < deadline, "encoder timeout");
+        pollfd poller{fd, POLLIN | POLLOUT, 0};
+        ck(poll(&poller, 1, 10) >= 0 || errno == EINTR, "encoder poll");
+    }
+    // Returns once the encoder has released src: the caller writes the next
+    // picture into the same buffer.
     void frame(const ar_ge2d_image &src, size_t bytes, uint64_t pts, unsigned ticks) {
         v4l2_plane p[3]{};
         for (int j = 0; j < 3; j++) {
@@ -187,10 +232,10 @@ class AscentExportWriter {
         b.timestamp.tv_sec = pts / 1000000;
         b.timestamp.tv_usec = pts % 1000000;
         ck(io(fd, VIDIOC_QBUF, &b) == 0, "encoder shared queue");
-        bool returned = false, encoded = false;
-        double deadline = seconds() + 5;
-        while (!returned || !encoded) {
-            ck(seconds() < deadline, "encoder timeout");
+        pending.push_back(ticks);
+        bool returned = false, last = false;
+        const double deadline = seconds() + 5;
+        for (;;) {
             if (!returned) {
                 v4l2_plane q[3]{};
                 auto d = buf(OUT, 0, 3, q);
@@ -201,31 +246,29 @@ class AscentExportWriter {
                 } else
                     ck(errno == EAGAIN, "encoder raw dequeue");
             }
-            if (!encoded) {
-                v4l2_plane q{};
-                auto d = buf(CAP, 0, 1, &q);
-                if (io(fd, VIDIOC_DQBUF, &d) == 0) {
-                    ck(d.index < coded.size() && q.bytesused > q.data_offset &&
-                           q.bytesused <= coded[d.index].n && !(d.flags & V4L2_BUF_FLAG_ERROR),
-                       "encoder packet invalid");
-                    size_t n = q.bytesused - q.data_offset;
-                    ck(mp4_h26x_write_nal(&mp4, coded[d.index].p + q.data_offset, n, ticks) == MP4E_STATUS_OK,
-                       "MP4 packet");
-                    frames++;
-                    bytes += n;
-                    encoded = true;
-                    ck(io(fd, VIDIOC_QBUF, &d) == 0, "encoder coded requeue");
-                } else
-                    ck(errno == EAGAIN, "encoder coded dequeue");
-            }
-            if (!returned || !encoded) {
-                pollfd poller{fd, POLLIN | POLLOUT, 0};
-                ck(poll(&poller, 1, 10) >= 0 || errno == EINTR, "encoder poll");
-            }
+            take_packets(last);
+            ck(!last, "encoder stopped early");
+            if (returned)
+                return;
+            wait(deadline);
         }
     }
     void finish() {
         ck(mux && file, "export output missing");
+        // Drain: the stop command makes the encoder hand out what it holds and
+        // mark the last packet. Skipped when every picture is already written.
+        if (!pending.empty()) {
+            v4l2_encoder_cmd stop{};
+            stop.cmd = V4L2_ENC_CMD_STOP;
+            ck(io(fd, VIDIOC_ENCODER_CMD, &stop) == 0, "encoder drain");
+            bool last = false;
+            const double deadline = seconds() + 5;
+            while (!pending.empty() && !last) {
+                if (!take_packets(last) && !last)
+                    wait(deadline);
+            }
+            ck(pending.empty(), "encoder lost pictures");
+        }
         const auto result = MP4E_close(mux);
         mux = nullptr;
         mp4_h26x_write_close(&mp4);

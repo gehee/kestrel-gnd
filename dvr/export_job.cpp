@@ -29,9 +29,27 @@ struct Fd {
             close(n);
     }
 };
+// Partial files (.hud-XXXXXX) left by a worker that outlived a crashed
+// kestrel-gnd: one export runs at a time, so outside run() every one is stale.
+void remove_partials(const std::string &folder) noexcept {
+    struct stat st{};
+    if (lstat(folder.c_str(), &st) || !S_ISDIR(st.st_mode)) // never through a symlink
+        return;
+    try {
+        std::error_code ec;
+        for (const auto &entry : std::filesystem::directory_iterator(folder, ec)) {
+            const auto name = entry.path().filename().string();
+            if (name.size() == 11 && name.compare(0, 5, ".hud-") == 0 && entry.is_regular_file(ec))
+                std::filesystem::remove(entry.path(), ec);
+        }
+    } catch (const std::exception &) {
+    }
+}
 } // namespace
 ExportJob::ExportJob(std::string d, std::string e, Media media)
-    : directory_(std::move(d)), executable_(std::move(e)), media_(std::move(media)) {}
+    : directory_(std::move(d)), executable_(std::move(e)), media_(std::move(media)) {
+    remove_partials(directory_ + "/exports");
+}
 ExportJob::~ExportJob() {
     cancel();
     if (thread_.joinable())
@@ -85,6 +103,7 @@ void ExportJob::run(std::string name, std::vector<std::string> options) {
             throw std::runtime_error("Cannot create exports folder");
         struct stat st{};
         require(!lstat(folder.c_str(), &st) && S_ISDIR(st.st_mode), "Invalid exports folder");
+        remove_partials(folder);
         std::string pattern = folder + "/.hud-XXXXXX";
         std::vector<char> path(pattern.begin(), pattern.end());
         path.push_back(0);
