@@ -1,6 +1,8 @@
 #include "receiver_controls.hpp"
 #include "controller.hpp"
+#include "system/air/power.hpp"
 #include <cstdio>
+#include <algorithm>
 #include <cstring>
 #include <stdexcept>
 using namespace kestrel_ui;
@@ -106,6 +108,43 @@ int main() {
             const auto& rates=state.controls.at("Max Bitrate").choices;
             check(rates.size()==13 && rates.front().label=="AUTO" && rates.back().value==40000,"Bitrate list is the VRX Pro's");
         }
+        // Radio choices use wire values, preserve power mode, and reject
+        // unsupported levels rather than exposing a combined mode/level list.
+        air.value.prj=AR_AIR_LITE; air.value.tx_power_want_mw=25; ++air.revision;
+        ground.value.max_bw_mhz=40; ++ground.revision; controls.update(state,now);
+        check(state.controls.at("max_bw").choices.size()==5 && state.controls.at("max_bw").value==40,
+              "Open8030 exposes AUTO and 5/10/20/40 MHz");
+        state.vrx.connected=true;state.vrx.mcs=5;state.vrx.stamp_us=now;model.tab=1;
+        const auto radio_rows=model.rows(now);
+        auto has_row=[&](const char* id){return std::any_of(radio_rows.begin(),radio_rows.end(),
+            [&](const auto& row){return row.id==id;});};
+        check(has_row("max_bw") && has_row("power_mode"),"Native radio menu exposes both new controls");
+        model.tab=0;
+        controls.apply("max_bw",20,now);
+        check(ground.last==20,"Bandwidth sends MHz, not menu index");
+        controls.apply("max_bw",0,now); check(ground.last==0,"AUTO sends zero");
+        bool bad_bw=false;
+        try {controls.apply("max_bw",80,now);} catch(const std::invalid_argument&) {bad_bw=true;}
+        check(bad_bw,"Reject unsupported bandwidth");
+        controls.apply("power_mode",1,now);
+        check(air.last==101,"Stock Lite AUTO selects its supported 100mW cap");
+        air.value.tx_power_want_mw=101; ++air.revision; controls.update(state,now);
+        check(state.controls.at("power").choices.size()==1 && state.controls.at("power").value==100,
+              "Stock AUTO exposes only supported cap, separate from mode");
+        controls.apply("power_mode",0,now); check(air.last==100,"FIXED preserves AUTO cap");
+        air.value.prj=AR_AIR_P1;air.value.fine=1;air.value.tx_power_want_mw=151;++air.revision;
+        controls.update(state,now); controls.apply("power",200,now);
+        check(air.last==201,"P1 power level edit preserves AUTO encoding");
+        bool bad_power=false;
+        try {controls.apply("power",500,now);} catch(const std::invalid_argument&) {bad_power=true;}
+        check(bad_power,"P1 never offers unsupported 500mW");
+        ground.value.radio_fw=0;++ground.revision;controls.update(state,now);
+        check(!state.controls.at("max_bw").enabled,"Native width control requires Open8030");
+        ground.value.radio_fw=1;ground.value.link.active=false;++ground.revision;controls.update(state,now);
+        check(!state.controls.at("max_bw").enabled && !state.controls.at("power_mode").enabled,
+              "Disconnected radio cannot apply power or bandwidth");
+        ground.value.link.active=true;++ground.revision;controls.update(state,now);
+        ground.calls=0;air.calls=0;
         controls.apply("Max Bitrate",18000,now);
         check(encoder.calls==1 && encoder.last==18000,"Bitrate uses kbps, not an option index");
         bool rejected=false;
