@@ -21,6 +21,11 @@ public:
     // Temporarily yield the hardware to an offline export. HDMI/UI stay alive.
     void suspend(bool on);
     bool suspended() const;
+    // Strips decoded by decoders of their own (hal/artosyn/wave5_strips),
+    // which need the live decoder's hardware and memory: no live decoder
+    // while on (a playback still runs). live_released: none left.
+    void hold_live(bool on);
+    bool live_released() const;
     void run_frame() override;
     void cleanup() override;
     bool keyframe_in() const override;
@@ -31,7 +36,7 @@ private:
     mutable std::mutex mutex_;
     std::shared_ptr<Vdec> active_;
     std::array<std::vector<uint8_t>,3> live_parameters_;
-    bool suspended_=false;
+    bool suspended_=false,live_held_=false;
     bool wanted_=false,playing_=false,paused_=false;
     uint64_t generation_=0,active_generation_=0;
     std::atomic<bool> quit_{false},failed_{false},playback_failed_{false};

@@ -32,6 +32,9 @@ public:
     bool nal(const uint8_t* nal, size_t len, uint64_t recv_us, VideoOut::SliceHeader& hdr);
     void end_of_read();
     void drop_picture();
+    // The air unit sends whole pictures again: the picture being joined goes,
+    // and the joiner is told (one decoding the strips itself lets go).
+    void whole_pictures();
     void relearn();
 private:
     // What each strip's VideoOut tells the radio, kept per picture.

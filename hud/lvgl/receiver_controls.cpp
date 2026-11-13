@@ -102,6 +102,9 @@ void ReceiverControls::update(BackendState& state, uint64_t now) {
            u.info.kestrel || u.stock, modes, "Requires a recognized air unit.");
     choice("Max Bitrate",e.max_kbps,true,u.info.kestrel,table(air::kArMaxBrVals,air::kArMaxBrLabels,air::kArMaxBrCount),
            "Requires an fpvOS air unit.");
+    // Strips: only where both ends can (the feature bit), not listed otherwise.
+    if(linked && (u.features & air::kFeatStrips))
+        choice("Strips",e.strips,true,true,table(air::kArStripsVals,air::kArStripsLabels,air::kArStripsCount));
     auto offer=ar_pwr_offered(a.prj,a.fine); std::vector<ReceiverChoice> powers;
     for(int i=0;i<offer.n;++i) powers.push_back({offer.mw[i],kArPwrLevels[ar_pwr_index(offer.mw[i])].label});
     choice("power",a.tx_power_want_mw,a.tx_power_want_mw>0,g.rf_caps & gnd::RF_CAP_POWER,powers,"The radio does not expose power control.");
@@ -140,6 +143,7 @@ std::string ReceiverControls::apply(const std::string& id,int value,uint64_t now
         throw std::invalid_argument("Unsupported control value");
     if(id=="bind") {ground_.bind();return "Binding requested";}
     if(id=="Max Bitrate") encoder_.set_max_bitrate(value);
+    else if(id=="Strips") encoder_.set_strips(value);
     else if(id=="Video Mode") camera_.set_mode(value);
     else if(id=="power") air_.set_tx_power(value);
     else if(id=="standby") unit_.set_standby(value!=0);

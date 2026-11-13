@@ -31,6 +31,9 @@ enum : uint8_t {
                     //    (kind 1 whole, 2 top over an older lower part, 3 lower part alone, 4 older whole first)
     kHold = 13,     // a: pts of the top waiting, b: reason | to-vblank us << 8 - nothing put up at a deadline
     kCap = 14,      // a: pts, b: its capture stamp on our clock (by the radio clock; row 0), t: first slice here
+    kStripIn = 15,  // a: pts, b: strip | first byte here << 8, t: the strip all here (decoded in place)
+    kStripFed = 16, // a: pts, b: strip, t: given to its decoder
+    kStripOut = 17, // a: pts, b: strip, t: decoded into the whole picture
 };
 
 struct Rec {

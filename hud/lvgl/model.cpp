@@ -140,6 +140,12 @@ std::vector<MenuRow> Model::rows(uint64_t now) const {
         for (const char* name : {"Video Mode", "Max Bitrate", "Rotate", "Scene", "EV", "White Balance",
                                  "Saturation", "Contrast", "Sharpness", "3D DNR", "Focus Mode"})
             result.push_back(unavailable(name, name, "Changes the air unit's camera."));
+        // After Max Bitrate, only where both ends can (receiver_controls lists it then).
+        if (backend.controls.count("Strips"))
+            result.insert(result.begin() + 2, unavailable("Strips", "Strips",
+                "Each picture sent as strips of rows, the top one out of the air unit's encoder sooner: "
+                "lower latency. More strips: lower still, but less detail in each and more joins where "
+                "they meet. OFF: whole pictures."));
         return result;
     }
     if (tab == 1) {
@@ -316,6 +322,8 @@ std::string Model::describe() const {
         << " keys=" << key_count << " last=" << last_key << " hud_pid=" << hud_pid << " hud_restarts=" << hud_restarts
         << " vrx_temp_c=" << (backend.vrx.cpu_temperature_x100 == Telemetry::unavailable ? std::string("--")
                               : std::to_string(backend.vrx.cpu_temperature_x100 / 100))
+        << " video_fps=" << backend.video.fps << " latency_ms=" << backend.video.latency_ms
+        << " idle_shown=" << show_status(monotonic_us())
         << " backend_connected=" << backend.service.connected << " backend_session=" << backend.service.session
         << " backend_caps=" << backend.service.capabilities << " provider_connected=" << backend.service.provider_connected
         << " msp_frames=" << backend.serial.frames << " pack_valid=" << backend.flight.have_pack_v

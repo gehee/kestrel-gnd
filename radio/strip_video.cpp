@@ -26,7 +26,8 @@ bool StripVideo::make_strip(int k) {
     if (s.out) return true;
     static const char* const tags[kMax] = {"strip0", "strip1", "strip2", "strip3"};
     std::unique_ptr<Vdec> dec;
-    if (decode_enabled_) {
+    if (decode_enabled_) dec = joiner_->decoder(k);
+    if (decode_enabled_ && !dec) {
         dec = make_([this, k](std::shared_ptr<DecodedUnit> du) {
                         // What its header said when it came, not what the
                         // strips coming now say (the count may have changed).
@@ -67,6 +68,7 @@ bool StripVideo::nal(const uint8_t* nal, size_t len, uint64_t recv_us, VideoOut:
         s.last = hdr.last;
         s.ov = hdr.strip_ov;
     }
+    joiner_->arriving(k, pic_, hdr.last, hdr.strip_ov);
     // To the strip's own stream a picture is one slice, which ends it.
     VideoOut::SliceHeader h = hdr;
     h.idx = 0;
@@ -134,6 +136,11 @@ void StripVideo::drop_picture() {
         if (s.out) s.out->drop_picture();
     if (joiner_) joiner_->drop();
     timed_pic_ = done_pic_ = -1;
+}
+
+void StripVideo::whole_pictures() {
+    drop_picture();
+    if (joiner_) joiner_->stopped();
 }
 
 void StripVideo::relearn() {

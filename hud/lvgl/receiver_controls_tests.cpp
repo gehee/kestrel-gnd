@@ -77,6 +77,23 @@ int main() {
             check(offered()=="720p60 864p144 1080p60 ","Video Mode names the running mode before its feature bit arrives");
             camera.value.mode_n=0; camera.value.video_mode=0; unit.value.features=0; changed();
         }
+        {
+            // Strips: listed only where both ends can (the feature bit), after
+            // Max Bitrate, the air unit's count by value.
+            check(!state.controls.count("Strips"),"Strips not listed without the feature bit");
+            unit.value.features=air::kFeatStrips; encoder.value.strips=2; ++unit.revision; ++encoder.revision;
+            controls.update(state,now);
+            const auto& strips=state.controls.at("Strips");
+            check(strips.enabled && strips.choices.size()==4 && strips.choices[0].label=="OFF" && strips.choices[3].value==4,
+                  "Strips offers OFF/2/3/4 where both ends can");
+            model.tab=0;
+            const auto rows=model.rows(now);
+            check(rows[2].id=="Strips" && rows[2].value=="2" && rows[2].editable,"Strips follows Max Bitrate and shows the count");
+            controls.apply("Strips",3,now);
+            check(encoder.calls==1 && encoder.last==3,"Strips asks the encoder for the count");
+            encoder.calls=0; unit.value.features=0; ++unit.revision; controls.update(state,now);
+            check(!state.controls.count("Strips"),"Strips goes when the bit does");
+        }
         check(state.controls.at("Max Bitrate").enabled,"P1 bitrate is supported");
         {
             // The VRX Pro's tables, by the value on the wire.

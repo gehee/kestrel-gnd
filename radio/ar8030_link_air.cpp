@@ -2,6 +2,7 @@
 // air unit's status, version, info and announcements, its camera's settings
 // and the settings sent to it.
 #include "radio/ar8030_link_detail.hpp"
+#include "system/air/encoder.hpp"
 
 using namespace radio;
 
@@ -907,6 +908,7 @@ void Ar8030Link::note_air_info(const uint8_t *pl, size_t n) {
     // The modes it says it has beyond its header's bits (864p144): the Video
     // Mode row offers them, and a stored one it lacks goes back to the default.
     {
+        static_assert(kAirFeatStrips == air::kFeatStrips, "the canopy menu lists Strips by this bit");
         uint16_t xf = 0;
         for (const auto &e : kv) {
             if (e.first == "864p144" && e.second == "1") xf |= kAirFeat864p144;

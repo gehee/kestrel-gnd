@@ -85,7 +85,7 @@ void Ar8030Link::picture_start(uint64_t recv_us, radio::VideoOut::PictureTiming&
 void Ar8030Link::vhdr_strip_seen(bool strip) {
     if (strip != vstrip_) {
         if (strip) video_.drop_picture();
-        else if (strips_) strips_->drop_picture();
+        else if (strips_) strips_->whole_pictures();
         printf("ar8030: %s\n", strip ? "pictures in strips now: each strip decoded on its own, joined again"
                                      : "whole pictures again");
     }

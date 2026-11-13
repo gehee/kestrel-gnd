@@ -12,6 +12,15 @@ void SourceDecoder::suspend(bool on) {
 bool SourceDecoder::suspended() const {
     std::lock_guard<std::mutex> lock(mutex_);return suspended_ && !active_;
 }
+void SourceDecoder::hold_live(bool on) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if(live_held_==on)return;
+    live_held_=on;
+    if(on && active_ && !playing_){++generation_;active_->cleanup();}
+}
+bool SourceDecoder::live_released() const {
+    std::lock_guard<std::mutex> lock(mutex_);return live_held_ && !(active_ && !playing_);
+}
 void SourceDecoder::playback(bool on) {
     std::lock_guard<std::mutex> lock(mutex_);
     if(wanted_==on)return;
@@ -49,7 +58,7 @@ void SourceDecoder::feed_packet_to_decoder(void* data,int len,int64_t pts,uint64
 bool SourceDecoder::keyframe_in() const {
     std::lock_guard<std::mutex> lock(mutex_);
     // A player is not a live-stream loss and must not trigger IDR requests.
-    return suspended_ || wanted_ || (active_ && !playing_ && active_generation_==generation_ && active_->keyframe_in());
+    return suspended_ || live_held_ || wanted_ || (active_ && !playing_ && active_generation_==generation_ && active_->keyframe_in());
 }
 uint64_t SourceDecoder::last_frame_us() const {
     std::lock_guard<std::mutex> lock(mutex_);return active_?active_->last_frame_us():0;
@@ -61,7 +70,7 @@ void SourceDecoder::run_frame() {
     unsigned live_retries = 0;
     while(!quit_ && !*stop_) {
         bool held;
-        {std::lock_guard<std::mutex> lock(mutex_);held=suspended_;}
+        {std::lock_guard<std::mutex> lock(mutex_);held=suspended_ || (live_held_ && !wanted_);}
         if(held){std::this_thread::sleep_for(std::chrono::milliseconds(10));continue;}
         bool session_playback;
         uint64_t session_generation;
@@ -70,7 +79,7 @@ void SourceDecoder::run_frame() {
             auto next=factory_();
             {std::lock_guard<std::mutex> lock(mutex_);
              if(quit_ || *stop_)break;
-             if(session_generation!=generation_ || suspended_)continue;
+             if(session_generation!=generation_ || suspended_ || (live_held_ && !session_playback))continue;
              active_=next;playing_=session_playback;active_generation_=session_generation;
              next->pause_input(playing_ && paused_);
              if(!playing_) for(size_t i=0;i<live_parameters_.size();++i) {

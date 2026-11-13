@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <memory>
 #include "hal/picture.hpp"
+#include "hal/vdec.hpp"
 namespace hal {
 class StripJoiner {
 public:
@@ -24,5 +25,14 @@ public:
     virtual void strip(int k, bool last, int ov, std::shared_ptr<DecodedUnit> du) = 0;
     // The picture being joined goes (the link lost, the strips stopped).
     virtual void drop() = 0;
+    // A joiner that decodes the strips itself (each writing its rows of the
+    // whole picture, no copy) gives strip k's decoder here; nullptr: a
+    // decoder of the link's own, whose pictures come to strip().
+    virtual std::unique_ptr<Vdec> decoder(int k) { (void)k; return nullptr; }
+    // Strip k of picture pic arriving, before it is fed: what its header says
+    // (as strip() is told once it is decoded). From the radio thread.
+    virtual void arriving(int k, int64_t pic, bool last, int ov) { (void)k; (void)pic; (void)last; (void)ov; }
+    // The air unit sends whole pictures again.
+    virtual void stopped() {}
 };
 }  // namespace hal

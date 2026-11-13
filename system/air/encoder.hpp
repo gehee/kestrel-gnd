@@ -46,6 +46,10 @@ static inline int ar_maxexp_index(int us) {
 static const int kArStripsVals[]     = { 1, 2, 3, 4 };
 static const char* kArStripsLabels[] = { "OFF", "2", "3", "4" };
 static const int kArStripsCount = 4;
+// The air unit's feature bit (air::UnitState::features) saying both ends can:
+// its kestrel-air sends strips and this goggle joins them (= the radio's
+// Ar8030Link::kAirFeatStrips).
+static const uint16_t kFeatStrips = 0x2000;
 static inline int ar_strips_index(int n) {
     for (int i = 0; i < kArStripsCount; i++) if (kArStripsVals[i] == n) return i;
     return n < 1 ? 0 : kArStripsCount - 1;
