@@ -2,6 +2,7 @@
 // Native Ascent composition root: existing radio, software HUD, platform media.
 #include "base/ltrace.hpp"
 #include "display/mode_trial.hpp"
+#include "dvr/format_card.hpp"
 #include "display/settings.hpp"
 #include "platform/software.hpp"
 #include "platform/ascent_panel.hpp"
@@ -330,9 +331,20 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
         for(const auto candidate:display::ascent_modes) if(receiver.screen->supports_mode(candidate) &&
             std::filesystem::is_directory(assets_root/(candidate.height==720?"1280x720":"1920x1080")))
             screen_choices.push_back({candidate.id(),candidate.label()});
+        // DVR > Format Card: what the firmware would erase, checked again when
+        // the DVR tab opens; a first OK arms it, a second within 5 s starts it.
+        dvr::format_card::Result format_info=dvr::format_card::check();
         std::string temperature_path;
         uint64_t temperature_next=0,temperature_search=0;
+        uint64_t format_armed_until=0,format_armed_at=0;
+        int format_armed_tab=-1,format_armed_row=-1;
+        bool formatting=false;
         controller.apply_receiver=[&](const std::string& id,int value) {
+            // Nothing opens a file on the card while it is being formatted
+            // under a receiver that keeps running.
+            if(formatting && (id=="record" || id.compare(0,5,"play:")==0 || id.compare(0,7,"delete:")==0 ||
+                              id.compare(0,7,"export:")==0))
+                throw std::runtime_error("Wait for the format to finish");
             if(id=="export_cancel") {exporter->cancel();return std::string("Canceling export...");}
             if(exporter->state().busy)throw std::runtime_error("Wait for export or cancel it first");
             if(id.compare(0,7,"export:")==0) {
@@ -361,6 +373,31 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
                     throw std::runtime_error("Screen mode or compiled assets unavailable");
                 mode.select(display::AscentMode::from_id(value)); model.quit=mode.restart;
                 return std::string("Testing screen mode");
+            }
+            if(id=="format_card") {
+                if(formatting) throw std::runtime_error("Formatting; the receiver restarts when it is done");
+                if(recorder.is_recording() || recorder.state().finishing || player.state().busy || player.state().deleting)
+                    throw std::runtime_error("Stop recording and playback before formatting");
+                const uint64_t t=kestrel_ui::monotonic_us();
+                if(controller.armed(t)) throw std::runtime_error("Disarm before formatting");
+                if(t>=format_armed_until) {
+                    format_info=dvr::format_card::check();
+                    if(!format_info.ok) throw std::runtime_error(format_info.text);
+                    format_armed_at=t;
+                    format_armed_until=t+uint64_t(dvr::format_card::kArmMs)*1000;
+                    format_armed_tab=model.tab;format_armed_row=model.selected;
+                    return "Erases everything on the "+format_info.text+". Press OK again within 5 seconds.";
+                }
+                // A double press is not a second answer: the warning stays up.
+                if(t<format_armed_at+uint64_t(dvr::format_card::kGapMs)*1000)
+                    return "Erases everything on the "+format_info.text+". Press OK again within 5 seconds.";
+                format_armed_until=0;
+                const auto started=dvr::format_card::start();
+                if(!started.ok) throw std::runtime_error(started.text);
+                formatting=true;
+                // The helper says when the receiver restarts for it; where it
+                // does not, this receiver reads the outcome (below).
+                return started.text+".";
             }
             if(id=="record") {
                 if(player.state().deleting)throw std::runtime_error("Wait for recording deletion to finish");
@@ -426,6 +463,12 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
         bool was_browsing=false; int recording_listed=0;
         int previous_bind = gnd::BIND_IDLE;
         std::string recording_error,telemetry_error,thumbnail_session,unsupported_video,held_notice;
+        // How a format (which restarted us) went, said once the screen is up.
+        // Not held for a disarmed flight controller as held_notice is: after
+        // a format there is often none linked, and it would never be said.
+        std::string start_notice=dvr::format_card::take_result();
+        uint64_t format_poll=0;
+        bool was_dvr_tab=false;
         std::vector<uint8_t> playback_hud_bytes;
         std::shared_ptr<const kestrel_ui::HudData> playback_hud;
         uint64_t profile_start = start, profile_loops = 0, profile_drawn = 0, profile_presented = 0, profile_ui_flips = 0;
@@ -610,6 +653,33 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
             rec.text=recorder.is_recording()?"STOP":recording.finishing?"SAVING":"START";
             rec.reason=recording.error.empty()?"Records the received video without re-encoding.":recording.error;
             auto& folder=model.backend.controls["folder"];folder={};folder.known=true;folder.text=o.recordings;
+            {
+                const bool dvr_tab=model.menu_open && model.side==0 && model.tab==4;
+                if(dvr_tab && !was_dvr_tab && !formatting) format_info=dvr::format_card::check();
+                was_dvr_tab=dvr_tab;
+                // Armed only while its row stays selected: leaving it, the tab
+                // or the menu takes the first press back.
+                if(format_armed_until && (!dvr_tab || model.tab!=format_armed_tab || model.selected!=format_armed_row))
+                    format_armed_until=0;
+                // The format ended while we kept running (the helper leaves a
+                // receiver up when nothing of its own is on the card), or failed
+                // before it stopped us: said, the row usable again, the gallery
+                // listing the new card.
+                if(formatting && now>=format_poll) {
+                    format_poll=now+500000;
+                    const std::string result=dvr::format_card::take_result();
+                    if(!result.empty()) {
+                        formatting=false;format_info=dvr::format_card::check();start_notice=result;
+                        player.refresh();playback_checked=0;
+                    }
+                }
+                const bool armed=now<format_armed_until;
+                auto& fmt=model.backend.controls["format_card"];fmt={};fmt.known=true;fmt.action=true;
+                fmt.enabled=format_info.ok && !formatting;
+                fmt.text=formatting?"FORMATTING":armed?"ENTER: ERASE ALL":"ENTER: FORMAT";
+                fmt.reason=format_info.ok?"Erases the "+format_info.text+" and makes it one exFAT partition for recordings. "
+                    "Settings and pairing are kept.":format_info.text+".";
+            }
             auto& space=model.backend.controls["space"];space={};space.known=true;
             space.text=std::to_string(recording.free_bytes/(1024*1024))+" MiB";
             space.reason=recording.storage_ready?"":"Storage unavailable or less than 64 MiB free.";
@@ -630,6 +700,11 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
             if (!held_notice.empty() && controller.arm_state(now) == 0) {
                 const std::string text = std::move(held_notice);
                 held_notice.clear();
+                notice(text.c_str());
+            }
+            if (!start_notice.empty() && !controller.armed(now)) {
+                const std::string text = std::move(start_notice);
+                start_notice.clear();
                 notice(text.c_str());
             }
             const std::string unsupported=video.rejected_us ?

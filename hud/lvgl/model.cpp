@@ -188,7 +188,8 @@ std::vector<MenuRow> Model::rows(uint64_t now) const {
         unavailable("record", "Recording", "Start or stop recording; the REC button does the same."),
         unavailable("gallery", "Gallery", "Browse and play recordings."),
         unavailable("folder", "Folder", "Where recordings are written."),
-        unavailable("space", "Space Left", "Room remaining on the recordings partition.")};
+        unavailable("space", "Space Left", "Room remaining on the recordings partition."),
+        unavailable("format_card", "Format SD Card", "Erases the whole SD card and formats it for recordings (exFAT).")};
     if (tab == 5) return {
         reading("build", "Build", build, "When this receiver application was built."),
         reading("version", "Version", version, "The receiver application version and source revision."),

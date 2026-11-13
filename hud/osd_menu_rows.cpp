@@ -122,6 +122,27 @@ void OSD::menu_action_status(int tab, int i, char* hint, size_t hcap,
     if (i < 0 || i >= (int)rows.size() || rows[i].type != 3) return;
     snprintf(hint, hcap, "%s", rows[i].hint ? rows[i].hint : "ENTER");
 
+    if (tab == kTabDvr && i == 3) {
+        if (!format_checked_) {
+            format_checked_ = true;
+            format_info_ = dvr::format_card::check();
+            format_result_ = dvr::format_card::take_result();
+        }
+        // The format failed before it stopped us (the helper's status file
+        // says so): the row is usable again and shows why.
+        if (formatting_) {
+            const std::string failed = dvr::format_card::take_result();
+            if (!failed.empty()) { formatting_ = false; format_result_ = failed; format_info_ = dvr::format_card::check(); }
+        }
+        const uint64_t now = (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        if (formatting_) { snprintf(hint, hcap, "%s", ""); snprintf(status, scap, "FORMATTING"); }
+        else if (now < format_armed_ms_) { snprintf(hint, hcap, "ENTER: ERASE ALL"); snprintf(status, scap, "PRESS AGAIN"); }
+        else if (!format_result_.empty()) snprintf(status, scap, "%s", format_result_.c_str());
+        else snprintf(status, scap, "%s", format_info_.text.c_str());
+        if (!format_info_.ok && !formatting_) snprintf(hint, hcap, "%s", "");
+        return;
+    }
     if (tab == 1) {
         auto rfi = ar_rf_items();
         if (i < (int)rfi.size() && rfi[i].second == 9) {
@@ -608,7 +629,10 @@ std::vector<OSD::MenuItem> OSD::menu_items(int tab) const {
             // A reading where the screen cannot be recorded: FPV is all there is.
             {"Source", platform::caps().screen_enc ? 1 : 0, "What REC captures: the FPV stream, or the screen."},  // see menu_help_text
             {"Folder", 0, "Where recordings are written."},
-            {"Space Left", 0, "Room remaining on the recordings partition."}
+            {"Space Left", 0, "Room remaining on the recordings partition."},
+            {"Format DVR", 3, "Erases the recordings partition and formats it again (exFAT). The system, "
+                               "settings and pairing on the card are not touched. Enter, then Enter again "
+                               "within 5 s. The VRX restarts when it is done.", "ENTER: FORMAT"}
         };
     } else if (tab == kTabAirInfo) { // AIR UNIT > INFO - what the linked air unit says it is
         // The first rows are stock's Device Info for the air unit (TX HW / SN / SW
