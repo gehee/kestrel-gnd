@@ -25,6 +25,10 @@ void OSD::handle_key(int key) {
         pthread_mutex_unlock(&osd_mutex);
         return;
     }
+    // DVR > Format DVR stays armed only for a second Enter on its own row: any
+    // other key, or the menu elsewhere, takes the first press back.
+    if (format_armed_ms_ && !(menu_open && menu_tab == kTabDvr && menu_index == 3 && (key == 13 || key == '\n')))
+        format_armed_ms_ = 0;
     // A screen mode on trial: Enter, anywhere in the menu, keeps it (not in the gallery).
     if (screen_confirm_ && !gallery_.active() && (key == 13 || key == '\n')) {
         screen_confirm_ = false;
@@ -500,7 +504,9 @@ void OSD::handle_key(int key) {
                     kestrel_request_restart();
                 }
             } else if (menu_tab == kTabDvr) {
-                if (menu_index == 0) {
+                if (menu_index == 3) {
+                    format_card_enter();
+                } else if (menu_index == 0) {
                     // Just a mode flag now. The REC button owns starting and
                     // stopping; this used to spin up a second DVR of its own the
                     // moment it was switched on, which recorded to a fixed
@@ -535,4 +541,31 @@ void OSD::handle_key(int key) {
     // decode thread calls on_new_frame → signal_render → locks osd_mutex.
     if (do_stop_player && bg_player_)  bg_player_->stop();
     else if (do_start_player && bg_player_) bg_player_->start();
+}
+
+// DVR > Format Card: the first Enter arms it for 5 s (and checks again what
+// it would erase), the second starts the firmware's format, which stops and
+// restarts kestrel-gnd. Never while recording: that file would be cut off.
+void OSD::format_card_enter() {
+    const uint64_t now = (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    format_result_.clear();
+    if (formatting_) return;
+    if (DvrRecorder::instance().is_recording()) {
+        format_result_ = "STOP RECORDING FIRST";
+        return;
+    }
+    if (now >= format_armed_ms_) {
+        format_info_ = dvr::format_card::check();
+        format_checked_ = true;
+        if (format_info_.ok) { format_armed_at_ms_ = now; format_armed_ms_ = now + dvr::format_card::kArmMs; }
+        return;
+    }
+    // A double press is not a second answer: the warning stays up.
+    if (now < format_armed_at_ms_ + dvr::format_card::kGapMs) return;
+    format_armed_ms_ = 0;
+    const auto started = dvr::format_card::start();
+    if (!started.ok) { format_info_ = started; return; }
+    formatting_ = true;
+    printf("menu: DVR > Format Card: %s\n", started.text.c_str());
 }

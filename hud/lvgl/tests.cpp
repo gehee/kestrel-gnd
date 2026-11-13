@@ -69,6 +69,28 @@ int main(int argc, char** argv) {
         t.stamp_us = 1000000; t.connected = true; t.mcs = -1;
         t.voltage_mv = 11512; t.cpu_temperature_x100 = 4889;
         check(!t.fresh(3000000) && !t.fresh(999999), "Telemetry freshness bounds");
+        {
+            // The receiver's own temperature: on its own stamp, link or none.
+            Model local; local.backend.vrx.cpu_temperature_x100 = 5300; local.backend.vrx.local_stamp_us = 1000000;
+            Controller lc(local);
+            const auto shown = lc.hud_data(2000000, false).panels[0].detail2;
+            check(shown.find("VRX 53C") != std::string::npos, "VRX temperature shown without a link");
+            check(lc.hud_data(7000000, false).panels[0].detail2.find("VRX --C") != std::string::npos,
+                  "VRX temperature stale 5 s after its last reading");
+        }
+        {
+            // Armed colours both canopies' rules (the right one too, as on the
+            // VRX Pro); disarmed or not known, neither.
+            Model armed; Controller ac(armed);
+            armed.backend.flight.stamp_us = 1000000; armed.backend.flight.arm = 1;
+            auto d = ac.hud_data(1500000, false);
+            check(d.panels[0].armed && d.panels[1].armed, "Armed: both canopies armed");
+            check(d.panels[0].state == "ARMED" && d.panels[1].state.empty(), "Only the left canopy says ARMED");
+            armed.backend.flight.arm = 0; d = ac.hud_data(1500000, false);
+            check(!d.panels[0].armed && !d.panels[1].armed, "Disarmed: neither canopy armed");
+            armed.backend.flight.arm = 1; d = ac.hud_data(4000000, false);
+            check(!d.panels[0].armed && !d.panels[1].armed, "Arm state gone stale: neither canopy armed");
+        }
 
         Model model;
         Controller controller(model);
@@ -440,7 +462,7 @@ int main(int argc, char** argv) {
             check(c.recording_text(now+67000000)=="REC 0:00","New recording resets timer");
             m.show_hud=true;
             h=c.hud_data(now+67000000);
-            check(h.panels[1].secondary.empty() && h.panels[1].detail1.find("--mW")!=std::string::npos && h.panels[1].detail2.find("--ms")!=std::string::npos,"Expired readings are not displayed as current");
+            check(h.panels[1].secondary.empty() && h.panels[1].detail1.find("mW")==std::string::npos && h.panels[1].detail2.find("ms")==std::string::npos,"Expired readings are not displayed as current");
         }
         std::puts("PASS: telemetry freshness, shared canopy/GLES geometry, projective rasterization, baked fonts and menus");
         return 0;

@@ -37,6 +37,8 @@ private:
     BetaflightAtlas bf_atlas_;
     lv_obj_t* bf_object_=nullptr;
     lv_obj_t* debug_object_=nullptr;
+    lv_obj_t* fps_object_=nullptr;
+    std::string fps_text_;
     std::array<uint16_t,1060> bf_grid_{};
     bool bf_visible_=false;
     std::string debug_text_;
@@ -59,6 +61,34 @@ private:
     int active_menu_side_ = 0;
     bool old_menu_ = false;
     float menu_progress_ = 0;
+    // The dimmer's share of the blade: it follows the blade at rest only. A
+    // dimmer level that changes with every step of the blade repaints every
+    // pixel of the screen, which these receivers cannot do 60 times a second.
+    float dimmer_progress_ = 0;
+    // Where the picker labels were painted, per side (x1 > x2: not yet known).
+    std::array<lv_area_t,2> picker_text_{{{1,1,0,0},{1,1,0,0}}};
+    // While the blade moves, nothing lies between the dimmer and the blade's
+    // ground in most of it. There the dimmer applies both in one pass: it
+    // stores ground-over-dimmer where nothing is below (no read at all), or
+    // blends the two over the artwork, HUD or OSD below.
+    std::array<lv_area_t,2> solid_{};
+    int solids_ = 0;
+    bool solid_clear_ = false;
+    uint32_t solid_dimmer_ = 0, solid_ground_ = 0, solid_argb_ = 0;
+    bool solid_stored_ = false;
+    void plan_solid_ground();
+    void draw_dimmer(lv_layer_t* layer);
+    // The idle artwork under a drawn dimmer: the dimmer stores it already
+    // blended (reading the artwork, never the screen), so the artwork is
+    // drawn on its own only below HUD regions, which lie between the two.
+    bool art_deferred_ = false;
+    lv_layer_t* art_layer_ = nullptr;
+    lv_area_t art_clip_{};
+    std::array<lv_area_t,12> blocked_{};
+    int blocked_count_ = 0;
+    bool hud_drawn_at(size_t region) const;
+    void draw_idle(lv_layer_t* layer);
+    void draw_deferred_art(lv_layer_t* layer, const lv_area_t& clip);
     bool animating_ = false;
     bool capturing_menu_ = false;
     bool menu_damage_applied_ = false;
@@ -69,6 +99,10 @@ private:
     uint64_t last_tick_ = 0;
     lv_obj_t* channel_ = nullptr;
     lv_obj_t* clock_ = nullptr;
+    // The idle status word ("Ready" / live binding state) over the idle artwork.
+    lv_obj_t* status_ = nullptr;
+    bool old_status_ready_ = false;
+    int old_bind_state_ = 0, old_bind_secs_ = 0;
     std::string clock_text_, recording_text_;
     std::array<lv_obj_t*,2> edge_objects_{};
     std::array<std::vector<uint8_t>,2> edge_pixels_;
@@ -88,6 +122,10 @@ private:
     };
     std::optional<MenuLayout> menu_cached_layout_;
     const MenuLayout* capture_layout_=nullptr;
+    // The layout of the frame being drawn. LVGL draws the blade once per
+    // damaged area between two updates; lay it out once.
+    struct FrameLayout { const Model* model; int width, height; MenuLayout layout; };
+    std::optional<FrameLayout> frame_layout_;
     MenuLayout menu_layout(const Model&,int width,int height) const;
     void sync_hud_objects();
     void draw_hud(lv_layer_t* layer, size_t region);
@@ -95,6 +133,7 @@ private:
     lv_area_t menu_reveal(float progress) const;
     void draw_picker(lv_layer_t* layer);
     void draw_channel(lv_layer_t* layer);
+    void draw_status(lv_layer_t* layer);
     void draw_gallery(lv_layer_t* layer);
     void prepare_menu_snapshot();
     void drop_menu_snapshot();

@@ -81,6 +81,7 @@ typedef struct png_closure
 
 #include "hud/latency_ring.hpp"
 #include "base/bus.hpp"
+#include "dvr/format_card.hpp"
 
 // OSD Vars
 struct osd_vars {
@@ -402,6 +403,14 @@ class OSD : public display::VideoListener {
         int  volt_mode = 0;
         int  menu_volt_mode = 0;
         int  menu_wifi_ap = 0;     // SYSTEM > WiFi AP (fpvos-wifi)
+        // DVR > Format Card (dvr/format_card.hpp): what the firmware would
+        // erase, read on first showing; armed by a first Enter for 5 s; how
+        // the last format went (it restarts us), shown on the row.
+        bool        format_checked_ = false, formatting_ = false;
+        uint64_t    format_armed_ms_ = 0, format_armed_at_ms_ = 0;
+        dvr::format_card::Result format_info_;
+        std::string format_result_;
+        void        format_card_enter();
         // DISPLAY > Screen Mode: 0 is Auto, then the connector's modes as
         // screen_modes() lists them. -1 until first read from screen_mode.
         int  menu_screen_mode = -1;

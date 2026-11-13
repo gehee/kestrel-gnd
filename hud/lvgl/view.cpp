@@ -1,5 +1,9 @@
 #include "view.hpp"
+#include "argb_blend.h"
+#include "src/draw/lv_draw_private.h"
 #include "hud/hud_theme.hpp"
+#include "system/gnd/radio.hpp"
+#include <algorithm>
 #include <array>
 #include <cstdio>
 #include <cstring>
@@ -30,6 +34,49 @@ void hidden(lv_obj_t* object, bool hide) {
     if (lv_obj_has_flag(object, LV_OBJ_FLAG_HIDDEN) == hide) return;
     if (hide) lv_obj_add_flag(object, LV_OBJ_FLAG_HIDDEN);
     else lv_obj_remove_flag(object, LV_OBJ_FLAG_HIDDEN);
+}
+bool intersect(lv_area_t& out, const lv_area_t& a, const lv_area_t& b) {
+    out = {std::max(a.x1, b.x1), std::max(a.y1, b.y1), std::min(a.x2, b.x2), std::min(a.y2, b.y2)};
+    return out.x1 <= out.x2 && out.y1 <= out.y2;
+}
+// The parts of r outside n row bands that span the same columns, top to bottom.
+int carve(const lv_area_t& r, const lv_area_t* bands, int n, lv_area_t* out) {
+    int k = 0;
+    auto add = [&](int x1, int y1, int x2, int y2) { if (x1 <= x2 && y1 <= y2) out[k++] = {x1, y1, x2, y2}; };
+    const int bx1 = bands[0].x1, bx2 = bands[0].x2;
+    add(r.x1, r.y1, std::min(r.x2, bx1 - 1), r.y2);
+    add(std::max(r.x1, bx2 + 1), r.y1, r.x2, r.y2);
+    const int x1 = std::max(r.x1, bx1), x2 = std::min(r.x2, bx2);
+    int y = r.y1;
+    for (int i = 0; i < n; ++i) { add(x1, y, x2, std::min(r.y2, bands[i].y1 - 1)); y = std::max(y, bands[i].y2 + 1); }
+    add(x1, y, x2, r.y2);
+    return k;
+}
+// Splits r into pieces that each lie wholly inside or wholly outside every one
+// of n (at most 16) areas: fn(piece, mask), bit i set inside areas[i].
+template <class F> void split(const lv_area_t& r, const lv_area_t* areas, int n, F&& fn) {
+    int ys[34], ny = 0, xs[34];
+    ys[ny++] = r.y1; ys[ny++] = r.y2 + 1;
+    for (int i = 0; i < n; ++i) for (int y : {areas[i].y1, areas[i].y2 + 1}) if (y > r.y1 && y <= r.y2) ys[ny++] = y;
+    std::sort(ys, ys + ny); ny = int(std::unique(ys, ys + ny) - ys);
+    for (int b = 0; b + 1 < ny; ++b) {
+        // Every area covers the whole band or none of it.
+        const int y1 = ys[b], y2 = ys[b + 1] - 1;
+        unsigned band = 0; int nx = 0;
+        xs[nx++] = r.x1; xs[nx++] = r.x2 + 1;
+        for (int i = 0; i < n; ++i) {
+            if (areas[i].y1 > y1 || areas[i].y2 < y2 || areas[i].x1 > r.x2 || areas[i].x2 < r.x1) continue;
+            band |= 1u << i;
+            for (int x : {areas[i].x1, areas[i].x2 + 1}) if (x > r.x1 && x <= r.x2) xs[nx++] = x;
+        }
+        std::sort(xs, xs + nx); nx = int(std::unique(xs, xs + nx) - xs);
+        for (int s = 0; s + 1 < nx; ++s) {
+            const lv_area_t piece{xs[s], y1, xs[s + 1] - 1, y2};
+            unsigned mask = 0;
+            for (int i = 0; i < n; ++i) if ((band >> i & 1) && areas[i].x1 <= piece.x1 && areas[i].x2 >= piece.x2) mask |= 1u << i;
+            fn(piece, mask);
+        }
+    }
 }
 void rect(lv_layer_t* layer, int x, int y, int w, int h, const float* rgb, float alpha, int border = 0) {
     lv_draw_rect_dsc_t d;
@@ -94,6 +141,15 @@ View::View(const Controller& controller, int w, int h, const std::string& assets
     lv_obj_remove_flag(channel_,LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(channel_,draw_event,LV_EVENT_DRAW_MAIN,this);
     lv_obj_add_flag(channel_,LV_OBJ_FLAG_HIDDEN);
+    // The idle status word ("Ready", or the live binding state) over the idle
+    // artwork, where the artwork used to bake "Ready".
+    status_=lv_obj_create(screen_);
+    lv_obj_remove_style_all(status_);
+    lv_obj_set_pos(status_,0,int(h*0.80f));
+    lv_obj_set_size(status_,w,int(h*0.14f));
+    lv_obj_remove_flag(status_,LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(status_,draw_event,LV_EVENT_DRAW_MAIN,this);
+    lv_obj_add_flag(status_,LV_OBJ_FLAG_HIDDEN);
     clock_=lv_obj_create(screen_);
     lv_obj_remove_style_all(clock_);
     lv_obj_set_pos(clock_,w/3,0);
@@ -112,6 +168,11 @@ View::View(const Controller& controller, int w, int h, const std::string& assets
     lv_obj_set_size(gallery_,w,h);lv_obj_remove_flag(gallery_,LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(gallery_,draw_event,LV_EVENT_DRAW_MAIN,this);
     lv_obj_add_flag(gallery_,LV_OBJ_FLAG_HIDDEN);
+    // Above everything, in the top right corner the blade never reaches.
+    fps_object_=lv_obj_create(screen_);lv_obj_remove_style_all(fps_object_);
+    lv_obj_set_pos(fps_object_,w*3/4,0);lv_obj_set_size(fps_object_,w-w*3/4,h/20);
+    lv_obj_remove_flag(fps_object_,LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(fps_object_,draw_event,LV_EVENT_DRAW_MAIN,this);
     capture_screen_=lv_obj_create(nullptr);lv_obj_remove_style_all(capture_screen_);
     menu_capture_=lv_obj_create(capture_screen_);lv_obj_remove_style_all(menu_capture_);
     lv_obj_remove_flag(menu_capture_,LV_OBJ_FLAG_SCROLLABLE);
@@ -140,7 +201,7 @@ void View::prepare_menu_snapshot() {
         now_ - menu_snapshot_checked_us_ < 250000) return;
     menu_snapshot_checked_us_ = now_;
     // Snapshot a derived preview. The View never mutates controller state.
-    menu_preview_ = model_;
+    menu_preview_ = model_; frame_layout_.reset();
     if (model_.stage == MenuStage::Pick) {
         menu_preview_->tab = model_.remembered_section(); menu_preview_->selected = menu_preview_->first_row(now_); menu_preview_->stage = MenuStage::Browse;
     }
@@ -253,17 +314,14 @@ void View::draw_event(lv_event_t* e) {
     auto* self = static_cast<View*>(lv_event_get_user_data(e));
     auto* target = lv_event_get_target(e);
     auto* layer = lv_event_get_layer(e);
-    if (target == self->idle_object_) self->idle_.draw(layer, self->model_, self->now_);
-    else if (target == self->dimmer_) {
-        if (self->model_.menu_open || self->menu_progress_ > 0)
-            rect(layer, 0, 0, self->width_, self->height_, hud_theme_at(self->model_.theme).ground,
-                 (self->model_.menu_open ? 0.10f : 0.0f) + self->menu_progress_ * 0.06f);
-    }
+    if (target == self->idle_object_) self->draw_idle(layer);
+    else if (target == self->dimmer_) self->draw_dimmer(layer);
     else if (target == self->edge_objects_[0] || target == self->edge_objects_[1])
         self->draw_edge(layer, target == self->edge_objects_[0] ? 0 : 1);
     else if (target == self->menu_ || target == self->menu_capture_) self->draw_menu(layer);
     else if (target == self->picker_) self->draw_picker(layer);
     else if (target == self->channel_) self->draw_channel(layer);
+    else if (target == self->status_) self->draw_status(layer);
     else if (target == self->clock_) {
         const float size=24.0f*self->height_/1080;
         const float x=(self->width_-self->text_.canvas_advance(self->clock_text_,size))/2;
@@ -281,7 +339,128 @@ void View::draw_event(lv_event_t* e) {
     else if(target==self->debug_object_) self->text_.canvas(layer,self->debug_text_,self->width_-18,self->height_-12,
         18.0f*self->height_/1080,true,hud_theme_at(self->model_.theme).quiet,1);
     else if(target==self->gallery_) self->draw_gallery(layer);
+    else if(target==self->fps_object_) self->text_.canvas(layer,self->fps_text_,self->width_-18,32.0f*self->height_/1080,
+        20.0f*self->height_/1080,true,hud_theme_at(self->model_.theme).text,1);
     else for (size_t i = 0; i < self->hud_objects_.size(); ++i) if (target == self->hud_objects_[i]) { self->draw_hud(layer, i); break; }
+}
+void View::plan_solid_ground() {
+    solids_ = 0;
+    // Only the live, moving blade (a settled one is its snapshot image), and
+    // nothing drawn between the dimmer and the blade.
+    if (menu_progress_ <= 0 || menu_progress_ >= 1 || model_.channel_open || lv_obj_has_flag(menu_, LV_OBJ_FLAG_HIDDEN) ||
+        !(model_.menu_open || dimmer_progress_ > 0) || edge_opacity_) return;
+    const lv_opa_t dim = opacity((model_.menu_open ? 0.10f : 0.0f) + dimmer_progress_ * 0.06f);
+    const lv_opa_t ground = opacity(0.94f * std::min(1.0f, menu_progress_ * 1.6f));
+    if (dim <= LV_OPA_MIN || ground <= LV_OPA_MIN || ground >= LV_OPA_MAX) return;
+    const auto reveal = menu_reveal(menu_progress_);
+    // The picker labels fade between the dimmer and the blade: their band
+    // keeps the general path.
+    lv_area_t band; lv_obj_get_coords(picker_, &band);
+    if (!lv_obj_has_flag(picker_, LV_OBJ_FLAG_HIDDEN)) {
+        if (reveal.y1 < band.y1) solid_[solids_++] = {reveal.x1, reveal.y1, reveal.x2, std::min(reveal.y2, band.y1 - 1)};
+        if (reveal.y2 > band.y2) solid_[solids_++] = {reveal.x1, std::max(reveal.y1, band.y2 + 1), reveal.x2, reveal.y2};
+    } else solid_[solids_++] = reveal;
+    // Whether anything is drawn below the dimmer there.
+    solid_clear_ = !idle_.paints(model_, now_) && !bf_visible_;
+    for (size_t i = 0; i < hud_objects_.size() && solid_clear_; ++i) {
+        if (!hud_drawn_at(i)) continue;
+        lv_area_t area, overlap; lv_obj_get_coords(hud_objects_[i], &area);
+        for (int j = 0; j < solids_; ++j) if (intersect(overlap, area, solid_[j])) solid_clear_ = false;
+    }
+    const lv_color_t c = color(hud_theme_at(model_.theme).ground);
+    const uint32_t rgb = uint32_t(c.red) << 16 | uint32_t(c.green) << 8 | c.blue;
+    solid_dimmer_ = uint32_t(dim) << 24 | rgb; solid_ground_ = uint32_t(ground) << 24 | rgb;
+    // Over the cleared buffer the dimmer is itself; the ground goes over it.
+    solid_argb_ = kestrel_argb_mix(solid_ground_, solid_dimmer_);
+}
+bool View::hud_drawn_at(size_t i) const {
+    // As draw_hud() decides; hidden objects are not drawn at all.
+    const auto role = hud_layout_.regions[i].role;
+    return !lv_obj_has_flag(hud_objects_[i], LV_OBJ_FLAG_HIDDEN) && hud_->image(i) && model_.hud_visible() &&
+           !(menu_progress_ > 0 && ((role == hud_ipc::Role::LeftWing && active_menu_side_ == 0) ||
+                                    (role == hud_ipc::Role::RightWing && active_menu_side_ == 1)));
+}
+void View::draw_idle(lv_layer_t* layer) {
+    art_deferred_ = false;
+    const auto* buf = layer->draw_buf;
+    if (LV_USE_OS == LV_OS_NONE && buf && buf->header.cf == LV_COLOR_FORMAT_ARGB8888 && !bf_visible_ &&
+        (model_.menu_open || dimmer_progress_ > 0) && idle_.artwork(model_, now_)) {
+        // The dimmer, next in this area, stores the artwork with itself. HUD
+        // regions are drawn in between: the artwork goes below them here.
+        const lv_area_t clip = layer->_clip_area;
+        bool apart = true;
+        blocked_count_ = 0;
+        for (size_t i = 0; i < hud_objects_.size() && apart; ++i) {
+            if (!hud_drawn_at(i)) continue;
+            lv_area_t area, part, overlap; lv_obj_get_coords(hud_objects_[i], &area);
+            if (!intersect(part, area, clip)) continue;
+            // Overlapping regions would get the artwork twice.
+            for (int j = 0; j < blocked_count_ && apart; ++j) apart = !intersect(overlap, part, blocked_[j]);
+            if (blocked_count_ == int(blocked_.size())) apart = false;
+            else blocked_[blocked_count_++] = part;
+        }
+        if (apart) {
+            art_deferred_ = true; art_layer_ = layer; art_clip_ = clip;
+            for (int j = 0; j < blocked_count_; ++j) { layer->_clip_area = blocked_[j]; idle_.draw(layer, model_, now_); }
+            layer->_clip_area = clip;
+            return;
+        }
+    }
+    idle_.draw(layer, model_, now_);
+}
+void View::draw_deferred_art(lv_layer_t* layer, const lv_area_t& clip) {
+    // The artwork where draw_idle() left it to the dimmer: outside the HUD regions.
+    const lv_area_t kept = layer->_clip_area;
+    split(clip, blocked_.data(), blocked_count_, [&](const lv_area_t& piece, unsigned mask) {
+        if (mask) return;
+        layer->_clip_area = piece; idle_.draw(layer, model_, now_);
+    });
+    layer->_clip_area = kept;
+}
+void View::draw_dimmer(lv_layer_t* layer) {
+    solid_stored_ = false;
+    const bool deferred = art_deferred_;
+    art_deferred_ = false;
+    const bool art = deferred && art_layer_ == layer && !std::memcmp(&art_clip_, &layer->_clip_area, sizeof art_clip_);
+    if (deferred && !art) draw_deferred_art(art_layer_, art_clip_);
+    if (!model_.menu_open && dimmer_progress_ <= 0) { if (art) draw_deferred_art(layer, art_clip_); return; }
+    const float* ground = hud_theme_at(model_.theme).ground;
+    const float alpha = (model_.menu_open ? 0.10f : 0.0f) + dimmer_progress_ * 0.06f;
+    const lv_opa_t dim = opacity(alpha);
+    const int solids = solids_ && dim == solid_dimmer_ >> 24 ? solids_ : 0;
+    auto* buf = layer->draw_buf;
+    bool direct = (solids || art) && dim > LV_OPA_MIN && dim < LV_OPA_MAX && LV_USE_OS == LV_OS_NONE && buf &&
+                  buf->header.cf == LV_COLOR_FORMAT_ARGB8888;
+    // Every queued task has drawn (one synchronous software unit): the
+    // buffer is final below the dimmer.
+    for (auto* t = layer->draw_task_head; direct && t; t = t->next) direct = t->state == LV_DRAW_TASK_STATE_READY;
+    if (!direct) {
+        if (art) draw_deferred_art(layer, art_clip_);
+        rect(layer, 0, 0, width_, height_, ground, alpha);
+        return;
+    }
+    // Pieces in the blade's solids get the dimmer and the blade's ground
+    // together; the others the dimmer alone. Each reads the artwork where it
+    // was deferred, else the pixels below (nothing at all over a cleared
+    // solid).
+    const lv_color_t c = color(ground);
+    const uint32_t dim_argb = uint32_t(dim) << 24 | uint32_t(c.red) << 16 | uint32_t(c.green) << 8 | c.blue;
+    lv_area_t areas[2 + std::tuple_size<decltype(blocked_)>::value];
+    int n = 0;
+    for (int i = 0; i < solids; ++i) areas[n++] = solid_[i];
+    if (art) for (int i = 0; i < blocked_count_; ++i) areas[n++] = blocked_[i];
+    const uint32_t* pixels = art ? idle_.artwork(model_, now_) : nullptr;
+    const int stride = int(buf->header.stride / 4);
+    split(layer->_clip_area, areas, n, [&](const lv_area_t& a, unsigned mask) {
+        const bool solid = mask & ((1u << solids) - 1);
+        auto* first = reinterpret_cast<uint32_t*>(buf->data + size_t(a.y1 - layer->buf_area.y1) * buf->header.stride) + (a.x1 - layer->buf_area.x1);
+        const int w = a.x2 - a.x1 + 1, h = a.y2 - a.y1 + 1;
+        if (solid && solid_clear_) for (int y = 0; y < h; ++y) std::fill_n(first + size_t(y) * stride, w, solid_argb_);
+        else if (pixels && !(mask >> solids))
+            kestrel_argb_fills(first, stride, pixels + size_t(a.y1) * width_ + a.x1, width_, w, h, solid ? 2 : 1, dim_argb, solid_ground_);
+        else kestrel_argb_fills(first, stride, first, stride, w, h, solid ? 2 : 1, dim_argb, solid_ground_);
+    });
+    solid_stored_ = solids > 0;
 }
 void View::sync_hud_objects() {
     if (hud_layout_ == hud_->layout()) return;
@@ -311,6 +490,7 @@ void View::draw_picker(lv_layer_t* layer) {
     const auto frame = canopy::screen_frame(width_, height_);
     for (int side = 0; side < 2; ++side) {
         const bool selected = side == model_.side;
+        text_.collect_bounds(&picker_text_[side]);
         text_.panel(layer, side ? "AIR UNIT  >" : "<  GROUND UNIT", side == 0, 14,
                     407 + canopy::kTextState * 0.25f / frame.U,
                     canopy::kTextState, side != 0, selected ? th.accent : th.quiet, alpha);
@@ -318,6 +498,7 @@ void View::draw_picker(lv_layer_t* layer) {
                     427 + canopy::kTextUnit * 0.25f / frame.U,
                     canopy::kTextUnit, side != 0, selected ? th.text : th.quiet, alpha * (selected ? 0.85f : 0.6f));
     }
+    text_.collect_bounds(nullptr);
 }
 void View::draw_channel(lv_layer_t* layer) {
     const auto& scan=model_.backend.channels;
@@ -352,6 +533,36 @@ void View::draw_channel(lv_layer_t* layer) {
     }
     label("LEFT / RIGHT  Select     UP  Quietest     DOWN  Current     OK  Apply     BACK  Close",pad,height_-46*u,20,theme.text);
     label(!scan.fresh?"Scan stale; waiting for radio":model_.feedback,pad,height_-17*u,18,theme.quiet);
+}
+void View::draw_status(lv_layer_t* layer) {
+    // Where the artwork used to bake "Ready": the idle status word, same font,
+    // size and place, swapped for the live binding state while a bind runs.
+    const auto& theme = hud_theme_at(model_.theme);
+    const float px = 45.8f * height_ / 1080.0f, baseline = height_ * 0.867f;
+    char s[48];
+    const unsigned p = model_.bind_peer;
+    switch (model_.bind_state) {
+    case gnd::BIND_RUNNING: std::snprintf(s, sizeof s, "BINDING  %ds", model_.bind_secs_left); break;
+    case gnd::BIND_OK:      std::snprintf(s, sizeof s, "BOUND  %02X:%02X:%02X:%02X",
+                                          (p >> 24) & 0xFF, (p >> 16) & 0xFF, (p >> 8) & 0xFF, p & 0xFF); break;
+    case gnd::BIND_FAILED:  std::snprintf(s, sizeof s, "NO AIR UNIT FOUND"); break;
+    case gnd::BIND_LINKED:  std::snprintf(s, sizeof s, "ALREADY LINKED"); break;
+    default:                std::snprintf(s, sizeof s, "Ready"); break;
+    }
+    const float x = (width_ - text_.canvas_advance(s, px)) / 2;
+    const int ts = std::max(1, int(height_ * 0.00238f + 0.5f));
+    static const float shadow[] = {0, 0, 0.05f};
+    text_.canvas(layer, s, x, baseline, px, false, shadow, 0.35f, 2 * ts, 2 * ts);
+    text_.canvas(layer, s, x, baseline, px, false, shadow, 0.60f, ts, ts);
+    text_.canvas(layer, s, x, baseline, px, false, theme.accent, 1.0f);
+    // A cancel hint under the word while the bind window is open.
+    if (model_.bind_state == gnd::BIND_RUNNING) {
+        const char* c = "Press bind again to cancel";
+        const float cpx = px * 0.52f, cby = baseline + px * 0.62f;
+        const float cx = (width_ - text_.canvas_advance(c, cpx)) / 2;
+        text_.canvas(layer, c, cx, cby, cpx, false, shadow, 0.55f, ts, ts);
+        text_.canvas(layer, c, cx, cby, cpx, false, theme.quiet, 1.0f);
+    }
 }
 void View::draw_gallery(lv_layer_t* layer) {
     const auto& theme=hud_theme_at(model_.theme);const float u=height_/1080.0f;
@@ -497,11 +708,19 @@ void View::draw_menu(lv_layer_t* layer) {
         lv_draw_image(layer, &d, &image_area);
         return;
     }
-    const auto layout_value=capture_layout_?MenuLayout{}:menu_layout(menu_model,w,h);
-    const auto& layout=capture_layout_?*capture_layout_:layout_value;
+    if(!capture_layout_ && (!frame_layout_ || frame_layout_->model!=&menu_model ||
+                            frame_layout_->width!=w || frame_layout_->height!=h))
+        frame_layout_=FrameLayout{&menu_model,w,h,menu_layout(menu_model,w,h)};
+    const auto& layout=capture_layout_?*capture_layout_:frame_layout_->layout;
     const float u=layout.u;
     const int pad=layout.pad,row_h=layout.row_h;
-    rect(layer, x, y, w, h, th.ground, 0.94f * std::min(1.0f, menu_progress_ * 1.6f));
+    const float ground_alpha = 0.94f * std::min(1.0f, menu_progress_ * 1.6f);
+    if (solid_stored_ && !capturing_menu_) {
+        // The dimmer already stored this ground over itself in solid_.
+        lv_area_t pieces[5];
+        for (int i = 0, n = carve(reveal, solid_.data(), solids_, pieces); i < n; ++i)
+            rect(layer, pieces[i].x1, pieces[i].y1, pieces[i].x2 - pieces[i].x1 + 1, pieces[i].y2 - pieces[i].y1 + 1, th.ground, ground_alpha);
+    } else rect(layer, x, y, w, h, th.ground, ground_alpha);
     rect(layer, x, y, w, std::max(1, int(3 * u)), th.accent, menu_progress_);
     if (menu_progress_ <= 0.5f) return;
     const float content_alpha = (menu_progress_ - 0.5f) * 2;
@@ -525,8 +744,14 @@ void View::draw_menu(lv_layer_t* layer) {
     const float help_y=layout.help_y,list_bottom=help_y-20*u;
     const int start=layout.start,visible=layout.visible;
     const float lit[] = {std::min(1.0f, th.ground[0] * 1.6f), std::min(1.0f, th.ground[1] * 1.6f), std::min(1.0f, th.ground[2] * 1.6f)};
+    // LVGL draws the blade once per damaged area: leave out rows whose band
+    // (with a row of margin for glyphs) lies outside the area drawn now.
+    const auto& clip = layer->_clip_area;
+    auto outside = [&](int top, int bottom) { return y + bottom + row_h < clip.y1 || y + top - row_h > clip.y2; };
     int ry = list_top;
     for (int i = start; i < std::min(int(rows.size()), start + visible); ++i) {
+        const int band = row_h + (i == menu_model.selected && editing ? extra : 0);
+        if (outside(ry, ry + band)) { ry += rows[i].heading ? row_h : band; continue; }
         if (rows[i].heading) {
             text_.canvas(layer, rows[i].name, pad, ry + row_h * 0.72f, 15 * u, false, th.quiet, 0.9f * content_alpha, x, y);
             rect(layer, x + pad, y + ry + int(row_h * 0.86f), w - 2 * pad, 1, th.quiet, 0.3f * content_alpha);
@@ -561,9 +786,10 @@ void View::draw_menu(lv_layer_t* layer) {
     }
     if (!help_lines.empty()) rect(layer, x + pad, y + int(help_y - 10 * u), w - 2 * pad, 1, th.quiet, 0.35f * content_alpha);
     const float help_color[] = {th.text[0] * 0.7f, th.text[1] * 0.7f, th.text[2] * 0.7f};
-    for (size_t i = 0; i < help_lines.size(); ++i)
-        text_.canvas(layer, help_lines[i], pad, help_y + 18 * 1.4f * u * i + 18 * 0.9f * u,
-                     18 * u, false, help_color, content_alpha, x, y);
+    for (size_t i = 0; i < help_lines.size(); ++i) {
+        const float line = help_y + 18 * 1.4f * u * i + 18 * 0.9f * u;
+        if (!outside(int(line), int(line))) text_.canvas(layer, help_lines[i], pad, line, 18 * u, false, help_color, content_alpha, x, y);
+    }
     auto arrow = [&](float cy, bool up) {
         lv_draw_triangle_dsc_t tri; lv_draw_triangle_dsc_init(&tri);
         const int cx = x + w / 2, sy = y + int(cy), size = std::max(1, int(6 * u));
@@ -576,7 +802,7 @@ void View::draw_menu(lv_layer_t* layer) {
 
 }
 void View::update(uint64_t now) {
-    menu_damage_applied_=false;
+    menu_damage_applied_=false; frame_layout_.reset(); solid_stored_=false;
     text_.begin_frame(); idle_.prepare(model_, now);
     now_ = now;
     const bool gallery=model_.scene==SceneMode::GalleryBrowse ||
@@ -629,6 +855,8 @@ void View::update(uint64_t now) {
     }
     const auto debug=!replay && model_.debug && model_.hud_visible() && !model_.menu_open?model_.backend.radio_debug:std::string();
     if(debug!=debug_text_ || old_theme_!=model_.theme) {debug_text_=debug;lv_obj_invalidate(debug_object_);}
+    const auto rate=model_.fps_counter?model_.backend.frame_rate:std::string();
+    if(rate!=fps_text_ || old_theme_!=model_.theme) {fps_text_=rate;lv_obj_invalidate(fps_object_);}
     auto clock=replay?(model_.hud_visible() && model_.clock?model_.backend.playback_clock:std::string()):model_.clock_text(std::time(nullptr),now);
     auto hud_data = controller_.hud_data(now);
     const auto recording = hud_data.enabled && hud_data.panels[0].visible && model_.hud_style != "vector" ? std::string() : replay?std::string():controller_.recording_text(now);
@@ -679,7 +907,12 @@ void View::update(uint64_t now) {
     const float next = model_.hud_visible() ? menu_progress_ + std::clamp(target - menu_progress_, -dt / 0.24f, dt / 0.24f) : 0;
     const bool moving = next != menu_progress_;
     const bool wing_visibility_changed = (menu_progress_ == 0) != (next == 0);
-    animating_ = moving || model_.visual.animating || edge_fade_ != edge_target || (edge_fade_ > 0 && edge_level_ == 2);
+    // Held while the blade moves; the frame that brings it to rest (or hides
+    // it) takes the new level, so landing repaints the screen once.
+    const float dimmer = next == 0 || next == 1 ? next : dimmer_progress_;
+    const bool dimmer_changed = dimmer != dimmer_progress_;
+    dimmer_progress_ = dimmer;
+    animating_ = moving || dimmer_changed || model_.visual.animating || edge_fade_ != edge_target || (edge_fade_ > 0 && edge_level_ == 2);
     menu_progress_ = next;
     if (unfolded) active_menu_side_ = model_.side;
     const bool right_side = active_menu_side_ != 0;
@@ -693,6 +926,15 @@ void View::update(uint64_t now) {
     if(model_.channel_open && (old_channel_!=model_.channel_open || channel_revision_!=model_.backend.channels.revision ||
                               menu_version_!=model_.menu_version || old_theme_!=model_.theme)) lv_obj_invalidate(channel_);
     old_channel_=model_.channel_open; channel_revision_=model_.backend.channels.revision;
+    // The idle status word: "Ready" (or the live binding state) shows wherever
+    // the idle artwork does. Repaint it when it appears, the bind state or its
+    // countdown changes, or the theme changes.
+    const bool show_status = idle_.paints(model_, now_) && !model_.backend.vrx.link_valid(now_);
+    hidden(status_, !show_status);
+    if (show_status && (!old_status_ready_ || model_.bind_state != old_bind_state_ ||
+                        model_.bind_secs_left != old_bind_secs_ || old_theme_ != model_.theme))
+        lv_obj_invalidate(status_);
+    old_status_ready_ = show_status; old_bind_state_ = model_.bind_state; old_bind_secs_ = model_.bind_secs_left;
     const auto& t = model_.backend.vrx;
     const auto& flight = model_.backend.flight;
     const bool flight_fresh = flight.stamp_us && now >= flight.stamp_us && now - flight.stamp_us < 2000000;
@@ -718,7 +960,12 @@ void View::update(uint64_t now) {
         lv_obj_invalidate_area(menu_, &old_reveal);
         const auto reveal = menu_reveal(next); lv_obj_invalidate_area(menu_, &reveal);
     }
-    if (appearance || menu || moving) lv_obj_invalidate(picker_);
+    if (appearance || menu) lv_obj_invalidate(picker_);
+    else if (moving) {
+        // The labels fade with the blade; the rest of the picker band is empty.
+        if (picker_text_[0].x1 > picker_text_[0].x2 || picker_text_[1].x1 > picker_text_[1].x2) lv_obj_invalidate(picker_);
+        else for (const auto& area : picker_text_) lv_obj_invalidate_area(picker_, &area);
+    }
     if (appearance || (menu && next == 0)) {
         for (auto* object : hud_objects_) lv_obj_invalidate(object);
     } else {
@@ -734,7 +981,7 @@ void View::update(uint64_t now) {
     // Static artwork stays centered behind either menu; only visibility/theme or
     // acquisition text changes invalidate it.
     if (appearance || status_visible != old_status_ || (valid && old_menu_ != model_.menu_open)) lv_obj_invalidate(idle_object_);
-    if (appearance || moving || old_menu_ != model_.menu_open) lv_obj_invalidate(dimmer_);
+    if (appearance || dimmer_changed || old_menu_ != model_.menu_open) lv_obj_invalidate(dimmer_);
     old_status_ = status_visible;
     presented_ = t; initialized_ = true;
     old_fresh_ = fresh; old_valid_ = valid; old_theme_ = model_.theme;
@@ -744,5 +991,6 @@ void View::update(uint64_t now) {
     rejected_inputs_ = model_.rejected_inputs;
     flight_version_ = model_.backend.flight_version; old_flight_fresh_ = flight_fresh;
     hud_revision_ = hud_->revision();
+    plan_solid_ground();
 }
 } // namespace kestrel_ui

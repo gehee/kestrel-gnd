@@ -150,7 +150,7 @@ std::vector<MenuRow> Model::rows(uint64_t now) const {
             result.push_back(unavailable("channel", "Channel", "Where the link sits, what is on every channel and what your country allows."));
             result.push_back(unavailable("power", "TX Power", "Radio output. More reaches further and runs hotter."));
         }
-        if (backend.controls.count("max_mcs")) result.push_back(unavailable("max_mcs", "Max MCS", "The highest receive MCS allowed by Open8030."));
+        if (backend.vrx.link_valid(now) && backend.controls.count("max_mcs")) result.push_back(unavailable("max_mcs", "Max MCS", "The highest receive MCS allowed by Open8030."));
         result.push_back(unavailable("radio_firmware", "VRX Radio Firmware", "This VRX's own radio firmware. The air unit's is not changed."));
         if (backend.vrx.link_valid(now)) result.push_back(unavailable("standby", "Auto Standby", "The air unit's low-power standby."));
         return result;
@@ -164,8 +164,9 @@ std::vector<MenuRow> Model::rows(uint64_t now) const {
             "The canopy's headline voltage: per cell reads the same on any pack size."));
         result.push_back(choice("clock", "Clock", clock, {"OFF","IDLE ONLY 12H","IDLE ONLY 24H","ON 12H","ON 24H"}, "When the time is shown at the top of the screen, and how it is written."));
         result.push_back(choice("dynamic", "Dynamic HUD", dynamic, {"OFF","SMALL","MEDIUM","EXTREME"}, "Move the panels horizontally and vertically with the aircraft's camera IMU or flight-controller attitude, while keeping them level."));
-        result.push_back(choice("link_edge_warning", "Link Edge Warning", link_edge_warning, {"OFF","ON"}, "Amber for a weak link, red for a very weak link or stalled video."));
         result.push_back(choice("debug", "Debug Info", debug, {"OFF","ON"}, "Show the radio's current frame and bandwidth under the right panel."));
+        result.push_back(choice("link_edge_warning", "Link Edge Warning", link_edge_warning, {"OFF","ON"}, "Amber for a weak link, red for a very weak link or stalled video."));
+        result.push_back(choice("fps_counter", "FPS Counter", fps_counter, {"OFF","ON"}, "Show the screen's frame rate and its slowest frame of the last second in the top right corner, menu open or not."));
         return result;
     }
     if (tab == 3) {
@@ -174,11 +175,12 @@ std::vector<MenuRow> Model::rows(uint64_t now) const {
         for(int i=5;i<=20;++i) scales.push_back(std::to_string(i/10)+"."+std::to_string(i%10)+"x");
         for (int i = 0; i < hud_theme_count(); ++i) themes.push_back(hud_theme_at(i).name);
         return {choice("theme", "Theme", theme, std::move(themes), "Which hues carry which meaning."),
-            reading("bg_video", "Idle Background", "STATIC", "The compiled artwork is cached and drawn only when it changes."),
+            reading("bg_video", "Background Video", "STATIC", "The compiled artwork is cached and drawn only when it changes."),
             reading("picture_size", "Picture Size", "FULL", "The native display driver currently exposes fixed full-screen planes. Hardware scaling needs driver support."),
             choice("ui_scale", "UI Scaling", ui_scale-5, scales, "Size of HUD type and menu contents. The menu panel stays put."),
             reading("brightness", "Brightness", "MONITOR", "Use the external monitor's brightness control. HDMI does not expose a local panel backlight."),
             heading("ADVANCED"),
+            backend.controls.count("screen_mode") ? unavailable("screen_mode", "Screen Mode", "Select the HDMI output resolution and refresh rate. Confirm the new picture within 15 seconds or it will revert.") : reading("screen_mode", "Screen Mode", screen_mode, "The current HDMI output mode."),
             reading("frame_mode", "Frame Mode", "FULL DECODE", "The decoder receives whole pictures; only complete decoded frames are displayed.")};
     }
     if (tab == 4) return {
@@ -186,12 +188,12 @@ std::vector<MenuRow> Model::rows(uint64_t now) const {
         unavailable("record", "Recording", "Start or stop recording; the REC button does the same."),
         unavailable("gallery", "Gallery", "Browse and play recordings."),
         unavailable("folder", "Folder", "Where recordings are written."),
-        unavailable("space", "Space Left", "Room remaining on the recordings partition.")};
+        unavailable("space", "Space Left", "Room remaining on the recordings partition."),
+        unavailable("format_card", "Format SD Card", "Erases the whole SD card and formats it for recordings (exFAT).")};
     if (tab == 5) return {
         reading("build", "Build", build, "When this receiver application was built."),
         reading("version", "Version", version, "The receiver application version and source revision."),
         reading("decoder", "Decoder", decoder, "The Ascent hardware video decoder."),
-        backend.controls.count("screen_mode") ? unavailable("screen_mode", "Screen Mode", "Select the HDMI output resolution and refresh rate. Confirm the new picture within 15 seconds or it will revert.") : reading("screen_mode", "Screen Mode", screen_mode, "The current HDMI output mode."),
         reading("wifi", "WiFi AP", "NOT SUPPORTED", "The native Ascent image has no WiFi AP or spectator video service."), heading("WHERE YOU FLY"),
         unavailable("licence", "Amateur Licence", "Whether you hold an amateur radio licence."),
         unavailable("area", "Area", "Where you fly, starting with the part of the world."),
@@ -200,12 +202,32 @@ std::vector<MenuRow> Model::rows(uint64_t now) const {
     if (tab == 6) {
         auto info = [&](const char* key) { auto it=backend.air_info.find(key); return it==backend.air_info.end()?std::string("--"):it->second; };
         std::vector<MenuRow> rows{heading("AIR UNIT"),
-            reading("model","Model",info("model"),"The connected air unit, as it reports itself."),
-            reading("hw_version","HW Version",info("hw_version"),"Board and RF board versions."),
-            reading("sn","SN",info("sn"),"The model and radio chip identifier reported by the air unit."),
-            reading("sw_version","SW Version",info("sw_version"),"Stock firmware version reported by the air unit.")};
-        for (const auto& field : std::vector<std::pair<const char*,const char*>>{{"app","Application"},{"ver","App Version"},{"os","OS"},{"radio","Radio"},{"kernel","Kernel"},{"sensor","Sensor"}})
-            if (backend.air_info.count(field.first) && !info(field.first).empty()) rows.push_back(reading(field.first,field.second,info(field.first),"Reported by the connected air unit."));
+            reading("model","Model",info("model"),"The air unit on the other end of the link, as it reports itself."),
+            reading("hw_version","HW Version",info("hw_version"),"As stock shows it: the board's version, then the RF board's."),
+            reading("sn","SN",info("sn"),"As stock shows it: the model, then the radio chip's ID."),
+            reading("sw_version","SW Version",info("sw_version"),"The Caddx firmware on the air unit, as stock shows it. With fpvOS it is the stock firmware fpvOS runs on.")};
+        // The VRX Pro's FPVOS block (hud/osd_menu_rows.cpp): only when
+        // kestrel-air says what it is, with the same names and values.
+        auto have = [&](const char* key) { const auto it=backend.air_info.find(key); return it!=backend.air_info.end() && !it->second.empty(); };
+        if (have("os") || have("ver") || have("radio") || have("radiofw") || have("kernel") || have("sensor")) {
+            auto value = [&](const char* key) { return have(key) ? info(key) : std::string("--"); };
+            std::string air_app = value("ver");
+            if (have("ver") && have("proto")) air_app += " (protocol " + info("proto") + ")";
+            std::string firmware = value("radiofw");
+            if (firmware == "open8030") firmware = "Open8030";
+            else if (firmware == "stock") firmware = "Stock";
+            rows.push_back(heading("FPVOS"));
+            rows.push_back(reading("os","fpvOS",value("os"),"The fpvOS air image the unit was flashed with."));
+            rows.push_back(reading("ver","kestrel-air",air_app,"fpvOS's air app: it runs the camera and the radio in place of Caddx's."));
+            rows.push_back(reading("radio","Radio Driver",have("radio") ? "ar_libre " + info("radio") : "--","What drives the AR8030 radio on the air unit."));
+            rows.push_back(reading("radiofw","Radio Firmware",firmware,"What runs on the air unit's AR8030 radio chip: the stock firmware, or Open8030, the open one (Lite and Lite+)."));
+            rows.push_back(reading("kernel","Kernel",value("kernel"),"The air unit's Linux kernel (the stock one)."));
+            rows.push_back(reading("sensor","Camera",value("sensor"),"The camera's image sensor."));
+            if (have("caps")) {
+                rows.push_back(heading("CAPABILITIES"));
+                rows.push_back(reading("caps","Capabilities",info("caps"),"What this air unit has on, as it names it."));
+            }
+        }
         return rows;
     }
     return {heading("FLIGHT CONTROLLER"),
@@ -229,6 +251,7 @@ int Model::setting(const std::string& id) const {
     if (id == "clock") return clock;
     if (id == "bf_osd") return bf_osd;
     if (id == "debug") return debug;
+    if (id == "fps_counter") return fps_counter;
     if (id == "link_edge_warning") return link_edge_warning;
     if (id == "dynamic") return dynamic;
     if (id == "ui_scale") return ui_scale-5;
@@ -249,6 +272,7 @@ void Model::set_setting(const std::string& id, int value) {
     else if (id == "clock") clock = std::clamp(value,0,4);
     else if (id == "bf_osd") bf_osd=value!=0;
     else if (id == "debug") debug=value!=0;
+    else if (id == "fps_counter") fps_counter=value!=0;
     else if (id == "link_edge_warning") link_edge_warning=value!=0;
     else if (id == "dynamic") dynamic=std::clamp(value,0,3);
     else if (id == "ui_scale") ui_scale=std::clamp(value+5,5,20);
@@ -259,7 +283,7 @@ void Model::set_preferences(const UiPreferences& p) {
     theme = p.theme; fps = p.fps; show_details = p.details; key_repeat = p.repeat; show_hud = p.hud; per_cell = p.per_cell;
     clock=p.clock;
     bf_osd=p.bf_osd;debug=p.debug;dynamic=p.dynamic;
-    ui_scale=p.ui_scale; link_edge_warning=p.link_edge_warning;
+    ui_scale=p.ui_scale; link_edge_warning=p.link_edge_warning; fps_counter=p.fps_counter;
 }
 std::string Model::clock_text(std::time_t wall_time,uint64_t now) const {
     if(!hud_visible() || !clock || (clock<=2 && !show_status(now))) return {};
@@ -290,6 +314,8 @@ std::string Model::describe() const {
         << " side=" << (side ? "air" : "ground") << " tab=" << tab_name(tab) << " row=" << selected
         << " theme=" << hud_theme_at(theme).name << " fps=" << fps << " details=" << show_details << " repeat=" << key_repeat
         << " keys=" << key_count << " last=" << last_key << " hud_pid=" << hud_pid << " hud_restarts=" << hud_restarts
+        << " vrx_temp_c=" << (backend.vrx.cpu_temperature_x100 == Telemetry::unavailable ? std::string("--")
+                              : std::to_string(backend.vrx.cpu_temperature_x100 / 100))
         << " backend_connected=" << backend.service.connected << " backend_session=" << backend.service.session
         << " backend_caps=" << backend.service.capabilities << " provider_connected=" << backend.service.provider_connected
         << " msp_frames=" << backend.serial.frames << " pack_valid=" << backend.flight.have_pack_v

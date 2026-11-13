@@ -210,6 +210,47 @@ class Ar9311Screen final : public PlaneScreen {
     // Match the last decoded source during flush/idle, so changing decoders
     // does not reconfigure the scaler or interrupt the HDMI signal.
     Buffer black_, black_720_;
+    // A blank at any other source size (864p), so a flush keeps the
+    // scaler's geometry instead of forcing a modeset. No new memory (CMA is
+    // nearly all taken): a framebuffer over the 1080p blank, its Y plane in
+    // that buffer's black luma, both chroma planes in its neutral chroma.
+    uint32_t other_fb_ = 0;
+    int other_w_ = 0, other_h_ = 0;
+    void drop_other_fb() {
+        if (other_fb_) ioctl(fd_, DRM_IOCTL_MODE_RMFB, &other_fb_);
+        other_fb_ = 0; other_w_ = other_h_ = 0;
+    }
+    uint32_t blank_fb(int w, int h) {
+        if (w == 1920 && h == 1080) return black_.fb;
+        if (w == 1280 && h == 720 && black_720_.fb) return black_720_.fb;
+        if (w != other_w_ || h != other_h_) {
+            // Never on screen here: what is showing has this new size.
+            drop_other_fb();
+            drm_mode_fb_cmd2 fb{};
+            fb.width = w; fb.height = h;
+            fb.pixel_format = DRM_FORMAT_YUV420;
+            fb.handles[0] = fb.handles[1] = fb.handles[2] = black_.handle;
+            fb.pitches[0] = w;
+            fb.pitches[1] = fb.pitches[2] = w / 2;
+            fb.offsets[1] = 1920 * 1080;
+            // The firmware takes plane offsets in multiples of 64 only.
+            fb.offsets[2] = 1920 * 1080 + ((w / 2) * (h / 2) + 63) / 64 * 64;
+            ctl(fd_, DRM_IOCTL_MODE_ADDFB2, &fb, "blank framebuffer");
+            other_fb_ = fb.fb_id; other_w_ = w; other_h_ = h;
+        }
+        return other_fb_;
+    }
+    // I420 the VO scaler takes: even sizes, up to 2x smaller or larger - on
+    // firmware that scales any size (any_scale_, probed at open). Older
+    // firmware shows the screen's own size and 1080p only: anything else is
+    // dropped and said, not committed (a refused commit ends the session).
+    bool any_scale_ = false;
+    bool scannable(int w, int h) const {
+        if (!any_scale_)
+            return (w == 1920 && h == 1080) || (w == width_ && h == height_);
+        return w > 0 && h > 0 && !(w & 1) && !(h & 1) && w <= 1920 && h <= 1080 &&
+               w * 2 >= width_ && w <= width_ * 2 && h * 2 >= height_ && h <= height_ * 2;
+    }
     std::array<Buffer, 3> ui_{};
     std::array<Slot, 3> slots_{};
     std::array<base::DamageRows, 3> ui_damage_;
@@ -268,6 +309,7 @@ class Ar9311Screen final : public PlaneScreen {
         for (auto &b : ui_)
             destroy(b);
         destroy(black_);
+        drop_other_fb();
         destroy(black_720_);
         if (mode_) {
             drm_mode_destroy_blob b{};
@@ -446,6 +488,19 @@ class Ar9311Screen final : public PlaneScreen {
             }
             if(!supports_mode({height,hz}))
                 throw std::runtime_error("Requested HDMI mode is not supported by the display and firmware");
+            {
+                // Does this firmware scale a size that is neither the screen's
+                // nor 1080p (fpvOS patch 0034)? Asked, never assumed.
+                Atomic test;
+                test.plane(primary_, crtc_.id, blank_fb(1536, 864), 1536, 864, width_, height_);
+                test.plane(overlay_, crtc_.id, 0, width_, height_, width_, height_);
+                test.add(connector_, {{"CRTC_ID", crtc_.id}});
+                test.add(crtc_, {{"MODE_ID", mode_}, {"ACTIVE", 1}});
+                any_scale_ = test.commit(fd_, DRM_MODE_ATOMIC_ALLOW_MODESET | DRM_MODE_ATOMIC_TEST_ONLY);
+                drop_other_fb();
+                printf("display: video sizes other than the screen's and 1080p: %s\n",
+                       any_scale_ ? "scaled by the firmware" : "not on this firmware");
+            }
             printf("display: hardware planes video=%u UI=%u, DMA-BUF scanout\n", primary_.id, overlay_.id);
         } catch (...) {
             close_display();
@@ -456,7 +511,7 @@ class Ar9311Screen final : public PlaneScreen {
     void queue_frame(std::shared_ptr<DecodedUnit> frame) override {
         if (!frame)
             return;
-        if (!((frame->width == 1920 && frame->height == 1080) || (frame->width == width_ && frame->height == height_)) ||
+        if (!scannable(int(frame->width), int(frame->height)) ||
             !frame->has_prime_fd || frame->prime_fd < 0 || frame->drm_pixel_format != DRM_FORMAT_YUV420 || !frame->frame_ref) {
             // A picture this pipeline cannot scan out (another size or
             // format) says nothing about HDMI: dropped, and said, rather than
@@ -597,16 +652,18 @@ class Ar9311Screen final : public PlaneScreen {
                     pending = {frame, framebuffer(*frame)};
                 const int next_width = frame ? frame->width : source_width;
                 const int next_height = frame ? frame->height : source_height;
-                const uint32_t blank_fb = next_height == 720 ? black_720_.fb : black_.fb;
+                const bool need_blank = video_changed ? !pending.frame : !showing.frame;
+                const uint32_t blank = need_blank ? blank_fb(next_width, next_height) : 0;
                 uint32_t video_fb =
-                    video_changed ? (pending.frame ? pending.fb : blank_fb) : (showing.frame ? showing.fb : blank_fb);
+                    video_changed ? (pending.frame ? pending.fb : blank) : (showing.frame ? showing.fb : blank);
                 Atomic a;
                 a.plane(primary_, crtc_.id, video_fb, next_width, next_height, width_, height_);
                 a.plane(overlay_, crtc_.id, next_ui < 0 ? 0 : ui_[next_ui].fb, width_, height_, width_, height_);
                 if (frame && ltrace::on()) ltrace::rec(ltrace::kRender, clock_us(), uint32_t(frame->pts), video_fb);
-                // Only a real source-size change needs the firmware's scaler
-                // modeset. Flushes use matching I420 black buffers, and release
-                // the old decoder lease only after the blank flip completes.
+                // A source-size change may modeset: older firmware needs one
+                // at 720p; fpvOS patch 0034 instead applies it at frame start,
+                // HDMI staying up. Flushes use matching I420 black buffers, and
+                // release the old decoder lease only after the blank flip completes.
                 const bool geometry_changed = next_width != source_width || next_height != source_height;
                 const uint32_t flags = DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT |
                     (geometry_changed ? DRM_MODE_ATOMIC_ALLOW_MODESET : 0);

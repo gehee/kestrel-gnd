@@ -599,6 +599,16 @@ void Ar8030Link::scan_air_status(const uint8_t *buf, int n) {
                     model_.update_camera([&](air::CameraState& c) { c.dnr3d = air.dnr_3d; c.dnr_n++; });
                     // Its rotation likewise: the menu shows what it runs.
                     model_.update_camera([&](air::CameraState& c) { c.angle = air.angle; c.angle_n++; });
+                    // And its video mode: the row kept the link-time mode, so
+                    // after any switch it showed the old one and the next
+                    // edit stepped from there. A mode outside the list keeps
+                    // the last one (the row stays usable).
+                    for (int m = 0; m < sky::kFpvModeCount; m++)
+                        if (sky::kFpvModes[m].w == air.ch0_w && sky::kFpvModes[m].h == air.ch0_h &&
+                            sky::kFpvModes[m].fps == air.ch0_fps) {
+                            model_.update_camera([&](air::CameraState& c) { c.video_mode = m; c.mode_n++; });
+                            break;
+                        }
                     printf("ar8030: air unit reports ch0=%ux%u@%u ev=%d sat=%u "
                            "sharp=%u contrast=%u scene=%u awb=%u flicker=%u "
                            "angle=%u dnr3d=%u focus=%u\n",

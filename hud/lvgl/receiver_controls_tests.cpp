@@ -44,7 +44,8 @@ struct Ground : Fake<gnd::Radio,gnd::RadioState> {
 int main() {
     try {
         Camera camera; Encoder encoder; Air air; Unit unit; Ground ground;
-        ReceiverControls controls(camera,encoder,air,unit,ground);
+        ReceiverControls controls(camera,encoder,air,unit,ground,
+                                  {{"720p60",0},{"864p120",0x40},{"864p144",0x100},{"1080p60",0}});
         Model model; Controller controller(model); auto& state=model.backend;
         const auto now=monotonic_us();
         state.service.connected=true;
@@ -63,6 +64,19 @@ int main() {
               state.link.video_mbps==4.5f && state.link.link_mbps==9.7f && state.link.standby && !state.link.vtx_temperature_valid,
               "HUD consumes calibrated native units and actual standby without fabricating temperature");
         check(!state.controls.at("EV").enabled,"P1 settings echoes must not enable missing ISP controls");
+        {
+            // Video Mode: the modes any air unit has, those its feature bits
+            // add, and always the one it runs (the bits arrive after it).
+            auto offered=[&]{ std::string s; for(const auto& m:state.controls.at("Video Mode").choices) s+=m.label+" "; return s; };
+            auto changed=[&]{ ++camera.revision; ++unit.revision; controls.update(state,now); };
+            camera.value.mode_n=1; camera.value.video_mode=0; unit.value.features=0; changed();
+            check(offered()=="720p60 1080p60 ","Video Mode offers only what any air unit has without feature bits");
+            unit.value.features=0x40; changed();
+            check(offered()=="720p60 864p120 1080p60 ","Video Mode adds the modes the air unit's features give");
+            unit.value.features=0; camera.value.video_mode=2; changed();
+            check(offered()=="720p60 864p144 1080p60 ","Video Mode names the running mode before its feature bit arrives");
+            camera.value.mode_n=0; camera.value.video_mode=0; unit.value.features=0; changed();
+        }
         check(state.controls.at("Max Bitrate").enabled,"P1 bitrate is supported");
         {
             // The VRX Pro's tables, by the value on the wire.

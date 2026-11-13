@@ -33,6 +33,7 @@ struct UiPreferences {
     int dynamic = 0;
     int ui_scale = 10;
     bool link_edge_warning = true;
+    bool fps_counter = false;
 };
 struct MenuRow {
     std::string name, value;
@@ -69,6 +70,7 @@ public:
     int dynamic = 0;
     int ui_scale = 10;
     bool link_edge_warning = true;
+    bool fps_counter = false;
     bool playback_hud_enabled = true;
     bool playback_controls_visible = true;
     bool show_details = true, key_repeat = true, show_hud = true, per_cell = true;
@@ -76,6 +78,10 @@ public:
     uint64_t menu_version = 0, key_count = 0, rejected_inputs = 0;
     std::string last_key = "--", input_sources = "stdin", control_path;
     std::string feedback;
+    // Binding progress for the over-video bind overlay (gnd::BindState; 0 = idle).
+    int bind_state = 0;
+    int bind_secs_left = 0;
+    unsigned bind_peer = 0;
     std::string build = "--", version = "--", decoder = "--", screen_mode = "--";
     int display_width = 1920, display_height = 1080;
     int hud_pid = -1;
@@ -83,7 +89,7 @@ public:
     bool simulated = false;
     std::string hud_style = "canopy";
     canopy::LinkVisual visual;
-    UiPreferences preferences() const { return {theme, fps, show_details, key_repeat, show_hud, per_cell, clock, bf_osd, debug, dynamic, ui_scale, link_edge_warning}; }
+    UiPreferences preferences() const { return {theme, fps, show_details, key_repeat, show_hud, per_cell, clock, bf_osd, debug, dynamic, ui_scale, link_edge_warning, fps_counter}; }
     std::string clock_text(std::time_t wall_time, uint64_t now) const;
     void set_preferences(const UiPreferences& p);
     std::vector<int> side_tabs() const;

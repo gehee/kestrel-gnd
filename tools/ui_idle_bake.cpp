@@ -104,12 +104,9 @@ int main(int argc, char** argv) {
             }
             mask(cr.get(), head.get(), x, y, h / 256, theme.text);
             mask(cr.get(), tail.get(), x, y, h / 256, theme.accent);
-            cairo_set_font_face(cr.get(), face.get()); cairo_set_font_size(cr.get(), height * 45.8 / 1080);
-            cairo_text_extents_t ready{}; cairo_text_extents(cr.get(), "Ready", &ready);
-            const double tx = (width - ready.x_advance) / 2, ty = height * .867, ts = height * .00238;
-            color(cr.get(), shadow1, .35); cairo_move_to(cr.get(), tx + 2 * ts, ty + 2 * ts); cairo_show_text(cr.get(), "Ready");
-            color(cr.get(), shadow2, .60); cairo_move_to(cr.get(), tx + ts, ty + ts); cairo_show_text(cr.get(), "Ready");
-            color(cr.get(), theme.accent); cairo_move_to(cr.get(), tx, ty); cairo_show_text(cr.get(), "Ready");
+            // The status word ("Ready", or the live binding state) is drawn at
+            // run time (View::draw_status) at height*0.867, so it is not baked
+            // into the artwork any more.
             if (cairo_status(cr.get()) != CAIRO_STATUS_SUCCESS) throw std::runtime_error("idle rasterization failed");
             cairo_surface_flush(image.get());
             // KUIB pixels are little-endian ARGB8888, independent of host endian.
