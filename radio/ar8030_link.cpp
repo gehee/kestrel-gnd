@@ -2,6 +2,7 @@
 // commands carried out between its steps, what it holds), and its loop.
 #include "radio/ar8030_link_detail.hpp"
 #include "radio/native_pairing.hpp"
+#include "radio/link_recovery.hpp"
 #include <algorithm>
 #include "base/shell.hpp"
 
@@ -303,6 +304,15 @@ void Ar8030Link::run() {
                 // Artosyn's library, 5 s on ar_libre) and, on ar_libre, from
                 // the chip's link-state event the moment it changes. Reading it costs nothing, so every pass.
                 int ls = link_state_.load();
+                if (retune_grace_expired(tl, retune_down_ms_, ls)) {
+                    printf("ar8030: bandwidth retune did not restore the link - resuming loss recovery\n");
+                    if (!lost_reopened_) link_lost_ms_ = retune_down_ms_;
+                    retune_down_ms_ = 0;
+                    if (!chan_auto && !chan_manual_cli && bb_dev) {
+                        chan_follow_khz_ = 0;
+                        search_all_channels();
+                    }
+                }
                 try_next_peer(tl, ls);
                 // (The HUD is told by the stats thread and the event handler.)
                 if (ls >= 0 && ls != last_link_state) {

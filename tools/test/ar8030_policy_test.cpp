@@ -1,8 +1,17 @@
 #include "radio/ar8030_policy.hpp"
+#include "radio/link_recovery.hpp"
 #include <cstdio>
 #include <unistd.h>
 
 int main() {
+    // A retune that stays disconnected must recover without another event;
+    // short retunes and a restored link must keep the existing video path.
+    if (radio::retune_grace_expired(5000, 0, 0) ||
+        radio::retune_grace_expired(4000, 1000, 0) ||
+        radio::retune_grace_expired(4001, 1000, 2) ||
+        !radio::retune_grace_expired(4001, 1000, 0) ||
+        !radio::retune_grace_expired(4001, 1000, 1) ||
+        !radio::retune_grace_expired(4001, 1000, -1)) return 7;
     char path[] = "/tmp/kestrel-policy-XXXXXX";
     int fd = mkstemp(path);
     if (fd < 0) return 1;
