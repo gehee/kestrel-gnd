@@ -320,8 +320,8 @@ void Ar8030Link::bind_step() {
 // these three, and inventing others would be worse than dropping them.
 bool Ar8030Link::save_paired_mac(const uint8_t mac[4]) {
     if (native_sdio_) {
-        peer_ = radio::Peer{mac[0],mac[1],mac[2],mac[3]};
-        return radio::save_native_peer(pairing_file_, *peer_);
+        remember_peer(mac);
+        return session_peer_ || radio::save_native_peers(pairing_file_, peers_);
     }
     static const char *kPath = "/factory/user_cfg.json";
     static const char *kTmp  = "/factory/.user_cfg.json.new";
@@ -428,6 +428,36 @@ void Ar8030Link::set_sky_key_from_mac(const uint8_t mac[4]) {
     sky_cfg_key = buf;
 }
 
+void Ar8030Link::remember_peer(const uint8_t mac[4]) {
+    peers_ = radio::with_first(peers_, radio::Peer{mac[0], mac[1], mac[2], mac[3]});
+    peer_idx_ = 0;
+}
+
+// The radio looks for one AP at a time. With more than one unit paired and
+// none linked, the next is tried after kTryMs: a unit that is on links within
+// a few seconds of being named (a lost link came back in 2.7-9.2 s, a reopen
+// in ~3 s), and the one that links goes to the front (identify_peer()).
+void Ar8030Link::try_next_peer(uint64_t now, int link_state) {
+    static constexpr uint64_t kTryMs = 8000;
+    bb_dev_handle_t *dev = (bb_dev_handle_t *)bb_dev;
+    if (!native_sdio_ || session_peer_ || peers_.size() < 2 || !dev || link_state == 2 || bind_busy()) return;
+    if (!peer_try_ms_) { peer_try_ms_ = now; return; }
+    if (now - peer_try_ms_ < kTryMs) return;
+    peer_try_ms_ = now;
+    const radio::Peer from = *peer();
+    peer_idx_ = (peer_idx_ + 1) % peers_.size();
+    const radio::Peer& to = *peer();
+    set_sky_key_from_mac(to.data());
+    load_sky_link();
+    apply_tx_power(tx_power_mw);
+    bb_set_ap_mac_t ap;
+    memset(&ap, 0, sizeof(ap));
+    memcpy(ap.mac.addr, to.data(), BB_MAC_LEN);
+    printf("ar8030: no link with %02X:%02X:%02X:%02X in %llu s - looking for %02X:%02X:%02X:%02X: BB_SET_AP_MAC -> %d\n",
+           from[0], from[1], from[2], from[3], (unsigned long long)(kTryMs / 1000), to[0], to[1], to[2], to[3],
+           ar_ioctl(dev, BB_SET_AP_MAC, &ap, NULL));
+}
+
 // The per-air settings key and the AP MAC follow the unit that answered, read
 // from the link status at the handshake (before the camera config goes out).
 // The key chosen at start is a guess from the pairing list.
@@ -450,11 +480,16 @@ void Ar8030Link::identify_peer() {
     // (66:00:00:00) there, and adopting it moved every setting to a new key.
     bb_mac_t macs[BB_CONFIG_MAX_SLOT_CANDIDATE];
     const int n = ar_load_candidate_macs(macs, BB_CONFIG_MAX_SLOT_CANDIDATE);
-    bool paired = native_sdio_ && peer_ && memcmp(peer_->data(),p,BB_MAC_LEN)==0;
+    bool paired = false;
+    for (const auto& q : peers_) paired = paired || memcmp(q.data(), p, BB_MAC_LEN) == 0;
     for (int i = 0; i < n && !paired; i++) paired = memcmp(macs[i].addr, p, BB_MAC_LEN) == 0;
     if (!paired) {
         printf("ar8030: linked peer is not a paired unit - settings key kept\n");
         return;
+    }
+    if (native_sdio_ && !session_peer_ && (peers_.empty() || memcmp(peers_.front().data(), p, BB_MAC_LEN))) {
+        remember_peer(p);
+        radio::save_native_peers(pairing_file_, peers_);
     }
     char key[32];
     snprintf(key, sizeof(key), "sky_%02X%02X%02X%02X", p[0], p[1], p[2], p[3]);

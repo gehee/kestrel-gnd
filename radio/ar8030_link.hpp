@@ -21,6 +21,7 @@
 #include "radio/link.hpp"
 #include "radio/radio.hpp"
 #include "radio/ar8030_config.hpp"
+#include "radio/native_pairing.hpp"
 #include "radio/model.hpp"
 #include "radio/streams.hpp"
 #include "radio/video_out.hpp"
@@ -81,7 +82,16 @@ class Ar8030Link : public radio::Link, private radio::VideoOut::Source {
     private:
         bool native_sdio_;
         std::string pairing_file_;
-        std::optional<std::array<uint8_t, 4>> peer_;
+        // Every air unit this receiver was paired with (radio/native_pairing.hpp),
+        // the last linked first; the radio is pointed at one at a time. A
+        // --peer for the session is the only one and is not saved.
+        radio::Peers peers_;
+        size_t peer_idx_ = 0;
+        bool session_peer_ = false;
+        uint64_t peer_try_ms_ = 0;   // when the current one was set without a link since (0: linked)
+        const radio::Peer* peer() const { return peers_.empty() ? nullptr : &peers_[peer_idx_ % peers_.size()]; }
+        void remember_peer(const uint8_t mac[4]);   // to the front, saved
+        void try_next_peer(uint64_t now, int link_state);
         radio::Model& model_;            // what it learns goes to its model, which takes its commands
         Settings& settings_;             // the settings file: each air unit's own, the last peer
         // The streams it carries from the air unit, into the model's feeds

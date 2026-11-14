@@ -2,6 +2,7 @@
 // commands carried out between its steps, what it holds), and its loop.
 #include "radio/ar8030_link_detail.hpp"
 #include "radio/native_pairing.hpp"
+#include <algorithm>
 #include "base/shell.hpp"
 
 using namespace radio;
@@ -12,7 +13,7 @@ Ar8030Link::Ar8030Link(radio::Model& model, const Ar8030Config& cfg,
                        std::atomic<bool>* stop_signal,
                        std::string host_, int host_port_,
                        int slot_, int video_port_)
-    : native_sdio_(cfg.native_sdio), pairing_file_(cfg.pairing_file), peer_(cfg.peer), model_(model), settings_(settings), fc_out_(model.fc()), imu_out_(model.imu()),
+    : native_sdio_(cfg.native_sdio), pairing_file_(cfg.pairing_file), model_(model), settings_(settings), fc_out_(model.fc()), imu_out_(model.imu()),
       video_("ar8030", codec_, vdec_, cfg.decode_enabled, cfg.stream_decode, model, *this),
       codec(codec_), vdec(vdec_), should_stop(stop_signal),
       host(std::move(host_)), host_port(host_port_), slot(slot_), video_port(video_port_),
@@ -30,7 +31,26 @@ Ar8030Link::Ar8030Link(radio::Model& model, const Ar8030Config& cfg,
       video_dump_path(cfg.video_dump_path), decode_enabled(cfg.decode_enabled),
       mode_w(cfg.mode_w), mode_h(cfg.mode_h), mode_fps(cfg.mode_fps), mode_chn(cfg.mode_chn),
       probe_modes(cfg.probe_modes), probe_rf(cfg.probe_rf) {
-    if (native_sdio_ && !peer_) peer_ = radio::load_native_peer(pairing_file_);
+    if (cfg.peer) {
+        peers_ = {*cfg.peer};
+        session_peer_ = true;
+    } else if (native_sdio_) {
+        peers_ = radio::load_native_peers(pairing_file_);
+        // Units paired before the file kept more than one: their settings
+        // are still here (sky_<MAC>_*), after the ones the file names.
+        const size_t had = peers_.size();
+        for (const auto& p : radio::peers_in_settings(settings_.all_text()))
+            if (std::find(peers_.begin(), peers_.end(), p) == peers_.end() && peers_.size() < radio::kMaxPeers)
+                peers_.push_back(p);
+        if (peers_.size() != had) radio::save_native_peers(pairing_file_, peers_);
+        std::string names;
+        for (const auto& p : peers_) {
+            char m[16];
+            snprintf(m, sizeof(m), "%s%02X:%02X:%02X:%02X", names.empty() ? "" : ", ", p[0], p[1], p[2], p[3]);
+            names += m;
+        }
+        printf("ar8030: paired air units: %s\n", names.empty() ? "none" : names.c_str());
+    }
     accum.reserve(AR_READ_CHUNK * 2);
     link_st_last_.bw_step = -1;          // not known, as each publish starts it
 }
@@ -283,6 +303,7 @@ void Ar8030Link::run() {
                 // Artosyn's library, 5 s on ar_libre) and, on ar_libre, from
                 // the chip's link-state event the moment it changes. Reading it costs nothing, so every pass.
                 int ls = link_state_.load();
+                try_next_peer(tl, ls);
                 // (The HUD is told by the stats thread and the event handler.)
                 if (ls >= 0 && ls != last_link_state) {
                     chan_settle_ms_ = tl + 6000;
@@ -313,6 +334,7 @@ void Ar8030Link::run() {
                     // --ar8030-chan-manual asked to stay fixed, and does.
                     if (last_link_state == 2 && ls != 2 && !retune_down_ms_ && !lost_reopened_) link_lost_ms_ = tl;
                     if (ls == 2) { link_lost_ms_ = 0; lost_reopened_ = false; }
+                    peer_try_ms_ = ls == 2 ? 0 : (peer_try_ms_ ? peer_try_ms_ : tl);
                     if (last_link_state == 2 && ls != 2 && !retune_down_ms_ && !chan_auto && !chan_manual_cli && bb_dev) {
                         printf("ar8030: link lost on a pinned channel - searching again\n");
                         search_all_channels();

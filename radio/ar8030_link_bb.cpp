@@ -208,8 +208,8 @@ void Ar8030Link::configure_link() {
     if (!dev) return;
 
     bb_mac_t macs[BB_CONFIG_MAX_SLOT_CANDIDATE];
-    int n = peer_ ? 1 : native_sdio_ ? 0 : ar_load_candidate_macs(macs, BB_CONFIG_MAX_SLOT_CANDIDATE);
-    if (peer_) memcpy(macs[0].addr, peer_->data(), 4);
+    int n = peer() ? 1 : native_sdio_ ? 0 : ar_load_candidate_macs(macs, BB_CONFIG_MAX_SLOT_CANDIDATE);
+    if (peer()) memcpy(macs[0].addr, peer()->data(), 4);
     if (n > 0 && !native_sdio_) {
         for (int i = 0; i < n; i++)
             printf("ar8030: candidate[%d] = %02X:%02X:%02X:%02X\n", i,
@@ -607,7 +607,7 @@ bool Ar8030Link::connect_bb() {
         if (bb_ioctl_ex(hdev, BB_SET_POWER_AUTO, power_auto, nullptr, kBringupReqTimeoutMs) != 0 ||
             bb_ioctl_ex(hdev, BB_SET_POWER, power, nullptr, kBringupReqTimeoutMs) != 0) return false;
         bb_set_ap_mac_t ap{};
-        if (peer_) memcpy(ap.mac.addr, peer_->data(), 4);
+        if (peer()) memcpy(ap.mac.addr, peer()->data(), 4);
         if (bb_ioctl_ex(hdev, BB_SET_AP_MAC, &ap, nullptr, kBringupReqTimeoutMs) != 0) return false;
     }
     if (!bounded_req(BB_START_REQ, "bb_start")) return false;
