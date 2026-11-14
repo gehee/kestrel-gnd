@@ -4,6 +4,7 @@
 #include "base/damage.hpp"
 #include <memory>
 #include <stdexcept>
+#include <string>
 
 namespace display {
 class ScreenError : public std::runtime_error {
@@ -22,6 +23,9 @@ class PlaneScreen : public hal::FrameSink {
     // Recorded playback may intentionally stop feeding while paused. Keep its
     // last picture until an explicit decoder flush; live reception times out.
     virtual void hold_video(bool) {}
+    // Which air unit the pictures come from (its radio MAC, hex): a screen
+    // that follows the camera keeps each one's camera rate.
+    virtual void set_source(const std::string&) {}
     struct VideoStats {
         uint64_t stamp_us = 0;
         int width = 0, height = 0, fps = 0;

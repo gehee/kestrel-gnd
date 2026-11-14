@@ -1,12 +1,18 @@
+#include <algorithm>
 #include <atomic>
 // Native AR9311: independent DMA-BUF video and ARGB UI planes, blended by VO.
 #include "display/ar9311_screen.hpp"
 #include "display/ascent_kms_mode.hpp"
+#include "display/clock_lock.hpp"
 #include "base/ltrace.hpp"
+#include "base/scheduling_helper.hpp"
 #include <array>
 #include <cerrno>
 #include <chrono>
+#include <climits>
 #include <cmath>
+#include <cstdlib>
+#include <string>
 #include <condition_variable>
 #include <cstdio>
 #include <cstring>
@@ -14,6 +20,7 @@
 #include <drm_fourcc.h>
 #include <drm_mode.h>
 #include <fcntl.h>
+#include <deque>
 #include <map>
 #include <mutex>
 #include <poll.h>
@@ -272,6 +279,213 @@ class Ar9311Screen final : public PlaneScreen {
     std::atomic<bool> hold_video_{false};
     uint64_t video_updates_ = 0;
     std::atomic<uint64_t> ui_updates_{0};
+
+    // Screen follows camera (display/clock_lock.hpp): the pixel clock trimmed
+    // through fpvOS's artosyn_dsi.clock_trim_ppb so pictures are ready a fixed
+    // time before the commit deadline, never at it. Ready times are taken as
+    // pictures come (queue_frame), the refresh from the flips' vblanks; once
+    // a second the trim is moved. The camera's rate (the trim that holds the
+    // slack) is kept for the next start, where the DSI comes up with it before
+    // the LT9611 locks. /tmp/kestrel-screenlock-off holds the trim where it is.
+    static constexpr const char *kTrimParam = "/sys/module/artosyn_dsi/parameters/clock_trim_ppb";
+    // One line per air unit ("<MAC hex> <ppb>") and "default <ppb>", the rate
+    // a start begins with; a file of one number is that default.
+    static constexpr const char *kTrimSaved = "/var/lib/kestrel/screen-clock-ppb";
+    std::map<std::string, long long> saved_rates_;
+    std::string source_, pending_source_;  // pending_source_ under mutex_
+    // In order: while pictures come within kNearUs of the deadline (either
+    // side), jitter puts two in one refresh and none in the next - newest
+    // first loses one and repeats one. Held here instead and shown oldest
+    // first, one a refresh (at most two waiting: one refresh more latency),
+    // until the phase has been clear of the deadline for kClearS seconds.
+    static constexpr double kNearUs = 2500;
+    static constexpr unsigned kClearS = 10;
+    std::deque<std::shared_ptr<DecodedUnit>> held_;  // under mutex_
+    std::atomic<bool> in_order_{false};
+    unsigned in_order_clear_s_ = 0, in_order_s_ = 0;
+    std::atomic<unsigned> held_dropped_{0};
+    void set_in_order(bool on) {
+        if (on == in_order_) return;
+        std::lock_guard<std::mutex> lock(mutex_);
+        in_order_ = on;
+        held_.clear();
+        printf("screen lock: %s\n", on ? "pictures near the deadline - shown in order, one a refresh"
+                                       : "pictures clear of the deadline - newest first again");
+    }
+    std::vector<uint64_t> ready_us_;  // under mutex_
+    display::ClockLock clock_lock_;
+    std::atomic<bool> clock_lock_on_{false};
+    double refresh_us_ = 0;
+    uint64_t lock_next_us_ = 0, lock_log_us_ = 0, lock_saved_us_ = 0, prev_vblank_us_ = 0;
+    long long trim_written_ppb_ = LLONG_MIN;
+    std::vector<double> lock_slacks_;  // since the last log line
+    unsigned lock_late_ = 0;           // pictures that missed their deadline since then
+    // Where refreshes go without a new picture, since the last log line:
+    // flips that landed a vblank late (the commit went after its deadline),
+    // pictures replaced by a newer one before they were shown.
+    unsigned lock_missed_vblanks_ = 0;
+    std::atomic<unsigned> lock_replaced_{0};
+    bool latest_taken_ = true;  // under mutex_: latest_ was picked up by the loop
+
+    static bool write_text(const char *path, const std::string &text) {
+        FILE *f = std::fopen(path, "w");
+        if (!f) return false;
+        const bool ok = std::fputs(text.c_str(), f) >= 0;
+        return std::fclose(f) == 0 && ok;
+    }
+    void write_trim(double ppm) {
+        const long long ppb = std::llround(ppm * 1000);
+        if (ppb == trim_written_ppb_) return;
+        if (write_text(kTrimParam, std::to_string(ppb) + "\n")) trim_written_ppb_ = ppb;
+    }
+    // The lock moves the trim once a second; the clock gets there in a
+    // straight line over that second, a little at every refresh (a 4 ppm
+    // jump at once made the LT9611's PCR re-lock now and then: a black
+    // screen).
+    double ramp_from_ = 0, ramp_to_ = 0;
+    uint64_t ramp_start_us_ = 0;
+    void ramp_trim(double ppm, uint64_t now) {
+        ramp_from_ = ramp_now(now);
+        ramp_to_ = ppm;
+        ramp_start_us_ = now;
+    }
+    double ramp_now(uint64_t now) const {
+        if (!ramp_start_us_) return ramp_to_;
+        const double f = std::clamp(double(now - ramp_start_us_) / 1e6, 0.0, 1.0);
+        return ramp_from_ + (ramp_to_ - ramp_from_) * f;
+    }
+    // Before the first modeset: the saved rate, so the bridge locks to it.
+    void clock_lock_start() {
+        if (access(kTrimParam, W_OK) != 0) {
+            printf("screen lock: no artosyn_dsi.clock_trim_ppb on this firmware\n");
+            return;
+        }
+        double ppm = 0;
+        if (FILE *f = std::fopen(kTrimSaved, "r")) {
+            char line[96], key[32], extra;
+            long long ppb = 0;
+            while (std::fgets(line, sizeof line, f)) {
+                if (std::sscanf(line, "%31s %lld %c", key, &ppb, &extra) == 2) saved_rates_[key] = ppb;
+                else if (std::sscanf(line, "%lld %c", &ppb, &extra) == 1) saved_rates_["default"] = ppb;  // the old form
+            }
+            std::fclose(f);
+        }
+        for (auto it = saved_rates_.begin(); it != saved_rates_.end();)
+            it = std::llabs(it->second) <= 2500000 ? std::next(it) : saved_rates_.erase(it);
+        if (saved_rates_.count("default")) ppm = saved_rates_["default"] / 1000.0;
+        clock_lock_ = display::ClockLock(ppm);
+        clock_lock_on_ = true;
+        ramp_from_ = ramp_to_ = ppm;
+        ramp_start_us_ = 0;
+        write_trim(ppm);
+        printf("screen lock: pixel clock trim %+.1f ppm at start (%s)\n", ppm,
+               ppm != 0 ? "saved" : "none saved");
+    }
+    // After each flip: the refresh from the vblanks; once a second the lock.
+    void clock_lock_tick(uint64_t vblank_us) {
+        if (prev_vblank_us_ && vblank_us > prev_vblank_us_) {
+            const double d = double(vblank_us - prev_vblank_us_);
+            const double k = std::round(d / double(frame_us_));
+            if (k >= 2 && k <= 3 && video_active_) ++lock_missed_vblanks_;
+            if (k >= 1 && k <= 3) {
+                const double sample = d / k;
+                refresh_us_ = refresh_us_ ? refresh_us_ + 0.02 * (sample - refresh_us_) : sample;
+            }
+        }
+        prev_vblank_us_ = vblank_us;
+        const uint64_t now = clock_us();
+        if (clock_lock_on_) write_trim(ramp_now(now));
+        if (!clock_lock_on_ || now < lock_next_us_ || !refresh_us_) return;
+        lock_next_us_ = now + 1000000;
+        // Another air unit (told at link-up, before its pictures): the lock
+        // aims at its own camera rate, slewing there (a step would be a PCR
+        // re-lock, seen as a black screen: six of six on the SteadyDigital).
+        std::string source;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            source = pending_source_;
+        }
+        if (!source.empty() && source != source_) {
+            source_ = source;
+            const auto it = saved_rates_.find(source_);
+            if (it != saved_rates_.end()) {
+                const double ppm = it->second / 1000.0;
+                clock_lock_.expect_rate(ppm);
+                printf("screen lock: air unit %s, camera %+.1f ppm (saved), trim %+.1f ppm going there\n",
+                       source_.c_str(), ppm, clock_lock_.trim_ppm());
+            } else {
+                clock_lock_.reset();
+                printf("screen lock: air unit %s, camera rate not known yet\n", source_.c_str());
+            }
+        }
+        std::vector<uint64_t> ready;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            ready.swap(ready_us_);
+        }
+        // 1:1 only, with enough pictures to go by.
+        if (ready.size() < 30) { set_in_order(false); return; }
+        const double interval = double(ready.back() - ready.front()) / double(ready.size() - 1);
+        if (std::fabs(interval / refresh_us_ - 1) > 0.03) { set_in_order(false); return; }
+        const double P = refresh_us_, V = double(vblank_us);
+        std::vector<double> slacks;
+        slacks.reserve(ready.size());
+        for (const uint64_t r : ready) {
+            // The first deadline (a vblank less the lead) not before r.
+            const double t = double(r) + double(kLeadUs);
+            const double n = V + std::ceil((t - V) / P) * P;
+            const double slack = n - t;
+            slacks.push_back(slack);
+            lock_slacks_.push_back(slack);
+        }
+        std::vector<double> sorted = slacks;
+        std::nth_element(sorted.begin(), sorted.begin() + sorted.size() / 2, sorted.end());
+        const double median = sorted[sorted.size() / 2];
+        // Late: ready past the deadline the slack's median aims at.
+        unsigned near = 0;
+        for (const double x : slacks) {
+            if (std::fabs(x - median) > P / 2) ++lock_late_;
+            if (x < kNearUs || x > P - kNearUs) ++near;
+        }
+        if (near) {
+            in_order_clear_s_ = 0;
+            set_in_order(true);
+        } else if (in_order_ && ++in_order_clear_s_ >= kClearS) {
+            set_in_order(false);
+        }
+        if (in_order_) ++in_order_s_;
+        if (access("/tmp/kestrel-screenlock-off", F_OK) == 0) return;
+        // Test hook: another target slack.
+        if (FILE *f = std::fopen("/tmp/kestrel-screenlock-target-us", "r")) {
+            double us = 0;
+            if (std::fscanf(f, "%lf", &us) == 1 && us >= 500 && us <= 14000) clock_lock_.set_target_us(us);
+            std::fclose(f);
+        }
+        const double ppm = clock_lock_.update(double(now) / 1e6, median, P);
+        ramp_trim(ppm, now);
+        if (now >= lock_log_us_) {
+            lock_log_us_ = now + 5000000;
+            std::sort(lock_slacks_.begin(), lock_slacks_.end());
+            const auto at = [&](double q) { return lock_slacks_[size_t(q * double(lock_slacks_.size() - 1))]; };
+            printf("screen lock: slack min %.0f p01 %.0f p05 %.0f p50 %.0f p95 %.0f us (target %.0f), trim %+.1f ppm, camera %+.1f ppm%s, refresh %.2f us, off-median %u, late flips %u, replaced %u, in order %us (held dropped %u)\n",
+                   lock_slacks_.front(), at(0.01), at(0.05), at(0.5), at(0.95), clock_lock_.target_us(), ppm,
+                   clock_lock_.base_ppm(), clock_lock_.estimated() ? "" : " (not yet)", P, lock_late_,
+                   lock_missed_vblanks_, lock_replaced_.exchange(0), in_order_s_, held_dropped_.exchange(0));
+            lock_missed_vblanks_ = 0;
+            in_order_s_ = 0;
+            lock_slacks_.clear();
+            lock_late_ = 0;
+        }
+        if (clock_lock_.estimated() && clock_lock_.updates() >= 120 && now >= lock_saved_us_) {
+            lock_saved_us_ = now + 60000000;
+            const long long ppb = std::llround(clock_lock_.base_ppm() * 1000);
+            saved_rates_["default"] = ppb;
+            if (!source_.empty()) saved_rates_[source_] = ppb;
+            std::string text;
+            for (const auto &[key, value] : saved_rates_) text += key + " " + std::to_string(value) + "\n";
+            write_text(kTrimSaved, text);
+        }
+    }
     std::atomic<uint64_t> rejected_frames_{0};
 
     void destroy(Buffer &b) {
@@ -355,6 +569,25 @@ class Ar9311Screen final : public PlaneScreen {
         if (!rgb)
             memset(b.pixels, 16, width * height);
     }
+    // The vblank of the last flip (CLOCK_MONOTONIC, the kernel's stamp) and
+    // the refresh period: when the next one comes.
+    uint64_t last_vblank_us_ = 0, frame_us_ = 16667;
+    // How long a start waits for the HDMI bridge to report the screen.
+    static constexpr int kConnectWaitMs = 3000, kConnectPollMs = 50;
+    // One commit a frame, this long before the vblank, with the newest
+    // picture and UI: a commit is applied at the next vblank (one made 0.8 ms
+    // before it still was), and only one can be pending. Committed as soon
+    // as a picture came, it was pending all frame - right after a vblank, the
+    // loop being free only then - and every picture decoded mid-frame waited
+    // for the vblank after next: a whole frame more (measured 15.6-16.6 ms
+    // from the commit to the screen, every picture).
+    static constexpr uint64_t kLeadUs = 2000;
+    // When the next commit goes: 0 (now) without a vblank to go by.
+    uint64_t ui_deadline(uint64_t now) const {
+        if (!last_vblank_us_ || now < last_vblank_us_ || now - last_vblank_us_ > 1000000) return 0;
+        const uint64_t next = last_vblank_us_ + ((now - last_vblank_us_) / frame_us_ + 1) * frame_us_;
+        return next > kLeadUs ? next - kLeadUs : 0;
+    }
     void wait_flip(uint64_t cookie, uint32_t fb) {
         pollfd p{fd_, POLLIN, 0};
         int r;
@@ -372,8 +605,9 @@ class Ar9311Screen final : public PlaneScreen {
             if (e->type == DRM_EVENT_FLIP_COMPLETE && e->length >= sizeof(drm_event_vblank) &&
                 reinterpret_cast<drm_event_vblank *>(e)->user_data == cookie) {
                 auto* vblank = reinterpret_cast<drm_event_vblank *>(e);
-                if (ltrace::on()) ltrace::rec(ltrace::kFlipDone, clock_us(), fb,
-                    uint64_t(vblank->tv_sec) * 1000000 + vblank->tv_usec);
+                const uint64_t at_us = uint64_t(vblank->tv_sec) * 1000000 + vblank->tv_usec;
+                if (ltrace::on()) ltrace::rec(ltrace::kFlipDone, clock_us(), fb, at_us);
+                last_vblank_us_ = at_us;
                 return;
             }
             at += e->length;
@@ -386,6 +620,7 @@ class Ar9311Screen final : public PlaneScreen {
         try {
             if (!AscentMode{height,hz}.valid() || AscentMode{height,hz}.width()!=width)
                 throw std::invalid_argument("Unsupported Ascent screen mode");
+            frame_us_ = hz > 0 ? uint64_t(1000000 / hz) : 16667;
             fd_ = open(device.c_str(), O_RDWR | O_CLOEXEC);
             if (fd_ < 0)
                 throw std::runtime_error("cannot open " + device);
@@ -405,16 +640,31 @@ class Ar9311Screen final : public PlaneScreen {
                 throw std::runtime_error("expected one CRTC and connector");
             crtc_ = Properties(fd_, crtcs[0], DRM_MODE_OBJECT_CRTC);
             connector_ = Properties(fd_, connectors[0], DRM_MODE_OBJECT_CONNECTOR);
+            // At boot the receiver can start before the HDMI bridge has seen
+            // the screen (the SteadyDigital's root mounts from flash, so it
+            // starts ~1 s into the boot): ask again for up to 3 s before giving
+            // up, rather than exiting and losing the supervisor's 2 s backoff.
             drm_mode_get_connector c{};
-            c.connector_id = connectors[0];
-            ctl(fd_, DRM_IOCTL_MODE_GETCONNECTOR, &c, "connector status");
-            std::vector<drm_mode_modeinfo> modes(c.count_modes);
-            c.modes_ptr = uintptr_t(modes.data());
-            c.count_props = c.count_encoders = 0;
-            ctl(fd_, DRM_IOCTL_MODE_GETCONNECTOR, &c, "HDMI modes");
-            if (c.count_modes > modes.size()) throw std::runtime_error("HDMI modes changed");
-            if (c.connection != 1 && !force)
-                throw std::runtime_error("HDMI disconnected; use --force-display");
+            std::vector<drm_mode_modeinfo> modes;
+            for (int waited_ms = 0;; waited_ms += kConnectPollMs) {
+                c = {};
+                c.connector_id = connectors[0];
+                ctl(fd_, DRM_IOCTL_MODE_GETCONNECTOR, &c, "connector status");
+                modes.resize(c.count_modes);
+                c.modes_ptr = uintptr_t(modes.data());
+                c.count_props = c.count_encoders = 0;
+                ctl(fd_, DRM_IOCTL_MODE_GETCONNECTOR, &c, "HDMI modes");
+                const bool settled = c.count_modes <= modes.size();
+                if (settled && (c.connection == 1 || force)) {
+                    if (waited_ms)
+                        std::fprintf(stderr, "display: HDMI screen reported after %d ms\n", waited_ms);
+                    break;
+                }
+                if (waited_ms >= kConnectWaitMs || (stop_ && stop_->load()))
+                    throw std::runtime_error(settled ? "HDMI disconnected; use --force-display"
+                                                     : "HDMI modes changed");
+                usleep(kConnectPollMs * 1000);
+            }
             drm_mode_get_plane_res planes{};
             ctl(fd_, DRM_IOCTL_MODE_GETPLANERESOURCES, &planes, "plane count");
             std::vector<uint32_t> ids(planes.count_planes);
@@ -529,13 +779,25 @@ class Ar9311Screen final : public PlaneScreen {
         }
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            if (latest_ && !latest_taken_ && !in_order_) ++lock_replaced_;
+            if (in_order_) {
+                held_.push_back(frame);
+                while (held_.size() > 2) { held_.pop_front(); ++held_dropped_; }
+            }
             latest_ = std::move(frame);
+            latest_taken_ = false;
+            if (clock_lock_on_ && ready_us_.size() < 1024) ready_us_.push_back(clock_us());
         }
         wake_.notify_all();
+    }
+    void set_source(const std::string &id) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        pending_source_ = id;
     }
     void request_flush() override {
         std::unique_lock<std::mutex> lock(mutex_);
         latest_.reset();
+        held_.clear();
         wake_.notify_all();
         wake_.wait(lock, [this] { return done_ || !video_active_; });
     }
@@ -606,7 +868,13 @@ class Ar9311Screen final : public PlaneScreen {
         int active_ui = 0, next_ui = -1;
         int source_width = width_, source_height = height_;
         uint64_t cookie = 0;
+        // Commits go 2 ms before the vblank; on two cores shared with the
+        // decoder and the HUD's software rendering a normal thread woke past
+        // that now and then (a picture a refresh late, the next replacing it).
+        // Below the radio's receive thread (20).
+        SchedulingHelper::set_thread_params_max_realtime("AR9311_SCREEN", 15);
         try {
+            clock_lock_start();
             Atomic initial;
             // Prime the hardware at native size, then establish the 1080p
             // decoder geometry before publishing UI or live frames. The VO
@@ -631,10 +899,23 @@ class Ar9311Screen final : public PlaneScreen {
                 std::shared_ptr<DecodedUnit> frame;
                 {
                     std::unique_lock<std::mutex> lock(mutex_);
-                    frame = latest_;
+                    // In order: the oldest held picture, else nothing new.
+                    frame = !in_order_ ? latest_ : held_.empty() ? showing.frame : held_.front();
                     if (!hold_video_ && frame && frame->dec_end_ts && clock_us() - frame->dec_end_ts > 2000000)
                         frame.reset();
                     next_ui = active_ui;
+                    // Anything new goes up just before the vblank, with
+                    // whatever else came meanwhile (see kLeadUs).
+                    if (frame != showing.frame ||
+                        std::find(slots_.begin(), slots_.end(), Slot::Ready) != slots_.end()) {
+                        const uint64_t now = clock_us(), deadline = ui_deadline(now);
+                        if (deadline > now) {
+                            wake_.wait_for(lock, std::chrono::microseconds(std::min<uint64_t>(deadline - now, 2000)));
+                            continue;
+                        }
+                    }
+                    if (frame && frame == latest_) latest_taken_ = true;  // committed now
+                    if (in_order_ && !held_.empty() && frame == held_.front()) held_.pop_front();
                     for (int i = 0; i < 3; ++i)
                         if (slots_[i] == Slot::Ready) {
                             next_ui = i;
@@ -665,10 +946,16 @@ class Ar9311Screen final : public PlaneScreen {
                 // HDMI staying up. Flushes use matching I420 black buffers, and
                 // release the old decoder lease only after the blank flip completes.
                 const bool geometry_changed = next_width != source_width || next_height != source_height;
-                const uint32_t flags = DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT |
+                // Blocking: the commit's register writes run here, in this
+                // real-time thread, not on a kernel worker that a busy box
+                // ran past the vblank now and then (the next refresh then
+                // repeated the old picture). This waits for the flip, as
+                // wait_flip did anyway.
+                const uint32_t flags = DRM_MODE_PAGE_FLIP_EVENT |
                     (geometry_changed ? DRM_MODE_ATOMIC_ALLOW_MODESET : 0);
                 a.commit(fd_, flags, ++cookie);
                 wait_flip(cookie, video_fb);
+                clock_lock_tick(last_vblank_us_);
                 source_width = next_width;
                 source_height = next_height;
                 if (video_changed) {
@@ -737,6 +1024,7 @@ class Ar9311Screen final : public PlaneScreen {
             done_ = true;
             video_active_ = false;
             latest_.reset();
+            held_.clear();
         }
         wake_.notify_all();
         printf("display: video updates=%llu UI updates=%llu hardware composition\n",

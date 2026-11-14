@@ -496,6 +496,7 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
         uint64_t render_us = 0, overlay_us = 0, longest_loop_us = 0;
         uint64_t longest_render_us = 0, longest_overlay_us = 0;
         uint64_t rate_start = start, rate_loops = 0, rate_slowest_us = 0, profile_copy_us = 0;
+        unsigned screen_source = 0;  // the air unit the screen was last told of
         while (!interrupted && !model.quit && !source_exited && !receiver.screen->failed() &&
                !receiver.decoder->failed()) {
             const auto now = kestrel_ui::monotonic_us();
@@ -548,6 +549,14 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
             if (menu_requested) {
                 menu_requested = 0;
                 controller.key(kestrel_ui::Key::Menu);
+            }
+            // The radio names each paired air unit as it links (before its
+            // pictures): the screen keeps each one's camera rate.
+            if (const unsigned peer = unsigned(settings.get(radio::setting::ar8030_last_peer)); peer != screen_source) {
+                screen_source = peer;
+                char id[16];
+                std::snprintf(id, sizeof id, "%08X", peer);
+                if (peer) receiver.screen->set_source(id);
             }
             const auto video = receiver.screen->video_stats();
             // The live decoder's last picture, or the screen's last one put up:
