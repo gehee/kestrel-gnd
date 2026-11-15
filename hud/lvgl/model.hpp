@@ -34,6 +34,7 @@ struct UiPreferences {
     int ui_scale = 10;
     bool link_edge_warning = true;
     bool fps_counter = false;
+    int picture_size = 100;   // Picture Size, %: 60..100 in fives
 };
 struct MenuRow {
     std::string name, value;
@@ -71,6 +72,7 @@ public:
     int ui_scale = 10;
     bool link_edge_warning = true;
     bool fps_counter = false;
+    int picture_size = 100;
     bool playback_hud_enabled = true;
     bool playback_controls_visible = true;
     bool show_details = true, key_repeat = true, show_hud = true, per_cell = true;
@@ -89,7 +91,7 @@ public:
     bool simulated = false;
     std::string hud_style = "canopy";
     canopy::LinkVisual visual;
-    UiPreferences preferences() const { return {theme, fps, show_details, key_repeat, show_hud, per_cell, clock, bf_osd, debug, dynamic, ui_scale, link_edge_warning, fps_counter}; }
+    UiPreferences preferences() const { return {theme, fps, show_details, key_repeat, show_hud, per_cell, clock, bf_osd, debug, dynamic, ui_scale, link_edge_warning, fps_counter, picture_size}; }
     std::string clock_text(std::time_t wall_time, uint64_t now) const;
     void set_preferences(const UiPreferences& p);
     std::vector<int> side_tabs() const;

@@ -118,6 +118,17 @@ void queue(int fd, v4l2_buf_type type, unsigned index, size_t size, size_t used,
     checked(fd, VIDIOC_QBUF, &b, "queue buffer");
 }
 } // namespace
+// fpvOS kernel patch 0041: the decoder's display output, % of the picture.
+constexpr uint32_t kDisplayScaleCid = V4L2_CID_CODEC_BASE | 0x1f04;
+bool VdecV4l2::display_scale_available(const std::string& device) {
+    const int fd = open(device.c_str(), O_RDWR | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) return false;
+    v4l2_queryctrl q{};
+    q.id = kDisplayScaleCid;
+    const bool ok = ioctl(fd, VIDIOC_QUERYCTRL, &q) == 0 && q.minimum <= 60 && q.maximum == 100;
+    close(fd);
+    return ok;
+}
 VdecV4l2::VdecV4l2(VideoCodec codec, std::string device, std::shared_ptr<hal::FrameSink> sink,
                    std::atomic<bool> *stop, bool offline)
     : offline_(offline), codec_(codec), device_(std::move(device)), sink_(std::move(sink)), stop_(stop),
@@ -337,11 +348,22 @@ void VdecV4l2::decode() {
                         throw std::runtime_error("short capture allocation");
                     queue(dev.fd, capture_type, i, cap[i]->size, 0);
                 }
+                // Picture Size: the frame buffers are registered with the
+                // firmware as the capture stream starts, with it.
+                const int scale = std::clamp(display_scale_.load(), 60, 100);
+                if (scale < 100) {
+                    v4l2_control s{};
+                    s.id = kDisplayScaleCid;
+                    s.value = scale;
+                    if (ioctl_retry(dev.fd, VIDIOC_S_CTRL, &s) < 0)
+                        fprintf(stderr, "v4l2: no display scaler in this decoder (%s); Picture Size stays full\n",
+                                strerror(errno));
+                }
                 auto t = capture_type;
                 checked(dev.fd, VIDIOC_STREAMON, &t, "start decoded stream");
                 dev.capture_on = true;
-                printf("v4l2: %ux%u stride=%u coded_height=%u buffers=%u\n", width, height, stride,
-                       coded_height, ncap);
+                printf("v4l2: %ux%u stride=%u coded_height=%u buffers=%u picture=%d%%\n", width, height, stride,
+                       coded_height, ncap, scale);
             }
         if (dev.capture_on)
             for (;;) {

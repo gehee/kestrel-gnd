@@ -184,7 +184,11 @@ std::vector<MenuRow> Model::rows(uint64_t now) const {
         for (int i = 0; i < hud_theme_count(); ++i) themes.push_back(hud_theme_at(i).name);
         return {choice("theme", "Theme", theme, std::move(themes), "Which hues carry which meaning."),
             reading("bg_video", "Background Video", "STATIC", "The compiled artwork is cached and drawn only when it changes."),
-            reading("picture_size", "Picture Size", "FULL", "The native display driver currently exposes fixed full-screen planes. Hardware scaling needs driver support."),
+            backend.picture_size_available
+                ? choice("picture_size", "Picture Size", (100 - picture_size) / 5,
+                         {"FULL", "95%", "90%", "85%", "80%", "75%", "70%", "65%", "60%"},
+                         "Shrink the video if your optics clip the edges. The decoder writes it smaller, so no delay is added. The HUD and menu stay full size.")
+                : reading("picture_size", "Picture Size", "FULL", "Needs the fpvOS decoder with its display scaler (an fpvOS update)."),
             choice("ui_scale", "UI Scaling", ui_scale-5, scales, "Size of HUD type and menu contents. The menu panel stays put."),
             reading("brightness", "Brightness", "MONITOR", "Use the external monitor's brightness control. HDMI does not expose a local panel backlight."),
             heading("ADVANCED"),
@@ -263,6 +267,7 @@ int Model::setting(const std::string& id) const {
     if (id == "link_edge_warning") return link_edge_warning;
     if (id == "dynamic") return dynamic;
     if (id == "ui_scale") return ui_scale-5;
+    if (id == "picture_size") return (100-picture_size)/5;
     return 0;
 }
 void Model::set_setting(const std::string& id, int value) {
@@ -284,14 +289,17 @@ void Model::set_setting(const std::string& id, int value) {
     else if (id == "link_edge_warning") link_edge_warning=value!=0;
     else if (id == "dynamic") dynamic=std::clamp(value,0,3);
     else if (id == "ui_scale") ui_scale=std::clamp(value+5,5,20);
+    else if (id == "picture_size") picture_size=100-5*std::clamp(value,0,8);
 }
 void Model::set_preferences(const UiPreferences& p) {
-    if (p.theme < 0 || p.theme >= hud_theme_count() || p.fps < 1 || p.fps > 60 || p.clock<0 || p.clock>4 || p.dynamic<0 || p.dynamic>3 || p.ui_scale<5 || p.ui_scale>20)
+    if (p.theme < 0 || p.theme >= hud_theme_count() || p.fps < 1 || p.fps > 60 || p.clock<0 || p.clock>4 || p.dynamic<0 || p.dynamic>3 || p.ui_scale<5 || p.ui_scale>20 ||
+        p.picture_size<60 || p.picture_size>100 || p.picture_size%5)
         throw std::invalid_argument("Invalid UI preferences");
     theme = p.theme; fps = p.fps; show_details = p.details; key_repeat = p.repeat; show_hud = p.hud; per_cell = p.per_cell;
     clock=p.clock;
     bf_osd=p.bf_osd;debug=p.debug;dynamic=p.dynamic;
     ui_scale=p.ui_scale; link_edge_warning=p.link_edge_warning; fps_counter=p.fps_counter;
+    picture_size=p.picture_size;
 }
 std::string Model::clock_text(std::time_t wall_time,uint64_t now) const {
     if(!hud_visible() || !clock || (clock<=2 && !show_status(now))) return {};

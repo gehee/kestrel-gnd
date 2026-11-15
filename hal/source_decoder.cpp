@@ -67,6 +67,11 @@ bool SourceDecoder::playback_wanted() const {
 uint64_t SourceDecoder::last_frame_us() const {
     std::lock_guard<std::mutex> lock(mutex_);return active_?active_->last_frame_us():0;
 }
+void SourceDecoder::set_display_scale(int pct) {
+    if(display_scale_.exchange(pct)==pct)return;
+    std::lock_guard<std::mutex> lock(mutex_);
+    if(active_ && !playing_)active_->cleanup();
+}
 void SourceDecoder::cleanup() {
     quit_=true;wake_.notify_all();std::lock_guard<std::mutex> lock(mutex_);if(active_)active_->cleanup();
 }
@@ -91,6 +96,7 @@ void SourceDecoder::run_frame() {
              if(quit_ || *stop_)break;
              if(session_generation!=generation_ || suspended_ || (live_held_ && !session_playback))continue;
              active_=next;playing_=session_playback;active_generation_=session_generation;
+             next->set_display_scale(display_scale_);
              next->pause_input(playing_ && paused_);
              if(!playing_) for(size_t i=0;i<live_parameters_.size();++i) {
                  auto& p=live_parameters_[i];if(!p.empty()) next->feed_packet_to_decoder(p.data(),int(p.size()),0,0,uint8_t(32+i),0,0);

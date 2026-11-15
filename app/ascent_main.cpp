@@ -338,6 +338,9 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
         model.backend.service.adapter = std::string("fpvOS native ") + bsp::board().name;
         model.backend.service.hardware_delegated = false;
         model.backend.vrx.freshness_us = 6000000; // native full radio poll is every three seconds
+        // Picture Size by the decoder's display scaler: offered where the
+        // decoder has it (fpvOS kernel patch 0041).
+        model.backend.picture_size_available = VdecV4l2::display_scale_available(o.platform.decoder_device);
         try { model.set_preferences(kestrel_ui::load_preferences(o.preferences)); }
         catch(const std::exception& error) {
             fprintf(stderr,"preferences: %s; starting with defaults\n",error.what());
@@ -561,6 +564,9 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
                 std::snprintf(id, sizeof id, "%08X", peer);
                 if (peer) receiver.screen->set_source(id);
             }
+            // Picture Size: the live decoder's next session takes it (a
+            // change restarts it; the same value again costs nothing).
+            source_decoder->set_display_scale(model.backend.picture_size_available ? model.picture_size : 100);
             const auto video = receiver.screen->video_stats();
             // The live decoder's last picture, or the screen's last one put up:
             // strips are decoded by the joiner's own decoders while the live

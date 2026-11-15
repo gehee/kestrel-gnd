@@ -87,6 +87,11 @@ class Vdec {
         virtual uint64_t last_frame_us() const { return 0; }
         // An intentionally paused file source is not a stalled live decoder.
         virtual void pause_input(bool) {}
+        // Picture Size done by the decoder (AR9311: the Wave5 display
+        // scaler, fpvOS kernel patch 0041): each picture written pct % of
+        // its size, centred in a buffer of its own size, black around it.
+        // Takes effect at the decoder's next session. Elsewhere: nothing.
+        virtual void set_display_scale(int /*pct*/) {}
 
         // While another decoder runs on the same hardware (a gallery clip, the
         // background video), live pictures go whole: a streamed one holds the

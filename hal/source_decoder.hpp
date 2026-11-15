@@ -34,7 +34,12 @@ public:
     bool keyframe_in() const override;
     bool failed() const override {return failed_;}
     uint64_t last_frame_us() const override;
+    // Picture Size: a live session running at another size ends, and the
+    // next one starts at this (a moment without pictures, then a keyframe).
+    // A playback keeps its size until its next session.
+    void set_display_scale(int pct) override;
 private:
+    std::atomic<int> display_scale_{100};
     Factory factory_;std::atomic<bool>* stop_;
     const bool live_;
     std::condition_variable wake_;

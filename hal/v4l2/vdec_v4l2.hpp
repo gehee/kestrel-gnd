@@ -24,6 +24,10 @@ class VdecV4l2 final : public Vdec {
     uint64_t dropped() const { return dropped_.load(); }
     bool failed() const override { return failed_.load(); }
     void pause_input(bool on) override { paused_=on; }
+    // Before run_frame(): this session's Picture Size, 60..100.
+    void set_display_scale(int pct) override { display_scale_ = pct; }
+    // Whether the decoder at device has the display scaler (patch 0041).
+    static bool display_scale_available(const std::string& device);
 
   private:
     struct Packet {
@@ -46,6 +50,7 @@ class VdecV4l2 final : public Vdec {
     std::array<std::vector<uint8_t>, 3> parameters_;
     std::atomic<bool> ready_{false}, failed_{false}, quit_{false};
     std::atomic<bool> paused_{false};
+    std::atomic<int> display_scale_{100};
     std::atomic<uint64_t> frames_{0}, dropped_{0}, last_frame_us_{0};
     std::atomic<uint64_t> overflows_{0}, capture_errors_{0}, peak_pending_{0}, peak_wait_us_{0};
 };

@@ -116,6 +116,8 @@ struct BackendState : ReceiverState {
     std::string playback_clock;
     std::array<uint16_t,53*20> bf_grid{};
     bool bf_available=false;
+    // The decoder shrinks the picture itself (Picture Size; fpvOS kernel patch 0041).
+    bool picture_size_available=false;
     float hud_dx=0,hud_dy=0,hud_bank=0;
     std::string radio_debug;
     // The FPS counter's text, from the main loop once a second (empty: hidden).
