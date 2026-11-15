@@ -632,7 +632,7 @@ def main():
     ap.add_argument("--host", default="192.168.3.1")
     ap.add_argument("--password", default="fpvos")
     ap.add_argument("--keysd", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "keysd"))
-    ap.add_argument("--only", default="", help="comma list of tabs (VIDEO,RADIO,HUD,DISPLAY,DVR,SYSTEM,INFO,SERIAL,CHANNEL,FIRMWARE)")
+    ap.add_argument("--only", default="", help="comma list of tabs (VIDEO,RADIO,HUD,DISPLAY,DVR,SYSTEM,INFO,SERIAL,CHANNEL)")
     ap.add_argument("--skip-restarts", action="store_true", help="no Screen Mode trials, no radio firmware switch")
     ap.add_argument("--max-values", type=int, default=0, help="at most N values a row (0: all)")
     ap.add_argument("--report", default="")

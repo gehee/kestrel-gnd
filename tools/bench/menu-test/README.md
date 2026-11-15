@@ -36,7 +36,8 @@ with video, `sshpass` on the PC, and `keysd` built for the goggle:
 python3 tools/bench/menu-test/menu_test.py --report menu-test.md
 ```
 
-- `--only HUD,DISPLAY` walks only those tabs (also `CHANNEL`, `FIRMWARE`).
+- `--only HUD,DISPLAY` walks only those tabs (also `CHANNEL`; the radio
+  firmware switch is part of `RADIO`).
 - `--max-values N` stops a row after N values (a quick pass).
 - `--skip-restarts` leaves out Screen Mode trials and the firmware switch.
 
@@ -58,6 +59,29 @@ back, and start it again.
 - It checks behaviour through the log, not the picture: layout, colours and
   text on screen still need a look (`kill -USR1 $(pidof kestrel-gnd)` records
   the screen).
-- The native AR9311 receivers (Ascent VRX, P1 goggles, SteadyDigital) use a
-  different menu (`hud/lvgl`); they have their own control socket
-  (`--control PATH --send-key`) and are not covered here.
+- The native AR9311 receivers have their own menu and their own test, below.
+
+## Native receivers (SteadyDigital, Ascent VRX, P1 goggles)
+
+`native_menu_test.py` walks the LVGL menu (`hud/lvgl`) through kestrel-gnd's
+control socket (`--control /run/kestrel-gnd/control --send-key KEY`), whose
+reply is the menu state, so no `keysd` is needed. The native menu logs no row
+changes: each change is read from `/var/lib/kestrel/ui.conf` and
+`receiver.conf`, and from the radio's own log lines.
+
+```sh
+python3 tools/bench/menu-test/native_menu_test.py --iface enx029311000202 --report native.md
+```
+
+- `--iface` picks the USB interface when two units share 192.168.3.x
+  (`devproxy.py` binds the ssh connection to it); the SteadyDigital is
+  `root`/`root` at 192.168.3.104.
+- `--only`, `--skip-restarts`, `--report` as above.
+- A setting not saved yet at the start (its default) is written when the walk
+  comes back to it; the walk then steps Up once onto the value it started on.
+- The channel page: from AUTO it moves to a channel and back to AUTO (a new
+  channel search), from a fixed channel to the one below and back.
+- Both settings files are copied to `*.pre-menutest` first and put back at
+  the end (kestrel-gnd restarted) if anything differs.
+
+Not exercised: Bind, Record, Gallery, Format SD Card, Back on the live screen.
