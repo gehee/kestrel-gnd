@@ -6,6 +6,7 @@
 #include "display/settings.hpp"
 #include "platform/software.hpp"
 #include "platform/ascent_panel.hpp"
+#include "bsp/bsp.hpp"
 #include "kestrel_gnd_config.h"
 #include "radio/ar8030_link.hpp"
 #include "radio/native_pairing.hpp"
