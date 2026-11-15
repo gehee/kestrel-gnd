@@ -25,6 +25,7 @@ void SourceDecoder::playback(bool on) {
     std::lock_guard<std::mutex> lock(mutex_);
     if(wanted_==on)return;
     wanted_=on;paused_=false;++generation_;playback_failed_=false;
+    wake_.notify_all();
     if(active_)active_->cleanup();
 }
 void SourceDecoder::pause_input(bool on) {
@@ -64,7 +65,7 @@ uint64_t SourceDecoder::last_frame_us() const {
     std::lock_guard<std::mutex> lock(mutex_);return active_?active_->last_frame_us():0;
 }
 void SourceDecoder::cleanup() {
-    quit_=true;std::lock_guard<std::mutex> lock(mutex_);if(active_)active_->cleanup();
+    quit_=true;wake_.notify_all();std::lock_guard<std::mutex> lock(mutex_);if(active_)active_->cleanup();
 }
 void SourceDecoder::run_frame() {
     unsigned live_retries = 0;
@@ -74,7 +75,13 @@ void SourceDecoder::run_frame() {
         if(held){std::this_thread::sleep_for(std::chrono::milliseconds(10));continue;}
         bool session_playback;
         uint64_t session_generation;
-        {std::lock_guard<std::mutex> lock(mutex_);session_playback=wanted_;session_generation=generation_;}
+        {std::unique_lock<std::mutex> lock(mutex_);
+         // Offline UI needs no decoder until the user starts a recording.
+         if(!live_ && !wanted_) {
+             wake_.wait_for(lock,std::chrono::milliseconds(50),[&]{return wanted_ || quit_ || *stop_;});
+             if(!wanted_)continue;
+         }
+         session_playback=wanted_;session_generation=generation_;}
         try {
             auto next=factory_();
             {std::lock_guard<std::mutex> lock(mutex_);

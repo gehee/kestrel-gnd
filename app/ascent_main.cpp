@@ -1,11 +1,12 @@
 #include <atomic>
-// Native Ascent composition root: existing radio, software HUD, platform media.
+// Shared native AR9311 composition root: existing radio, software HUD, platform media.
 #include "base/ltrace.hpp"
 #include "display/mode_trial.hpp"
 #include "dvr/format_card.hpp"
 #include "display/settings.hpp"
 #include "platform/software.hpp"
-#include "platform/ascent_panel.hpp"
+#include "platform/native_panel.hpp"
+#include "bsp/bsp.hpp"
 #include "kestrel_gnd_config.h"
 #include "radio/ar8030_link.hpp"
 #include "radio/native_pairing.hpp"
@@ -188,11 +189,11 @@ Options options(int argc, char **argv) {
                 throw std::invalid_argument("peer must be a four-byte radio MAC: AA:BB:CC:DD");
             o.link.peer = std::array<uint8_t, 4>{uint8_t(a), uint8_t(b), uint8_t(c), uint8_t(d)};
         } else if (arg == "--help") {
-            puts("Ascent VRX receiver (native fpvOS, 720p/1080p HDMI)\n"
+            printf("%s receiver (native fpvOS, V4L2/DRM)\n"
                  "  --peer AA:BB:CC:DD   Air unit radio MAC, for this session\n"
                  "  --screen-mode MODE  1280x720@50/60/100/120 or 1920x1080@50/60\n"
                  "  --assets DIR        Generated LVGL assets\n"
-                 "  --force-display     Bypass HDMI detection/EDID; retain driver mode checks\n"
+                 "  --force-display     Bypass connector detection; retain driver mode checks\n"
                  "  --input /dev/input/eventN  Optional evdev buttons\n"
                  "  --control PATH      Optional local UI control socket\n"
                  "  --send-key KEY      Send menu/up/down/left/right/enter/back/quit to that socket\n"
@@ -203,7 +204,7 @@ Options options(int argc, char **argv) {
                  "  --recordings DIR    Existing folder for received-stream MP4 recordings\n"
                  "  --profile           Log UI and display timing every five seconds\n"
                  "  --trace-dir DIR     Watch DIR/ltrace.req; write frame timing to DIR/ltrace.bin\n"
-                 "  --drm DEVICE --decoder DEVICE --replay FILE");
+                 "  --drm DEVICE --decoder DEVICE --replay FILE", bsp::board().name);
             exit(0);
         } else
             throw std::invalid_argument("unknown option: " + arg);
@@ -255,7 +256,7 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
         auto preview_sink=std::make_shared<PreviewSink>(thumbnails,receiver.screen);
         auto source_decoder=std::make_shared<hal::SourceDecoder>([&] {
             return platform::make_software_decoder(o.platform,codec,preview_sink,&stop);
-        },&stop);
+        },&stop,o.radio);
         receiver.decoder=source_decoder;
         if(o.recordings.empty()) o.recordings=settings.get(dvr::setting::dvr_dir);
         dvr::StreamRecorder recorder(o.recordings,codec,1920,1080,60);
@@ -333,7 +334,7 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
         model.decoder = "V4L2 / Wave5";
         model.screen_mode = mode.current.label();
         model.backend.media.video_monitored = o.radio;
-        model.backend.service.adapter = "fpvOS native Ascent";
+        model.backend.service.adapter = std::string("fpvOS native ") + bsp::board().name;
         model.backend.service.hardware_delegated = false;
         model.backend.vrx.freshness_us = 6000000; // native full radio poll is every three seconds
         try { model.set_preferences(kestrel_ui::load_preferences(o.preferences)); }
@@ -458,8 +459,8 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
                 kestrel_ui::store_preferences(o.preferences, p);
             };
         kestrel_ui::Input input(o.input, o.control, false);
-        platform::AscentPanel panel;
-        model.input_sources = input.sources() + panel.sources();
+        auto panel = platform::make_native_panel();
+        model.input_sources = input.sources() + panel->sources();
         model.control_path = o.control;
         model.hud_style = o.vector ? "vector" : "canopy";
         // Passive HUD telemetry can rebuild large canopy images. Keep that
@@ -749,43 +750,43 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
             }
             if(recording.telemetry_error!=telemetry_error) {
                 telemetry_error=recording.telemetry_error;
-                if(!telemetry_error.empty()){notice(telemetry_error.c_str());panel.beep(platform::PanelTone::Failure);}
+                if(!telemetry_error.empty()){notice(telemetry_error.c_str());panel->beep(platform::PanelTone::Failure);}
             }
             if(recording.error!=recording_error) {
                 recording_error=recording.error;
-                if(!recording_error.empty()) {notice(recording_error.c_str());panel.beep(platform::PanelTone::Failure);}
+                if(!recording_error.empty()) {notice(recording_error.c_str());panel->beep(platform::PanelTone::Failure);}
             }
-            for (const auto& event : panel.take()) {
+            for (const auto& event : panel->take()) {
                 if (event.repeat && !model.key_repeat) continue;
                 printf("panel: key=%s%s\n", bsp::ascent_panel::name(event.key), event.repeat ? " repeat" : "");
                 if (event.key == platform::PanelKey::Rec) {
                     if(event.repeat)continue;
                     if(model.scene==kestrel_ui::SceneMode::GalleryBrowse) {
-                        controller.key(kestrel_ui::Key::Record);panel.beep();continue;
+                        controller.key(kestrel_ui::Key::Record);panel->beep();continue;
                     }
-                    // Not a recording key while one plays (nothing to record).
+                    // Recording cannot start during playback.
                     if(model.scene==kestrel_ui::SceneMode::GalleryPlayback) continue;
-                    try {model.feedback=controller.apply_receiver("record",0);panel.beep();}
-                    catch(const std::exception& e) {notice(e.what());panel.beep(platform::PanelTone::Failure);}
+                    try {model.feedback=controller.apply_receiver("record",0);panel->beep();}
+                    catch(const std::exception& e) {notice(e.what());panel->beep(platform::PanelTone::Failure);}
                 } else if (event.key == platform::PanelKey::Upgrade) {
                     notice("Button-triggered upgrade is not available yet");
-                    panel.beep(platform::PanelTone::Failure);
+                    panel->beep(platform::PanelTone::Failure);
                 } else if (event.key == platform::PanelKey::Link) {
                     // The over-video bind overlay (model.bind_state) shows the
                     // progress; the bind button must not open the menu.
                     if (o.radio && o.link.replay_path.empty()) {
                         radio_model.radio().bind();
                         printf("panel: bind button -> binding\n");
-                        panel.beep();
+                        panel->beep();
                     } else {
                         notice("Binding requires a running radio");
-                        panel.beep(platform::PanelTone::Failure);
+                        panel->beep(platform::PanelTone::Failure);
                     }
                 } else {
                     kestrel_ui::Key key;
                     if (kestrel_ui::parse_key(bsp::ascent_panel::name(event.key), key)) {
                         controller.key(key, event.repeat);
-                        if (!event.repeat) panel.beep();
+                        if (!event.repeat) panel->beep();
                     }
                 }
             }
@@ -800,13 +801,13 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
                 switch (state.bind_state) {
                 case gnd::BIND_RUNNING:
                     printf("panel: binding (press LINK again to cancel)\n");
-                    panel.beep(platform::PanelTone::Notice); break;
+                    panel->beep(platform::PanelTone::Notice); break;
                 case gnd::BIND_OK:
                     printf("panel: binding succeeded\n");
-                    panel.beep(platform::PanelTone::Success); break;
+                    panel->beep(platform::PanelTone::Success); break;
                 case gnd::BIND_FAILED:
                     printf("panel: binding failed\n");
-                    panel.beep(platform::PanelTone::Failure); break;
+                    panel->beep(platform::PanelTone::Failure); break;
                 case gnd::BIND_IDLE: printf("panel: binding ended\n"); break;
                 default: break;
                 }
@@ -916,7 +917,7 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
         player.stop();
         exporter.reset();
         workers.finish();
-        printf("ascent: HDMI presentations=%llu UI presentations=%llu\n",
+        printf("ar9311: display presentations=%llu UI presentations=%llu\n",
                (unsigned long long)receiver.screen->presented(), (unsigned long long)display.presentations);
         if (receiver.screen->failed()) return display::SessionResult::DisplayFailed;
         return source_failed || worker_failed || receiver.decoder->failed() ? display::SessionResult::Failed
