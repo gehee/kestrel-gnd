@@ -108,7 +108,9 @@ public:
     std::string apply(int mhz,const kestrel_ui::BackendState& state) {
         const auto at=state.controls.find("channel");
         if(at==state.controls.end() || !at->second.enabled) throw std::runtime_error("Channel scan is unavailable");
-        if(!mhz) radio_.search_channels();
+        // AUTO: no longer FIXED (the saved channel forgotten, AUTO's pick made
+        // now), then the ground searches again - as the VRX Pro page does.
+        if(!mhz) {radio_.set_channel_auto(false); radio_.search_channels();}
         else {
             const auto& readings=state.channels.readings;
             if(std::none_of(readings.begin(),readings.end(),[&](const auto& c){return c.mhz==mhz;}))

@@ -9,7 +9,7 @@ using namespace kestrel_ui;
 namespace {
 void check(bool ok,const char* why) {if(!ok) throw std::runtime_error(why);}
 struct Radio : gnd::Radio {
-    gnd::RadioState value{}; gnd::ScanSample sample{}; bool have=false,fast=false; int changed=-1;
+    gnd::RadioState value{}; gnd::ScanSample sample{}; bool have=false,fast=false; int changed=-1,auto_hop=-1;
     gnd::RadioState state() const override {return value;}
     uint32_t version() const override {return 0;}
     void watch(bus::Waker*) override {}
@@ -19,7 +19,7 @@ struct Radio : gnd::Radio {
     Ticket set_max_bandwidth(int) override {return {};}
     Ticket set_steady(bool) override {return {};}
     Ticket set_channel(int f) override {changed=f;return {1,f};}
-    Ticket set_channel_auto(bool) override {return {};}
+    Ticket set_channel_auto(bool hop) override {auto_hop=hop?1:0;return {};}
     void region_changed() override {}
     void search_channels() override {changed=0;}
     void scan_screen(bool v) override {fast=v;}
@@ -60,6 +60,8 @@ int main() {
       controller.key(Key::Up); check(model.channel_mhz==5820 && radio.changed==-1,"Quietest selects by peak without changing RF");
       controller.key(Key::Enter); check(radio.changed==5820,"OK requests selected frequency");
       controller.key(Key::Down); check(model.channel_mhz==5800,"Down returns to current link");
+      model.channel_mhz=0; radio.changed=-1; controller.key(Key::Enter);
+      check(radio.auto_hop==0 && radio.changed==0,"AUTO forgets the FIXED channel, then searches");
       now+=1000; radio.sample.last_update_ms=now/1000; radio.sample.power_dbm[1]=-110; radio.have=true;
       channels.update(model.backend,now,true);
       check(model.backend.channels.readings.back().peak_dbm==-95,"Peak holds for thirty seconds");
