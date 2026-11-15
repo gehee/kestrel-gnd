@@ -3,6 +3,7 @@
 #include <array>
 #include <atomic>
 #include <functional>
+#include <condition_variable>
 #include <vector>
 namespace hal {
 // One hardware decoding session, switched on its own worker. The radio keeps
@@ -10,7 +11,8 @@ namespace hal {
 class SourceDecoder : public Vdec {
 public:
     using Factory=std::function<std::shared_ptr<Vdec>()>;
-    SourceDecoder(Factory factory,std::atomic<bool>* stop) : factory_(std::move(factory)),stop_(stop) {}
+    SourceDecoder(Factory factory,std::atomic<bool>* stop,bool live=true)
+        : factory_(std::move(factory)),stop_(stop),live_(live) {}
     void playback(bool on);
     void restart_playback();
     void pause_input(bool on) override;
@@ -33,6 +35,8 @@ public:
     uint64_t last_frame_us() const override;
 private:
     Factory factory_;std::atomic<bool>* stop_;
+    const bool live_;
+    std::condition_variable wake_;
     mutable std::mutex mutex_;
     std::shared_ptr<Vdec> active_;
     std::array<std::vector<uint8_t>,3> live_parameters_;

@@ -313,3 +313,7 @@ std::string AscentPanel::sources() const {
            (impl_->gpio.value >= 0 ? ", LINK GPIO" : "") + (impl_->keys.value >= 0 ? ", panel keys" : "");
 }
 } // namespace platform
+
+namespace platform {
+std::unique_ptr<NativePanel> make_native_panel() { return std::make_unique<AscentPanel>(); }
+}

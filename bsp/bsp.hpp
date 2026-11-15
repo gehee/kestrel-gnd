@@ -80,6 +80,7 @@ inline int supply_mv(const SupplyAdc &s, int avg_pin_mv) {
 const Board &vrx_pro();
 const Board &pc();
 const Board &ascent();
+const Board &p1_goggle();
 
 // The box this build is for (KESTREL_BOARD).
 const Board &board();

@@ -377,3 +377,5 @@ atlas. Configure `KESTREL_UI_TEST_ASSETS` with the absolute asset directory to
 also run rendering and HUD worker/recovery tests.
 
 Native Ascent AR9311 build instructions and current hardware-validation limits are in [docs/ascent.md](docs/ascent.md).
+
+P1 goggles native UI bring-up is documented in [docs/p1-goggle.md](docs/p1-goggle.md).

@@ -1,21 +1,20 @@
 #pragma once
-#include "platform/panel_logic.hpp"
+#include "platform/native_panel.hpp"
 #include <memory>
 #include <string>
 #include <vector>
 
 namespace platform {
-enum class PanelTone { Click, Notice, Success, Failure };
 // Owns Linux panel resources. No UI or radio objects cross the worker boundary.
-class AscentPanel {
+class AscentPanel : public NativePanel {
   public:
     AscentPanel();
-    ~AscentPanel();
+    ~AscentPanel() override;
     AscentPanel(const AscentPanel &) = delete;
     AscentPanel &operator=(const AscentPanel &) = delete;
-    std::vector<PanelEvent> take();
-    void beep(PanelTone tone = PanelTone::Click);
-    std::string sources() const;
+    std::vector<PanelEvent> take() override;
+    void beep(PanelTone tone = PanelTone::Click) override;
+    std::string sources() const override;
 
   private:
     struct Impl;

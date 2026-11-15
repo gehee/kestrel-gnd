@@ -70,6 +70,18 @@ int main() {
     check(!decoder.failed(),"Decoded progress permits recovery from a later stall");
     session(8)->error=true;wait([&]{return decoder.failed();});
     check(count()==9,"Repeated failures without a decoded picture are bounded");
+    // Offline UI must not open hardware until playback, nor reopen it afterward.
+    std::atomic<unsigned> offline_opens{0};
+    auto offline_fake=std::make_shared<Fake>();
+    hal::SourceDecoder offline([&]() -> std::shared_ptr<Vdec> {++offline_opens;return offline_fake;},&stop,false);
+    Worker offline_worker{offline,std::thread([&]{offline.run_frame();})};
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    check(offline_opens==0,"Offline UI must not open a live decoder");
+    offline.playback(true);wait([&]{return offline.playback_ready();});
+    check(offline_opens==1,"Offline playback opens the decoder");
+    offline.playback(false);wait([&]{return offline_fake->quit.load();});
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    check(offline_opens==1 && !offline.failed(),"Ending offline playback leaves hardware idle");
     puts("PASS: exclusive live/playback decoder ownership, parameter cache, failure recovery");return 0;
  } catch(const std::exception& e) {fprintf(stderr,"FAIL: %s\n",e.what());return 1;}
 }
