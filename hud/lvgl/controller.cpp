@@ -28,6 +28,17 @@ void Controller::tick(uint64_t now) {
     if (arm >= 0) {
         if (arm == 1 && arm_seen_ == 0) {
             armed_edge_ = true;
+            // The channel page sits over the video and takes the keys (OK
+            // retunes): it goes with the menu it was opened from.
+            if (m.channel_open) { m.channel_open = false; m.feedback.clear(); ++m.menu_version; }
+            // The gallery too: a recording playing holds the screen in place
+            // of the live video.
+            if (m.scene == SceneMode::GalleryBrowse || m.scene == SceneMode::GalleryPlayback) {
+                if (m.scene == SceneMode::GalleryPlayback && apply_receiver) {
+                    try { apply_receiver("playback_stop", 0); } catch (const std::exception&) {}
+                }
+                set_scene(SceneMode::Live);
+            }
             if (m.menu_open || m.scene == SceneMode::Menu) {
                 if (m.stage == MenuStage::Edit) cancel_edit();
                 m.menu_open = false;

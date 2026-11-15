@@ -555,6 +555,14 @@ void OSD::format_card_enter() {
         format_result_ = "STOP RECORDING FIRST";
         return;
     }
+    // Not in the air: the format stops kestrel-gnd, and the picture with it
+    // (the menu can be opened again while armed). The flight controller's
+    // last word; one that went quiet while armed still counts as armed.
+    if (arm_seen_ == 1) {
+        format_armed_ms_ = 0;
+        format_result_ = "DISARM FIRST";
+        return;
+    }
     if (now >= format_armed_ms_) {
         format_info_ = dvr::format_card::check();
         format_checked_ = true;

@@ -61,6 +61,9 @@ bool SourceDecoder::keyframe_in() const {
     // A player is not a live-stream loss and must not trigger IDR requests.
     return suspended_ || live_held_ || wanted_ || (active_ && !playing_ && active_generation_==generation_ && active_->keyframe_in());
 }
+bool SourceDecoder::playback_wanted() const {
+    std::lock_guard<std::mutex> lock(mutex_);return wanted_;
+}
 uint64_t SourceDecoder::last_frame_us() const {
     std::lock_guard<std::mutex> lock(mutex_);return active_?active_->last_frame_us():0;
 }

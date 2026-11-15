@@ -71,7 +71,11 @@ struct RefreshSync {
 constexpr double kFollowShorter = 0.005;
 inline double follow_period_us(double mode_us, double camera_us) {
     if (mode_us <= 0 || camera_us <= 0 || camera_us < mode_us * (1 - kFollowShorter)) return 0;
-    const double k = std::max(1.0, std::floor(camera_us / mode_us + 1e-6));
+    // How many refreshes a camera frame: counted against the shortest refresh
+    // FOLLOW may make, so a camera a little faster than a whole multiple
+    // (60.03 fps on a 120.000 Hz mode, 1.999 of them) still gets that multiple
+    // and not one fewer (the 120 Hz screen run at 60).
+    const double k = std::max(1.0, std::floor(camera_us / (mode_us * (1 - kFollowShorter)) + 1e-6));
     return std::max(camera_us / k, mode_us * (1 - kFollowShorter));
 }
 

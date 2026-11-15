@@ -285,7 +285,8 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
                 [preview_sink,source_decoder,device,codec] {
                     return std::unique_ptr<hal::StripJoiner>(new hal::Wave5Strips(codec, device, preview_sink,
                         {[source_decoder](bool on) { source_decoder->hold_live(on); },
-                         [source_decoder] { return source_decoder->live_released(); }}));
+                         [source_decoder] { return source_decoder->live_released(); },
+                         [source_decoder] { return source_decoder->playback_wanted(); }}));
                 });
             printf("strips: offered (decoded in place)\n");
         }

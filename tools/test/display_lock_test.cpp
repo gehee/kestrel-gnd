@@ -100,6 +100,8 @@ static void test_follow_period() {
     CHECK(std::fabs(display::follow_period_us(m144, 16666.1) - 8333.05) < 0.1);   // 60 fps on 144 Hz: two
     CHECK(std::fabs(display::follow_period_us(m60, 16658.0) - 16658.0) < 0.1);    // 60.03 fps on 60 Hz: a little shorter
     CHECK(std::fabs(display::follow_period_us(m100, 9960.0) - 9960.0) < 0.1);     // within 0.5% faster
+    CHECK(std::fabs(display::follow_period_us(8333.333, 16658.0) - 8329.0) < 0.1);  // 60.03 fps on 120.000 Hz: two, a little shorter
+    CHECK(std::fabs(display::follow_period_us(8333.333, 16680.0) - 8340.0) < 0.1);  // 59.95 fps on 120.000 Hz: two, a little longer
     CHECK(display::follow_period_us(m60, 10000.0) == 0);                          // the camera faster: no FOLLOW
     CHECK(display::follow_period_us(0, 16666.0) == 0 && display::follow_period_us(m60, 0) == 0);
 }

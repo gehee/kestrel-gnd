@@ -174,9 +174,27 @@ void Wave5Strips::feed(int k, const uint8_t* data, int len, int64_t pts, uint64_
                        uint32_t proc, bool key, SliceTimesPtr times) {
     if (k < 0 || k >= kMax || len <= 0 || (size_t)len > kPacketBytes) return;
     const bool hevc = codec_ == VideoCodec::H265;
+    // A recording playing has the screen and the decoder: live strips shown
+    // among its pictures, and a decoder beside these, are not wanted. The
+    // strips stop as when the air unit sends whole pictures again, and start
+    // from the next keyframe once it has ended.
+    const bool playing = main_.playing && main_.playing();
     {
         std::lock_guard<std::mutex> lk(mtx_);
         if (quit_) return;
+        if (playing) {
+            in_[k].packets.clear();
+            in_[k].ready = false;
+            const bool first = !paused_;
+            paused_ = true;
+            if (first) stop_req_ = true;
+        } else {
+            paused_ = false;
+        }
+    }
+    if (playing) { wake(); return; }
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
         In& in = in_[k];
         const int param = hevc ? (nal >= 32 && nal <= 34 ? nal - 32 : -1) : (nal == 7 ? 0 : nal == 8 ? 1 : -1);
         if (param >= 0) {

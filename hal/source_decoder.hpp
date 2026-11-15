@@ -17,6 +17,7 @@ public:
     void restart_playback();
     void pause_input(bool on) override;
     bool playback_ready() const;
+    bool playback_wanted() const;   // a recording is playing or about to
     bool playback_failed() const {return playback_failed_;}
     void feed_playback(void* data,int len,int64_t pts,uint64_t recv,uint8_t nal,bool key=false);
     void feed_packet_to_decoder(void*,int,int64_t,uint64_t,uint8_t,uint32_t,uint32_t,bool=false) override;
