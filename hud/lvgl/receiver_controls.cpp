@@ -2,6 +2,7 @@
 #include "system/air/camera.hpp"
 #include "system/air/encoder.hpp"
 #include "system/air/power.hpp"
+#include "system/air/bandwidth.hpp"
 #include <algorithm>
 #include <cstdio>
 #include <stdexcept>
@@ -105,21 +106,24 @@ void ReceiverControls::update(BackendState& state, uint64_t now) {
     // Strips: only where both ends can (the feature bit), not listed otherwise.
     if(linked && (u.features & air::kFeatStrips))
         choice("Strips",e.strips,true,true,table(air::kArStripsVals,air::kArStripsLabels,air::kArStripsCount));
-    // Share the legacy menu's mode/level mapping and per-air-unit limits.
-    const bool automatic=ar_pwr_is_auto(a.tx_power_want_mw);
+    // Share the legacy menu's mode/level mapping and per-air-unit limits: the
+    // saved level fitted to this air unit's list, as the link sends it. Known
+    // once the air unit has said what it is (prj), as in the legacy menu.
+    const int power_now=ar_pwr_fit(a.prj,a.tx_power_want_mw,a.fine);
+    const bool power_known=a.tx_power_want_mw>0 && a.prj>0;
+    const bool automatic=ar_pwr_is_auto(power_now);
     int tops[kArPwrTopsMax];
     const int count=ar_pwr_tops(a.prj,a.fine,automatic,tops);
     std::vector<ReceiverChoice> powers, power_modes;
     for(int i=0;i<count;++i) powers.push_back({tops[i],kArPwrLevels[ar_pwr_index(tops[i])].label});
     for(int mode=0;mode<2;++mode)
-        if(ar_pwr_pick(a.prj,a.fine,mode,ar_pwr_top(a.tx_power_want_mw))>=0)
+        if(ar_pwr_pick(a.prj,a.fine,mode,ar_pwr_top(power_now))>=0)
             power_modes.push_back({mode,mode?"AUTO":"FIXED"});
-    choice("power_mode",automatic,a.tx_power_want_mw>0,g.rf_caps & gnd::RF_CAP_POWER,power_modes,
+    choice("power_mode",automatic,power_known,g.rf_caps & gnd::RF_CAP_POWER,power_modes,
            "The radio does not expose power control.");
-    choice("power",ar_pwr_top(a.tx_power_want_mw),a.tx_power_want_mw>0,g.rf_caps & gnd::RF_CAP_POWER,powers,
+    choice("power",ar_pwr_top(power_now),power_known,g.rf_caps & gnd::RF_CAP_POWER,powers,
            "The radio does not expose power control.");
-    choice("max_bw",g.max_bw_mhz,true,g.radio_fw==1,
-           {{0,"AUTO"},{5,"5 MHz"},{10,"10 MHz"},{20,"20 MHz"},{40,"40 MHz"}},"Requires Open8030.");
+    choice("max_bw",g.max_bw_mhz,true,g.radio_fw==1,table(kArMaxBwVals,kArMaxBwLabels,kArMaxBwCount),"Requires Open8030.");
 
     choice("standby",u.standby,u.standby_n,true,{{0,"OFF"},{1,"ON"}});
     std::vector<ReceiverChoice> mcs{{-1,"AUTO"}};
@@ -160,8 +164,9 @@ std::string ReceiverControls::apply(const std::string& id,int value,uint64_t now
     else if(id=="Video Mode") camera_.set_mode(value);
     else if(id=="power" || id=="power_mode") {
         const auto a=air_.state();
-        const bool mode=id=="power_mode" ? value!=0 : ar_pwr_is_auto(a.tx_power_want_mw);
-        const int top=id=="power" ? value : ar_pwr_top(a.tx_power_want_mw);
+        const int now_mw=ar_pwr_fit(a.prj,a.tx_power_want_mw,a.fine);
+        const bool mode=id=="power_mode" ? value!=0 : ar_pwr_is_auto(now_mw);
+        const int top=id=="power" ? value : ar_pwr_top(now_mw);
         const int encoded=ar_pwr_pick(a.prj,a.fine,mode,top);
         if(encoded<0) throw std::invalid_argument("Unsupported TX power mode");
         air_.set_tx_power(encoded);

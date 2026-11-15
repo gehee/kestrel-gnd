@@ -296,6 +296,7 @@ if(KESTREL_TESTS)
     kestrel_test(gallery_stats_test hud)
     kestrel_test(link_view_test hud)
     kestrel_test(power_test)   # system/air/power.hpp: header only
+    kestrel_test(ar8030_policy_test base)   # the saved RF policy both launchers load
     kestrel_test(bus_test base)
     kestrel_test(settings_test base)
     kestrel_test(hevc_repair_test dvr)

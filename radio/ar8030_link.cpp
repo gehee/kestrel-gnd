@@ -308,10 +308,7 @@ void Ar8030Link::run() {
                     printf("ar8030: bandwidth retune did not restore the link - resuming loss recovery\n");
                     if (!lost_reopened_) link_lost_ms_ = retune_down_ms_;
                     retune_down_ms_ = 0;
-                    if (!chan_auto && !chan_manual_cli && bb_dev) {
-                        chan_follow_khz_ = 0;
-                        search_all_channels();
-                    }
+                    search_after_loss();
                 }
                 try_next_peer(tl, ls);
                 // (The HUD is told by the stats thread and the event handler.)
@@ -333,7 +330,7 @@ void Ar8030Link::run() {
                         if (retune_down_ms_)
                             printf("ar8030: link re-forming after a bandwidth change\n");
                     }
-                    const bool retune = ls == 2 && retune_down_ms_ && tl - retune_down_ms_ <= 3000;
+                    const bool retune = ls == 2 && retune_down_ms_ && tl - retune_down_ms_ <= radio::kRetuneGraceMs;
                     if (ls == 2) retune_down_ms_ = 0;
                     // A channel pinned from the menu holds only while the link
                     // does. The air unit decides the channel - after a restart
@@ -345,10 +342,7 @@ void Ar8030Link::run() {
                     if (last_link_state == 2 && ls != 2 && !retune_down_ms_ && !lost_reopened_) link_lost_ms_ = tl;
                     if (ls == 2) { link_lost_ms_ = 0; lost_reopened_ = false; }
                     peer_try_ms_ = ls == 2 ? 0 : (peer_try_ms_ ? peer_try_ms_ : tl);
-                    if (last_link_state == 2 && ls != 2 && !retune_down_ms_ && !chan_auto && !chan_manual_cli && bb_dev) {
-                        printf("ar8030: link lost on a pinned channel - searching again\n");
-                        search_all_channels();
-                    }
+                    if (last_link_state == 2 && ls != 2 && !retune_down_ms_) search_after_loss();
                     if (retune) {
                         drop_pictures();
                         printf("ar8030: link back after the bandwidth change - same link, video goes on\n");

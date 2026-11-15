@@ -11,7 +11,7 @@ int main() {
         radio::retune_grace_expired(4001, 1000, 2) ||
         !radio::retune_grace_expired(4001, 1000, 0) ||
         !radio::retune_grace_expired(4001, 1000, 1) ||
-        !radio::retune_grace_expired(4001, 1000, -1)) return 7;
+        radio::retune_grace_expired(4001, 1000, -1)) return 7;   // -1: no reading yet, not down
     char path[] = "/tmp/kestrel-policy-XXXXXX";
     int fd = mkstemp(path);
     if (fd < 0) return 1;

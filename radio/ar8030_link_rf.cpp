@@ -620,6 +620,13 @@ int Ar8030Link::work_list_all() {
     return ar_ioctl(dev, BB_SET_WORK_CHAN_LIST, &wl, NULL);
 }
 
+void Ar8030Link::search_after_loss() {
+    if (chan_auto || chan_manual_cli || !bb_dev) return;
+    printf("ar8030: link lost on a pinned channel - searching again\n");
+    chan_follow_khz_ = 0;
+    search_all_channels();
+}
+
 int Ar8030Link::search_all_channels(bool region) {
     bb_dev_handle_t *dev = (bb_dev_handle_t *)bb_dev;
     if (!dev) return -1;

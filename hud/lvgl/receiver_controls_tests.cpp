@@ -132,6 +132,16 @@ int main() {
         check(state.controls.at("power").choices.size()==1 && state.controls.at("power").value==100,
               "Stock AUTO exposes only supported cap, separate from mode");
         controls.apply("power_mode",0,now); check(air.last==100,"FIXED preserves AUTO cap");
+        // A level saved for another air unit (500mW AUTO from a Lite+) reads
+        // as what this one runs, fitted as the link sends it: 100mW AUTO.
+        air.value.tx_power_want_mw=501; ++air.revision; controls.update(state,now);
+        check(state.controls.at("power_mode").value==1 && state.controls.at("power").value==100,
+              "Saved power is fitted to the connected air unit");
+        controls.apply("power_mode",0,now); check(air.last==100,"FIXED from a fitted AUTO keeps its level");
+        // Before the air unit has said what it is, its levels are not known.
+        air.value.prj=0; ++air.revision; controls.update(state,now);
+        check(!state.controls.at("power").enabled && !state.controls.at("power_mode").enabled,
+              "Power waits for the air unit's type");
         air.value.prj=AR_AIR_P1;air.value.fine=1;air.value.tx_power_want_mw=151;++air.revision;
         controls.update(state,now); controls.apply("power",200,now);
         check(air.last==201,"P1 power level edit preserves AUTO encoding");

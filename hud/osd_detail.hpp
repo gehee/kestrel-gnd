@@ -29,6 +29,7 @@
 #include "hud/settings.hpp"
 #include "base/frame_mode.hpp"
 #include "hud/osd.hpp"
+#include "system/air/bandwidth.hpp"
 
 // An idle-screen asset's path (osd_set_assets_dir).
 std::string osd_asset(const char* name);
@@ -92,11 +93,7 @@ static const uint16_t kAirStripsFeat = 0x2000;   // = Ar8030Link::kAirFeatStrips
 // more throughput and a shorter frame, less range - or 20 with its 20 MHz one
 // (bb_only.sh picks it from ar8030_max_bw_mhz). Any air unit follows. With
 // Open8030 on the goggle, AUTO (the radio's own config, nothing sent), 5 and
-// 10 too, taken live (SET 22).
-static const int kArMaxBwVals[]     = { 0, 5, 10, 20, 40 };
-static const char* kArMaxBwLabels[] = { "AUTO", "5 MHz", "10 MHz", "20 MHz", "40 MHz" };
-static const int kArMaxBwCount = 5;
-static inline int ar_maxbw_index(int mhz) { return mhz == 0 ? 0 : mhz == 5 ? 1 : mhz == 10 ? 2 : mhz == 20 ? 3 : 4; }
+// 10 too, taken live (SET 22). The table: system/air/bandwidth.hpp.
 // Max MCS (Open8030 on the goggle): the highest MCS its receive policy may
 // use - AUTO (none), or MCS 0..11. Lower: fewer blocks sent again (the radio
 // part's latency tail), less throughput.

@@ -738,6 +738,9 @@ class Ar8030Link : public radio::Link, private radio::VideoOut::Source {
         // channel adaptation on - the ground searches, as at start. region:
         // AUTO's list is due again (not after AUTO's own move).
         int  search_all_channels(bool region = true);
+        // A link lost on a channel pinned from the menu: back to searching all
+        // (a move still under way is dropped with it). --ar8030-chan-manual stays.
+        void search_after_loss();
         int  work_list_all();       // the radio's work list (its scan list too, on Open8030) = every channel
         void chan_follow_poll();    // a manual move under way: ours followed? (read loop, every 100 ms)
         uint32_t chan_follow_khz_ = 0;        // its target, 0: none
