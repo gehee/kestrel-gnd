@@ -245,7 +245,13 @@ void Ar8030Link::send_air_handshake(bool link_up) {
     // VRX's radio stays searching and follows it.
     std::vector<uint32_t> hop_list;
     uint32_t hop_from = 0, move_to = 0;
-    if (chan_auto && !chan_manual_cli && (chan_hop.load() || link_up)) {
+    // Not with a channel picked from the menu (FIXED, chan_fixed_mhz): AUTO's
+    // pick is not the pilot's choice then. chan_auto is the radio searching,
+    // which it does at every connect; the channel it reports before the link
+    // is the search's (4945 MHz, 2.1 GHz on stock firmware), "not allowed",
+    // and the air unit was sent elsewhere before region_auto_apply() put the
+    // link back on the fixed one - two link moves at every connect.
+    if (chan_auto && !chan_manual_cli && chan_fixed_mhz.load() <= 0 && (chan_hop.load() || link_up)) {
         uint32_t freqs[128];
         int32_t power[128];
         int n = 0;
