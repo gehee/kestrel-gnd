@@ -20,6 +20,9 @@ private:
         std::vector<uint8_t> pixels;
         lv_image_dsc_t image{};
         int x = 0, y = 0;
+        int design_w = 0, design_h = 0;   // the screen the asset was made for
+        // An asset made for any screen: drawn scaled to the HUD's (Picture
+        // Size draws the HUD smaller than the assets' screen).
         void load(const std::string& path, int width, int height);
     } assets_[2];
     int width_, height_;

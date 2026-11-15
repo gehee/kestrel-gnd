@@ -2,7 +2,9 @@
 #include "hal/vdec.hpp"
 #include "display/ascent_mode.hpp"
 #include "base/damage.hpp"
+#include <cstdint>
 #include <memory>
+#include <vector>
 #include <stdexcept>
 #include <string>
 
@@ -20,6 +22,19 @@ class PlaneScreen : public hal::FrameSink {
     virtual void overlay(const uint32_t *argb, unsigned width, unsigned height) = 0;
     virtual void overlay_damage(const uint32_t *argb, unsigned width, unsigned height,
                                 const std::vector<base::Damage>&) { overlay(argb, width, height); }
+    // Picture Size: the UI drawn smaller than the screen, its frames (w x h,
+    // what overlay() takes from then on) at x, y. w 0: the whole screen.
+    struct UiInset {
+        int x = 0, y = 0, w = 0, h = 0;
+        bool operator==(const UiInset& o) const { return x == o.x && y == o.y && w == o.w && h == o.h; }
+    };
+    virtual bool supports_ui_inset() const { return false; }
+    virtual void set_ui_inset(const UiInset&) {}
+    // What shows around a smaller UI: art (the whole screen's ARGB8888,
+    // screen-sized) under dim_argb (its alpha in the top byte, 0 none), or
+    // nothing (transparent: the video plane) without art. Kept for as long
+    // as it shows.
+    virtual void set_ui_margin(std::shared_ptr<const std::vector<uint8_t>> /*art*/, uint32_t /*dim_argb*/) {}
     // Recorded playback may intentionally stop feeding while paused. Keep its
     // last picture until an explicit decoder flush; live reception times out.
     virtual void hold_video(bool) {}

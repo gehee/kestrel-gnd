@@ -87,8 +87,9 @@ void rect(lv_layer_t* layer, int x, int y, int w, int h, const float* rgb, float
     lv_draw_rect(layer, &d, &a);
 }
 }
-View::View(const Controller& controller, int w, int h, const std::string& assets, HudSource* hud)
-    : controller_(controller), model_(controller.model()), hud_(hud), width_(w), height_(h), text_(assets + "/canopy-font.kuf", w, h, 512 * 1024), idle_(assets, w, h), bf_atlas_(assets+"/betaflight.kui") {
+View::View(const Controller& controller, int w, int h, const std::string& assets, HudSource* hud, ScreenInset inset)
+    : controller_(controller), model_(controller.model()), hud_(hud), width_(w), height_(h), text_(assets + "/canopy-font.kuf", w, h, 512 * 1024),
+      idle_(assets, w, h, inset.screen_w, inset.screen_h, inset.x, inset.y), bf_atlas_(assets+"/betaflight.kui") {
     if (!hud_) { owned_hud_ = std::make_unique<InlineHud>(w, h, assets); hud_ = owned_hud_.get(); }
     screen_ = lv_screen_active();
     lv_obj_remove_style_all(screen_);
@@ -417,6 +418,18 @@ void View::draw_deferred_art(lv_layer_t* layer, const lv_area_t& clip) {
     });
     layer->_clip_area = kept;
 }
+UiMargin View::margin() const {
+    UiMargin m;
+    m.art = idle_.screen_artwork(model_, now_);
+    // draw_dimmer()'s level: its blade share moves only at rest, so this
+    // changes a few times a menu opening, not every frame of it.
+    const lv_opa_t dim = opacity((model_.menu_open ? 0.10f : 0.0f) + dimmer_progress_ * 0.06f);
+    if (m.art && dim > LV_OPA_MIN) {
+        const lv_color_t c = color(hud_theme_at(model_.theme).ground);
+        m.dim_argb = uint32_t(dim) << 24 | uint32_t(c.red) << 16 | uint32_t(c.green) << 8 | c.blue;
+    }
+    return m;
+}
 void View::draw_dimmer(lv_layer_t* layer) {
     solid_stored_ = false;
     const bool deferred = art_deferred_;
@@ -457,7 +470,7 @@ void View::draw_dimmer(lv_layer_t* layer) {
         const int w = a.x2 - a.x1 + 1, h = a.y2 - a.y1 + 1;
         if (solid && solid_clear_) for (int y = 0; y < h; ++y) std::fill_n(first + size_t(y) * stride, w, solid_argb_);
         else if (pixels && !(mask >> solids))
-            kestrel_argb_fills(first, stride, pixels + size_t(a.y1) * width_ + a.x1, width_, w, h, solid ? 2 : 1, dim_argb, solid_ground_);
+            kestrel_argb_fills(first, stride, pixels + size_t(a.y1) * idle_.art_stride() + a.x1, idle_.art_stride(), w, h, solid ? 2 : 1, dim_argb, solid_ground_);
         else kestrel_argb_fills(first, stride, first, stride, w, h, solid ? 2 : 1, dim_argb, solid_ground_);
     });
     solid_stored_ = solids > 0;

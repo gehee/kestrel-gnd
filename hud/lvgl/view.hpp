@@ -7,13 +7,27 @@
 #include "betaflight.hpp"
 #include "lvgl.h"
 #include <string>
+#include <memory>
 #include <vector>
 #include <optional>
 
 namespace kestrel_ui {
+// Where a UI smaller than the screen sits on it (Picture Size): the screen's
+// size and the UI's top left. Zeros: the UI is the whole screen.
+struct ScreenInset { int screen_w = 0, screen_h = 0, x = 0, y = 0; };
+// What shows around a UI smaller than the screen: the idle artwork (the whole
+// screen's, ARGB8888) under a dimmer of dim_argb (alpha in the top byte; 0:
+// none), or nothing (transparent) without artwork.
+struct UiMargin {
+    std::shared_ptr<const std::vector<uint8_t>> art;
+    uint32_t dim_argb = 0;
+    bool operator==(const UiMargin& o) const { return art == o.art && dim_argb == o.dim_argb; }
+};
+
 class View {
 public:
-    View(const Controller& controller, int width, int height, const std::string& assets, HudSource* hud = nullptr);
+    View(const Controller& controller, int width, int height, const std::string& assets, HudSource* hud = nullptr,
+         ScreenInset inset = {});
     ~View();
     void update(uint64_t now);
     size_t text_cache_bytes() const { return text_.cached_bytes() + hud_->cache_bytes(); }
@@ -21,6 +35,9 @@ public:
     bool animating() const { return animating_; }
     uint64_t menu_snapshots() const { return menu_snapshot_count_; }
     bool betaflight_available() const { return bf_atlas_.available(); }
+    // Around a smaller UI (Picture Size), as of the last update(), with the
+    // dimmer's level (which moves only while the menu's blade is at rest).
+    UiMargin margin() const;
 private:
     const Controller& controller_;
     const Model& model_;

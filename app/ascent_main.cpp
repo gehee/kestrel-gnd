@@ -49,20 +49,24 @@ volatile sig_atomic_t interrupted = 0, menu_requested = 0;
 // LVGL draws the next frame into its other buffer. The only overlay producer.
 class OverlayCopier {
 public:
-    OverlayCopier(display::PlaneScreen& screen, unsigned width, unsigned height)
-        : screen_(screen), width_(width), height_(height), thread_([this] { run(); }) {}
+    explicit OverlayCopier(display::PlaneScreen& screen) : screen_(screen), thread_([this] { run(); }) {}
     ~OverlayCopier() {
         { std::lock_guard<std::mutex> lock(mutex_); stop_ = true; }
         wake_.notify_all();
         thread_.join();
     }
     // Waits for the previous copy: it reads the buffer LVGL draws into next.
-    void submit(const uint32_t* pixels, std::vector<base::Damage> damage) {
+    void submit(const uint32_t* pixels, unsigned width, unsigned height, std::vector<base::Damage> damage) {
         std::unique_lock<std::mutex> lock(mutex_);
         wake_.wait(lock, [this] { return !pending_; });
         if (error_) std::rethrow_exception(std::exchange(error_, nullptr));
-        pixels_ = pixels; damage_ = std::move(damage); pending_ = true;
+        pixels_ = pixels; width_ = width; height_ = height; damage_ = std::move(damage); pending_ = true;
         wake_.notify_all();
+    }
+    // The last frame copied: its pixels can go (a UI rebuilt at another size).
+    void wait_idle() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        wake_.wait(lock, [this] { return !pending_; });
     }
     uint64_t copy_us() const { return copy_us_.load(); }
 private:
@@ -72,11 +76,12 @@ private:
             wake_.wait(lock, [this] { return stop_ || pending_; });
             if (!pending_) return;
             const uint32_t* pixels = pixels_;
+            const unsigned width = width_, height = height_;
             const auto damage = std::move(damage_);
             lock.unlock();
             const auto started = kestrel_ui::monotonic_us();
             std::exception_ptr error;
-            try { screen_.overlay_damage(pixels, width_, height_, damage); }
+            try { screen_.overlay_damage(pixels, width, height, damage); }
             catch (...) { error = std::current_exception(); }
             copy_us_ += kestrel_ui::monotonic_us() - started;
             lock.lock();
@@ -86,7 +91,7 @@ private:
         }
     }
     display::PlaneScreen& screen_;
-    const unsigned width_, height_;
+    unsigned width_ = 0, height_ = 0;
     std::mutex mutex_;
     std::condition_variable wake_;
     bool pending_ = false, stop_ = false;
@@ -95,6 +100,24 @@ private:
     std::exception_ptr error_;
     std::atomic<uint64_t> copy_us_{0};
     std::thread thread_;
+};
+// Picture Size: the UI's rectangle on a sw x sh screen, centred, even.
+display::PlaneScreen::UiInset ui_inset_for(int sw, int sh, int pct) {
+    if (pct >= 100) return {0, 0, sw, sh};
+    const int w = sw * pct / 100 & ~1, h = sh * pct / 100 & ~1;
+    return {(sw - w) / 2 & ~1, (sh - h) / 2 & ~1, w, h};
+}
+// The UI at one size: LVGL's display, the HUD's worker and the view drawing
+// both. Picture Size makes them again at its rectangle (the same layout,
+// smaller), the idle artwork staying the whole screen's.
+struct Ui {
+    kestrel_ui::Display display;
+    kestrel_ui::HudClient hud;
+    kestrel_ui::View view;
+    Ui(const display::PlaneScreen::UiInset& r, int sw, int sh, const kestrel_ui::Controller& controller,
+       const std::string& assets, const std::string& hud_executable)
+        : display(r.w, r.h, "", 0, 2), hud(r.w, r.h, assets, hud_executable),
+          view(controller, r.w, r.h, assets, &hud, {sw, sh, r.x, r.y}) {}
 };
 void signal_handler(int signal) {
     if (signal == SIGUSR1)
@@ -327,8 +350,7 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
         lv_init();
         struct LvLifetime { ~LvLifetime() { lv_deinit(); } } lv_lifetime;
         lv_tick_set_cb([] { return uint32_t(kestrel_ui::monotonic_us() / 1000); });
-        kestrel_ui::Display display(screen_w, screen_h, "", 0, 2);
-        OverlayCopier copier(*receiver.screen, unsigned(screen_w), unsigned(screen_h));
+        OverlayCopier copier(*receiver.screen);
         kestrel_ui::Model model;
         model.build = kestrel_gnd_build_time;
         model.version = std::string(kestrel_gnd_version) + " (" + kestrel_gnd_git_hash + ")";
@@ -472,9 +494,21 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
         // until the UI has finished drawing them.
         const auto hud_executable=std::filesystem::read_symlink("/proc/self/exe").parent_path() /
             (o.vector ? "kestrel-hud-vector" : "kestrel-hud");
-        kestrel_ui::HudClient hud(screen_w,screen_h,o.assets,hud_executable.string());
-        kestrel_ui::View view(controller, screen_w, screen_h, o.assets, &hud);
-        model.backend.bf_available=view.betaflight_available();
+        // Picture Size draws the UI smaller too, as on the VRX Pro: where the
+        // screen can place it (the video's is the decoder's).
+        const bool ui_inset_ok = receiver.screen->supports_ui_inset();
+        auto ui_pct = [&] { return model.backend.picture_size_available && ui_inset_ok ? model.picture_size : 100; };
+        auto make_ui = [&](int pct) {
+            const auto r = ui_inset_for(screen_w, screen_h, pct);
+            receiver.screen->set_ui_inset(pct >= 100 ? display::PlaneScreen::UiInset{} : r);
+            receiver.screen->set_ui_margin(nullptr, 0);
+            return std::make_unique<Ui>(r, screen_w, screen_h, controller, o.assets, hud_executable.string());
+        };
+        int ui_built_pct = ui_pct();
+        auto ui = make_ui(ui_built_pct);
+        // At the end, the copier done with the UI's last frame before the UI goes.
+        struct CopiedFirst { OverlayCopier& copier; ~CopiedFirst() { copier.wait_idle(); } } copied_first{copier};
+        model.backend.bf_available=ui->view.betaflight_available();
         uint32_t bf_version=~uint32_t(0);
         uint32_t fc_last_frames=0;
         flight_controller.set_cell_size(1,1);
@@ -685,7 +719,7 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
                 const int first=std::max(0,model.gallery_selected)/6*6;
                 for(int i=0;i<int(model.backend.recordings.size());++i) {
                     auto& clip=model.backend.recordings[i];
-                    clip.thumbnail=i>=first && i<first+6?thumbnails.get(clip.name,320*screen_h/1080,180*screen_h/1080):nullptr;
+                    clip.thumbnail=i>=first && i<first+6?thumbnails.get(clip.name,320*ui->display.height()/1080,180*ui->display.height()/1080):nullptr;
                 }
             }
             model.backend.media.recording_known=true; model.backend.media.recording=recording.recording;
@@ -851,10 +885,20 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
                     }catch(const std::exception& e){model.backend.playback_telemetry_error=e.what();}
                 }
             }
+            // A new Picture Size: the UI made again at its rectangle (the
+            // last frame copied first: its pixels go with the old one).
+            if (ui_pct() != ui_built_pct) {
+                copier.wait_idle();
+                ui.reset();
+                ui_built_pct = ui_pct();
+                ui = make_ui(ui_built_pct);
+                drawn = 0;
+            }
             const auto render_start = kestrel_ui::monotonic_us();
-            view.update(ui_now);
-            model.hud_pid=hud.pid();model.hud_restarts=hud.restarts();
-            const auto presented = display.presentations;
+            ui->view.update(ui_now);
+            if (ui_built_pct < 100) { const auto m = ui->view.margin(); receiver.screen->set_ui_margin(m.art, m.dim_argb); }
+            model.hud_pid=ui->hud.pid();model.hud_restarts=ui->hud.restarts();
+            const auto presented = ui->display.presentations;
             lv_timer_handler();
             // LVGL pauses its refresh timer until something is invalidated.
             // Refreshing anyway is not free with two buffers: it would copy
@@ -863,13 +907,14 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
             // has just drawn this frame itself (a layout in that refresh
             // leaves it unpaused): a second one would copy into the buffer
             // the overlay copier may still be reading.
-            if (display.presentations == presented &&
-                !lv_timer_get_paused(lv_display_get_refr_timer(display.lv_display())))
-                lv_refr_now(display.lv_display());
+            if (ui->display.presentations == presented &&
+                !lv_timer_get_paused(lv_display_get_refr_timer(ui->display.lv_display())))
+                lv_refr_now(ui->display.lv_display());
             const auto overlay_start = kestrel_ui::monotonic_us();
-            if (display.presentations != drawn) {
-                drawn = display.presentations;
-                copier.submit(display.pixels().data(), display.take_damage());
+            if (ui->display.presentations != drawn) {
+                drawn = ui->display.presentations;
+                copier.submit(ui->display.pixels().data(), unsigned(ui->display.width()), unsigned(ui->display.height()),
+                              ui->display.take_damage());
             }
             const auto rendered = kestrel_ui::monotonic_us();
             // Keep an absolute phase: sleep/wakeup overhead must not lower
@@ -919,13 +964,13 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
             }
         }
         if (!o.screenshot.empty())
-            display.dump(o.screenshot);
+            ui->display.dump(o.screenshot);
         const bool source_failed = source_exited.load();
         player.stop();
         exporter.reset();
         workers.finish();
         printf("ar9311: display presentations=%llu UI presentations=%llu\n",
-               (unsigned long long)receiver.screen->presented(), (unsigned long long)display.presentations);
+               (unsigned long long)receiver.screen->presented(), (unsigned long long)ui->display.presentations);
         if (receiver.screen->failed()) return display::SessionResult::DisplayFailed;
         return source_failed || worker_failed || receiver.decoder->failed() ? display::SessionResult::Failed
                                                                            : display::SessionResult::Stopped;

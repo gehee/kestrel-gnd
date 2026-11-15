@@ -262,6 +262,33 @@ class Ar9311Screen final : public PlaneScreen {
     std::array<Slot, 3> slots_{};
     std::array<base::DamageRows, 3> ui_damage_;
     bool first_overlay_ = true;
+    // Picture Size (set_ui_inset/set_ui_margin, under mutex_): where the
+    // UI's frames go, and what shows around them. Each change counts in
+    // ui_generation_; a UI buffer whose margins are of an older one gets them
+    // again before it is next written (ui_margin_gen_, the UI producer's).
+    UiInset ui_inset_;
+    std::shared_ptr<const std::vector<uint8_t>> ui_margin_art_;
+    uint32_t ui_margin_dim_ = 0;
+    uint64_t ui_generation_ = 1, ui_inset_gen_ = 1;
+    std::array<uint64_t, 3> ui_margin_gen_{};
+    uint64_t ui_seen_inset_gen_ = 1;
+    // A row's pixels x0..x1 outside the UI: the artwork there under the
+    // dimmer, or transparent.
+    void fill_margin(uint32_t *row, int y, int x0, int x1, const uint32_t *art, uint32_t dim) const {
+        if (x0 >= x1) return;
+        if (!art) { std::fill(row + x0, row + x1, 0u); return; }
+        const uint32_t *src = art + size_t(y) * width_;
+        const uint32_t a = dim >> 24;
+        if (!a) { std::copy(src + x0, src + x1, row + x0); return; }
+        const uint32_t gr = (dim >> 16) & 255, gg = (dim >> 8) & 255, gb = dim & 255;
+        for (int x = x0; x < x1; ++x) {
+            const uint32_t p = src[x], pa = p >> 24, pr = (p >> 16) & 255, pg = (p >> 8) & 255, pb = p & 255;
+            const uint32_t oa = pa + (255 - pa) * a / 255;
+            const uint32_t orr = pr + (int(gr) - int(pr)) * int(a) / 255, og = pg + (int(gg) - int(pg)) * int(a) / 255,
+                           ob = pb + (int(gb) - int(pb)) * int(a) / 255;
+            row[x] = oa << 24 | orr << 16 | og << 8 | ob;
+        }
+    }
     std::vector<AscentMode> supported_modes_;
     Properties connector_, crtc_, primary_, overlay_;
     uint32_t mode_ = 0;
@@ -806,13 +833,25 @@ class Ar9311Screen final : public PlaneScreen {
     }
     void overlay_damage(const uint32_t *argb, unsigned width, unsigned height,
                         const std::vector<base::Damage>& damage) override {
-        if (!argb || width != unsigned(width_) || height != unsigned(height_))
+        UiInset inset;
+        std::shared_ptr<const std::vector<uint8_t>> margin_art;
+        uint32_t margin_dim = 0;
+        uint64_t generation = 0, inset_gen = 0;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            inset = ui_inset_.w ? ui_inset_ : UiInset{0, 0, width_, height_};
+            margin_art = ui_margin_art_; margin_dim = ui_margin_dim_;
+            generation = ui_generation_; inset_gen = ui_inset_gen_;
+        }
+        if (!argb || width != unsigned(inset.w) || height != unsigned(inset.h))
             throw std::invalid_argument("UI plane geometry");
+        // A new place for the UI: everything in it is new.
+        if (inset_gen != ui_seen_inset_gen_) { first_overlay_ = true; ui_seen_inset_gen_ = inset_gen; }
         // This state belongs exclusively to the UI producer. Even a dropped
         // update must remain dirty in every buffer until its next upload.
         for (auto& dirty : ui_damage_) {
-            if (first_overlay_) dirty.all();
-            for (const auto& area : damage) dirty.add(area);
+            if (first_overlay_) dirty.add({inset.x, inset.y, inset.w, inset.h});
+            for (const auto& area : damage) dirty.add({area.x + inset.x, area.y + inset.y, area.width, area.height});
         }
         first_overlay_ = false;
         int slot = -1;
@@ -839,11 +878,28 @@ class Ar9311Screen final : public PlaneScreen {
         auto &b = ui_[slot];
         auto& dirty = ui_damage_[slot];
         for (unsigned row = 0; row < height; ++row) {
-            const auto [left, right] = dirty.rows()[row];
+            const int y = inset.y + int(row);
+            const auto [l, r] = dirty.rows()[y];
+            const int left = std::max(l, inset.x), right = std::min(r, inset.x + inset.w);
             if (left < right)
-                memcpy(b.pixels + row * b.pitch + left * 4, argb + row * width + left, (right - left) * 4);
+                memcpy(b.pixels + size_t(y) * b.pitch + left * 4, argb + row * width + (left - inset.x), (right - left) * 4);
         }
         dirty.clear();
+        if (ui_margin_gen_[slot] != generation) {
+            // Around the UI: the artwork (as the UI shows its part of it) or
+            // nothing, in this buffer as it comes up for writing.
+            const auto *art = margin_art && margin_art->size() >= size_t(width_) * height_ * 4
+                                  ? reinterpret_cast<const uint32_t *>(margin_art->data()) : nullptr;
+            for (int y = 0; y < height_; ++y) {
+                auto *row = reinterpret_cast<uint32_t *>(b.pixels + size_t(y) * b.pitch);
+                if (y < inset.y || y >= inset.y + inset.h) fill_margin(row, y, 0, width_, art, margin_dim);
+                else {
+                    fill_margin(row, y, 0, inset.x, art, margin_dim);
+                    fill_margin(row, y, inset.x + inset.w, width_, art, margin_dim);
+                }
+            }
+            ui_margin_gen_[slot] = generation;
+        }
         {
             std::lock_guard<std::mutex> lock(mutex_);
             for (auto &state : slots_)
@@ -852,6 +908,23 @@ class Ar9311Screen final : public PlaneScreen {
             slots_[slot] = Slot::Ready;
         }
         wake_.notify_all();
+    }
+    bool supports_ui_inset() const override { return true; }
+    void set_ui_inset(const UiInset &inset) override {
+        if (inset.w && (inset.x < 0 || inset.y < 0 || inset.w < 2 || inset.h < 2 ||
+                        inset.x + inset.w > width_ || inset.y + inset.h > height_))
+            throw std::invalid_argument("UI inset outside the screen");
+        std::lock_guard<std::mutex> lock(mutex_);
+        const UiInset full{0, 0, width_, height_};
+        if ((inset.w ? inset : full) == (ui_inset_.w ? ui_inset_ : full)) return;
+        ui_inset_ = inset;
+        ++ui_generation_; ++ui_inset_gen_;
+    }
+    void set_ui_margin(std::shared_ptr<const std::vector<uint8_t>> art, uint32_t dim_argb) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (art == ui_margin_art_ && dim_argb == ui_margin_dim_) return;
+        ui_margin_art_ = std::move(art); ui_margin_dim_ = dim_argb;
+        ++ui_generation_;
     }
     bool supports_mode(AscentMode mode) const override {
         return std::find(supported_modes_.begin(),supported_modes_.end(),mode)!=supported_modes_.end();

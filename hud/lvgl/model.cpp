@@ -187,7 +187,7 @@ std::vector<MenuRow> Model::rows(uint64_t now) const {
             backend.picture_size_available
                 ? choice("picture_size", "Picture Size", (100 - picture_size) / 5,
                          {"FULL", "95%", "90%", "85%", "80%", "75%", "70%", "65%", "60%"},
-                         "Shrink the video if your optics clip the edges. The decoder writes it smaller, so no delay is added. The HUD and menu stay full size.")
+                         "Shrink the whole picture if your optics clip the edges: the video (written smaller by the decoder, no delay added), the HUD and the menu.")
                 : reading("picture_size", "Picture Size", "FULL", "Needs the fpvOS decoder with its display scaler (an fpvOS update)."),
             choice("ui_scale", "UI Scaling", ui_scale-5, scales, "Size of HUD type and menu contents. The menu panel stays put."),
             reading("brightness", "Brightness", "MONITOR", "Use the external monitor's brightness control. HDMI does not expose a local panel backlight."),

@@ -5,13 +5,14 @@
 #include <stdexcept>
 
 namespace kestrel_ui {
-IdleScene::IdleScene(const std::string& assets, int w, int h)
-    : path_(assets + "/idle-scenes.kui"), width_(w), height_(h),
+IdleScene::IdleScene(const std::string& assets, int w, int h, int screen_w, int screen_h, int x, int y)
+    : path_(assets + "/idle-scenes.kui"), width_(w), height_(h), screen_w_(screen_w ? screen_w : w),
+      screen_h_(screen_h ? screen_h : h), x_(x), y_(y),
       text_(assets + "/canopy-font.kuf", w, h, 512 * 1024) {}
 IdleScene::~IdleScene() { drop_image(); }
 void IdleScene::drop_image() {
     lv_image_cache_drop(&image_); lv_image_header_cache_drop(&image_);
-    pixels_.clear(); image_ = {};
+    pixels_.reset(); image_ = {};
 }
 void IdleScene::prepare(const Model& model, uint64_t now) {
     text_.begin_frame();
@@ -26,10 +27,11 @@ void IdleScene::prepare(const Model& model, uint64_t now) {
     auto word = [&](int offset) { return uint32_t(header[offset]) | uint32_t(header[offset + 1]) << 8 |
         uint32_t(header[offset + 2]) << 16 | uint32_t(header[offset + 3]) << 24; };
     if (!file.read(reinterpret_cast<char*>(header), sizeof(header)) || std::memcmp(header, "KUIB", 4) ||
-        (word(4) != 1 && word(4) != 2) || word(8) != unsigned(width_) || word(12) != unsigned(height_) ||
-        width_ < 1 || width_ > 4096 || height_ < 1 || height_ > 2160 || !word(16) || word(16) > 64)
+        (word(4) != 1 && word(4) != 2) || word(8) != unsigned(screen_w_) || word(12) != unsigned(screen_h_) ||
+        screen_w_ < 1 || screen_w_ > 4096 || screen_h_ < 1 || screen_h_ > 2160 || !word(16) || word(16) > 64 ||
+        x_ < 0 || y_ < 0 || x_ + width_ > screen_w_ || y_ + height_ > screen_h_)
         throw std::runtime_error("Invalid static idle artwork: " + path_);
-    const uint64_t bytes = uint64_t(width_) * height_ * 4;
+    const uint64_t bytes = uint64_t(screen_w_) * screen_h_ * 4;
     const uint64_t length = 20 + word(16) * (32 + bytes);
     file.seekg(0, std::ios::end);
     if (file.tellg() != std::streamoff(length)) throw std::runtime_error("Invalid static idle artwork length: " + path_);
@@ -39,20 +41,21 @@ void IdleScene::prepare(const Model& model, uint64_t now) {
         if (!file.read(name, sizeof(name)) || !std::memchr(name, 0, sizeof(name)))
             throw std::runtime_error("Invalid static idle theme: " + path_);
         if (theme == name) {
-            pixels_.resize(bytes);
-            if (!file.read(reinterpret_cast<char*>(pixels_.data()), pixels_.size()))
+            pixels_ = std::make_shared<std::vector<uint8_t>>(bytes);
+            auto& pixels = *pixels_;
+            if (!file.read(reinterpret_cast<char*>(pixels.data()), pixels.size()))
                 throw std::runtime_error("Cannot read static idle artwork: " + path_);
             if (word(4) == 2 && i != 0) {
                 std::vector<uint8_t> base(bytes);
                 file.seekg(52); // Header, then the first theme's name.
                 if (!file.read(reinterpret_cast<char*>(base.data()),base.size()))
                     throw std::runtime_error("Truncated base idle artwork: " + path_);
-                for (size_t j=0;j<pixels_.size();++j) pixels_[j] ^= base[j];
+                for (size_t j=0;j<pixels.size();++j) pixels[j] ^= base[j];
             }
             image_.header.magic = LV_IMAGE_HEADER_MAGIC;
             image_.header.cf = LV_COLOR_FORMAT_ARGB8888;
-            image_.header.w = width_; image_.header.h = height_; image_.header.stride = width_ * 4;
-            image_.data_size = pixels_.size(); image_.data = pixels_.data();
+            image_.header.w = screen_w_; image_.header.h = screen_h_; image_.header.stride = screen_w_ * 4;
+            image_.data_size = pixels.size(); image_.data = pixels.data();
             loaded_theme_ = theme;
             return;
         }
@@ -64,8 +67,11 @@ bool IdleScene::paints(const Model& model, uint64_t now) const {
     return model.hud_visible() && model.show_status(now) && !(model.backend.vrx.link_valid(now) && model.menu_open);
 }
 const uint32_t* IdleScene::artwork(const Model& model, uint64_t now) const {
-    if (!paints(model, now) || model.backend.vrx.link_valid(now) || pixels_.empty()) return nullptr;
-    return reinterpret_cast<const uint32_t*>(pixels_.data());
+    if (!paints(model, now) || model.backend.vrx.link_valid(now) || !pixels_) return nullptr;
+    return reinterpret_cast<const uint32_t*>(pixels_->data()) + size_t(y_) * screen_w_ + x_;
+}
+std::shared_ptr<const std::vector<uint8_t>> IdleScene::screen_artwork(const Model& model, uint64_t now) const {
+    return artwork(model, now) ? pixels_ : nullptr;
 }
 void IdleScene::draw(lv_layer_t* layer, const Model& model, uint64_t now) {
     if (!paints(model, now)) return;
@@ -81,9 +87,10 @@ void IdleScene::draw(lv_layer_t* layer, const Model& model, uint64_t now) {
                      height_ * 0.53f, size * 0.5f, false, theme.accent, 1);
         return;
     }
-    if (!pixels_.empty()) {
+    if (pixels_) {
+        // The whole screen's artwork, the UI's area showing its own part.
         lv_draw_image_dsc_t d; lv_draw_image_dsc_init(&d); d.src = &image_;
-        lv_area_t area{0, 0, width_ - 1, height_ - 1};
+        lv_area_t area{-x_, -y_, screen_w_ - x_ - 1, screen_h_ - y_ - 1};
         lv_draw_image(layer, &d, &area);
     } else {
         const float size = height_ * 0.17f, advance = text_.advance("fpvOS") * size / canopy::kFontPixels;

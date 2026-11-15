@@ -12,13 +12,19 @@ lv_opa_t opacity(float v) { return lv_opa_t(std::clamp(v * 255, 0.0f, 255.0f)); 
 }
 void HudView::Asset::load(const std::string& path, int width, int height) {
     std::ifstream in(path, std::ios::binary); uint8_t header[28]{};
-    if (!in.read(reinterpret_cast<char*>(header), sizeof(header)) || std::memcmp(header, "KUIA", 4) ||
-        le32(header + 4) != uint32_t(width) || le32(header + 8) != uint32_t(height))
-        throw std::runtime_error("Missing/mismatched HUD asset: " + path);
+    if (!in.read(reinterpret_cast<char*>(header), sizeof(header)) || std::memcmp(header, "KUIA", 4))
+        throw std::runtime_error("Missing HUD asset: " + path);
+    const auto dw = le32(header + 4), dh = le32(header + 8);
+    // Made for a screen of the HUD's shape, at most twice its size.
+    if (!dw || !dh || dw > 4096 || dh > 2160 || width < 1 || height < 1 || dw < uint32_t(width) ||
+        dw > uint32_t(width) * 2 || uint64_t(dw) * height < uint64_t(dh) * width * 99 / 100 ||
+        uint64_t(dw) * height > uint64_t(dh) * width * 101 / 100)
+        throw std::runtime_error("Mismatched HUD asset: " + path);
     const auto ox = le32(header + 12), oy = le32(header + 16), w = le32(header + 20), h = le32(header + 24);
-    if (!w || !h || uint64_t(ox) + w > uint32_t(width) || uint64_t(oy) + h > uint32_t(height))
+    if (!w || !h || uint64_t(ox) + w > dw || uint64_t(oy) + h > dh)
         throw std::runtime_error("Invalid HUD asset bounds");
-    x = int(ox); y = int(oy); pixels.resize(size_t(w) * h);
+    design_w = int(dw); design_h = int(dh);
+    x = int(uint64_t(ox) * width / dw); y = int(uint64_t(oy) * height / dh); pixels.resize(size_t(w) * h);
     if (!in.read(reinterpret_cast<char*>(pixels.data()), pixels.size()) || in.peek() != std::char_traits<char>::eof())
         throw std::runtime_error("Invalid HUD asset length");
     image.header.magic = LV_IMAGE_HEADER_MAGIC; image.header.cf = LV_COLOR_FORMAT_A8;
@@ -93,6 +99,11 @@ void HudView::panel(lv_layer_t* layer, bool left) {
     lv_draw_image_dsc_t image; lv_draw_image_dsc_init(&image);
     image.src = &a.image; image.recolor = color(th.ground); image.recolor_opa = LV_OPA_COVER;
     image.opa = opacity(p.dim * p.shade);
+    if (a.design_w != width_ || a.design_h != height_) {
+        // Made for a larger screen (Picture Size): drawn to the HUD's.
+        image.scale_x = int32_t(256 * width_ / a.design_w); image.scale_y = int32_t(256 * height_ / a.design_h);
+        image.pivot = {0, 0};
+    }
     lv_area_t area{a.x, a.y, a.x + int(a.image.header.w) - 1, a.y + int(a.image.header.h) - 1};
     lv_draw_image(layer, &image, &area);
     const auto frame = canopy::screen_frame(width_, height_);
