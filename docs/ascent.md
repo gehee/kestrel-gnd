@@ -166,6 +166,21 @@ the menu. Send keys using a second invocation with `--control PATH --send-key
 enter` (or menu/up/down/left/right/back/quit). `--preferences FILE` persists visual
 preferences; without it they last for the session. `--vector` selects Vector.
 `--replay FILE` plays a recorded framed radio stream without opening the radio.
+
+Ascent VRX and P1 goggles use the same 40 MHz default bandwidth cap as
+VRX Pro. A saved bandwidth selection takes precedence. Native RADIO exposes
+Max Bandwidth (AUTO, 5, 10, 20, 40 MHz) and separate TX Power Mode
+(FIXED/AUTO) and TX Power controls, using the connected air unit's supported
+levels. In AUTO power mode, TX Power is the upper limit. Bandwidth AUTO leaves
+the firmware policy in control; it does not enable bandwidth adaptation.
+Saved bandwidth, MCS, steady-latency and channel policies are restored at startup.
+
+On the tested Ascent VRX with stock Ascent Lite 18.21.10, explicit 5, 10 and
+20 MHz selections sustain video. Selecting 40 MHz repeatedly drops the link;
+AUTO also became unstable during the test sequence. Use an explicit 20 MHz
+selection on this combination until the width-transition issue is resolved.
+The shared 40 MHz default does not establish compatibility with every air unit.
+
 `--screenshot FILE` saves the final ARGB HUD as PAM, including transparency.
 
 ## UI reference and verification

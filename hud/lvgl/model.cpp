@@ -154,9 +154,11 @@ std::vector<MenuRow> Model::rows(uint64_t now) const {
             result.push_back(unavailable("bind", "Bind", "Pairs this VRX with an air unit."));
         else {
             result.push_back(unavailable("channel", "Channel", "Where the link sits, what is on every channel and what your country allows."));
+            result.push_back(unavailable("power_mode", "TX Power Mode", "FIXED holds the selected power; AUTO uses it as the upper limit. Available levels depend on the air unit."));
             result.push_back(unavailable("power", "TX Power", "Radio output. More reaches further and runs hotter."));
         }
         if (backend.vrx.link_valid(now) && backend.controls.count("max_mcs")) result.push_back(unavailable("max_mcs", "Max MCS", "The highest receive MCS allowed by Open8030."));
+        result.push_back(unavailable("max_bw", "Max Bandwidth", "Limit the video link width. AUTO leaves the firmware policy in control; it does not enable automatic adaptation."));
         result.push_back(unavailable("radio_firmware", "VRX Radio Firmware", "This VRX's own radio firmware. The air unit's is not changed."));
         if (backend.vrx.link_valid(now)) result.push_back(unavailable("standby", "Auto Standby", "The air unit's low-power standby."));
         return result;
