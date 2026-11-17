@@ -22,4 +22,12 @@ bus::PicturePool& get() {
     return *pool;
 }
 
+void trim() {
+    get().trim_free([](uint8_t* base, size_t bytes) noexcept {
+        // mmap base and each 4 MiB slot are page-aligned. This is never
+        // applied to a decoder/DMA buffer or to a referenced picture.
+        madvise(base, bytes, MADV_DONTNEED);
+    });
+}
+
 }  // namespace video_pool

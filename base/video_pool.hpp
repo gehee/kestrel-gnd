@@ -14,5 +14,7 @@ constexpr int      kPictures = 32;            // in flight at once: the one bein
 constexpr uint32_t kCapacity = 4 * 1024 * 1024;
 
 bus::PicturePool& get();
+// Return unused anonymous pages after a recording; active pictures survive.
+void trim();
 
 }  // namespace video_pool
