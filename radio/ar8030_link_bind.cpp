@@ -150,6 +150,13 @@ void Ar8030Link::bind_finish(bool ok, const uint8_t peer[4], bool cancelled) {
     }
     bind_done_ms_ = now_ms();
     bind_secs_left.store(0);
+    // The window held the link off: the time without one starts again here.
+    // try_next_peer() stood still meanwhile, and with its old start it moved
+    // on from the unit just bound at once (8 s before that one was named
+    // again); a link lost at the window's start was "12 s ago" and reopened
+    // the socket right after the bind.
+    peer_try_ms_ = bind_done_ms_;
+    if (link_lost_ms_) link_lost_ms_ = bind_done_ms_;
 
     if (cancelled) {
         // The user's own doing, not an outcome: nothing to report and nothing

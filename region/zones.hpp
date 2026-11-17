@@ -106,7 +106,12 @@ void set_licensed(bool on);
 // ---- the setting ----
 int  selected();                 // the zone in force, -1: not set
 int  selected_country();         // its country, -1: not set
-void load(Settings& settings);   // read "time_zone" at start and apply it; select() saves there
+// Read "time_zone" at start and apply it; select() saves there. Not set, the
+// zone the fpvOS Flasher left in LOCATION_FILE at the last flash (the
+// updater's, ZONE='Europe/Paris') is taken and saved; the file is removed
+// either way, so a zone the pilot sets back to NOT SET stays that way.
+inline constexpr const char* kLocationFile = "/var/lib/kestrel/location";
+void load(Settings& settings, const char* location_file = kLocationFile);
 void select(int z);              // pick a zone (-1: none), save it, have its TZ applied
 uint32_t generation();           // bumped by every select(), for anyone mirroring it
 // Apply the zone's TZ string to this process if it changed. Call from one

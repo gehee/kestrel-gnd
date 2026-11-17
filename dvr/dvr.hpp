@@ -186,8 +186,16 @@ class DVR {
             struct tm buf;
             localtime_r(&in_time_t, &buf);
             std::stringstream ss;
-            ss << base << "_" << std::put_time(&buf, "%Y%m%d_%H%M%S") << ext;
-            return ss.str();
+            ss << base << "_" << std::put_time(&buf, "%Y%m%d_%H%M%S");
+            // A name already on the card gets _1, _2...: the clock starts at
+            // the same date on every boot where the RTC is not read, and REC
+            // as long after power-on as in an earlier flight would otherwise
+            // open that flight's file and empty it (as StreamRecorder's names).
+            const std::string stem = ss.str();
+            std::string name = stem + ext;
+            for (int suffix = 1; suffix < 1000 && access(name.c_str(), F_OK) == 0; ++suffix)
+                name = stem + "_" + std::to_string(suffix) + ext;
+            return name;
         }
 
     public:

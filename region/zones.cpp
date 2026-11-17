@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <ctime>
 #include <cstring>
+#include <unistd.h>
 
 namespace zones {
 
@@ -187,13 +188,37 @@ int selected_country() {
 
 uint32_t generation() { return g_gen.load(); }
 
-void load(Settings& settings) {
+// The ZONE line of the updater's location file ("" when none or unreadable).
+static std::string flasher_zone(const char* path) {
+    std::string zone;
+    if (FILE* f = path ? fopen(path, "r") : nullptr) {
+        char line[256];
+        while (fgets(line, sizeof line, f)) {
+            const size_t n = strlen(line);
+            if (n > 8 && !strncmp(line, "ZONE='", 6) && !strcmp(line + n - 2, "'\n")) {
+                zone.assign(line + 6, n - 8);
+                break;
+            }
+        }
+        fclose(f);
+        unlink(path);
+    }
+    return zone;
+}
+
+void load(Settings& settings, const char* location_file) {
     g_settings = &settings;
     g_licensed = settings.get(region::setting::amateur_licence);
     const char* t = getenv("TZ");
     g_tz_initial = t ? t : kNoTz;
     if (!t) setenv("TZ", kNoTz, 1);   // before any thread (see kNoTz)
-    const int z = find(settings.get(region::setting::time_zone));
+    int z = find(settings.get(region::setting::time_zone));
+    const std::string flashed = flasher_zone(location_file);
+    if (z < 0 && find(flashed) >= 0) {
+        z = find(flashed);
+        settings.set(region::setting::time_zone, std::string(data::kZones[z].name));
+        printf("time zone: %s, from the computer of the last flash\n", data::kZones[z].name);
+    }
     g_sel = z;
     g_gen++;
     // Not set: the TZ the init script exported (time.conf) stays in force.

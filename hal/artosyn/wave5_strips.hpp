@@ -67,6 +67,10 @@ public:
     struct MainDecoder {
         std::function<void(bool)> hold;   // let go of the hardware and its buffers (true), or take them again
         std::function<bool()> released;   // has let go
+        // A recording is playing: the screen and the decoder are its own, so
+        // the strips stop (their decoders closed, their packets dropped) until
+        // it ends. Not given: never.
+        std::function<bool()> playing;
     };
     // device: the decoder's node; out: where whole pictures go.
     Wave5Strips(VideoCodec codec, std::string device, std::shared_ptr<FrameSink> out, MainDecoder main);
@@ -167,6 +171,7 @@ private:
     Said said_[kMax][32];
     int seen_n_ = 0, seen_ov_ = 0;
     bool stop_req_ = false, drop_req_ = false, quit_ = false;
+    bool paused_ = false;   // stopped for a playback (main_.playing), under mtx_
     int wake_fd_ = -1;
 
     // The thread's.

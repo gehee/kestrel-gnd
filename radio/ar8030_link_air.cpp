@@ -162,7 +162,11 @@ void Ar8030Link::save_sky_config() {
 // channel is not kept - the air unit decides it, and the goggle searches.
 void Ar8030Link::load_sky_link() {
     if (sky_cfg_key.empty()) return;
-    tx_power_want_mw = settings_.get(radio::setting::air_tx_power_mw(sky_cfg_key, tx_power_want_mw));
+    // The goggle-wide setting, not the level in use: that one is the last
+    // air unit's, and a new unit would start on it (a Lite+ on another's
+    // 500 mW) without anyone having chosen it.
+    tx_power_want_mw = settings_.get(radio::setting::air_tx_power_mw(sky_cfg_key,
+                                                                    settings_.get(radio::setting::tx_power_mw)));
     // Fitted to the levels this air unit has: what it said on this link, else what it said
     // last time. A link lost and reopened has heard nothing yet, and the smallest list
     // would hold a Lite+ to 100 mW (and its own uplink with it) until the unit is back.
@@ -241,7 +245,13 @@ void Ar8030Link::send_air_handshake(bool link_up) {
     // VRX's radio stays searching and follows it.
     std::vector<uint32_t> hop_list;
     uint32_t hop_from = 0, move_to = 0;
-    if (chan_auto && !chan_manual_cli && (chan_hop.load() || link_up)) {
+    // Not with a channel picked from the menu (FIXED, chan_fixed_mhz): AUTO's
+    // pick is not the pilot's choice then. chan_auto is the radio searching,
+    // which it does at every connect; the channel it reports before the link
+    // is the search's (4945 MHz, 2.1 GHz on stock firmware), "not allowed",
+    // and the air unit was sent elsewhere before region_auto_apply() put the
+    // link back on the fixed one - two link moves at every connect.
+    if (chan_auto && !chan_manual_cli && chan_fixed_mhz.load() <= 0 && (chan_hop.load() || link_up)) {
         uint32_t freqs[128];
         int32_t power[128];
         int n = 0;

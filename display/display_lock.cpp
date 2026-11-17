@@ -362,7 +362,8 @@ void DisplayLock::run() {
         // the camera is a little faster (60.03 fps on a 60.000 Hz mode).
         double Pt = Pm, B = 0;
         if (free) {
-            const double k = std::max(1.0, std::floor(Pc / Pm + 1e-6));
+            // As display::follow_period_us: against the shortest refresh.
+            const double k = std::max(1.0, std::floor(Pc / (Pm * (1 - kFreeShorter)) + 1e-6));
             Pt = Pc / k;
             B = std::max(-kFreeShorter * mode.vtotal, Pt / line - mode.vtotal + trim);
             Pt = (mode.vtotal + B) * line;

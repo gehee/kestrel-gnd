@@ -65,6 +65,23 @@ int main(int argc, char** argv) {
             b.flight.stamp_us = t0 + 3100000; c.tick(t0 + 3100000);
             check(m.menu_open && !c.take_arming(), "Armed again after the FC went quiet: no arming");
         }
+        {
+            // Arming also closes the channel page and ends gallery playback.
+            Model m; Controller c(m); auto& b = m.backend; const uint64_t t0 = 10000000;
+            std::string asked; c.apply_receiver = [&](const std::string& id, int) { asked = id; return std::string(); };
+            b.flight.arm = 0; b.flight.stamp_us = t0; c.tick(t0);
+            c.open_menu(); m.channel_open = true;
+            b.flight.arm = 1; b.flight.stamp_us = t0 + 100000; c.tick(t0 + 100000);
+            check(!m.channel_open && !m.menu_open, "Arming closes the channel page with its menu");
+            b.flight.arm = 0; b.flight.stamp_us = t0 + 200000; c.tick(t0 + 200000);
+            c.set_scene(SceneMode::GalleryPlayback);
+            b.flight.arm = 1; b.flight.stamp_us = t0 + 300000; c.tick(t0 + 300000);
+            check(m.scene == SceneMode::Live && asked == "playback_stop", "Arming stops playback and shows the live video");
+            b.flight.arm = 0; b.flight.stamp_us = t0 + 400000; c.tick(t0 + 400000);
+            c.set_scene(SceneMode::GalleryBrowse); asked.clear();
+            b.flight.arm = 1; b.flight.stamp_us = t0 + 500000; c.tick(t0 + 500000);
+            check(m.scene == SceneMode::Live && asked.empty(), "Arming leaves the gallery list");
+        }
         Telemetry t;
         t.stamp_us = 1000000; t.connected = true; t.mcs = -1;
         t.voltage_mv = 11512; t.cpu_temperature_x100 = 4889;

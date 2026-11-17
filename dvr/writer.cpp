@@ -5,6 +5,7 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <dirent.h>
 #include <pthread.h>
 #include <stdexcept>
@@ -22,11 +23,19 @@ uint64_t size_of(const std::string& path) {
     struct stat st;
     return stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode) ? (uint64_t)st.st_size : 0;
 }
-// dir's purgeable recordings, oldest first: their mtime and path.
+// dir's purgeable recordings, oldest first: their mtime and path. Those made
+// since this boot come last whatever their date: where the RTC is not read
+// the clock starts in 2017, and by date alone the flights just recorded would
+// be the first to go, before last month's.
 std::vector<std::pair<time_t, std::string>> recordings_in(const std::string& dir, const std::string& keep) {
     std::vector<std::pair<time_t, std::string>> files;
     DIR* d = opendir(dir.c_str());
     if (!d) return files;
+    const time_t now = time(nullptr);
+    struct timespec up{};
+    clock_gettime(CLOCK_BOOTTIME, &up);
+    const time_t boot = now - up.tv_sec;
+    const auto this_boot = [&](time_t t) { return t >= boot && t <= now + 60; };
     struct dirent* ent;
     while ((ent = readdir(d)) != nullptr) {
         const std::string name = ent->d_name;
@@ -37,7 +46,10 @@ std::vector<std::pair<time_t, std::string>> recordings_in(const std::string& dir
         files.emplace_back(fst.st_mtime, path);
     }
     closedir(d);
-    std::sort(files.begin(), files.end());
+    std::sort(files.begin(), files.end(), [&](const auto& a, const auto& b) {
+        const bool na = this_boot(a.first), nb = this_boot(b.first);
+        return na != nb ? nb : a < b;
+    });
     return files;
 }
 // A recording's companions: its gallery thumbnail and its telemetry sidecar.
