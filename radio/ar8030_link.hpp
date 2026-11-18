@@ -657,6 +657,13 @@ class Ar8030Link : public radio::Link, private radio::VideoOut::Source {
         int  read_sky_ack(uint8_t want_cmd, int timeout_ms);
         void drain_control_socket();  // keep the port-2 RX ring from overflowing
         void on_ctrl_bytes(const uint8_t *buf, int n);  // the air's reports, MSP, an awaited ack
+        // The FC's bytes out of the air's 0x02 messages (see the .cpp): the
+        // control socket's bytes not yet taken apart, and the frames that
+        // failed their check.
+        void feed_fc(const uint8_t *buf, int n);
+        std::vector<uint8_t> fc_rx_;
+        std::mutex fc_rx_mu_;
+        unsigned long long fc_bad_frames_ = 0;
         void drain_msp_socket();      // FC MSP passthrough -> OSD DisplayPort
         void apply_bandwidth();       // must run after the link is up (see .cpp)
         void send_prj_rf_config();    // BB_SET_PRJ_DISPATCH cmd 138 (see .cpp)

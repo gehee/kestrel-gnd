@@ -400,12 +400,43 @@ void Ar8030Link::on_ctrl_bytes(const uint8_t *buf, int n) {
         }
     }
     // --debug-msp-bb-port 2 means "the FC stream is inside the telemetry we
-    // already drain" - tee it rather than opening a second socket on a
-    // port this client already owns.
-    if (msp_bb_port == 2 && fc_out_.watched()) {
-        msp_bytes += (unsigned long long)n;
-        fc_out_.bytes(buf, (size_t)n);
+    // already drain" - taken out of it rather than opening a second socket
+    // on a port this client already owns.
+    if (msp_bb_port == 2 && fc_out_.watched()) feed_fc(buf, n);
+}
+
+// The air unit sends the FC's serial bytes as message 0x02, up to 172 bytes
+// a message, each in its own FE A5 frame (sky::Proto: a 6-byte header, a pad
+// byte and a CRC-32C round it), among its other messages. Only the bytes
+// inside the 0x02 messages are the FC's. They used to go to the MSP parser
+// as the socket gave them, frames and all: every MSP frame that crossed from
+// one message into the next had a frame's trailer, header and anything sent
+// between spliced into it, failed its checksum and was dropped - most of
+// Betaflight's screens while armed, and a STATS page, longer than one
+// message, nearly always. Frames are reassembled across reads here.
+void Ar8030Link::feed_fc(const uint8_t *buf, int n) {
+    std::lock_guard<std::mutex> lock(fc_rx_mu_);
+    fc_rx_.insert(fc_rx_.end(), buf, buf + n);
+    size_t i = 0;
+    const size_t have = fc_rx_.size();
+    while (have - i >= 6) {
+        const uint8_t *b = fc_rx_.data() + i;
+        if (b[0] != 0xFE || b[1] != 0xA5 || (uint8_t)(b[3] + b[4] + b[5]) != b[2]) { i++; continue; }
+        const size_t body = (size_t)((b[4] | (b[5] << 8)) >> 4);   // the message: its type and payload
+        if (body < 1 || body > 0xFFA) { i++; continue; }
+        const size_t len = 6 + body + 1 + 4;
+        if (have - i < len) break;                                // the rest is still on its way
+        const uint32_t want = (uint32_t)b[len - 4] | ((uint32_t)b[len - 3] << 8) |
+                              ((uint32_t)b[len - 2] << 16) | ((uint32_t)b[len - 1] << 24);
+        if (sky::Proto::crc32c(b, len - 4) != want) { fc_bad_frames_++; i++; continue; }
+        if (b[6] == 0x02 && body > 1) {
+            msp_bytes += (unsigned long long)(body - 1);
+            fc_out_.bytes(b + 7, body - 1);
+        }
+        i += len;
     }
+    fc_rx_.erase(fc_rx_.begin(), fc_rx_.begin() + (long)i);
+    if (fc_rx_.size() > 16384) fc_rx_.clear();   // nothing that size is one frame
 }
 
 // The awaited camera setting acknowledged: accepted, it goes into the stored

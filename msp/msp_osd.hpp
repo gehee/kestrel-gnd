@@ -79,6 +79,10 @@ class MspOsd {
         // resolution. The OSD loop redraws on a new version and not on every
         // MSP packet - the FC resends an unchanged screen continuously.
         std::atomic<uint32_t> content_ver_{0};
+        // Cells Betaflight sent with its blink attribute (MSP DisplayPort attr
+        // bit 6, 0x40): it leaves the blinking to the display, so they are
+        // drawn only in the on half of a 400 ms cycle, as Betaflight's own.
+        std::atomic<bool> has_blink_{false};
         bool hud_moving_ = false;   // spring not yet settled (update_physics)
         std::atomic<bool> motion_wanted_{false};   // reactive HUD on: attitude is news
 
@@ -158,7 +162,10 @@ class MspOsd {
 
     private:
         void clear_internal();
-        void write_string_locked(uint8_t row, uint8_t col, const uint8_t* str, size_t len);
+        void note_blink_locked();
+        void trace_screen_locked(const char* kind, int seq, int recs, bool complete, size_t size);
+        void trace_note(const char* what);
+        void write_string_locked(uint8_t row, uint8_t col, const uint8_t* str, size_t len, uint8_t attr = 0);
         float m_scale = 1.0f;
         // Absolute cell size in frustum units. The panel layout and the
         // full-screen canvas need different sizes, so the owner sets it per
@@ -214,6 +221,10 @@ class MspOsd {
         
         // Helper to update grid
         void write_string(uint8_t row, uint8_t col, const uint8_t* str, size_t len);
+        static constexpr uint8_t kAttrBlink = 0x40;
+        // Something on the canvas blinks: the HUD has to keep redrawing.
+        // Something on the canvas blinks: the HUD has to keep redrawing.
+        bool has_blink() const { return has_blink_.load(std::memory_order_relaxed); }
         bool handle_batched_displayport(const uint8_t* payload, size_t size);
         void scan_osd_angles(const uint8_t* payload, size_t size);
         void scan_osd_values(const uint8_t* payload, size_t size);

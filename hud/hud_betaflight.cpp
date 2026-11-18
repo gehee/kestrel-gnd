@@ -137,6 +137,7 @@ void OSD::draw_betaflight(Frame& f) {
     // just looked like noise laid across it. The FC's own OSD is still
     // running underneath; it comes back the moment the menu closes.
     if (bf_osd && !is_menu_open) {
+        if (msp_osd.has_blink()) signal_render(prof::kWakeAnim);   // its blinking cells
         canvas_->set_transform(mvp_hud_c);
 
         const float avail_w = 2.0f * frustum_w;

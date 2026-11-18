@@ -194,6 +194,60 @@ bool MspOsd::step(uint8_t b) {
     return false;
 }
 
+// `touch /tmp/kestrel-osd-trace`: every Betaflight screen as it arrives, into
+// /tmp/kestrel-osd-trace.txt - its time, sequence number (and any gap before
+// it), its records, and the rows that changed from the last one - with the
+// arm state from MSP_STATUS. For checking what the FC drew against what the
+// HUD showed. Stops at 8 MB; remove the trigger to stop sooner.
+static FILE* osd_trace() {
+    static FILE* f = nullptr;
+    static uint64_t checked_us = 0;
+    const uint64_t now = get_time_us();
+    if (now - checked_us >= 500000ULL) {
+        checked_us = now;
+        const bool want = access("/tmp/kestrel-osd-trace", F_OK) == 0;
+        if (want && !f) f = fopen("/tmp/kestrel-osd-trace.txt", "a");
+        if (!want && f) { fclose(f); f = nullptr; }
+        if (f && ftell(f) > 8 * 1024 * 1024) { fclose(f); f = nullptr; unlink("/tmp/kestrel-osd-trace"); }
+    }
+    return f;
+}
+
+void MspOsd::trace_note(const char* what) {
+    FILE* f = osd_trace();
+    if (!f) return;
+    fprintf(f, "%10.3f %s\n", get_time_us() / 1e6, what);
+    fflush(f);
+}
+
+void MspOsd::trace_screen_locked(const char* kind, int seq, int recs, bool complete, size_t size) {
+    FILE* f = osd_trace();
+    if (!f) return;
+    static char prev[GRID_H][GRID_W + 1];
+    static int prev_seq = -1;
+    char gap[32] = "";
+    if (seq >= 0 && prev_seq >= 0 && seq != ((prev_seq + 1) & 0xFF) && seq != ((prev_seq + 1) & 0xFFFF))
+        snprintf(gap, sizeof gap, " GAP after %d", prev_seq);
+    if (seq >= 0) prev_seq = seq;
+    fprintf(f, "%10.3f %s seq=%d%s recs=%d bytes=%zu%s\n", get_time_us() / 1e6, kind, seq, gap, recs, size,
+            complete ? "" : " INCOMPLETE");
+    for (int r = 0; r < GRID_H; r++) {
+        char line[GRID_W + 1];
+        int last = -1;
+        for (int c = 0; c < GRID_W; c++) {
+            const uint16_t g = grid[r][c].char_idx;
+            line[c] = g == 0 ? ' ' : (g >= 0x20 && g < 0x7F) ? (char)g : '#';
+            if (line[c] != ' ') last = c;
+        }
+        line[last + 1] = 0;
+        if (strcmp(line, prev[r]) != 0) {
+            fprintf(f, "    r%02d |%s|\n", r, line);
+            memcpy(prev[r], line, sizeof line);
+        }
+    }
+    fflush(f);
+}
+
 // // void MspOsd::handle_msp_frame(uint16_t function, const uint8_t* payload, size_t size) {
 // The AR8030 air unit does not forward Betaflight's DisplayPort verbatim. It
 // re-encodes a whole screen refresh into one MSP v2 frame on function 182:
@@ -210,7 +264,12 @@ bool MspOsd::step(uint8_t b) {
 // Returns false if the payload is not in this shape, so the caller can fall
 // through to the stock one-subcommand-per-frame DisplayPort encoding.
 bool MspOsd::handle_batched_displayport(const uint8_t* payload, size_t size) {
-    if (size < 4 || payload[0] != 0x35) return false;
+    // Three bytes is an empty screen - nothing on Betaflight's canvas: a
+    // warning in its blink's off half, the visual beeper's stars gone. It
+    // clears what was there; taken for something else (it needed four), it
+    // was dropped, and the last text stayed up - steady instead of blinking.
+    // (The stock DisplayPort has no subcommand 0x35, so this is never one.)
+    if (size < 3 || payload[0] != 0x35) return false;
 
     std::lock_guard<std::mutex> lock(mtx);
     // No CLEAR subcommand exists in this encoding, but this is exactly why it
@@ -236,16 +295,18 @@ bool MspOsd::handle_batched_displayport(const uint8_t* payload, size_t size) {
     // writing a garbled glyph into a cell nothing was actually wrong with.
     size_t i = 3;
     bool complete = true;
+    int recs = 0;
     while (i < size) {
         if (i + 4 > size) { complete = false; break; }
         uint8_t total = payload[i];
         if (total < 4 || i + total > size) { complete = false; break; }
         uint8_t row = payload[i + 1];
         uint8_t col = payload[i + 2];
-        // payload[i + 3] is the attribute; only 0 and 0x43 were observed and
-        // nothing downstream renders attributes yet.
+        // payload[i + 3] is Betaflight's attribute: bit 6 blink (left to the
+        // display), the low two bits the severity. 0 and 0x43 were seen.
         uint8_t len = (uint8_t)(total - 4);
-        if (len) write_string_locked(row, col, payload + i + 4, len);
+        if (len) write_string_locked(row, col, payload + i + 4, len, payload[i + 3]);
+        recs++;
         i += total;
     }
     if (!complete) {
@@ -260,7 +321,9 @@ bool MspOsd::handle_batched_displayport(const uint8_t* payload, size_t size) {
     if (memcmp(grid, pending_grid, sizeof(grid)) != 0) {
         memcpy(grid, pending_grid, sizeof(grid));
         content_ver_++;
+        note_blink_locked();
     }
+    trace_screen_locked("screen", payload[1] | (payload[2] << 8), recs, complete, size);
     scrape_locked();
     return true;
 }
@@ -378,7 +441,18 @@ void MspOsd::scan_osd_angles(const uint8_t* payload, size_t size) {
 // record chain desyncs elsewhere. The backward-scan-from-the-glyph logic is
 // copied from scrape_locked()'s proven "number to the LEFT of a unit glyph"
 // case, just walking the flat payload instead of one grid row.
+// Betaflight's post-flight page ("--- STATS ---"): its figures are the
+// flight's minimums and maximums, not readings, and nothing on it is an
+// element the HUD shows in its own place.
+static bool is_stats_page(const uint8_t* p, size_t n) {
+    static const char kStats[] = "STATS";
+    for (size_t k = 0; k + 5 <= n; k++)
+        if (memcmp(p + k, kStats, 5) == 0) return true;
+    return false;
+}
+
 void MspOsd::scan_osd_values(const uint8_t* payload, size_t size) {
+    if (is_stats_page(payload, size)) return;
     bool have_cell_v = false, have_pack_v = false, have_mode = false;
     float cell_v = 0.0f, pack_v = 0.0f;
     char mode[8] = {0};
@@ -432,6 +506,12 @@ void MspOsd::scrape_locked() {
     // Each element read is marked as it is read, glyph and figure together,
     // so what is hidden and what was found cannot disagree.
     memset(elem_, 0, sizeof(elem_));
+    // The stats page: drawn whole, and read for nothing (is_stats_page).
+    for (int r = 0; r < GRID_H; r++) {
+        uint8_t row[GRID_W];
+        for (int c = 0; c < GRID_W; c++) row[c] = (uint8_t)grid[r][c].char_idx;
+        if (is_stats_page(row, GRID_W)) return;
+    }
     auto mark = [&](int r, int b, int e, uint8_t k) {
         if (b < 0) b = 0;
         if (e >= GRID_W) e = GRID_W - 1;
@@ -785,7 +865,10 @@ void MspOsd::handle_status(const uint8_t* p, size_t n) {
     } else if (msp_arm_ == 0) {
         if (tilt_.armed(now)) tilt_save_ = true;
     }
-    if (armed != msp_arm_) content_ver_++;
+    if (armed != msp_arm_) {
+        content_ver_++;
+        trace_note(armed ? "MSP_STATUS: ARMED" : "MSP_STATUS: disarmed");
+    }
     msp_arm_ = armed;
     msp_status_us_ = now;
 }
@@ -923,19 +1006,20 @@ void MspOsd::handle_msp_frame(uint16_t function, const uint8_t* payload, size_t 
             if (size >= 4) {
                 uint8_t row = payload[1];
                 uint8_t col = payload[2];
-                // uint8_t attr = payload[3]; // Not used yet
 
                 // The enclosing branch already holds mtx (see the lock_guard
                 // above), so take the non-locking variant - write_string()
                 // would deadlock on this non-recursive mutex.
-                write_string_locked(row, col, payload + 4, size - 4);
+                write_string_locked(row, col, payload + 4, size - 4, payload[3]);
             }
         } else if (subcmd == MSP_DP_DRAW_SCREEN) {
             // COMMIT pending to active - and tell the OSD only if it differs
             if (memcmp(grid, pending_grid, sizeof(grid)) != 0) {
                 memcpy(grid, pending_grid, sizeof(grid));
                 content_ver_++;
+                note_blink_locked();
             }
+            trace_screen_locked("draw", -1, 0, true, 0);
             // DON'T clear pending - let WRITE commands overwrite naturally
             // This makes us immune to CLEAR packet loss
             scrape_locked();
@@ -968,7 +1052,7 @@ void MspOsd::write_string(uint8_t row, uint8_t col, const uint8_t* str, size_t l
     write_string_locked(row, col, str, len);
 }
 
-void MspOsd::write_string_locked(uint8_t row, uint8_t col, const uint8_t* str, size_t len) {
+void MspOsd::write_string_locked(uint8_t row, uint8_t col, const uint8_t* str, size_t len, uint8_t attr) {
     // Basic bounds check
     if (row >= GRID_H) return;
 
@@ -978,7 +1062,16 @@ void MspOsd::write_string_locked(uint8_t row, uint8_t col, const uint8_t* str, s
         // Write to PENDING grid
         // Betaflight/INAV typically sends ASCII.
         pending_grid[row][col + i].char_idx = str[i];
+        pending_grid[row][col + i].attr = attr;
     }
+}
+
+void MspOsd::note_blink_locked() {
+    bool any = false;
+    for (int y = 0; y < GRID_H; y++)
+        for (int x = 0; x < GRID_W; x++)
+            if (grid[y][x].char_idx != 0 && grid[y][x].char_idx != ' ' && (grid[y][x].attr & kAttrBlink)) any = true;
+    has_blink_.store(any, std::memory_order_relaxed);
 }
 
 void MspOsd::draw(math::Mat4& projection, math::Mat4& view, std::function<void(float x, float y, const std::vector<uint16_t>& span)> draw_span_cb) {
@@ -1030,9 +1123,10 @@ void MspOsd::draw_region(int r_start, int c_start, int r_cnt, int c_cnt, float x
 
     const float cell_w = m_cell_w;
     const float cell_h = m_cell_h;
+    const bool blink_off = (get_time_us() / 200000ULL) & 1;   // Betaflight's own 200 ms on, 200 off
     auto blank = [&](int r, int c) {
         uint16_t ch = grid[r][c].char_idx;
-        return ch == 0 || ch == ' ' || (elem_[r][c] & hide);
+        return ch == 0 || ch == ' ' || (elem_[r][c] & hide) || (blink_off && (grid[r][c].attr & kAttrBlink));
     };
     
     for(int r = r_start; r < r_start + r_cnt && r < GRID_H; r++) {
