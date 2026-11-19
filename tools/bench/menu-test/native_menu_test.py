@@ -24,7 +24,7 @@ Never: Enter on Bind, Record, Gallery, Format SD Card, the channel page
 outside its own test; Back on the live screen (gallery); the link, bind or
 upgrade keys (not on the socket anyway).
 
-  python3 native_menu_test.py [--host 192.168.3.104] [--iface enx...] [--only HUD,DISPLAY]
+  python3 native_menu_test.py [--host 192.168.3.1] [--iface enx...] [--only HUD,DISPLAY]
                               [--skip-restarts] [--report FILE]
 """
 import argparse
@@ -337,7 +337,7 @@ class NativeTest:
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--host", default="192.168.3.104")
+    ap.add_argument("--host", default="192.168.3.1")
     ap.add_argument("--password", default="root")
     ap.add_argument("--iface", default="", help="USB network interface (two units on 192.168.3.x)")
     ap.add_argument("--only", default="")

@@ -73,9 +73,9 @@ changes: each change is read from `/var/lib/kestrel/ui.conf` and
 python3 tools/bench/menu-test/native_menu_test.py --iface enx029311000202 --report native.md
 ```
 
-- `--iface` picks the USB interface when two units share 192.168.3.x
-  (`devproxy.py` binds the ssh connection to it); the SteadyDigital is
-  `root`/`root` at 192.168.3.104.
+- `--iface` picks the USB interface when two goggles are plugged in, both
+  at 192.168.3.1 (`devproxy.py` binds the ssh connection to it); the
+  native receivers are `root`/`root`.
 - `--only`, `--skip-restarts`, `--report` as above.
 - A setting not saved yet at the start (its default) is written when the walk
   comes back to it; the walk then steps Up once onto the value it started on.
