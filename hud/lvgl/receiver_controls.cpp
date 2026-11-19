@@ -41,9 +41,10 @@ void ReceiverControls::update(BackendState& state, uint64_t now) {
     };
     // Values and labels match VRX Pro's on-wire domains. The camera rows the air
     // unit applies, as the VRX Pro's menu has them (UnitState::cam_settings):
-    // those its info lists (cam_ctrl=, the P1: EV, White Balance Auto with Lock
-    // current and the kelvin presets, Rotate, Saturation, Contrast, Sharpness,
-    // 3D DNR), all of them where it lists none (stock, the Lite). A kestrel-air
+    // those its info lists (cam_ctrl=: the Lites all of them, with White Balance's
+    // Lock current; the P1 EV, White Balance Auto with Lock current and the
+    // kelvin presets, Rotate, Saturation, Contrast, Sharpness, 3D DNR), all but
+    // Lock current where it lists none (stock, an older kestrel-air). A kestrel-air
     // has said once its info came; a P1 that lists none applies none (its
     // settings echo back all the same: no proof the sensor has them).
     const char* cam_reason = "Not on this air unit: its camera has no such setting.";
@@ -66,7 +67,7 @@ void ReceiverControls::update(BackendState& state, uint64_t now) {
     choice("Rotate",c.angle,c.angle_n || c.camera_n,has(air::kCamRotate),table(nullptr,air::kRotateLabels,2),cam_reason);
     choice("Scene",c.scene,c.camera_n,has(air::kCamScene),table(air::kSceneVals,air::kSceneLabels,air::kSceneCount),cam_reason);
     choice("EV",c.ev_x10,c.camera_n,has(air::kCamEv),table(air::kEvSteps,air::kEvLabels,air::kEvCount),cam_reason);
-    // Auto, then what the air unit takes: Lock current (wb_lock, the P1), the
+    // Auto, then what the air unit takes: Lock current (wb_lock, kestrel-air), the
     // kelvin presets (wb, or an air unit that lists nothing) - the VRX Pro's.
     std::vector<ReceiverChoice> wb{{0,"Auto"}};
     if(wb_lock) wb.push_back({-1,"Lock current"});
@@ -112,6 +113,9 @@ void ReceiverControls::update(BackendState& state, uint64_t now) {
     // Strips: only where both ends can (the feature bit), not listed otherwise.
     if(linked && (u.features & air::kFeatStrips))
         choice("Strips",e.strips,true,true,table(air::kArStripsVals,air::kArStripsLabels,air::kArStripsCount));
+    // Max Exposure: only where the air unit takes it live (its info's maxexp=1).
+    if(linked && (u.features & air::kFeatMaxExp))
+        choice("Max Exposure",e.max_exp_us,true,true,table(air::kArMaxExpVals,air::kArMaxExpLabels,air::kArMaxExpCount));
     // Share the legacy menu's mode/level mapping and per-air-unit limits: the
     // saved level fitted to this air unit's list, as the link sends it. Known
     // once the air unit has said what it is (prj), as in the legacy menu.
@@ -167,6 +171,7 @@ std::string ReceiverControls::apply(const std::string& id,int value,uint64_t now
     if(id=="bind") {ground_.bind();return "Binding requested";}
     if(id=="Max Bitrate") encoder_.set_max_bitrate(value);
     else if(id=="Strips") encoder_.set_strips(value);
+    else if(id=="Max Exposure") encoder_.set_max_exposure(value);
     else if(id=="Video Mode") camera_.set_mode(value);
     else if(id=="power" || id=="power_mode") {
         const auto a=air_.state();

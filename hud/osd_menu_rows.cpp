@@ -488,13 +488,13 @@ std::vector<OSD::MenuItem> OSD::menu_items(int tab) const {
     std::vector<MenuItem> items;
     if (tab == 0) { // Video Tab
         {
-            // A camera row the air unit does not apply (its info's cam=, the
-            // P1 Air: Rotate and EV), greyed.
+            // A camera row the air unit does not apply (not in its info's
+            // cam_ctrl=: the P1 Air's Scene and Focus Mode), greyed.
             auto cam_item = [this](const char *label, int row) {
                 return cam_row_ok(row)
                     ? MenuItem{label, 1}
-                    : MenuItem{label, 0, "Not on this air unit: its camera has no such setting "
-                                         "(the P1 Air takes Rotate and EV).", nullptr, true};
+                    : MenuItem{label, 0, "Not on this air unit: its camera has no such setting.",
+                               nullptr, true};
             };
             // Grouped by what the setting acts on: the format block first,
             // then the capture settings, then everything applied to the image
@@ -537,7 +537,8 @@ std::vector<OSD::MenuItem> OSD::menu_items(int tab) const {
             // After Max Bitrate, each only where it can be had - not listed
             // at all otherwise (video_row skips it then): Strips (row 12),
             // where both ends can, and Max Exposure (11), where the air
-            // unit's kestrel-air takes it while it runs (the P1 Air).
+            // unit's kestrel-air takes it while it runs (maxexp=1: the P1 Air,
+            // the Lites).
             const uint16_t feat = air_feat_.load();
             int at = 2;
             if (feat & kAirStripsFeat)
@@ -551,7 +552,7 @@ std::vector<OSD::MenuItem> OSD::menu_items(int tab) const {
                              MenuItem{"Max Exposure", 1, "Longest exposure the camera's auto exposure may use. "
                                                          "Shorter: less motion blur and a fresher picture, the "
                                                          "gain making up the light, so more grain when dark. "
-                                                         "OFF: the camera's own (10 ms indoors)."});
+                                                         "OFF: the camera's own (the P1 Air: 10 ms indoors)."});
         }
     } else if (tab == 1) { // RF Tab
         // Bind and Channel are actions (type 3): Enter does the thing, the

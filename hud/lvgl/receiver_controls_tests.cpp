@@ -128,6 +128,23 @@ int main() {
             check(encoder.calls==1 && encoder.last==3,"Strips asks the encoder for the count");
             encoder.calls=0; unit.value.features=0; ++unit.revision; controls.update(state,now);
             check(!state.controls.count("Strips"),"Strips goes when the bit does");
+            // Max Exposure: listed only where the air unit takes it live, after
+            // Max Bitrate and Strips, in us on the wire.
+            check(!state.controls.count("Max Exposure"),"Max Exposure not listed without maxexp=1");
+            unit.value.features=air::kFeatStrips|air::kFeatMaxExp; encoder.value.max_exp_us=4000;
+            ++unit.revision; ++encoder.revision; controls.update(state,now);
+            const auto& exp=state.controls.at("Max Exposure");
+            check(exp.enabled && exp.choices.size()==9 && exp.choices[3].value==4000 && exp.choices[8].label=="OFF",
+                  "Max Exposure offers 1 to 10 ms and OFF");
+            const auto rows2=model.rows(now);
+            check(rows2[2].id=="Strips" && rows2[3].id=="Max Exposure" && rows2[3].value=="4 ms" && rows2[3].editable,
+                  "Max Exposure follows Strips and shows the cap");
+            controls.apply("Max Exposure",2000,now);
+            check(encoder.calls==1 && encoder.last==2000,"Max Exposure asks the encoder for the cap in us");
+            encoder.calls=0; unit.value.features=air::kFeatMaxExp; ++unit.revision; controls.update(state,now);
+            check(model.rows(now)[2].id=="Max Exposure","Max Exposure follows Max Bitrate without Strips");
+            unit.value.features=0; ++unit.revision; controls.update(state,now);
+            check(!state.controls.count("Max Exposure"),"Max Exposure goes when maxexp does");
         }
         check(state.controls.at("Max Bitrate").enabled,"P1 bitrate is supported");
         {
@@ -244,6 +261,17 @@ int main() {
         check(camera.field==air::CameraField::AWB && camera.last==5200,"White balance uses Kelvin");
         controls.apply("EV",-7,now);
         check(camera.field==air::CameraField::EV && camera.last==-7,"EV uses tenths, including negative values");
+        rejected=false;
+        try{controls.apply("White Balance",-1,now);}catch(const std::invalid_argument&){rejected=true;}
+        check(rejected,"A Lite that lists nothing has no Lock current");
+        cam_ctrl("rotate,scene,ev,wb,wb_lock,sat,contrast,sharpness,3dnr,focus");
+        check(state.controls.at("Rotate").enabled && state.controls.at("Scene").enabled &&
+              state.controls.at("Focus Mode").enabled && state.controls.at("3D DNR").enabled,"A Lite listing all its settings keeps every row");
+        controls.apply("White Balance",-1,now);
+        check(camera.field==air::CameraField::AWB && camera.last==-1,"A Lite listing wb_lock takes Lock current");
+        controls.apply("White Balance",5200,now);
+        check(camera.field==air::CameraField::AWB && camera.last==5200,"A Lite keeps the Kelvin presets beside Lock current");
+        cam_ctrl(nullptr);
         controls.update(state,now);
         state.vrx.connected=true; state.vrx.mcs=5; state.vrx.stamp_us=now;
         model.menu_open=true; model.side=1; model.tab=0; model.selected=1; model.stage=MenuStage::Browse;

@@ -140,12 +140,20 @@ std::vector<MenuRow> Model::rows(uint64_t now) const {
         for (const char* name : {"Video Mode", "Max Bitrate", "Rotate", "Scene", "EV", "White Balance",
                                  "Saturation", "Contrast", "Sharpness", "3D DNR", "Focus Mode"})
             result.push_back(unavailable(name, name, "Changes the air unit's camera."));
-        // After Max Bitrate, only where both ends can (receiver_controls lists it then).
+        // After Max Bitrate, each only where it can be had (receiver_controls
+        // lists it then): Strips where both ends can, Max Exposure where the
+        // air unit takes it live - as the VRX Pro's menu has them.
+        int at = 2;
         if (backend.controls.count("Strips"))
-            result.insert(result.begin() + 2, unavailable("Strips", "Strips",
+            result.insert(result.begin() + at++, unavailable("Strips", "Strips",
                 "Each picture sent as strips of rows, the top one out of the air unit's encoder sooner: "
                 "lower latency. More strips: lower still, but less detail in each and more joins where "
                 "they meet. OFF: whole pictures."));
+        if (backend.controls.count("Max Exposure"))
+            result.insert(result.begin() + at, unavailable("Max Exposure", "Max Exposure",
+                "Longest exposure the camera's auto exposure may use. Shorter: less motion blur and a "
+                "fresher picture, the gain making up the light, so more grain when dark. OFF: the "
+                "camera's own (the P1 Air: 10 ms indoors)."));
         return result;
     }
     if (tab == 1) {

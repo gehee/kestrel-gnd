@@ -50,6 +50,9 @@ static const int kArStripsCount = 4;
 // its kestrel-air sends strips and this goggle joins them (= the radio's
 // Ar8030Link::kAirFeatStrips).
 static const uint16_t kFeatStrips = 0x2000;
+// ... and the one saying it takes Max Exposure live (its info's maxexp=1, =
+// Ar8030Link::kAirFeatMaxExp).
+static const uint16_t kFeatMaxExp = 0x1000;
 static inline int ar_strips_index(int n) {
     for (int i = 0; i < kArStripsCount; i++) if (kArStripsVals[i] == n) return i;
     return n < 1 ? 0 : kArStripsCount - 1;

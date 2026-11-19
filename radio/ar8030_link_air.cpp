@@ -1007,8 +1007,9 @@ void Ar8030Link::note_air_info(const uint8_t *pl, size_t n) {
             check_air_modes();
         }
     }
-    // The camera settings it applies, where not all (cam_ctrl=, the P1; cam=
-    // from an older kestrel-air): the VIDEO tab greys the rest.
+    // The camera settings it applies, where it lists them (cam_ctrl=: the P1
+    // fewer than all, the Lites all with Lock current; cam= from an older
+    // kestrel-air): the VIDEO tab greys the rest.
     {
         uint16_t cam = air::kCamAll;
         for (const auto &e : kv)
