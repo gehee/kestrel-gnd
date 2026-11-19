@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 // The "sky" (air-unit / camera) control protocol.
@@ -108,6 +109,18 @@ extern const int       kFpvModeCount;
 // Index of the mode stock boots into (1080p100, sent as 120), used as the menu
 // default.
 int default_fpv_mode_index();
+
+// The modes of the list an air unit says it runs, bit i for kFpvModes[i]:
+// kestrel-air's info's modes=, "WxH@fps" comma-separated as SET_CHN_RES asks
+// for them (anything after the rate is skipped). One the list has not is left
+// out.
+uint32_t modes_of(const std::string& list);
+// What to ask an air unit that runs these modes for, in place of one of this
+// size it does not run: the fastest it runs of the size (the P1 Air: 720p90
+// for 720p100, 1080p60 for 1080p100), else the default where it runs it, else
+// the last of the list it runs (the largest, at its fastest). -1 where it runs
+// none.
+int fallback_mode_index(uint32_t modes, unsigned w, unsigned h);
 
 // The subset of the SET_CONFIG (cmd 0x10) body we understand and want to
 // control. Offsets were recovered from the serialiser in ar_ldy_gnd, not

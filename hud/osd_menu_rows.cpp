@@ -457,7 +457,8 @@ static const char kAirCapsHelp[] =
     "Bandwidth Cap: takes the VRX's limit. Exposure Cap: takes VIDEO > Max Exposure. "
     "Strips: sends pictures as strips this goggle joins (VIDEO > Strips). "
     "TX Power Levels, TX Power 400mW: the levels TX Power offers it besides Caddx's. "
-    "864p120, 864p144: Video Mode offers a 1536x864 window at 120 or 144 fps.";
+    "864p120, 864p144: Video Mode offers a 1536x864 window at 120 or 144 fps. "
+    "720p90: Video Mode offers 720p at 90 fps (the P1 Air).";
 
 // A row label made at run time (the capabilities list), kept for good: a
 // MenuItem holds only the pointer, and a set's strings never move.
@@ -466,6 +467,21 @@ const char* OSD::menu_intern(const std::string& s) {
     static std::set<std::string> pool;
     std::lock_guard<std::mutex> g(m);
     return pool.insert(s).first->c_str();
+}
+
+// Video Mode: a setting, or where the air unit lists a single mode it runs (a
+// P1 Air whose sensor driver has no 720p modes: 1080p60), the mode it runs as
+// a reading, greyed - there is no other to pick.
+OSD::MenuItem OSD::video_mode_item() const {
+    int n = 0, only = -1;
+    for (int i = 0; i < (int)video_mode_names.size(); i++)
+        if (video_mode_ok(i)) { n++; only = i; }
+    if (!air_modes_said_.load() || n > 1) return MenuItem{"Video Mode", 1};
+    return MenuItem{"Video Mode", 0,
+                    n ? menu_intern("This air unit runs " + video_mode_names[only] + " only: there is no other "
+                                    "mode to pick.")
+                      : "This air unit lists no video mode this VRX has.",
+                    nullptr, true};
 }
 
 std::vector<OSD::MenuItem> OSD::menu_items(int tab) const {
@@ -500,7 +516,7 @@ std::vector<OSD::MenuItem> OSD::menu_items(int tab) const {
                 // a kestrel-air command (sky cmd 0x40), ignored by stock. Next to
                 // Video Mode, the other setting that decides the stream; listed
                 // here, handled as row 10 (video_row).
-                {"Video Mode", 1},
+                video_mode_item(),
                 air_stock_
                     ? MenuItem{"Max Bitrate", 0, "Needs an fpvOS air unit: this one runs the stock "
                                                  "air app, which ignores the cap.", nullptr, true}

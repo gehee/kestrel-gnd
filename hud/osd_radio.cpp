@@ -65,6 +65,8 @@ void OSD::sync_radio() {
     air_unit_ = parts_.air_unit.state();
     const air::UnitState& as = air_unit_;
     air_feat_ = as.features;
+    air_modes_said_ = as.modes_said;
+    air_modes_ = as.video_modes;
     air_cam_ = as.cam_settings;
     air_stock_ = as.stock;
     air_max_bw_ = as.max_bw;

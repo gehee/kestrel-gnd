@@ -39,22 +39,19 @@ void ReceiverControls::update(BackendState& state, uint64_t now) {
         control.choices = std::move(choices);
         control.reason = !linked ? "Connect an air unit." : !supported ? why : !known ? "Waiting for the air unit's settings." : "";
     };
-    // Values and labels match VRX Pro's on-wire domains. P1's current native
-    // camera backend advertises implemented controls explicitly; never offer its
-    // settings-only echoes as proof that a sensor/ISP control exists.
-    const char* p1_reason = "The connected P1 camera driver does not implement this control.";
-    const auto camera_controls=u.info.get("cam_ctrl");
-    auto supports=[&](const char* name) {
-        const auto list=","+camera_controls+",";
-        return u.info.kestrel && list.find(std::string(",")+name+",")!=std::string::npos;
-    };
-    // A P1 offers what its cam_ctrl lists: EV, White Balance Auto with Lock
-    // current (wb_lock) and the kelvin presets (wb, locked at its tuning's
-    // white points), Rotate, Saturation, Contrast, Sharpness and 3D DNR.
-    auto p1_has=[&](const char* name){return p1 && supports(name);};
-    const bool native_ev=p1_has("ev"), native_lock=p1_has("wb_lock"), native_kelvin=p1_has("wb");
-    const bool native_wb=native_lock || native_kelvin;
-    bool camera = u.stock || (!p1 && u.info.kestrel && !u.info.get("model").empty());
+    // Values and labels match VRX Pro's on-wire domains. The camera rows the air
+    // unit applies, as the VRX Pro's menu has them (UnitState::cam_settings):
+    // those its info lists (cam_ctrl=, the P1: EV, White Balance Auto with Lock
+    // current and the kelvin presets, Rotate, Saturation, Contrast, Sharpness,
+    // 3D DNR), all of them where it lists none (stock, the Lite). A kestrel-air
+    // has said once its info came; a P1 that lists none applies none (its
+    // settings echo back all the same: no proof the sensor has them).
+    const char* cam_reason = "Not on this air unit: its camera has no such setting.";
+    const bool cam_said = u.stock || (u.info.kestrel && !u.info.get("model").empty());
+    const bool cam_listed = !u.info.get("cam_ctrl").empty() || !u.info.get("cam").empty();
+    const uint16_t cam = !cam_said || (p1 && !cam_listed) ? 0 : u.cam_settings;
+    auto has=[&](uint16_t bit){return (cam & bit) == bit;};
+    const bool wb_lock=cam && air::cam_wb_lock(cam), wb_kelvin=cam && air::cam_wb_kelvin(cam);
     // The VRX Pro's own tables (system/air/camera.hpp), by the value on the wire.
     auto table=[](const int* values,const char* const* labels,int n) {
         std::vector<ReceiverChoice> out;
@@ -66,41 +63,50 @@ void ReceiverControls::update(BackendState& state, uint64_t now) {
         for(int k=0;k<=max;++k) out.push_back({k,air::cam_auto_label(k)});
         return out;
     };
-    choice("Rotate",c.angle,c.angle_n || c.camera_n,camera || p1_has("rotate"),table(nullptr,air::kRotateLabels,2),p1_reason);
-    choice("Scene",c.scene,c.camera_n,camera,table(air::kSceneVals,air::kSceneLabels,air::kSceneCount),p1_reason);
-    choice("EV",c.ev_x10,c.camera_n,camera || native_ev,table(air::kEvSteps,air::kEvLabels,air::kEvCount),p1_reason);
-    // The VRX Pro's table; a P1 that lists its white balance offers Auto and
-    // what it lists: Lock current (wb_lock), the kelvin presets (wb).
-    std::vector<ReceiverChoice> wb;
-    if(!native_wb) for(int i=0;i<air::kWbCount;++i) wb.push_back({air::wb_kelvin(i),air::wb_label(i)});
-    else {
-        wb.push_back({0,"Auto"});
-        if(native_lock) wb.push_back({-1,"Lock current"});
-        if(native_kelvin) for(int i=1;i<air::kWbCount;++i) wb.push_back({air::wb_kelvin(i),air::wb_label(i)});
-    }
-    choice("White Balance",c.awb,c.camera_n,camera || native_wb,wb,p1_reason);
-    if(native_wb && controls_["White Balance"].enabled)
-        controls_["White Balance"].reason=native_kelvin && native_lock ?
+    choice("Rotate",c.angle,c.angle_n || c.camera_n,has(air::kCamRotate),table(nullptr,air::kRotateLabels,2),cam_reason);
+    choice("Scene",c.scene,c.camera_n,has(air::kCamScene),table(air::kSceneVals,air::kSceneLabels,air::kSceneCount),cam_reason);
+    choice("EV",c.ev_x10,c.camera_n,has(air::kCamEv),table(air::kEvSteps,air::kEvLabels,air::kEvCount),cam_reason);
+    // Auto, then what the air unit takes: Lock current (wb_lock, the P1), the
+    // kelvin presets (wb, or an air unit that lists nothing) - the VRX Pro's.
+    std::vector<ReceiverChoice> wb{{0,"Auto"}};
+    if(wb_lock) wb.push_back({-1,"Lock current"});
+    if(wb_kelvin) for(int i=1;i<air::kWbCount;++i) wb.push_back({air::wb_kelvin(i),air::wb_label(i)});
+    choice("White Balance",c.awb,c.camera_n,has(air::kCamWb),wb,cam_reason);
+    if(wb_lock && controls_["White Balance"].enabled)
+        controls_["White Balance"].reason=wb_kelvin ?
             "Auto adapts white balance; Lock current holds the current colors, a Kelvin preset the camera tuning's for that light, across restarts." :
-            native_lock ? "Auto adapts white balance; Lock current holds the current colors across restarts." :
-            "Auto adapts white balance; a Kelvin preset holds the camera tuning's colors for that light.";
-    choice("Saturation",c.sat,c.camera_n,camera || p1_has("sat"),levels(air::kCamSatMax),p1_reason);
-    choice("Contrast",c.contrast,c.camera_n,camera || p1_has("contrast"),levels(air::kCamContrastMax),p1_reason);
-    choice("Sharpness",c.sharp,c.camera_n,camera || p1_has("sharpness"),levels(air::kCamSharpMax),p1_reason);
-    choice("3D DNR",c.dnr3d,c.dnr_n || c.camera_n,camera || p1_has("3dnr"),table(air::kDnrVals,air::kDnrLabels,air::kDnrCount),p1_reason);
-    choice("Focus Mode",c.focus,c.camera_n,camera,{{0,"OFF"},{1,"ON"}},p1_reason);
-    // The air unit's own video modes it can switch to: the universal ones
+            "Auto adapts white balance; Lock current holds the current colors across restarts.";
+    else if(cam!=air::kCamAll && wb_kelvin && controls_["White Balance"].enabled)
+        controls_["White Balance"].reason="Auto adapts white balance; a Kelvin preset holds the camera tuning's colors for that light.";
+    choice("Saturation",c.sat,c.camera_n,has(air::kCamSat),levels(air::kCamSatMax),cam_reason);
+    choice("Contrast",c.contrast,c.camera_n,has(air::kCamContrast),levels(air::kCamContrastMax),cam_reason);
+    choice("Sharpness",c.sharp,c.camera_n,has(air::kCamSharpness),levels(air::kCamSharpMax),cam_reason);
+    choice("3D DNR",c.dnr3d,c.dnr_n || c.camera_n,has(air::kCamDnr3d),table(air::kDnrVals,air::kDnrLabels,air::kDnrCount),cam_reason);
+    choice("Focus Mode",c.focus,c.camera_n,has(air::kCamFocus),{{0,"OFF"},{1,"ON"}},cam_reason);
+    // The air unit's own video modes it can switch to: those its info lists
+    // (modes=, the P1 Air: 720p90 and 1080p60), else the universal ones
     // (720p60/100, 1080p60/100) plus any its features add (864p120/144 on a
-    // Lite+). Screen Mode Auto follows the stream; 1080p100 is captured and
-    // decoded at 100 fps but this HDMI output tops out at 1080p60.
+    // Lite+, 720p90 on a P1 Air that lists none). Screen Mode Auto follows the
+    // stream; 1080p100 is captured and decoded at 100 fps but this HDMI output
+    // tops out at 1080p60.
     // The mode it runs stays in the list whatever its feature bits say (they
     // arrive after the mode at link-up), so the row names it.
     std::vector<ReceiverChoice> modes;
-    for (int i = 0; i < int(video_modes_.size()); i++)
-        if (video_modes_[i].need == 0 || (u.features & video_modes_[i].need) || i == c.video_mode)
-            modes.push_back({i, video_modes_[i].name});
+    int offered = 0;
+    for (int i = 0; i < int(video_modes_.size()); i++) {
+        const auto& v = video_modes_[i];
+        const bool runs = air::video_mode_offered(u.modes_said, u.video_modes, u.features, i, v.need);
+        offered += runs;
+        if (runs || i == c.video_mode) modes.push_back({i, v.name});
+    }
+    // A list of one (a P1 Air whose sensor driver has no 720p modes) is a
+    // reading: nothing else to pick.
+    const bool one_mode = u.modes_said && offered <= 1;
     choice("Video Mode", c.video_mode, c.mode_n && c.video_mode >= 0,
-           u.info.kestrel || u.stock, modes, "Requires a recognized air unit.");
+           (u.info.kestrel || u.stock) && !one_mode, modes,
+           !one_mode ? "Requires a recognized air unit." :
+           offered ? "This air unit runs this mode only: there is no other to pick." :
+                     "This air unit lists no video mode this receiver has.");
     choice("Max Bitrate",e.max_kbps,true,u.info.kestrel,table(air::kArMaxBrVals,air::kArMaxBrLabels,air::kArMaxBrCount),
            "Requires an fpvOS air unit.");
     // Strips: only where both ends can (the feature bit), not listed otherwise.

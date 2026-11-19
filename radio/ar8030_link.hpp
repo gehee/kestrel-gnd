@@ -200,7 +200,7 @@ class Ar8030Link : public radio::Link, private radio::VideoOut::Source {
         // kestrel-air's capabilities, named for the INFO tab, by the feature bit
         // (or AirInfo::said bit) that says the air unit has it on.
         struct AirCap { uint16_t bit; const char *key; const char *name; };
-        static const AirCap kAirCaps[14];
+        static const AirCap kAirCaps[15];
         // What the air unit has on, by name: its feature bits and what it said.
         static std::vector<std::string> cap_names(const AirInfo &a);
         int air_floor_us;       // fastest capture -> first slice (air_floor_ms), see air_delay_for
@@ -552,7 +552,11 @@ class Ar8030Link : public radio::Link, private radio::VideoOut::Source {
         // ... and strips=N/M with M > 1, on a goggle that can join them
         // (strips_supported()): VIDEO > Strips is listed.
         static constexpr uint16_t kAirFeatStrips = 0x2000;
-        static constexpr uint16_t kAirInfoFeats = kAirFeat864p144 | kAirFeatPwr400 | kAirFeatMaxExp | kAirFeatStrips;
+        // ... and 720p90=1: it has 720p at 90 fps (the P1 Air), which the
+        // Video Mode row offers it (asked for at 90: sky::kFpvModes).
+        static constexpr uint16_t kAirFeat720p90 = 0x4000;
+        static constexpr uint16_t kAirInfoFeats = kAirFeat864p144 | kAirFeatPwr400 | kAirFeatMaxExp |
+                                                  kAirFeatStrips | kAirFeat720p90;
         // No feature bits, only AirInfo::said, for the INFO tab: its frame
         // (KA_MSG_FRAME) came, and its info says the sensor's readout.
         static constexpr uint16_t kAirSaidFrameClock = 0x200;
@@ -561,8 +565,13 @@ class Ar8030Link : public radio::Link, private radio::VideoOut::Source {
         std::atomic<uint16_t> air_info_feat_{0};   // those bits, from its info (reset with the info)
         std::atomic<bool> air_info_seen_{false};   // its info has come since the link came up
         uint16_t air_cam_ = air::kCamAll;           // its info's cam= (UnitState::cam_settings)
+        // Its info's modes= (UnitState::modes_said, video_modes): whether it
+        // lists the modes it runs, and those of sky::kFpvModes it lists.
+        std::atomic<bool> air_modes_said_{false};
+        std::atomic<uint32_t> air_modes_{0};
         // The mode stored for this air unit, if it lacks it: the default asked
-        // for. Bits said in the info only once it has come.
+        // for, or where its info lists its modes, one of them
+        // (sky::fallback_mode_index). Bits said in the info only once it has come.
         void check_air_modes();
         // Written by the stats thread (poll_ap_time), read by the video thread.
         std::atomic<int64_t> ap_off_us_{0};

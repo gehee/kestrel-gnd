@@ -343,6 +343,9 @@ class OSD : public display::VideoListener {
         std::vector<std::string> video_mode_names;
         std::vector<uint16_t> video_mode_needs;  // per mode: the air features it takes
         std::atomic<uint16_t> air_feat_{0};
+        // The modes the air unit lists (air::UnitState::modes_said, video_modes).
+        std::atomic<bool> air_modes_said_{false};
+        std::atomic<uint32_t> air_modes_{0};
         // The camera rows the air unit applies (air::UnitState::cam_settings,
         // bit n for video_row n); the others are greyed.
         std::atomic<uint16_t> air_cam_{0xffff};
@@ -1086,6 +1089,7 @@ class OSD : public display::VideoListener {
         void menu_action_status(int tab, int i, char* hint, size_t hcap,
                                 char* status, size_t scap);
         std::vector<MenuItem> menu_items(int tab) const;
+        MenuItem video_mode_item() const;
         static const char* menu_intern(const std::string& s);
         void set_video_mode_names(const std::vector<std::string>& n, int current,
                                   const std::vector<uint16_t>& needs = {}) {
@@ -1093,8 +1097,11 @@ class OSD : public display::VideoListener {
             video_mode_needs = needs;
             if (current >= 0 && current < (int)n.size()) menu_video_mode = current;
         }
+        // A mode the air unit runs: one its info lists, or its features give.
         bool video_mode_ok(int i) const {
-            return i < 0 || i >= (int)video_mode_needs.size() || (video_mode_needs[i] & ~air_feat_.load()) == 0;
+            if (i < 0) return true;
+            const uint16_t need = i < (int)video_mode_needs.size() ? video_mode_needs[i] : 0;
+            return air::video_mode_offered(air_modes_said_.load(), air_modes_.load(), air_feat_.load(), i, need);
         }
         int get_drift_request() { int d = drift_request; drift_request = 0; return d; }
     private:

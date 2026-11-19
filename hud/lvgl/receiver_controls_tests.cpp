@@ -47,7 +47,8 @@ int main() {
     try {
         Camera camera; Encoder encoder; Air air; Unit unit; Ground ground;
         ReceiverControls controls(camera,encoder,air,unit,ground,
-                                  {{"720p60",0},{"864p120",0x40},{"864p144",0x100},{"1080p60",0}});
+                                  {{"720p60",0},{"720p90",0x4000},{"720p100",0},{"864p120",0x40},{"864p144",0x100},
+                                   {"1080p60",0},{"1080p100",0}});
         Model model; Controller controller(model); auto& state=model.backend;
         const auto now=monotonic_us();
         state.service.connected=true;
@@ -72,12 +73,44 @@ int main() {
             auto offered=[&]{ std::string s; for(const auto& m:state.controls.at("Video Mode").choices) s+=m.label+" "; return s; };
             auto changed=[&]{ ++camera.revision; ++unit.revision; controls.update(state,now); };
             camera.value.mode_n=1; camera.value.video_mode=0; unit.value.features=0; changed();
-            check(offered()=="720p60 1080p60 ","Video Mode offers only what any air unit has without feature bits");
+            check(offered()=="720p60 720p100 1080p60 1080p100 ","Video Mode offers only what any air unit has without feature bits");
             unit.value.features=0x40; changed();
-            check(offered()=="720p60 864p120 1080p60 ","Video Mode adds the modes the air unit's features give");
-            unit.value.features=0; camera.value.video_mode=2; changed();
-            check(offered()=="720p60 864p144 1080p60 ","Video Mode names the running mode before its feature bit arrives");
-            camera.value.mode_n=0; camera.value.video_mode=0; unit.value.features=0; changed();
+            check(offered()=="720p60 720p100 864p120 1080p60 1080p100 ","Video Mode adds the modes the air unit's features give");
+            unit.value.features=0x4000; changed();
+            check(offered()=="720p60 720p90 720p100 1080p60 1080p100 ","Video Mode adds 720p90 where the air unit says it has it");
+            unit.value.features=0; camera.value.video_mode=4; changed();
+            check(offered()=="720p60 720p100 864p144 1080p60 1080p100 ","Video Mode names the running mode before its feature bit arrives");
+            // An air unit that lists its modes (modes=) is offered those, and
+            // no other its feature bits would give.
+            unit.value.modes_said=true; unit.value.video_modes=1u<<0|1u<<5; unit.value.features=0x40;
+            camera.value.video_mode=5; changed();
+            check(offered()=="720p60 1080p60 ","Video Mode offers only the modes the air unit lists");
+            check(state.controls.at("Video Mode").enabled,"Video Mode is a choice where it lists two");
+            auto refused=[&](int mode){
+                try { controls.apply("Video Mode",mode,now); } catch(const std::invalid_argument&) { return camera.calls==0; }
+                return false;
+            };
+            check(refused(3),"A mode the air unit does not list is not asked for");
+            // The P1 Air: 720p90 and 1080p60, 720p90 asked for at 90; not
+            // 720p60, 720p100 or 1080p100, which it would run as 1080p60, at
+            // 90 and at 60.
+            unit.value.video_modes=1u<<1|1u<<5; unit.value.features=0x4000; changed();
+            check(offered()=="720p90 1080p60 " && state.controls.at("Video Mode").enabled,
+                  "Video Mode offers a P1 Air its two modes");
+            check(refused(0) && refused(2) && refused(6),"A P1 Air is not asked for 720p60, 720p100 or 1080p100");
+            // A P1 Air whose sensor driver has no 720p modes: 1080p60 alone,
+            // named, with nothing to pick.
+            unit.value.video_modes=1u<<5; unit.value.features=0; changed();
+            check(offered()=="1080p60 ","Video Mode offers a P1 Air its 1080p60 alone");
+            check(!state.controls.at("Video Mode").enabled &&
+                  state.controls.at("Video Mode").reason.find("only")!=std::string::npos,
+                  "Video Mode is a reading where the air unit runs one mode");
+            // Listed but none of the list's: the one it runs, named.
+            unit.value.video_modes=0; camera.value.video_mode=3; changed();
+            check(offered()=="864p120 " && !state.controls.at("Video Mode").enabled,
+                  "Video Mode names the running mode an unknown list leaves out, and offers no other");
+            camera.value.mode_n=0; camera.value.video_mode=0; unit.value.features=0;
+            unit.value.modes_said=false; unit.value.video_modes=0; changed();
         }
         {
             // Strips: listed only where both ends can (the feature bit), after
@@ -98,7 +131,9 @@ int main() {
         }
         check(state.controls.at("Max Bitrate").enabled,"P1 bitrate is supported");
         {
-            // The VRX Pro's tables, by the value on the wire.
+            // The VRX Pro's tables, by the value on the wire: an air unit
+            // whose info lists no camera settings (the Lite) takes them all.
+            std::strcpy(unit.value.info.kv[0].value,"Ascent Lite"); ++unit.revision; controls.update(state,now);
             const auto& rotate=state.controls.at("Rotate").choices;
             check(rotate.size()==2 && rotate[0].value==0 && rotate[1].value==1 && rotate[1].label=="180",
                   "Rotate sends 0/1 as the VRX Pro does, shown as 0/180");
@@ -107,6 +142,9 @@ int main() {
                   "White balance is Auto plus 4000-7000 K");
             const auto& rates=state.controls.at("Max Bitrate").choices;
             check(rates.size()==13 && rates.front().label=="AUTO" && rates.back().value==40000,"Bitrate list is the VRX Pro's");
+            check(state.controls.at("Scene").enabled && state.controls.at("Focus Mode").enabled,
+                  "An air unit that lists no camera settings takes every one");
+            std::strcpy(unit.value.info.kv[0].value,"BETAFPV P1 Air"); ++unit.revision; controls.update(state,now);
         }
         // Radio choices use wire values, preserve power mode, and reject
         // unsupported levels rather than exposing a combined mode/level list.
@@ -160,10 +198,16 @@ int main() {
         bool rejected=false;
         try {controls.apply("Max Bitrate",18,now);} catch(const std::invalid_argument&) {rejected=true;}
         check(rejected && encoder.calls==1,"Invalid value must not reach transport");
-        unit.value.info.kv_n=2;
-        std::strcpy(unit.value.info.kv[1].key,"cam_ctrl");
-        std::strcpy(unit.value.info.kv[1].value,"ev,wb_lock");++unit.revision;
-        controls.update(state,now);
+        // Its info's cam_ctrl=, and the camera settings the link reads in it
+        // (Ar8030Link::note_air_info: all of them where it has none).
+        auto cam_ctrl=[&](const char* list) {
+            unit.value.info.kv_n=list?2:1;
+            std::strcpy(unit.value.info.kv[1].key,"cam_ctrl");
+            std::strcpy(unit.value.info.kv[1].value,list?list:"");
+            unit.value.cam_settings=list?air::cam_settings_of(list):air::kCamAll;
+            ++unit.revision; controls.update(state,now);
+        };
+        cam_ctrl("ev,wb_lock");
         check(state.controls.at("EV").enabled && state.controls.at("White Balance").enabled,"P1 advertises implemented controls explicitly");
         check(!state.controls.at("Saturation").enabled && !state.controls.at("Rotate").enabled,"Capability list does not enable unrelated controls");
         controls.apply("White Balance",-1,now);
@@ -181,11 +225,9 @@ int main() {
         check(model.rows(now)[4].value=="-0.7","Request alone must not claim application");
         camera.value.ev_x10=-3;++camera.revision;controls.update(state,now);
         check(model.rows(now)[4].value=="-0.3","Applied camera report completes edit");
-        std::strcpy(unit.value.info.kv[1].value,"not_ev,wb_lock_extra");++unit.revision;
-        controls.update(state,now);
+        cam_ctrl("not_ev,wb_lock_extra");
         check(!state.controls.at("EV").enabled && !state.controls.at("White Balance").enabled,"Capability tokens require an exact match");
-        std::strcpy(unit.value.info.kv[1].value,"rotate,ev,wb,wb_lock,sat,contrast,sharpness,3dnr");++unit.revision;
-        controls.update(state,now);
+        cam_ctrl("rotate,ev,wb,wb_lock,sat,contrast,sharpness,3dnr");
         check(state.controls.at("Rotate").enabled && state.controls.at("Saturation").enabled &&
               state.controls.at("Contrast").enabled && state.controls.at("Sharpness").enabled &&
               state.controls.at("3D DNR").enabled,"P1 advertising its ISP settings enables them");
@@ -194,7 +236,7 @@ int main() {
         check(camera.field==air::CameraField::AWB && camera.last==5200,"P1 advertising wb takes Kelvin presets");
         controls.apply("White Balance",-1,now);
         check(camera.field==air::CameraField::AWB && camera.last==-1,"P1 keeps Lock current beside Kelvin presets");
-        unit.value.info.kv_n=1;++unit.revision;controls.update(state,now);
+        cam_ctrl(nullptr);
         check(!state.controls.at("EV").enabled,"Reconnecting to older P1 firmware disables missing controls");
         std::strcpy(unit.value.info.kv[0].value,"Ascent Lite"); ++unit.revision;
         controls.update(state,now);

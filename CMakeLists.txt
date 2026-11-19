@@ -302,6 +302,7 @@ if(KESTREL_TESTS)
     kestrel_test(hevc_repair_test dvr)
     kestrel_test(model_test radio)
     kestrel_test(mode_pick_test)
+    kestrel_test(sky_modes_test radio)   # the modes an air unit lists (its info's modes=)
     # The strip joiner with RGA and the DRM device stubbed (see the source).
     kestrel_test(strip_joiner_test SOURCES hal/rockchip/rga_strips.cpp)
     target_compile_definitions(strip_joiner_test PRIVATE USE_RGA)

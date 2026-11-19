@@ -1,16 +1,20 @@
 #include "radio/ar8030_sky.hpp"
 
+#include <cstdio>
 #include <cstring>
 #include <sys/time.h>
 
 namespace sky {
 
 // The 120 fps entries are labelled 100: 120 is the value stock sends on the
-// wire and what the menu matches against, but the air unit does not support 120.
-// 864p120 is kestrel-air's (its 864p120 feature): the camera's 1536x864 window
-// at a real 120 fps.
+// wire and what the menu matches against, but the Ascents run it at 100.
+// 720p90 is the P1 Air's (its info's 720p90=1), asked for at 90: it has no
+// 720p at 120. 864p120 is kestrel-air's (its 864p120 feature): the camera's
+// 1536x864 window at a real 120 fps. An entry is matched by its size and rate,
+// never stored by its place: one can go anywhere.
 const VideoMode kFpvModes[] = {
     { "720p60",   1280,  720,  60 },
+    { "720p90",   1280,  720,  90, 0x4000 },  // Ar8030Link::kAirFeat720p90
     { "720p100",  1280,  720, 120 },
     { "864p120",  1536,  864, 120, 0x40 },
     { "864p144",  1536,  864, 144, 0x100 },   // the Lite+'s OS02K10 window, for 144 Hz screens
@@ -24,6 +28,31 @@ int default_fpv_mode_index() {
         if (kFpvModes[i].w == 1920 && kFpvModes[i].h == 1080 && kFpvModes[i].fps == 120)
             return i;
     return 0;
+}
+
+uint32_t modes_of(const std::string& list) {
+    static_assert(sizeof(kFpvModes) / sizeof(kFpvModes[0]) <= 32, "a bit a mode");
+    uint32_t m = 0;
+    for (size_t p = 0; p < list.size();) {
+        size_t c = list.find(',', p);
+        if (c == std::string::npos) c = list.size();
+        unsigned w = 0, h = 0, fps = 0;
+        if (sscanf(list.substr(p, c - p).c_str(), "%ux%u@%u", &w, &h, &fps) == 3)
+            for (int i = 0; i < kFpvModeCount; i++)
+                if (kFpvModes[i].w == w && kFpvModes[i].h == h && kFpvModes[i].fps == fps) m |= 1u << i;
+        p = c + 1;
+    }
+    return m;
+}
+
+int fallback_mode_index(uint32_t modes, unsigned w, unsigned h) {
+    for (int i = kFpvModeCount - 1; i >= 0; i--)
+        if ((modes >> i & 1) && kFpvModes[i].w == w && kFpvModes[i].h == h) return i;
+    const int d = default_fpv_mode_index();
+    if (modes >> d & 1) return d;
+    for (int i = kFpvModeCount - 1; i >= 0; i--)
+        if (modes >> i & 1) return i;
+    return -1;
 }
 
 

@@ -21,7 +21,7 @@ void Ar8030Link::publish_air_info() {
     model_.air_info(a);
 }
 
-const Ar8030Link::AirCap Ar8030Link::kAirCaps[14] = {
+const Ar8030Link::AirCap Ar8030Link::kAirCaps[15] = {
     { kAirFeatLatInfo,      "air-timing",    "Air Timing" },
     { kAirFeatApClock,      "radio-clock",   "Radio Clock" },
     { kAirSaidFrameClock,   "frame-clock",   "Frame Clock" },
@@ -32,6 +32,7 @@ const Ar8030Link::AirCap Ar8030Link::kAirCaps[14] = {
     { kAirFeatMaxBw,        "bandwidth-cap", "Bandwidth Cap" },
     { kAirFeat864p120,      "864p120",       "864p120" },
     { kAirFeat864p144,      "864p144",       "864p144" },
+    { kAirFeat720p90,      "720p90",       "720p90" },
     { kAirFeatPwrLvl,       "power-levels",  "TX Power Levels" },
     { kAirFeatPwr400,       "power-400",     "TX Power 400mW" },
     { kAirFeatMaxExp,       "exposure-cap",  "Exposure Cap" },
@@ -58,6 +59,11 @@ void Ar8030Link::clear_air_info() {
         air_cam_ = air::kCamAll;
         model_.update_unit([&](air::UnitState &a) { a.cam_settings = air::kCamAll; });
     }
+    if (air_modes_said_ || air_modes_) {
+        air_modes_said_ = false;
+        air_modes_ = 0;
+        model_.update_unit([&](air::UnitState &a) { a.modes_said = false; a.video_modes = 0; });
+    }
     publish_air_info();
 }
 
@@ -66,15 +72,19 @@ void Ar8030Link::check_air_modes() {
     if (!air_ver_seen_) return;
     const uint16_t have = air_kestrel_ ? (uint16_t)(air_feat_ | air_info_feat_) : 0;
     const uint16_t known = air_info_seen_ ? 0xffff : 0x00ff;
+    // The modes its info lists, where it lists them (modes=): it runs no other.
+    const bool said = air_modes_said_;
+    const uint32_t modes = air_modes_;
     for (int i = 0; i < sky::kFpvModeCount; i++) {
         const sky::VideoMode &m = sky::kFpvModes[i];
-        if (m.w == sky_cfg.ch0_w && m.h == sky_cfg.ch0_h && m.fps == sky_cfg.ch0_fps && (m.need & known & ~have)) {
-            const int d = sky::default_fpv_mode_index();
-            printf("ar8030: the air unit has no %s: asking for %s\n", m.name, sky::kFpvModes[d].name);
-            model_.update_camera([&](air::CameraState& c) { c.video_mode = d; c.mode_n++; });
-            request_mode_index(d);
-            break;
-        }
+        if (m.w != sky_cfg.ch0_w || m.h != sky_cfg.ch0_h || m.fps != sky_cfg.ch0_fps) continue;
+        if (said ? (modes >> i & 1) : !(m.need & known & ~have)) break;
+        const int d = said ? sky::fallback_mode_index(modes, m.w, m.h) : sky::default_fpv_mode_index();
+        if (d < 0) break;
+        printf("ar8030: the air unit has no %s: asking for %s\n", m.name, sky::kFpvModes[d].name);
+        model_.update_camera([&](air::CameraState& c) { c.video_mode = d; c.mode_n++; });
+        request_mode_index(d);
+        break;
     }
 }
 
@@ -946,6 +956,25 @@ void Ar8030Link::note_air_info(const uint8_t *pl, size_t n) {
         } else if (e.first == "model" && e.second == "BETAFPV P1 Air") {
             note_air_prj(AR_AIR_P1, "info");   // its board type is 0: no stock number
         }
+    // The modes it runs, where its info lists them (modes=, the P1 Air): the
+    // Video Mode row offers only those, and a stored one it lacks is asked
+    // again as one of them (check_air_modes, below).
+    bool modes_changed = false;
+    {
+        bool said = false;
+        std::string list;
+        for (const auto &e : kv)
+            if (e.first == "modes") { said = true; list = e.second; }
+        const uint32_t modes = said ? sky::modes_of(list) : 0;
+        if (said != air_modes_said_ || modes != air_modes_) {
+            air_modes_said_ = said;
+            air_modes_ = modes;
+            modes_changed = true;
+            model_.update_unit([&](air::UnitState &a) { a.modes_said = said; a.video_modes = modes; });
+            printf("ar8030: the air unit's video modes: %s\n",
+                   said ? list.c_str() : "those its features give");
+        }
+    }
     // The modes it says it has beyond its header's bits (864p144): the Video
     // Mode row offers them, and a stored one it lacks goes back to the default.
     {
@@ -953,6 +982,7 @@ void Ar8030Link::note_air_info(const uint8_t *pl, size_t n) {
         uint16_t xf = 0;
         for (const auto &e : kv) {
             if (e.first == "864p144" && e.second == "1") xf |= kAirFeat864p144;
+            if (e.first == "720p90" && e.second == "1") xf |= kAirFeat720p90;
             if (e.first == "pwr400" && e.second == "1") xf |= kAirFeatPwr400;
             if (e.first == "maxexp" && e.second == "1") xf |= kAirFeatMaxExp;
             int sn = 0, sm = 0;
@@ -973,6 +1003,8 @@ void Ar8030Link::note_air_info(const uint8_t *pl, size_t n) {
             // Max Exposure: once a link, when its info first says it takes it
             // (it keeps the launcher's until then).
             if (new_maxexp) request_setting(CAM_MAX_EXP_US, max_exp_us.load());
+        } else if (modes_changed) {
+            check_air_modes();
         }
     }
     // The camera settings it applies, where not all (cam_ctrl=, the P1; cam=

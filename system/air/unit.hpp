@@ -73,10 +73,24 @@ inline uint16_t cam_settings_of(const std::string &list) {
     return m;
 }
 
+// Whether the Video Mode list's mode i, which takes the feature bits `need`
+// (sky::VideoMode), is one the air unit runs: one its info lists where it lists
+// them (UnitState::modes_said, video_modes), else one its features give - stock
+// and any air unit those needing none, kestrel-air those its bits say.
+inline bool video_mode_offered(bool modes_said, uint32_t modes, uint16_t features, int i, uint16_t need) {
+    if (modes_said) return i >= 0 && i < 32 && (modes >> i & 1);
+    return (need & ~features) == 0;
+}
+
 struct UnitState {
     Info info;
     uint16_t features = 0;     // kestrel-air's feature bits and its info's (0: none or stock)
     uint16_t cam_settings = kCamAll;   // the camera rows it applies (CamSetting)
+    // The Video Mode list's modes it runs, bit i for the list's mode i
+    // (sky::kFpvModes), where its info lists them (modes=, the P1 Air).
+    // Where it does not, the modes its features give (video_mode_offered).
+    bool modes_said = false;
+    uint32_t video_modes = 0;
     bool stock = false;        // the stock air app
     bool max_bw = false;       // takes the goggle's bandwidth cap
     bool low_power = false;    // drawing standby power (cmd 0x05 bytes 29-30)

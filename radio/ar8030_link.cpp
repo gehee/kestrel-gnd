@@ -262,7 +262,12 @@ void Ar8030Link::run() {
         int want = pending_mode_index.exchange(-1);
         if (want >= 0 && want < sky::kFpvModeCount) {
             const sky::VideoMode& m = sky::kFpvModes[want];
-            if (m.w == sky_cfg.ch0_w && m.h == sky_cfg.ch0_h && m.fps == sky_cfg.ch0_fps) {
+            if (air_modes_said_ && !(air_modes_.load() >> want & 1)) {
+                // Not one its info lists (modes=): it would run another. The
+                // menu is told again what it runs.
+                printf("ar8030: menu mode %s - not one this air unit runs, nothing sent\n", m.name);
+                model_.update_camera([&](air::CameraState& c) { c.mode_n++; });
+            } else if (m.w == sky_cfg.ch0_w && m.h == sky_cfg.ch0_h && m.fps == sky_cfg.ch0_fps) {
                 // The mode the air unit runs: no switch (it restarts the encoder).
                 printf("ar8030: menu mode %s - already this air unit's, nothing sent\n", m.name);
             } else {
