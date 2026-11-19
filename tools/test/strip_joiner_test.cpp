@@ -7,6 +7,8 @@
 //   - a new size (another video mode) makes the buffers again once, flushing
 //     the renderer and the screen recording's pictures first, never sized
 //     from a mix of the old strips' heights and the new ones';
+//   - the air unit counting from 0 again after the joiner was dropped
+//     (whole pictures for a while): joined again at once;
 //   - the strips' decoder threads at once, with the renderer slow to let go,
 //     while the size changes: every copy within its buffer, pictures coming
 //     out at the new size after it (the race that froze the picture: the
@@ -210,6 +212,30 @@ static void test_missing_and_late() {
     CHECK(sink->h == 1080);
 }
 
+// The air unit restarting with whole pictures for a while before its strips
+// (the P1 Air power-cycled while linked): the joiner was dropped, and the new
+// count starts far below the picture its layout was set at. It joins again at
+// once, not once the new count passes the old one (minutes on, the screen
+// "acquiring video" all along).
+static void test_restart_after_drop() {
+    auto sink = std::make_shared<Sink>();
+    auto scan = std::make_shared<Scan>();
+    RgaStripJoiner j(sink, scan);
+    Feed f{j, *sink};
+    f.pic = 9209;
+    CHECK(f.run(2, k2, 10) >= 9);
+    j.drop();                      // whole pictures again
+    f.pic = 180;                   // its strips again, counted from 0 since its start
+    CHECK(f.run(2, k2, 10) >= 9);
+    CHECK(sink->h == 1080);
+    // ...and dropped with no picture joined at all since its layout changed.
+    f.pic = 50000;
+    CHECK(f.run(3, k3, 3) >= 2);
+    j.drop();
+    f.pic = 7;
+    CHECK(f.run(3, k3, 10) >= 9);
+}
+
 // Each strip on a thread of its own, as each has its own decoder, with the
 // renderer taking 5 ms to let go; the size changes back and forth meanwhile.
 static void test_threads_and_resize() {
@@ -251,6 +277,7 @@ static void test_threads_and_resize() {
 int main() {
     test_counts_and_sizes();
     test_missing_and_late();
+    test_restart_after_drop();
     test_threads_and_resize();
     CHECK(g_bad == 0);
     if (fails) {

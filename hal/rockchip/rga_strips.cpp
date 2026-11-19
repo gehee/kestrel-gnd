@@ -163,13 +163,13 @@ void RgaStripJoiner::strip(int k, bool last, int ov, std::shared_ptr<DecodedUnit
     std::unique_lock<std::mutex> lk(mtx_);
     const int64_t pic = (int64_t)du->pts;
     // A picture given up on already - unless far behind: the air unit
-    // counting from 0 again (its kestrel-air started again).
-    if (cur_.pic >= 0 && pic < cur_.pic) {
-        if (cur_.pic - pic < 64) return;
-        cur_ = Picture();
-        clean_ = false;
-        layout_pic_ = -1;
-        for (int64_t& p : rows_pic_) p = -1;
+    // counting from 0 again (its kestrel-air started again). Far behind the
+    // layout's picture too, with none being joined (dropped: the link lost,
+    // whole pictures for a while): or the layout waits for a picture the new
+    // count only reaches minutes on, every picture until then not shown.
+    if ((cur_.pic >= 0 && pic < cur_.pic) || layout_pic_ - pic >= 64) {
+        if (cur_.pic >= 0 && pic < cur_.pic && cur_.pic - pic < 64) return;
+        forget_count();
     }
     // How many strips a picture has: its last one says; one that is not the
     // last, at or past that count, says there are more.
@@ -413,11 +413,19 @@ void RgaStripJoiner::check_picture() {
     }
 }
 
+// The pictures' numbers, as the air unit counts them: what comes next may
+// count from anywhere (a restart counts from 0).
+void RgaStripJoiner::forget_count() {
+    cur_ = Picture();
+    clean_ = false;
+    layout_pic_ = -1;
+    for (int64_t& p : rows_pic_) p = -1;
+}
+
 void RgaStripJoiner::drop() {
     std::lock_guard<std::mutex> lk(mtx_);
     give_up();
-    cur_ = Picture();
-    clean_ = false;
+    forget_count();
 }
 
 #else   // no RGA: strips cannot be joined, so they are never asked for

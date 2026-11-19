@@ -64,6 +64,7 @@ private:
     // all must have (a height or the count changed): the layout waits till then.
     int64_t rows_pic_[kStrips] = {-1, -1, -1, -1};
     int64_t layout_pic_ = -1;
+    void forget_count();
     // The strips a picture has, as the last one to say so said (each strip
     // says whether it is its picture's last), and the rows each codes past
     // its joins: what the buffers are laid out for.
