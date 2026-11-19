@@ -225,6 +225,7 @@ public:
     // memory elsewhere): count buffers of headroom + cap bytes each.
     PicturePool(uint8_t* mem, int count, uint32_t cap, uint32_t headroom) {
         if (count > 64) count = 64;
+        count_ = count;
         for (int i = 0; i < count; i++) {
             bufs_[i].base = mem + (size_t)i * (cap + headroom);
             bufs_[i].cap = cap;
@@ -249,10 +250,22 @@ public:
         empty_.fetch_add(1, std::memory_order_relaxed);
         return PictureRef();
     }
+    // Temporarily claim free slots before reclaiming their backing storage.
+    // Referenced pictures are never touched; acquire() cannot race discard.
+    // The owner chooses how to discard memory (anonymous mappings only).
+    void trim_free(void (*discard)(uint8_t*, size_t) noexcept) {
+        for (int i = 0; i < count_; ++i) {
+            const uint64_t bit = 1ull << i;
+            if (!(free_.fetch_and(~bit, std::memory_order_acq_rel) & bit)) continue;
+            discard(bufs_[i].base, size_t(bufs_[i].cap) + bufs_[i].headroom);
+            free_.fetch_or(bit, std::memory_order_release);
+        }
+    }
     void release(PictureBuf* b) { free_.fetch_or(1ull << b->index, std::memory_order_release); }
     int free_count() const { return __builtin_popcountll(free_.load(std::memory_order_relaxed)); }
     uint64_t empty_count() const { return empty_.load(std::memory_order_relaxed); }
 private:
+    int count_ = 0;
     PictureBuf bufs_[64];
     std::atomic<uint64_t> free_{0};
     std::atomic<uint64_t> empty_{0};

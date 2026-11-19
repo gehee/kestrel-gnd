@@ -43,6 +43,12 @@ private:
         size_t size() const {return picture?picture->len:data?data->size():0;}
         const uint8_t* bytes() const {return picture?picture->data():data->data();}
     };
+    // Native receivers have little spare RAM. At 15 Mbps these permit
+    // roughly half a second of frames plus one second of muxed writes.
+    static constexpr size_t kFrameQueueBytes = 1u << 20;
+    static constexpr size_t kFrameQueueCount = 30;
+    static constexpr size_t kWriterBytes = 2u << 20;
+    void discard_frames_locked();
     void enqueue(Item item);
     void run();
     const std::string directory_;

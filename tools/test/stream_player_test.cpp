@@ -1,5 +1,6 @@
 #include "dvr/stream_player.hpp"
 #include "dvr/stream_recorder.hpp"
+#include "dvr/telemetry_track.hpp"
 #include "recording_fixture.hpp"
 #include <algorithm>
 #include <chrono>
@@ -11,6 +12,23 @@
 namespace {
 void check(bool v,const char* s) {if(!v)throw std::runtime_error(s);}
 template<class F> void wait_at(F f,int line) {for(int i=0;i<2000;++i) {if(f())return;std::this_thread::sleep_for(std::chrono::milliseconds(2));}throw std::runtime_error("Player timeout at line "+std::to_string(line));}
+// Long seek fixtures are generated faster than playback. Write their sidecar
+// synchronously so host disk speed cannot overflow the recorder's bounded
+// telemetry queue and turn a seek test into a storage-pressure test.
+void seek_telemetry(const std::string& file,unsigned frames,unsigned group_size) {
+    std::filesystem::remove(file+".telemetry.jsonl");
+    dvr::TelemetryWriter writer;writer.begin(file);
+    for(unsigned i=0;i<frames;++i) {
+        auto sample=std::make_shared<media::TelemetrySample>();
+        sample->values["group"]=i/group_size;
+        writer.append(uint64_t(i)*1000000/60,std::move(sample));
+        writer.drain();
+        check(writer.error().empty(),"Seek fixture telemetry write failed");
+    }
+    writer.finish();writer.drain();
+    check(writer.error().empty(),"Seek fixture telemetry finalization failed");
+}
+
 }
 #define wait(...) wait_at(__VA_ARGS__,__LINE__)
 int main() {
@@ -91,13 +109,12 @@ int main() {
         dvr::StreamRecorder recorder(path,VideoCodec::H265,64,64,60);
         recorder.set_parameter_sets(recording_ps);recorder.toggle();wait([&]{return recorder.is_recording();});
         for(unsigned group=0;group<120;++group) {
-            auto sample=std::make_shared<media::TelemetrySample>();sample->values["group"]=group;
-            recorder.set_telemetry(sample);
             for(unsigned j=0;j<8;++j)recorder.feed(std::make_shared<std::vector<uint8_t>>(recording_frames[j]),1000000+(group*8+j)*16667);
             wait([&]{return recorder.state().frames==(group+1)*8;});
         }
         const auto seek_name=std::filesystem::path(recorder.state().file).filename().string();
         recorder.stop();wait([&]{return !recorder.state().recording && !recorder.state().finishing;});
+        seek_telemetry(std::string(path)+"/"+seek_name,960,8);
         std::atomic<uint64_t> floor{0},visible{0},decoded{0};std::atomic<unsigned> resets{0};
         std::atomic<bool> first{false},selected{false};
         dvr::StreamPlayer* seeking=nullptr;
@@ -116,7 +133,7 @@ int main() {
         },64,64);seeking=&player;
         player.play(seek_name);wait([&]{return player.state().playing;});player.pause();
         player.seek_relative(5,0);
-        wait([&]{return !player.state().seeking && player.state().position_us>=4900000;});
+        wait([&]{const auto s=player.state(); if(!s.error.empty()) throw std::runtime_error(s.error); return !s.seeking && s.position_us>=4900000;});
         check(player.state().paused && visible>5000000 && visible<5140000,"Paused forward seek snaps to the following keyframe");
         const auto held=visible.load();std::this_thread::sleep_for(std::chrono::milliseconds(30));
         check(visible==held,"Seek preserves a paused picture");
@@ -162,15 +179,12 @@ int main() {
         dvr::StreamRecorder recorder(path,VideoCodec::H265,64,64,60);
         recorder.set_parameter_sets(recording_ps);recorder.toggle();wait([&]{return recorder.is_recording();});
         for(unsigned i=0;i<900;++i) {
-            if(i%30==0) {
-                auto sample=std::make_shared<media::TelemetrySample>();sample->values["group"]=i/30;
-                recorder.set_telemetry(sample);
-            }
             recorder.feed(std::make_shared<std::vector<uint8_t>>(recording_frames[i%480?1:0]),1000000+i*16667);
-            if(i%30==29) {wait([&]{const auto state=recorder.state();if(!state.error.empty())throw std::runtime_error(state.error);return state.frames+state.dropped==i+1;});check(recorder.state().dropped==0,"Long GOP fixture has no rejected NALs");}
+            if(i%8==7 || i==899) {wait([&]{const auto state=recorder.state();if(!state.error.empty())throw std::runtime_error(state.error);return state.frames+state.dropped==i+1;});check(recorder.state().dropped==0,"Long GOP fixture has no rejected NALs");}
         }
         const auto long_name=std::filesystem::path(recorder.state().file).filename().string();
         recorder.stop();wait([&]{return !recorder.state().recording && !recorder.state().finishing;});
+        seek_telemetry(std::string(path)+"/"+long_name,900,30);
         std::atomic<bool> selected{false},expect_key{true};
         std::atomic<uint64_t> floor{0},visible{0},decoded{0};
         std::atomic<unsigned> resets{0},pictures{0};

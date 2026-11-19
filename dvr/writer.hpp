@@ -42,7 +42,7 @@ class DvrWriter {
         std::mutex m_;
         std::condition_variable work_, room_;
         std::deque<Chunk> q_;
-        size_t queued_ = 0;     // bytes in q_
+        size_t queued_ = 0;     // bytes in q_ AND the worker's in-flight batch
         bool done_ = false;
         std::atomic<bool> failed_{false};
         std::thread t_;
