@@ -2,6 +2,9 @@
 // the values a row walks through, and what a change to it does.
 #include "hud/osd_detail.hpp"
 
+#include <algorithm>
+#include <cstring>
+
 std::vector<std::pair<const char*, int>> OSD::ar_rf_items() const {
     std::vector<std::pair<const char*, int>> v;
     // Unlinked: binding is the only thing this tab can do, and the only time
@@ -299,7 +302,11 @@ int OSD::video_row(int shown) const {
     if (s && shown == 2) return 12;          // Strips
     if (e && shown == 2 + s) return 11;      // Max Exposure
     const int first = 2 + s + e;             // Rotate, the first camera row
-    return shown >= first && shown < first + 9 ? shown - first + 1 : -1;
+    // Scene (row 2) not listed where the air unit does not apply it (the P1 Air).
+    const bool scene = cam_row_ok(2);
+    if (shown < first || shown >= first + (scene ? 9 : 8)) return -1;
+    const int row = shown - first + 1;
+    return !scene && row >= 2 ? row + 1 : row;
 }
 
 int OSD::disp_row(int shown) const {
@@ -489,7 +496,8 @@ std::vector<OSD::MenuItem> OSD::menu_items(int tab) const {
     if (tab == 0) { // Video Tab
         {
             // A camera row the air unit does not apply (not in its info's
-            // cam_ctrl=: the P1 Air's Scene and Focus Mode), greyed.
+            // cam_ctrl=), greyed - but Scene, not listed at all then (the P1
+            // Air has no other tuning to switch to; video_row skips it).
             auto cam_item = [this](const char *label, int row) {
                 return cam_row_ok(row)
                     ? MenuItem{label, 1}
@@ -524,7 +532,8 @@ std::vector<OSD::MenuItem> OSD::menu_items(int tab) const {
                                                  "below it gives a steadier picture and less time on the "
                                                  "air per frame. fpvOS air units only."},
                 cam_item("Rotate", 1),
-                cam_item("Scene", 2), cam_item("EV", 3), cam_item("White Balance", 4),
+                cam_item("Scene", 2),
+                cam_item("EV", 3), cam_item("White Balance", 4),
                 cam_item("Saturation", 5), cam_item("Contrast", 6), cam_item("Sharpness", 7),
                 cam_item("3D DNR", 8),
                 // Stock's own Display tab (photo-confirmed), not Camera - but
@@ -534,6 +543,9 @@ std::vector<OSD::MenuItem> OSD::menu_items(int tab) const {
                 // only holds goggle-local drawing settings.
                 cam_item("Focus Mode", 9)
             };
+            if (!cam_row_ok(2))
+                items.erase(std::find_if(items.begin(), items.end(),
+                                         [](const MenuItem &i) { return !strcmp(i.label, "Scene"); }));
             // After Max Bitrate, each only where it can be had - not listed
             // at all otherwise (video_row skips it then): Strips (row 12),
             // where both ends can, and Max Exposure (11), where the air

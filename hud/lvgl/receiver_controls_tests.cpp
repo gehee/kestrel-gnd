@@ -234,21 +234,24 @@ int main() {
         check(rejected,"Uncalibrated Kelvin presets are not offered on P1");
         camera.value.ev_x10=-7;camera.value.awb=-1;++camera.revision;
         controls.update(state,now);
-        model.menu_open=true;model.side=1;model.tab=0;model.selected=4;model.stage=MenuStage::Browse;
+        model.menu_open=true;model.side=1;model.tab=0;model.selected=3;model.stage=MenuStage::Browse;
         controller.apply_receiver=[&](const std::string& id,int v){return controls.apply(id,v,monotonic_us());};
-        check(model.rows(now)[4].value=="-0.7" && model.rows(now)[5].value=="Lock current","Camera readback updates EV and signed WB lock");
+        // No Scene row where the air unit has none: EV follows Rotate.
+        check(model.rows(now)[3].id=="EV" && model.rows(now)[3].value=="-0.7" && model.rows(now)[4].value=="Lock current",
+              "Camera readback updates EV and signed WB lock");
         controller.key(Key::Enter);controller.key(Key::Down);controller.key(Key::Enter);
         check(camera.field==air::CameraField::EV && camera.last==-3,"Next edit starts from reported EV");
-        check(model.rows(now)[4].value=="-0.7","Request alone must not claim application");
+        check(model.rows(now)[3].value=="-0.7","Request alone must not claim application");
         camera.value.ev_x10=-3;++camera.revision;controls.update(state,now);
-        check(model.rows(now)[4].value=="-0.3","Applied camera report completes edit");
+        check(model.rows(now)[3].value=="-0.3","Applied camera report completes edit");
         cam_ctrl("not_ev,wb_lock_extra");
         check(!state.controls.at("EV").enabled && !state.controls.at("White Balance").enabled,"Capability tokens require an exact match");
         cam_ctrl("rotate,ev,wb,wb_lock,sat,contrast,sharpness,3dnr");
         check(state.controls.at("Rotate").enabled && state.controls.at("Saturation").enabled &&
               state.controls.at("Contrast").enabled && state.controls.at("Sharpness").enabled &&
               state.controls.at("3D DNR").enabled,"P1 advertising its ISP settings enables them");
-        check(!state.controls.at("Scene").enabled && !state.controls.at("Focus Mode").enabled,"Unlisted P1 controls stay unavailable");
+        check(!state.controls.count("Scene") && !state.controls.at("Focus Mode").enabled,
+              "Unlisted P1 controls: Scene not listed, Focus Mode unavailable");
         controls.apply("White Balance",5200,now);
         check(camera.field==air::CameraField::AWB && camera.last==5200,"P1 advertising wb takes Kelvin presets");
         controls.apply("White Balance",-1,now);

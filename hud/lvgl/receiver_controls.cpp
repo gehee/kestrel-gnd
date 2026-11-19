@@ -65,7 +65,10 @@ void ReceiverControls::update(BackendState& state, uint64_t now) {
         return out;
     };
     choice("Rotate",c.angle,c.angle_n || c.camera_n,has(air::kCamRotate),table(nullptr,air::kRotateLabels,2),cam_reason);
-    choice("Scene",c.scene,c.camera_n,has(air::kCamScene),table(air::kSceneVals,air::kSceneLabels,air::kSceneCount),cam_reason);
+    // Scene: not listed where the air unit says it has none (the P1 Air: no
+    // other tuning to switch to), as the VRX Pro's menu leaves it out.
+    if(!cam || has(air::kCamScene))
+        choice("Scene",c.scene,c.camera_n,has(air::kCamScene),table(air::kSceneVals,air::kSceneLabels,air::kSceneCount),cam_reason);
     choice("EV",c.ev_x10,c.camera_n,has(air::kCamEv),table(air::kEvSteps,air::kEvLabels,air::kEvCount),cam_reason);
     // Auto, then what the air unit takes: Lock current (wb_lock, kestrel-air), the
     // kelvin presets (wb, or an air unit that lists nothing) - the VRX Pro's.

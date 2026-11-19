@@ -2,6 +2,7 @@
 #include "msp_names.hpp"
 #include "hud/hud_theme.hpp"
 #include <cctype>
+#include <cstring>
 #include <ctime>
 #include <sstream>
 #include <stdexcept>
@@ -137,9 +138,12 @@ std::vector<MenuRow> Model::rows(uint64_t now) const {
     const auto& serial = backend.serial;
     if (tab == 0) {
         std::vector<MenuRow> result;
+        // Scene where receiver_controls lists it (not on an air unit without it).
+        const bool scene = !backend.controls.count("Rotate") || backend.controls.count("Scene");
         for (const char* name : {"Video Mode", "Max Bitrate", "Rotate", "Scene", "EV", "White Balance",
                                  "Saturation", "Contrast", "Sharpness", "3D DNR", "Focus Mode"})
-            result.push_back(unavailable(name, name, "Changes the air unit's camera."));
+            if (scene || strcmp(name, "Scene"))
+                result.push_back(unavailable(name, name, "Changes the air unit's camera."));
         // After Max Bitrate, each only where it can be had (receiver_controls
         // lists it then): Strips where both ends can, Max Exposure where the
         // air unit takes it live - as the VRX Pro's menu has them.
