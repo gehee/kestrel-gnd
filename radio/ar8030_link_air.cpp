@@ -787,6 +787,7 @@ void Ar8030Link::apply_pending_settings() {
             case CAM_MAX_BW:    cmd = sky::CMD_KA_MAX_BW;      name = "video link bandwidth cap MHz"; break;
             case CAM_AIR_LOGS:  cmd = sky::CMD_KA_LOGS;        name = "air flight logs"; break;
             case CAM_MAX_EXP_US: cmd = sky::CMD_KA_MAX_EXP;    name = "exposure cap us"; break;
+            case CAM_ALLOW_SPECTATORS: cmd = sky::CMD_KA_SPECTATORS; name = "allow spectators"; break;
             case CAM_STRIPS:    cmd = sky::CMD_KA_STRIPS;      name = "strips a picture"; break;
             case CAM_WORK_LIST: cmd = sky::CMD_SET_WORK_CHAN_LIST; name = "work channels"; break;
             case CAM_HOP_ON:    cmd = sky::CMD_SET_BB_FREQ;    name = "own hopping on, from kHz"; break;
@@ -807,6 +808,12 @@ void Ar8030Link::apply_pending_settings() {
         if (item.first == CAM_MAX_EXP_US && !(air_info_feat_ & kAirFeatMaxExp)) {
             printf("ar8030: %s = %d kept for an air unit that takes it\n", name, item.second);
             continue;
+        }
+        if (item.first == CAM_ALLOW_SPECTATORS) {
+            std::lock_guard<bus::PiMutex> g(air_info_mtx_);
+            const auto value = air_info_.get("spectators");
+            if (!air_kestrel_ || (value != "0" && value != "1") ||
+                (item.second != 0 && item.second != 1)) continue;
         }
         // Strips likewise (strips=N/M): its info asks again while it differs.
         if (item.first == CAM_STRIPS && air_strips_max_ < 2) continue;
@@ -834,7 +841,7 @@ void Ar8030Link::apply_pending_settings() {
             uint8_t v[2] = { 0, (uint8_t)item.second };
             f = sky_proto.build(cmd, v, sizeof(v));
         } else if (item.first == CAM_STANDBY || item.first == CAM_BW ||
-                   item.first == CAM_MAX_BW || item.first == CAM_AIR_LOGS || item.first == CAM_STRIPS) {
+                   item.first == CAM_MAX_BW || item.first == CAM_AIR_LOGS || item.first == CAM_STRIPS || item.first == CAM_ALLOW_SPECTATORS) {
             f = sky_proto.build_u8(cmd, (uint8_t)item.second);
         } else {
             f = sky_proto.build_u32(cmd, (uint32_t)item.second);

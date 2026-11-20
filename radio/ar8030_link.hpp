@@ -80,6 +80,10 @@ class Ar8030Link : public radio::Link, private radio::VideoOut::Source {
         radio::State held() const override;
 
     private:
+        gnd::Spectator spectator_;
+        bool spectator_dirty_ = false;
+        uint64_t spectator_announced_ms_ = 0;
+        void run_spectator();
         bool native_sdio_;
         std::string pairing_file_;
         // Every air unit this receiver was paired with (radio/native_pairing.hpp),

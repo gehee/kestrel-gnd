@@ -4,6 +4,7 @@
 #include <cstdint>
 
 #include "system/part.hpp"
+#include "system/gnd/spectator.hpp"
 
 namespace gnd {
 
@@ -97,6 +98,9 @@ enum RfCap { RF_CAP_POWER = 1, RF_CAP_MCS = 2, RF_CAP_LNA = 4,
              RF_CAP_BW = 8, RF_CAP_CHAN = 16 };
 
 struct RadioState {
+    Spectator spectator;
+    bool spectator_supported = false;
+    int spectator_status = 0; // 0 idle, 1 waiting, 2 receiving, 3 unavailable
     LinkStats link{};
     float video_mbps = 0;      // received video, the last second (0 while none comes)
     uint32_t frames_lost = 0;  // pictures the air unit sent that never came (gaps in its counter), since start
@@ -123,6 +127,7 @@ struct RadioState {
 
 class Radio : public Part<RadioState> {
 public:
+    virtual Ticket set_spectator(const Spectator&) { return {}; }
     virtual Ticket set_firmware(int firmware) = 0;    // 0 stock, 1 Open8030: the radio restarts on it
     virtual Ticket set_frame(int mode) = 0;           // 0 standard, 2 short
     virtual Ticket set_max_mcs(int mcs) = 0;          // -1: none

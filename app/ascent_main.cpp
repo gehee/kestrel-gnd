@@ -598,7 +598,7 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
             telemetry.connected = state.link.active && state.link.state == gnd::kLinkUp;
             // The video arrives on RX; link.mcs is this receiver's uplink TX MCS.
             telemetry.mcs = telemetry.connected ? state.link.rx_mcs_val : -1;
-            telemetry.frequency_mhz = state.link.tx_freq;
+            telemetry.frequency_mhz = state.spectator.mode ? state.link.rx_freq : state.link.tx_freq;
             flight_controller.set_motion_wanted(model.dynamic>0 && telemetry.link_valid(now));
             if(model.dynamic && telemetry.link_valid(now) && model.backend.media.video_fresh(now) && !model.menu_open) {
                 constexpr float scale[]={0,.5f,1,3};bool moving=false;

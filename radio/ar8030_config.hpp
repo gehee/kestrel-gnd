@@ -4,6 +4,7 @@
 // (Ar8030Link's constructor). After that, the link's values are its own -
 // changed by its commands and its threads, nothing else.
 #include <cstdlib>
+#include "system/gnd/spectator.hpp"
 #include <cstdint>
 #include <array>
 #include <optional>
@@ -12,6 +13,7 @@
 #include "system/air/power.hpp"
 
 struct Ar8030Config {
+    gnd::Spectator spectator;
     // Native SDIO has no vendor daemon or factory pairing store.
     bool native_sdio = false;
     std::string pairing_file;

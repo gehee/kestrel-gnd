@@ -167,7 +167,7 @@ kestrel_module(render FOLDERS render DEPS base
 # out - it is built into each program that runs the radio (below).
 kestrel_module(radio FOLDERS radio DEPS hal region system
     SOURCES radio/ar8030_link.cpp radio/ar8030_link_bb.cpp radio/ar8030_link_bind.cpp radio/ar8030_link_air.cpp
-            radio/ar8030_link_rf.cpp radio/ar8030_link_stats.cpp radio/ar8030_link_video.cpp radio/bb_watchdog.cpp radio/ar8030_sky.cpp radio/model.cpp
+            radio/ar8030_link_rf.cpp radio/ar8030_link_stats.cpp radio/ar8030_link_video.cpp radio/ar8030_link_spectator.cpp radio/bb_watchdog.cpp radio/ar8030_sky.cpp radio/model.cpp
             radio/air_imu.cpp radio/streams.cpp radio/video_out.cpp radio/strip_video.cpp
     LIBS ${_ar8030_libs})
 kestrel_module(motion FOLDERS motion DEPS system
@@ -291,6 +291,8 @@ if(KESTREL_TESTS)
     kestrel_test(hal_test hal)
     kestrel_test(canvas_test render)
     kestrel_test(platform_test platform)
+    kestrel_test(spectator_protocol_test)
+    kestrel_test(spectator_announcement_test)
     kestrel_test(air_clock_test radio)
     kestrel_test(display_lock_test)
     kestrel_test(gallery_stats_test hud)

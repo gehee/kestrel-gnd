@@ -53,6 +53,7 @@ public:
     SceneMode scene = SceneMode::Live;
     bool menu_open = false, quit = false;
     bool channel_open = false;
+    bool spectator_info_open = false;
     int channel_mhz = 0;
     int gallery_selected=0;
     std::string gallery_action_name; // pinned when REC opens the actions menu

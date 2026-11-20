@@ -162,6 +162,31 @@ std::vector<MenuRow> Model::rows(uint64_t now) const {
     }
     if (tab == 1) {
         std::vector<MenuRow> result;
+        if (backend.controls.count("receiver_mode")) {
+            result.push_back(unavailable("receiver_mode","Receiver Mode","Pilot pairs normally; spectator receives without transmitting."));
+            if (!backend.controls.at("receiver_mode").value) {
+                if (spectator_info_open) {
+                    const char* help = "On another receiver, select Spectator and enter these settings.";
+                    auto frequency = unavailable("stream_frequency", "Frequency", help);
+                    auto bandwidth = unavailable("stream_bandwidth", "Bandwidth", help);
+                    auto id = unavailable("pilot_stream_id", "Stream ID", help);
+                    // Readings are informational, not disabled settings.
+                    frequency.disabled = bandwidth.disabled = id.disabled = false;
+                    return {heading("Spectator Info"), frequency, bandwidth, id};
+                }
+                auto info = reading("spectator_info", "Spectator Info", "ENTER", "Settings for watching this stream on another receiver.");
+                info.action = true;
+                result.push_back(info);
+            } else {
+                result.push_back(unavailable("spectator_frequency","Listen Frequency","Initial channel; subsequent announced hops are followed."));
+                result.push_back(unavailable("spectator_bandwidth","Listen Bandwidth","Initial width; subsequent announced changes are followed."));
+                result.push_back(unavailable("spectator_stream_id","Stream ID","The air radio's identity filter."));
+                result.push_back(unavailable("stream_frequency","Current Frequency","The receiver's current downlink frequency."));
+                result.push_back(unavailable("stream_bandwidth","Current Bandwidth","The receiver's current downlink bandwidth."));
+                result.push_back(unavailable("spectator_status","Spectator Status","Waiting for decodable video; pilot controls the stream."));
+                return result;
+            }
+        }
         if (!backend.vrx.link_valid(now))
             result.push_back(unavailable("bind", "Bind", "Pairs this VRX with an air unit."));
         else {

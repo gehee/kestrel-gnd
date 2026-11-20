@@ -79,6 +79,7 @@ class UnitPart final : public detail::Held<air::Unit> {
 public:
     using Held::Held;
     Ticket set_standby(bool on) override;
+    Ticket set_spectators(bool on) override;
     Ticket set_logs(bool on) override;
 };
 
@@ -90,6 +91,7 @@ public:
         scans_.set_waker(w);
         rates_.set_waker(w);
     }
+    Ticket set_spectator(const gnd::Spectator& s) override;
     Ticket set_firmware(int firmware) override;
     Ticket set_frame(int mode) override;
     Ticket set_max_mcs(int mcs) override;

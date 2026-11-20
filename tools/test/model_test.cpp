@@ -43,6 +43,7 @@ struct FakeLink : radio::Link {
     void run() override {}
     void apply(const radio::Command& c) override {
         applied.push_back(c);
+        if (const auto* m = std::get_if<radio::cmd::Spectator>(&c)) h.spectator = m->config;
         if (const auto* m = std::get_if<radio::cmd::MaxBitrate>(&c)) h.max_kbps = m->kbps;
         if (const auto* m = std::get_if<radio::cmd::MaxBandwidth>(&c)) h.max_bw_mhz = m->mhz;
         if (const auto* m = std::get_if<radio::cmd::Firmware>(&c)) h.radio_fw = m->firmware;
@@ -406,7 +407,24 @@ static void threads_test(Rig& b, HudLike& h) {
     CHECK(reads > 0 && popped > 0);
 }
 
+static void spectator_test() {
+    Rig b; FakeLink link;
+    const gnd::Spectator wanted{1,5839,40,246};
+    b.model.radio().set_spectator(wanted);
+    b.model.take_commands(link);
+    CHECK(link.h.spectator==wanted && radio_of(b).spectator==wanted);
+    CHECK(b.settings.get(radio::setting::spectator_mode)==1);
+    CHECK(b.settings.get(radio::setting::spectator_stream_id)==246);
+    const auto n=link.applied.size();
+    b.model.radio().set_spectator({1,5839,20,246});
+    b.model.take_commands(link);
+    CHECK(link.applied.size()==n && b.settings.get(radio::setting::spectator_bandwidth)==40);
+    b.model.radio().set_spectator({0,5839,40,246});
+    b.model.take_commands(link);
+    CHECK(!radio_of(b).spectator.mode);
+}
 int main() {
+    spectator_test();
     Rig b;
     defaults_test(b);
     // The IMU's reader alone is not a reader of the radio's state.
