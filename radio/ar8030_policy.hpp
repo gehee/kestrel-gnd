@@ -5,6 +5,10 @@
 #include "radio/settings.hpp"
 
 inline void ar8030_load_policy(Ar8030Config& cfg, Settings& settings, int default_bw_mhz = 40) {
+    cfg.spectator = {settings.get(radio::setting::spectator_mode),
+        settings.get(radio::setting::spectator_frequency), settings.get(radio::setting::spectator_bandwidth),
+        settings.get(radio::setting::spectator_stream_id)};
+    // Invalid spectator settings must not silently fall back to transmitting pilot mode.
     const int bw = settings.get(Setting<int>{radio::setting::ar8030_max_bw_mhz.key, default_bw_mhz});
     cfg.max_bw_mhz = ar_maxbw_valid(bw) ? bw : default_bw_mhz;
     const int mcs = settings.get(radio::setting::ar8030_max_mcs);

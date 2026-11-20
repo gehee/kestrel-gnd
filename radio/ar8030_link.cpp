@@ -14,7 +14,7 @@ Ar8030Link::Ar8030Link(radio::Model& model, const Ar8030Config& cfg,
                        std::atomic<bool>* stop_signal,
                        std::string host_, int host_port_,
                        int slot_, int video_port_)
-    : native_sdio_(cfg.native_sdio), pairing_file_(cfg.pairing_file), model_(model), settings_(settings), fc_out_(model.fc()), imu_out_(model.imu()),
+    : spectator_(cfg.spectator), native_sdio_(cfg.native_sdio), pairing_file_(cfg.pairing_file), model_(model), settings_(settings), fc_out_(model.fc()), imu_out_(model.imu()),
       video_("ar8030", codec_, vdec_, cfg.decode_enabled, cfg.stream_decode, model, *this),
       codec(codec_), vdec(vdec_), should_stop(stop_signal),
       host(std::move(host_)), host_port(host_port_), slot(slot_), video_port(video_port_),
@@ -66,7 +66,16 @@ Ar8030Link::~Ar8030Link() { disconnect_bb(); }
 // loads with restarts it here.
 void Ar8030Link::apply(const radio::Command& c) {
     using namespace radio;
-    static_assert(std::variant_size_v<Command> == 16, "a new command: carry it out here (and save it in Model::save if it is a setting)");
+    static_assert(std::variant_size_v<Command> == 17, "a new command: carry it out here (and save it in Model::save if it is a setting)");
+    if (const auto* a = std::get_if<cmd::Spectator>(&c)) {
+        if (native_sdio_ && on_ar_libre() && gnd::valid(a->config)) {
+            spectator_dirty_ |= spectator_ != a->config;
+            spectator_ = a->config;
+        }
+        return;
+    }
+    // No air-unit controls, scan, pairing or uplink requests in spectator mode.
+    if (spectator_.mode) return;
     if (const auto* a = std::get_if<cmd::AirLogs>(&c)) {
         air_logs = a->on;
         request_setting(CAM_AIR_LOGS, a->on);
@@ -143,6 +152,8 @@ void Ar8030Link::apply(const radio::Command& c) {
 
 radio::State Ar8030Link::held() const {
     radio::State s;
+    s.spectator = spectator_;
+    s.spectator_supported = native_sdio_ && on_ar_libre();
     s.radio_fw = radio_fw;
     s.tx_power_mw = tx_power_mw;
     s.tx_power_want_mw = tx_power_want_mw;
@@ -210,6 +221,11 @@ void Ar8030Link::run() {
         bb_watchdog_alive();   // the loop is still going round
         if (air_info_clear_.exchange(false)) clear_air_info();   // the link went down (on_link_event)
         model_.take_commands(*this);   // the menu's, since the last pass
+        if (spectator_.mode) {
+            disconnect_bb();
+            run_spectator();
+            continue;
+        }
         bw_poll();
         if (sockfd < 0) {
             if (!connect_bb()) {

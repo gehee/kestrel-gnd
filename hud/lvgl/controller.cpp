@@ -69,8 +69,9 @@ int Controller::arm_state(uint64_t now) const {
     if (!f.stamp_us || now < f.stamp_us || now - f.stamp_us >= 2000000) return -1;
     return f.arm == 1 ? 1 : f.arm == 0 ? 0 : -1;
 }
-void Controller::open_menu() { model_.gallery_action_name.clear(); model_.gallery_delete_name.clear(); model_.menu_open = true; model_.stage = MenuStage::Pick; model_.scene = SceneMode::Live; model_.feedback.clear(); ++model_.menu_version; }
+void Controller::open_menu() { model_.spectator_info_open = false; model_.gallery_action_name.clear(); model_.gallery_delete_name.clear(); model_.menu_open = true; model_.stage = MenuStage::Pick; model_.scene = SceneMode::Live; model_.feedback.clear(); ++model_.menu_version; }
 void Controller::set_scene(SceneMode scene) {
+    model_.spectator_info_open = false;
     model_.gallery_action_name.clear();model_.gallery_action=RecordingAction::Export;
     model_.gallery_delete_name.clear();model_.gallery_delete_chosen=false;
     if (model_.stage == MenuStage::Edit) cancel_edit();
@@ -258,6 +259,7 @@ void Controller::key(Key key, bool repeat) {
         return;
     }
     if (key == Key::Back) {
+        if (m.spectator_info_open) { m.spectator_info_open=false; m.selected=1; m.feedback.clear(); return; }
         if (m.stage == MenuStage::Browse) m.stage = MenuStage::Pick;
         else { m.menu_open = false; m.scene = SceneMode::Live; }
         m.feedback.clear(); return;
@@ -283,12 +285,14 @@ void Controller::key(Key key, bool repeat) {
         }
     }
     else if (key == Key::Left || key == Key::Right) {
+        m.spectator_info_open=false;
         const auto tabs = m.side_tabs();
         const auto found = std::find(tabs.begin(), tabs.end(), m.tab);
         int index = found == tabs.end() ? 0 : int(found - tabs.begin());
         index = std::clamp(index + (key == Key::Right ? 1 : -1), 0, int(tabs.size()) - 1);
         m.remembered_tab_[m.side] = m.tab = tabs[index]; m.selected = m.first_row(monotonic_us());
     } else if (key == Key::Enter && menu[m.selected].action) {
+        if(menu[m.selected].id=="spectator_info") {m.spectator_info_open=true; m.selected=1; return;}
         if(menu[m.selected].id=="gallery") {set_scene(SceneMode::GalleryBrowse);return;}
         if(menu[m.selected].id=="channel") {
             m.channel_open=true; m.channel_mhz=m.backend.channels.automatic?0:m.backend.channels.current_mhz; return;

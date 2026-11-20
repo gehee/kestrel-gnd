@@ -10,6 +10,7 @@
 //   ar8030_link_air.cpp    the air unit: its handshake, settings, status, camera
 //   ar8030_link_rf.cpp     the RF: channel, power, bandwidth, ranging, AUTO
 //   ar8030_link_stats.cpp  the link's figures, and the air delay by the radio clock
+//   ar8030_link_spectator.cpp receive-only lifecycle and fixed-channel recovery
 //   ar8030_link_video.cpp  the video: the stream split into slices, the replay
 
 #include "radio/ar8030_link.hpp"

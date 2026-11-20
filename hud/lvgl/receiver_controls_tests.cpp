@@ -27,6 +27,7 @@ struct Unit : Fake<air::Unit,air::UnitState> {
     Ticket set_logs(bool v) override { return request(v); }
 };
 struct Ground : Fake<gnd::Radio,gnd::RadioState> {
+    Ticket set_spectator(const gnd::Spectator& s) override {value.spectator=s;++revision;return request(s.mode);}
     Ticket set_firmware(int v) override {return request(v);}
     Ticket set_frame(int v) override {return request(v);}
     Ticket set_max_mcs(int v) override {return request(v);}
@@ -50,6 +51,38 @@ int main() {
                                   {{"720p60",0},{"720p90",0x4000},{"720p100",0},{"864p120",0x40},{"864p144",0x100},
                                    {"1080p60",0},{"1080p100",0}});
         Model model; Controller controller(model); auto& state=model.backend;
+        // Receive-only controls work before a link and disable all air control.
+        state.service.connected=true;
+        ground.value.spectator_supported=true;
+        controls.update(state,monotonic_us());
+        check(state.controls.at("receiver_mode").enabled,"Mode can be selected while disconnected");
+        ground.value.link.tx_freq=5545; ground.value.link.rx_freq=2100; ++ground.revision;
+        controls.update(state,monotonic_us());
+        check(state.controls.at("stream_frequency").text=="5545 MHz", "Pilot info ignores parked RX bank");
+
+        model.tab=1; model.menu_open=true; model.stage=MenuStage::Browse; model.selected=1;
+        check(model.rows(monotonic_us()).at(1).id=="spectator_info", "Pilot info follows receiver mode");
+        controller.key(Key::Enter);
+        check(model.spectator_info_open, "Enter opens spectator info");
+        auto info_rows=model.rows(monotonic_us());
+        check(info_rows.size()==4 && info_rows[0].name=="Spectator Info" &&
+              info_rows[3].name=="Stream ID" && !info_rows[1].editable && !info_rows[1].action,
+              "Spectator info contains only read-only stream details");
+        controller.key(Key::Back);
+        check(!model.spectator_info_open && model.selected==1, "Back returns to info entry");
+        model.menu_open=false;
+
+        controls.apply("spectator_stream_id",246,monotonic_us());
+        controls.apply("receiver_mode",1,monotonic_us());
+        controls.update(state,monotonic_us());
+        check(ground.value.spectator.mode==1 && ground.value.spectator.stream_id==246,"Spectator request reaches model");
+        check(!state.controls.at("bind").enabled && !state.controls.at("power").enabled &&
+              !state.controls.at("Video Mode").enabled,"Spectator cannot control or bind the air unit");
+        bool invalid_id=false;
+        try {controls.apply("spectator_stream_id",256,monotonic_us());} catch(const std::invalid_argument&) {invalid_id=true;}
+        check(invalid_id,"Malformed stream ID invalid_id");
+        controls.apply("receiver_mode",0,monotonic_us());
+        ground.value.spectator_supported=false; ++ground.revision;
         const auto now=monotonic_us();
         state.service.connected=true;
         ground.value.link.active=true; ground.value.link.state=gnd::kLinkUp;

@@ -10,15 +10,15 @@
 namespace kestrel_ui {
 void ReceiverControls::update(BackendState& state, uint64_t now) {
     const auto g = ground_.state();
-    const bool linked = g.link.active && g.link.state == gnd::kLinkUp &&
+    const bool linked = !g.spectator.mode && g.link.active && g.link.state == gnd::kLinkUp &&
         g.link.last_update_ms && now / 1000 >= g.link.last_update_ms && now / 1000 - g.link.last_update_ms < 6000;
     const auto unit = unit_.state();
     auto& details = state.link;
     details.distance_m = linked ? g.dist_m : -1;
-    details.bandwidth_step = linked ? g.link.bw_step : -1;
+    details.bandwidth_step = g.spectator.mode || linked ? g.link.bw_step : -1;
     details.air_power_mw = linked ? g.link.air_pwr_mw : 0;
     details.air_live_dbm = linked ? air_.state().live_dbm : 0;
-    details.video_mbps = linked ? g.video_mbps : 0;
+    details.video_mbps = linked || g.spectator.mode ? g.video_mbps : 0;
     details.link_mbps = linked ? g.link.rx_data_rate_kbps / 1000.0f : 0;
     details.standby = linked && unit.low_power;
     details.vtx_temperature_valid = linked && unit.vtx_temp_valid;
@@ -149,6 +149,43 @@ void ReceiverControls::update(BackendState& state, uint64_t now) {
     if(g.bind_state==gnd::BIND_RUNNING) bind.reason="Binding: "+std::to_string(g.bind_secs_left)+" seconds remaining.";
     else if(g.bind_state==gnd::BIND_FAILED) bind.reason="No air unit found. Press OK to retry.";
     else if(g.bind_state==gnd::BIND_OK) bind.reason="Binding succeeded.";
+    if (g.spectator_supported) {
+        auto local=[&](const char* id,int value,std::vector<ReceiverChoice> choices,const char* reason) {
+            auto& c=controls_[id]; c={}; c.known=true; c.enabled=state.service.connected;
+            c.value=value; c.choices=std::move(choices); c.reason=reason;
+        };
+        local("receiver_mode",g.spectator.mode,{{0,"PILOT"},{1,"SPECTATOR"}},
+              "Spectator only receives video. Match the pilot's frequency and stream ID; the pilot controls the air unit.");
+        std::vector<ReceiverChoice> frequencies,ids;
+        for(int mhz=4915;mhz<=6400;++mhz) frequencies.push_back({mhz,std::to_string(mhz)+" MHz"});
+        for(int id=0;id<256;++id) {char label[8];std::snprintf(label,sizeof label,"%02X",id);ids.push_back({id,label});}
+        local("spectator_frequency",g.spectator.frequency_mhz,std::move(frequencies),"Initial receive frequency. Subsequent received hop controls are followed silently.");
+        local("spectator_bandwidth",g.spectator.bandwidth_mhz,{{5,"5 MHz"},{10,"10 MHz"},{20,"20 MHz"},{40,"40 MHz"}},"Initial bandwidth. Subsequent received width controls are followed silently.");
+        local("spectator_stream_id",g.spectator.stream_id,std::move(ids),"XOR of the four air-unit radio MAC bytes. This short filter is not authentication.");
+        auto& frequency=controls_["stream_frequency"]; frequency.known=true;
+        // Pilot status reads user 0: its RX bank is parked at 2100 MHz.
+        // Use the same active-channel field as the pilot HUD.
+        const int mhz=g.spectator.mode?g.link.rx_freq:g.link.tx_freq;
+        frequency.text=mhz>0?std::to_string(mhz)+" MHz":"--";
+        auto& bandwidth=controls_["stream_bandwidth"]; bandwidth.known=true;
+        bandwidth.text=g.link.bw_step>=2 && g.link.bw_step<=5?std::to_string(5<<(g.link.bw_step-2))+" MHz":"--";
+        auto& pilot_id=controls_["pilot_stream_id"]; pilot_id.known=true; pilot_id.text="--";
+        unsigned mac[4]{};
+        if(linked && std::sscanf(g.link.peer_mac,"%x:%x:%x:%x",&mac[0],&mac[1],&mac[2],&mac[3])==4 &&
+           std::all_of(mac,mac+4,[](unsigned v){return v<=255;})) {
+            char text[8]; std::snprintf(text,sizeof text,"%02X",mac[0]^mac[1]^mac[2]^mac[3]);
+            pilot_id.text=text;
+        }
+        pilot_id.reason="Copy this ID to a spectator listening on the same channel and width.";
+        auto& status=controls_["spectator_status"];status.known=true;
+        const char* labels[]={"IDLE","WAITING FOR VIDEO","RECEIVING","UNAVAILABLE"};
+        status.text=labels[std::clamp(g.spectator_status,0,3)];
+        status.reason="The air periodically supplies recovery pictures. Missed hop controls may require manual retuning; no uplink requests are sent.";
+        if(g.spectator.mode) {
+            bind.enabled=false;bind.reason="Binding is disabled in spectator mode.";
+            details.video_mbps=g.video_mbps;details.bandwidth_step=g.link.bw_step;
+        }
+    }
     state.controls=controls_;
     state.air_info.clear();
     if(linked && u.info.version) {
@@ -171,8 +208,19 @@ std::string ReceiverControls::apply(const std::string& id,int value,uint64_t now
     if(at==controls_.end() || !at->second.enabled) throw std::runtime_error(at==controls_.end()?"Control unavailable":at->second.reason);
     if(!at->second.action && std::none_of(at->second.choices.begin(),at->second.choices.end(),[&](const auto& x){return x.value==value;}))
         throw std::invalid_argument("Unsupported control value");
+    if(id=="receiver_mode" || id=="spectator_frequency" || id=="spectator_bandwidth" || id=="spectator_stream_id") {
+        auto s=ground_.state().spectator;
+        if(id=="receiver_mode") s.mode=value;
+        else if(id=="spectator_frequency") s.frequency_mhz=value;
+        else if(id=="spectator_bandwidth") s.bandwidth_mhz=value;
+        else s.stream_id=value;
+        if(!gnd::valid(s)) throw std::invalid_argument("Invalid spectator configuration");
+        ground_.set_spectator(s);
+        return "Receiver mode/tuning saved; change requested";
+    }
     if(id=="bind") {ground_.bind();return "Binding requested";}
     if(id=="Max Bitrate") encoder_.set_max_bitrate(value);
+    else if(id=="allow_spectators") unit_.set_spectators(value != 0);
     else if(id=="Strips") encoder_.set_strips(value);
     else if(id=="Max Exposure") encoder_.set_max_exposure(value);
     else if(id=="Video Mode") camera_.set_mode(value);

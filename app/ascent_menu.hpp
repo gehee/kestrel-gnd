@@ -80,7 +80,7 @@ public:
         const auto radio=radio_.state();
         auto& control=state.controls["channel"]; control={}; control.known=true; control.action=true;
         const bool fresh=scan_.last_update_ms && now/1000>=scan_.last_update_ms && now/1000-scan_.last_update_ms<6000;
-        control.enabled=state.service.connected && state.vrx.link_valid(now) && fresh && (radio.rf_caps&gnd::RF_CAP_CHAN);
+        control.enabled=!radio.spectator.mode && state.service.connected && state.vrx.link_valid(now) && fresh && (radio.rf_caps&gnd::RF_CAP_CHAN);
         control.text=radio.chan_auto?"AUTO":"MANUAL";
         control.reason=fresh?"OK opens the live channel scan.":"Waiting for a channel scan from the radio.";
         if(!state.service.connected || !state.vrx.link_valid(now)) control.reason="Connect an air unit.";

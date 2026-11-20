@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "system/air/camera.hpp"
+#include "system/gnd/spectator.hpp"
 #include "system/air/power.hpp"
 
 namespace radio {
@@ -80,7 +81,7 @@ enum CamField { CAM_EV = 1, CAM_SAT, CAM_CONTRAST, CAM_SHARPNESS,
                 CAM_MAX_EXP_US,
                 // Ours: the strips a picture is encoded in (1: whole
                 // pictures), sky cmd 0x44 - a kestrel-air that says strips=N/M.
-                CAM_STRIPS };
+                CAM_STRIPS, CAM_ALLOW_SPECTATORS };
 
 // RF controls on our own radio: rf_control(field, value).
 enum RfField { RF_TX_POWER = 1, RF_MCS, RF_LNA, RF_BW, RF_CHAN, RF_HOP,
@@ -90,6 +91,8 @@ enum RfField { RF_TX_POWER = 1, RF_MCS, RF_LNA, RF_BW, RF_CHAN, RF_HOP,
 // model hands on to the parts they belong to, with the last command carried
 // out.
 struct State {
+    gnd::Spectator spectator;
+    bool spectator_supported = false;
     int radio_fw = 0;              // our radio's firmware: 0 stock, 1 Open8030
     int tx_power_mw = 0;           // TX Power as held (stock's encoding)
     int tx_power_want_mw = 0;      // TX Power as chosen
@@ -111,7 +114,7 @@ struct State {
     bool resend_known = false;     // the air radio's resends are known (air::Radio::take_resend)
 };
 inline bool operator==(const State& a, const State& b) {
-    return a.radio_fw == b.radio_fw && a.tx_power_mw == b.tx_power_mw &&
+    return a.spectator==b.spectator && a.spectator_supported==b.spectator_supported && a.radio_fw == b.radio_fw && a.tx_power_mw == b.tx_power_mw &&
            a.tx_power_want_mw == b.tx_power_want_mw && a.max_mcs == b.max_mcs &&
            a.frame_mode == b.frame_mode && a.max_kbps == b.max_kbps && a.max_exp_us == b.max_exp_us && a.strips == b.strips && a.max_bw_mhz == b.max_bw_mhz &&
            a.steady == b.steady && a.chan_auto == b.chan_auto && a.chan_hop == b.chan_hop &&
@@ -125,6 +128,7 @@ inline bool operator!=(const State& a, const State& b) { return !(a == b); }
 // in order, and saves what is a setting). The radio carries them out on its
 // own thread (radio::Link::apply), in order, so its settings have one writer.
 namespace cmd {
+struct Spectator { gnd::Spectator config; };
 struct AirLogs { bool on; };
 struct CameraSetting { int field; int value; };           // CamField
 struct RfControl { int field; int value; int fixed_mhz; };   // RfField; fixed_mhz: RF_CHAN's, else -1
@@ -145,7 +149,7 @@ struct ScanScreen { bool open; };     // the channel-scan screen: scan fast whil
 using Command = std::variant<cmd::AirLogs, cmd::CameraSetting, cmd::RfControl,
                              cmd::MaxBitrate, cmd::MaxBandwidth, cmd::Firmware, cmd::FrameMode,
                              cmd::MaxMcs, cmd::Steady, cmd::ChannelHop, cmd::VideoMode, cmd::Bind,
-                             cmd::RegionChanged, cmd::ScanScreen, cmd::MaxExposure, cmd::Strips>;
+                             cmd::RegionChanged, cmd::ScanScreen, cmd::MaxExposure, cmd::Strips, cmd::Spectator>;
 
 // A command as the radio's queue holds it: numbered in the order it was
 // asked (from 1; 0 is no command).

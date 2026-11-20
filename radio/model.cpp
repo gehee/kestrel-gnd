@@ -50,8 +50,13 @@ Ticket EncoderPart::set_strips(int n) { return ticket(m_.post(cmd::Strips{n}), n
 Ticket AirRadioPart::set_tx_power(int mw) { return ticket(m_.post(cmd::RfControl{RF_TX_POWER, mw, -1}), mw); }
 
 Ticket UnitPart::set_standby(bool on) { return ticket(m_.post(cmd::CameraSetting{CAM_STANDBY, on ? 1 : 0}), on); }
+Ticket UnitPart::set_spectators(bool on) { return ticket(m_.post(cmd::CameraSetting{CAM_ALLOW_SPECTATORS, on ? 1 : 0}), on); }
 Ticket UnitPart::set_logs(bool on) { return ticket(m_.post(cmd::AirLogs{on}), on); }
 
+Ticket GroundRadioPart::set_spectator(const gnd::Spectator& s) {
+    if (!gnd::valid(s)) return {};
+    return ticket(m_.post(cmd::Spectator{s}), s.mode);
+}
 Ticket GroundRadioPart::set_firmware(int firmware) {
     const CommandMsg m = m_.post(cmd::Firmware{firmware});
     return ticket(m, std::get<cmd::Firmware>(m.c).firmware);
@@ -104,7 +109,14 @@ CommandMsg Model::post(Command c) {
 
 // The commands come normalized (radio::normalize): saved as they are.
 void Model::save(Settings& s, const Command& c) {
-    if (const auto* a = std::get_if<cmd::RfControl>(&c)) {
+    if (const auto* a = std::get_if<cmd::Spectator>(&c)) {
+        if (!gnd::valid(a->config)) return;
+        s.set(setting::spectator_mode, a->config.mode);
+        s.set(setting::spectator_frequency, a->config.frequency_mhz);
+        s.set(setting::spectator_bandwidth, a->config.bandwidth_mhz);
+        s.set(setting::spectator_stream_id, a->config.stream_id);
+        s.flush();
+    } else if (const auto* a = std::get_if<cmd::RfControl>(&c)) {
         // A channel picked on the channel page is FIXED from here on;
         // AUTO HOP is off with it.
         if (a->fixed_mhz < 0) return;
@@ -181,6 +193,8 @@ void Model::held(const State& h) {
     std::lock_guard<bus::PiMutex> lk(mu_);
     if (h == held_) return;
     held_ = h;
+    radio_s_.spectator = h.spectator;
+    radio_s_.spectator_supported = h.spectator_supported;
     radio_s_.radio_fw = h.radio_fw;
     radio_s_.max_mcs = h.max_mcs;
     radio_s_.frame_mode = h.frame_mode;

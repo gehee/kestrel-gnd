@@ -106,6 +106,7 @@ struct UnitState {
 class Unit : public Part<UnitState> {
 public:
     virtual Ticket set_standby(bool on) = 0;   // AIR UNIT > Standby
+    virtual Ticket set_spectators(bool) { return {}; }
     virtual Ticket set_logs(bool on) = 0;      // its flight logs (kestrel-air): HUD > Debug Info
 };
 

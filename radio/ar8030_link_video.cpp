@@ -1,6 +1,7 @@
 // The AR8030 link's video: the stream from the baseband (or a replay) split
 // into slices for VideoOut, the pictures' timing and keyframes.
 #include "radio/ar8030_link_detail.hpp"
+#include "radio/spectator_announcement.hpp"
 
 using namespace radio;
 
@@ -93,6 +94,7 @@ void Ar8030Link::vhdr_strip_seen(bool strip) {
 }
 
 bool Ar8030Link::ask_keyframe(const char* why) {
+    if (spectator_.mode) return false; // Only the pilot may request an IDR.
     if (now_ms() - idr_asked_ms_ < 1500) return false;
     idr_asked_ms_ = now_ms();
     if (why) printf("ar8030: %s\n", why);
@@ -259,6 +261,18 @@ void Ar8030Link::emit_nal(const uint8_t* nal, size_t len) {
     // The air unit's IMU samples (kestrel-air --imu) ride in SEI after each picture's last
     // slice: read out and published (radio/air_imu). Taken whatever the state of the
     // picture; the decoder drops the SEI itself below.
+    if (spectator_.mode && codec == VideoCodec::H265 && nal_type == 40) {
+        radio::spectator::Announcement a;
+        if (radio::spectator::announcement(nal, len, a)) {
+            const unsigned id=a.mac[0]^a.mac[1]^a.mac[2]^a.mac[3];
+            if (id == unsigned(spectator_.stream_id)) {
+                if (!spectator_announced_ms_ || now_ms()-spectator_announced_ms_>1000)
+                    printf("spectator: advertised stream %02X, %ux%u at %u fps, recovery %u ms\n",
+                           id,a.width,a.height,a.fps,a.recovery_ms);
+                spectator_announced_ms_=now_ms();
+            }
+        }
+    }
     if (codec == VideoCodec::H265 && (nal_type == 39 || nal_type == 40) && imu_out_.watched())
         imu_out_.sei(nal, len);
 

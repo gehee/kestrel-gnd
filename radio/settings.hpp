@@ -9,6 +9,10 @@
 #include "system/air/power.hpp"
 
 namespace radio::setting {
+inline constexpr Setting<int> spectator_mode{"spectator_mode", 0};
+inline constexpr Setting<int> spectator_frequency{"spectator_frequency", 5839};
+inline constexpr Setting<int> spectator_bandwidth{"spectator_bandwidth", 40};
+inline constexpr Setting<int> spectator_stream_id{"spectator_stream_id", 0};
 
 // RADIO: the channel (FIXED, MHz; 0 for none) and AUTO HOP; the caps on the
 // video's bitrate (kbps, 0 none), bandwidth (MHz) and MCS (-1 AUTO); Steady.
