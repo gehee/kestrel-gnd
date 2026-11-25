@@ -397,8 +397,9 @@ const char* OSD::menu_help_text(int tab, int i, const char* fallback) {
                             "steady latency; indoors the picture can get soft. Enter applies it, no restart.";
             case 2:  return "The rate follows the signal and resends repair what is lost: the most "
                             "picture, latency varies more. Enter applies it, no restart.";
-            default: return "The radio drops its rate only at about 5% errored frames, for a short "
-                            "time. The default. Enter applies it, no restart.";
+            default: return "The rate follows the signal, at most MCS 8 at 40 MHz, and resends repair what "
+                            "is lost: more picture than LOW LATENCY, steadier than QUALITY. The default. "
+                            "Enter applies it, no restart.";
             }
         }
     }
