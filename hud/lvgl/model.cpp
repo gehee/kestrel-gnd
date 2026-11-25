@@ -170,6 +170,7 @@ std::vector<MenuRow> Model::rows(uint64_t now) const {
             result.push_back(unavailable("power", "TX Power", "Radio output. More reaches further and runs hotter."));
         }
         if (backend.vrx.link_valid(now) && backend.controls.count("max_mcs")) result.push_back(unavailable("max_mcs", "Max MCS", "The highest receive MCS allowed by Open8030."));
+        if (backend.vrx.link_valid(now) && backend.controls.count("link_profile")) result.push_back(unavailable("link_profile", "Link Profile", "LOW LATENCY drops the rate at the first errored frames: steady latency, a softer picture indoors. QUALITY follows the signal and lets resends repair what is lost: the most picture, latency varies more. BALANCED, the default: as QUALITY, at most MCS 8 at 40 MHz. Applied at once, no restart."));
         if (backend.vrx.link_valid(now) && backend.controls.count("max_bw")) result.push_back(unavailable("max_bw", "Max Bandwidth", "Limit the video link width. AUTO leaves the firmware policy in control; it does not enable automatic adaptation."));
         result.push_back(unavailable("radio_firmware", "VRX Radio Firmware", "This VRX's own radio firmware. The air unit's is not changed."));
         if (backend.vrx.link_valid(now)) result.push_back(unavailable("standby", "Auto Standby", "The air unit's low-power standby."));

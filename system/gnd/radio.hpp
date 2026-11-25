@@ -125,7 +125,7 @@ struct RadioState {
 class Radio : public Part<RadioState> {
 public:
     virtual Ticket set_firmware(int firmware) = 0;    // 0 stock, 1 Open8030: the radio restarts on it
-    virtual Ticket set_link_profile(int profile) = 0; // 0 low latency, 1 balanced, 2 quality: the radio restarts on it
+    virtual Ticket set_link_profile(int profile) = 0; // 0 low latency, 1 balanced, 2 quality: live, no restart
     virtual Ticket set_frame(int mode) = 0;           // 0 standard, 2 short
     virtual Ticket set_max_mcs(int mcs) = 0;          // -1: none
     virtual Ticket set_max_bandwidth(int mhz) = 0;    // 0: no cap

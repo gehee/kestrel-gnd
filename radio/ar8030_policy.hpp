@@ -13,4 +13,8 @@ inline void ar8030_load_policy(Ar8030Config& cfg, Settings& settings, int defaul
     cfg.chan_hop = settings.get(radio::setting::ar8030_chan_hop) == 1 ? 1 : 0;
     const int fixed = settings.get(radio::setting::ar8030_chan_mhz);
     cfg.chan_fixed_mhz = fixed >= 2000 && fixed <= 7000 ? fixed : 0;
+    // RADIO > Link Profile: the radio config's profile sent at link-up
+    // (out of range: BALANCED).
+    const int profile = settings.get(radio::setting::ar8030_link_profile);
+    cfg.link_profile = profile >= 0 && profile <= 2 ? profile : 1;
 }

@@ -295,12 +295,7 @@ int read_start_options(int argc, char** argv, Settings& settings, StartOptions& 
 	const char *open8030_fw = bsp::board().radio.open8030_fw;
 	ar_cfg.radio_fw      = *open8030_fw && access(open8030_fw, R_OK) == 0 &&
 	                              settings.get(radio::setting::ar8030_firmware) != 0 ? 1 : 0;
-	// RADIO > Link Profile: the radio config's profile kestrel-gnd sends at
-	// link-up (out of range: BALANCED).
-	{
-		const int p = settings.get(radio::setting::ar8030_link_profile);
-		ar_cfg.link_profile = p >= 0 && p <= 2 ? p : 1;
-	}
+
 	// The radio's TDD frame mode (RADIO > Radio Frame): 2 short, 0 standard.
 	ar_cfg.frame_mode    = settings.get(radio::setting::ar8030_frame_mode) == 0 ? 0 : 2;
 	ar_cfg.replay_stock_rf = settings.get(radio::setting::replay_stock_rf);

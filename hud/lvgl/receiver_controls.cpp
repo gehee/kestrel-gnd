@@ -142,6 +142,7 @@ void ReceiverControls::update(BackendState& state, uint64_t now) {
     std::vector<ReceiverChoice> mcs{{-1,"AUTO"}};
     for(int i=0;i<12;++i) mcs.push_back({i,"MCS "+std::to_string(i)});
     choice("max_mcs",g.max_mcs,true,g.radio_fw==1,mcs,"Requires Open8030.");
+    choice("link_profile",g.link_profile,true,g.radio_fw==1,{{0,"LOW LATENCY"},{1,"BALANCED"},{2,"QUALITY"}},"Requires Open8030.");
     auto& fw=controls_["radio_firmware"]; fw.known=true; fw.text=g.radio_fw?"OPEN8030":"STOCK";
     fw.reason="Native SDIO firmware is supplied by fpvOS; live firmware replacement is not supported.";
     auto& bind=controls_["bind"]; bind.known=true; bind.enabled=state.service.connected; bind.action=true;
@@ -188,6 +189,7 @@ std::string ReceiverControls::apply(const std::string& id,int value,uint64_t now
     else if(id=="max_bw") ground_.set_max_bandwidth(value);
     else if(id=="standby") unit_.set_standby(value!=0);
     else if(id=="max_mcs") ground_.set_max_mcs(value);
+    else if(id=="link_profile") ground_.set_link_profile(value);
     else {
         const std::map<std::string,air::CameraField> fields{{"Rotate",air::CameraField::ANGLE},{"Scene",air::CameraField::SCENE},
             {"EV",air::CameraField::EV},{"White Balance",air::CameraField::AWB},{"Saturation",air::CameraField::SAT},

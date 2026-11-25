@@ -182,6 +182,14 @@ int main() {
         bool bad_bw=false;
         try {controls.apply("max_bw",80,now);} catch(const std::invalid_argument&) {bad_bw=true;}
         check(bad_bw,"Reject unsupported bandwidth");
+        // Link Profile: the radio config's profile index, sent live.
+        check(has_row("link_profile") && state.controls.at("link_profile").choices.size()==3 &&
+              state.controls.at("link_profile").value==1,"Native radio menu offers the three link profiles, BALANCED by default");
+        controls.apply("link_profile",2,now); check(ground.last==2,"QUALITY sends profile 2");
+        controls.apply("link_profile",0,now); check(ground.last==0,"LOW LATENCY sends profile 0");
+        bool bad_profile=false;
+        try {controls.apply("link_profile",3,now);} catch(const std::invalid_argument&) {bad_profile=true;}
+        check(bad_profile,"Reject an unknown link profile");
         controls.apply("power_mode",1,now);
         check(air.last==101,"Stock Lite AUTO selects its supported 100mW cap");
         air.value.tx_power_want_mw=101; ++air.revision; controls.update(state,now);
