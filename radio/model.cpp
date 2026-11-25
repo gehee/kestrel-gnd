@@ -56,6 +56,10 @@ Ticket GroundRadioPart::set_firmware(int firmware) {
     const CommandMsg m = m_.post(cmd::Firmware{firmware});
     return ticket(m, std::get<cmd::Firmware>(m.c).firmware);
 }
+Ticket GroundRadioPart::set_link_profile(int profile) {
+    const CommandMsg m = m_.post(cmd::LinkProfile{profile});
+    return ticket(m, std::get<cmd::LinkProfile>(m.c).profile);
+}
 Ticket GroundRadioPart::set_frame(int mode) {
     const CommandMsg m = m_.post(cmd::FrameMode{mode});
     return ticket(m, std::get<cmd::FrameMode>(m.c).mode);
@@ -120,6 +124,8 @@ void Model::save(Settings& s, const Command& c) {
         s.set(setting::ar8030_max_bw_mhz, a->mhz);         // and to a kestrel-air that takes it
     } else if (const auto* a = std::get_if<cmd::Firmware>(&c)) {
         s.set(setting::ar8030_firmware, a->firmware);      // bb_only.sh loads it with the radio
+    } else if (const auto* a = std::get_if<cmd::LinkProfile>(&c)) {
+        s.set(setting::ar8030_link_profile, a->profile);   // sent to the radio at every link-up
     } else if (const auto* a = std::get_if<cmd::FrameMode>(&c)) {
         s.set(setting::ar8030_frame_mode, a->mode);
     } else if (const auto* a = std::get_if<cmd::MaxMcs>(&c)) {
@@ -182,6 +188,7 @@ void Model::held(const State& h) {
     if (h == held_) return;
     held_ = h;
     radio_s_.radio_fw = h.radio_fw;
+    radio_s_.link_profile = h.link_profile;
     radio_s_.max_mcs = h.max_mcs;
     radio_s_.frame_mode = h.frame_mode;
     radio_s_.max_bw_mhz = h.max_bw_mhz;

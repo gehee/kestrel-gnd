@@ -137,6 +137,7 @@ struct FakeRadio : Fake<gnd::Radio> {
     std::deque<gnd::ScanSample> scans;
     std::deque<float> rates;
     Ticket set_firmware(int firmware) override { return ask(firmware); }
+    Ticket set_link_profile(int profile) override { return ask(profile); }
     Ticket set_frame(int mode) override { return ask(mode); }
     Ticket set_max_mcs(int mcs) override { return ask(mcs); }
     Ticket set_max_bandwidth(int mhz) override { return ask(mhz); }

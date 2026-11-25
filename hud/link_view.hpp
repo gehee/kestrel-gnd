@@ -12,11 +12,12 @@ namespace hud {
 
 // What the menu asked, each with its ticket (Ticket::seq 0: nothing asked).
 struct Asked {
-    Ticket kbps, bw, frame, mcs, steady, fw, hop, exp, strips;
+    Ticket kbps, bw, frame, mcs, steady, fw, profile, hop, exp, strips;
 };
 
 struct LinkView {
     int radio_fw = 0;              // our radio's firmware: 0 stock, 1 Open8030
+    int link_profile = 1;          // its Open8030 config: 0 low latency, 1 balanced, 2 quality
     int tx_power_mw = 0;           // the air unit's TX Power as it runs (stock's encoding)
     int tx_power_want_mw = 0;      // ... as chosen
     int max_mcs = -1;

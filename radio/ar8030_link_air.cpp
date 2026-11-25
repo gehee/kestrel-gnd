@@ -1198,7 +1198,7 @@ void Ar8030Link::send_caps() {
             tried = t;
             const bool live = (req & 1) != 0;
             const int mhz = max_bw_mhz;
-            int rc_bw = 1, rc_mcs = 1, rc_st = 1;   // 1: not sent
+            int rc_bw = 1, rc_mcs = 1, rc_st = 1, rc_lp = 1;   // 1: not sent
             if (mhz > 0 || live) {
                 const uint8_t gear = mhz == 0 || mhz >= 40 ? 5 : mhz >= 20 ? 4 : mhz >= 10 ? 3 : 2;
                 bb_set_bandwidth_t p;
@@ -1216,20 +1216,32 @@ void Ar8030Link::send_caps() {
                 const uint8_t cap = max_mcs < 0 ? 0xff : (uint8_t)(int8_t)max_mcs;
                 rc_mcs = arlink_request(0x0c5a0036, &cap, 1, nullptr, 0, &got, 500);
             }
+            // RADIO > Link Profile: the profile's index in the radio config
+            // (0 low latency, 1 balanced, 2 quality), live, no restart. The
+            // reply is the one in use and how many the config has.
+            uint8_t lp_reply[2] = {0, 0};
+            {
+                const uint8_t lp = (uint8_t)link_profile.load();
+                rc_lp = arlink_request(0x0c5a0038, &lp, 1, lp_reply, sizeof lp_reply, &got, 500);
+            }
             if (steady || live) {
                 const uint8_t st = steady ? 1 : 0;
                 rc_st = arlink_request(0x0c5a0037, &st, 1, nullptr, 0, &got, 500);
             }
             auto rc = [](int r) { return r == 1 ? std::string("not sent") : std::to_string(r); };
-            if (rc_bw != 1 || rc_mcs != 1 || rc_st != 1)
-            printf("ar8030: caps: %s (SET 22 -> %s), MCS %s (-> %s), steady latency %s (-> %s)\n",
+            static const char* const kProfile[] = { "low latency", "balanced", "quality" };
+            if (rc_bw != 1 || rc_mcs != 1 || rc_st != 1 || rc_lp != 1)
+            printf("ar8030: caps: %s (SET 22 -> %s), MCS %s (-> %s), steady latency %s (-> %s), link profile %s (-> %s, %u of %u in use)\n",
                    mhz ? ("up to " + std::to_string(mhz) + " MHz").c_str() : "AUTO", rc(rc_bw).c_str(),
                    max_mcs < 0 ? "AUTO" : std::to_string(max_mcs).c_str(), rc(rc_mcs).c_str(),
-                   steady ? "on" : "off", rc(rc_st).c_str());
+                   steady ? "on" : "off", rc(rc_st).c_str(), kProfile[link_profile.load() % 3], rc(rc_lp).c_str(),
+                   (unsigned)lp_reply[0], (unsigned)lp_reply[1]);
             auto taken = [](int r) { return r == 0 || r == 1 || r == -95; };
             // Taken as of req: a change made meanwhile is still due (the count
             // moved on), and the menu's bit goes only if none came.
-            if (taken(rc_bw) && taken(rc_mcs) && taken(rc_st)) {
+            // A config without profiles has one: index 1 is refused (-22),
+            // and the radio runs on that one - taken, as an old radio's -95.
+            if (taken(rc_bw) && taken(rc_mcs) && taken(rc_st) && (taken(rc_lp) || rc_lp == -22)) {
                 caps_sent_ = req >> 1;
                 unsigned r = req;
                 caps_req_.compare_exchange_strong(r, req & ~1u);

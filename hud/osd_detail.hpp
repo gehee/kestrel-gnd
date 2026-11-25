@@ -116,6 +116,11 @@ static inline int ar_frame_index(int mode) { return mode == 0 ? 1 : 0; }
 // default), or stock's.
 static const char* kArFwLabels[] = { "STOCK", "OPEN8030" };
 static const int kArFwCount = 2;
+// Link Profile (Open8030 on the goggle): which of its radio config's link
+// profiles it uses (ar8030_link_profile, sent live): when the rate drops for
+// errored frames.
+static const char* kArProfileLabels[] = { "LOW LATENCY", "BALANCED", "QUALITY" };
+static const int kArProfileCount = 3;
 // DISPLAY > Refresh Sync's values (display::RefreshSync::mode).
 static inline const char *refresh_sync_label(int v) {
     return v == 2 ? "FOLLOW" : v == 1 ? "NUDGE" : "OFF";

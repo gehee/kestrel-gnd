@@ -26,7 +26,7 @@ Ar8030Link::Ar8030Link(radio::Model& model, const Ar8030Config& cfg,
       standby_mode(cfg.standby_mode), prj_rf_bw(cfg.prj_rf_bw), prj_rf_pwr_mw(cfg.prj_rf_pwr_mw),
       air_bw(cfg.air_bw), max_kbps(cfg.max_kbps), max_exp_us(cfg.max_exp_us), strips(cfg.strips), air_logs(cfg.air_logs),
       stream_decode(cfg.stream_decode), max_bw_mhz(cfg.max_bw_mhz), max_mcs(cfg.max_mcs),
-      steady(cfg.steady), radio_fw(cfg.radio_fw), frame_mode(cfg.frame_mode),
+      steady(cfg.steady), radio_fw(cfg.radio_fw), link_profile(cfg.link_profile), frame_mode(cfg.frame_mode),
       replay_stock_rf(cfg.replay_stock_rf), msp_bb_port(cfg.msp_bb_port),
       dump_path(cfg.dump_path), replay_path(cfg.replay_path),
       video_dump_path(cfg.video_dump_path), decode_enabled(cfg.decode_enabled),
@@ -66,7 +66,7 @@ Ar8030Link::~Ar8030Link() { disconnect_bb(); }
 // loads with restarts it here.
 void Ar8030Link::apply(const radio::Command& c) {
     using namespace radio;
-    static_assert(std::variant_size_v<Command> == 16, "a new command: carry it out here (and save it in Model::save if it is a setting)");
+    static_assert(std::variant_size_v<Command> == 17, "a new command: carry it out here (and save it in Model::save if it is a setting)");
     if (const auto* a = std::get_if<cmd::AirLogs>(&c)) {
         air_logs = a->on;
         request_setting(CAM_AIR_LOGS, a->on);
@@ -113,6 +113,11 @@ void Ar8030Link::apply(const radio::Command& c) {
         const int was = radio_fw;
         radio_fw = a->firmware;
         if (a->firmware != was) restart_with(radio::setting::ar8030_firmware, a->firmware, a->firmware ? "radio firmware Open8030" : "radio firmware stock");
+    } else if (const auto* a = std::get_if<cmd::LinkProfile>(&c)) {
+        // Which of the Open8030 config's link profiles our radio uses: sent
+        // live (request 0x0c5a0038, send_caps), at once and at every link-up.
+        link_profile = a->profile;
+        caps_now(true);
     } else if (const auto* a = std::get_if<cmd::FrameMode>(&c)) {
         frame_mode = a->mode;
         frame_mode_changed.store(true);
@@ -144,6 +149,7 @@ void Ar8030Link::apply(const radio::Command& c) {
 radio::State Ar8030Link::held() const {
     radio::State s;
     s.radio_fw = radio_fw;
+    s.link_profile = link_profile;
     s.tx_power_mw = tx_power_mw;
     s.tx_power_want_mw = tx_power_want_mw;
     s.max_mcs = max_mcs;

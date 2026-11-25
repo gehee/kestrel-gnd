@@ -46,6 +46,7 @@ struct FakeLink : radio::Link {
         if (const auto* m = std::get_if<radio::cmd::MaxBitrate>(&c)) h.max_kbps = m->kbps;
         if (const auto* m = std::get_if<radio::cmd::MaxBandwidth>(&c)) h.max_bw_mhz = m->mhz;
         if (const auto* m = std::get_if<radio::cmd::Firmware>(&c)) h.radio_fw = m->firmware;
+        if (const auto* m = std::get_if<radio::cmd::LinkProfile>(&c)) h.link_profile = m->profile;
         if (const auto* m = std::get_if<radio::cmd::ChannelHop>(&c)) h.chan_hop = m->hop;
         if (const auto* m = std::get_if<radio::cmd::ScanScreen>(&c)) scan = m->open;
     }
@@ -325,6 +326,14 @@ static void commands_test(Rig& b, HudLike& h) {
     b.model.encoder().set_max_bitrate(4321);
     b.model.radio().set_firmware(1);
     CHECK(st.get(rs::ar8030_max_kbps) == 4321 && st.text(rs::ar8030_firmware) == "1");
+    // Link Profile: BALANCED until asked, 0..2 saved as asked, anything else BALANCED.
+    CHECK(st.get(rs::ar8030_link_profile) == 1);
+    CHECK(b.model.radio().set_link_profile(0).value == 0 && st.get(rs::ar8030_link_profile) == 0);
+    CHECK(b.model.radio().set_link_profile(2).value == 2 && st.get(rs::ar8030_link_profile) == 2);
+    CHECK(b.model.radio().set_link_profile(7).value == 1 && st.get(rs::ar8030_link_profile) == 1);
+    CHECK(b.model.radio().set_link_profile(-1).value == 1);
+    b.model.take_commands(f);                   // carried out: held and shown
+    CHECK(std::get<radio::cmd::LinkProfile>(f.applied.back()).profile == 1 && f.h.link_profile == 1);
     // Max Exposure: saved too, 4 ms until asked.
     CHECK(st.get(rs::ar8030_max_exp_us) == 4000);
     const Ticket te = b.model.encoder().set_max_exposure(2000);

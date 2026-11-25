@@ -199,6 +199,7 @@ void OSD::handle_key(int key) {
              menu_ar_maxmcs = rs.max_mcs < 0 ? 0 : rs.max_mcs + 1;
              menu_ar_steady = rs.steady;
              menu_ar_fw = rs.radio_fw;
+             menu_ar_profile = rs.link_profile;
              menu_refresh_options();      // seeded: work out what row 0 shows
         }
         render_requested = true;
@@ -462,6 +463,10 @@ void OSD::handle_key(int key) {
                         case 13:
                             // Saved; a change restarts the radio with that firmware.
                             asked_.fw = parts_.radio.set_firmware(menu_ar_fw);
+                            break;
+                        case 17:
+                            // Saved; a change restarts the radio with that config.
+                            asked_.profile = parts_.radio.set_link_profile(menu_ar_profile);
                             break;
                         case 9:
                             // Bind. Parked for the RX thread - the menu runs on the

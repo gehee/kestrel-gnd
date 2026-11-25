@@ -14,6 +14,7 @@ struct Radio : gnd::Radio {
     uint32_t version() const override {return 0;}
     void watch(bus::Waker*) override {}
     Ticket set_firmware(int) override {return {};}
+    Ticket set_link_profile(int) override {return {};}
     Ticket set_frame(int) override {return {};}
     Ticket set_max_mcs(int) override {return {};}
     Ticket set_max_bandwidth(int) override {return {};}

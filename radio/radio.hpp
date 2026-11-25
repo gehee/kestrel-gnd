@@ -91,6 +91,7 @@ enum RfField { RF_TX_POWER = 1, RF_MCS, RF_LNA, RF_BW, RF_CHAN, RF_HOP,
 // out.
 struct State {
     int radio_fw = 0;              // our radio's firmware: 0 stock, 1 Open8030
+    int link_profile = 1;          // its Open8030 config: 0 low latency, 1 balanced, 2 quality
     int tx_power_mw = 0;           // TX Power as held (stock's encoding)
     int tx_power_want_mw = 0;      // TX Power as chosen
     int max_mcs = -1;
@@ -111,7 +112,7 @@ struct State {
     bool resend_known = false;     // the air radio's resends are known (air::Radio::take_resend)
 };
 inline bool operator==(const State& a, const State& b) {
-    return a.radio_fw == b.radio_fw && a.tx_power_mw == b.tx_power_mw &&
+    return a.radio_fw == b.radio_fw && a.link_profile == b.link_profile && a.tx_power_mw == b.tx_power_mw &&
            a.tx_power_want_mw == b.tx_power_want_mw && a.max_mcs == b.max_mcs &&
            a.frame_mode == b.frame_mode && a.max_kbps == b.max_kbps && a.max_exp_us == b.max_exp_us && a.strips == b.strips && a.max_bw_mhz == b.max_bw_mhz &&
            a.steady == b.steady && a.chan_auto == b.chan_auto && a.chan_hop == b.chan_hop &&
@@ -133,6 +134,7 @@ struct MaxExposure { int us; };        // 0: no cap
 struct Strips { int n; };              // 1: whole pictures, 2-4 strips
 struct MaxBandwidth { int mhz; };      // 0: no cap
 struct Firmware { int firmware; };
+struct LinkProfile { int profile; };   // 0 low latency, 1 balanced, 2 quality
 struct FrameMode { int mode; };
 struct MaxMcs { int mcs; };
 struct Steady { int on; };
@@ -145,7 +147,8 @@ struct ScanScreen { bool open; };     // the channel-scan screen: scan fast whil
 using Command = std::variant<cmd::AirLogs, cmd::CameraSetting, cmd::RfControl,
                              cmd::MaxBitrate, cmd::MaxBandwidth, cmd::Firmware, cmd::FrameMode,
                              cmd::MaxMcs, cmd::Steady, cmd::ChannelHop, cmd::VideoMode, cmd::Bind,
-                             cmd::RegionChanged, cmd::ScanScreen, cmd::MaxExposure, cmd::Strips>;
+                             cmd::RegionChanged, cmd::ScanScreen, cmd::MaxExposure, cmd::Strips,
+                             cmd::LinkProfile>;
 
 // A command as the radio's queue holds it: numbered in the order it was
 // asked (from 1; 0 is no command).
@@ -157,7 +160,8 @@ struct CommandMsg {
 // Each value in the range the radio and the settings file take, whatever
 // was asked: a channel picked is FIXED from then on (fixed_mhz),
 // Max Bandwidth 0 (no cap), 5, 10, 20 or 40 (a stock radio takes 20 or 40),
-// the frame 0 or 2, Max MCS 0..13 or -1, the rest on or off.
+// the frame 0 or 2, Max MCS 0..13 or -1, the link profile 0..2 (else
+// BALANCED, 1), the rest on or off.
 inline void normalize(Command& c) {
     if (auto* a = std::get_if<cmd::RfControl>(&c)) {
         a->fixed_mhz = a->field == RF_CHAN ? (a->value > 0 ? a->value / 1000 : 0) : -1;
@@ -166,6 +170,8 @@ inline void normalize(Command& c) {
         a->mhz = m == 0 || m == 5 || m == 10 || m == 20 ? m : 40;
     } else if (auto* a = std::get_if<cmd::Firmware>(&c)) {
         a->firmware = a->firmware == 1 ? 1 : 0;
+    } else if (auto* a = std::get_if<cmd::LinkProfile>(&c)) {
+        a->profile = a->profile >= 0 && a->profile <= 2 ? a->profile : 1;
     } else if (auto* a = std::get_if<cmd::FrameMode>(&c)) {
         a->mode = a->mode == 0 ? 0 : 2;
     } else if (auto* a = std::get_if<cmd::MaxMcs>(&c)) {

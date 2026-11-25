@@ -6,6 +6,7 @@ LinkView link_view(const gnd::RadioState& r, const air::RadioState& a, const air
                    const Asked& asked) {
     LinkView v;
     v.radio_fw = shown(asked.fw, r.radio_fw, r.taken);
+    v.link_profile = shown(asked.profile, r.link_profile, r.taken);
     v.max_mcs = shown(asked.mcs, r.max_mcs, r.taken);
     v.frame_mode = shown(asked.frame, r.frame_mode, r.taken);
     v.max_bw_mhz = shown(asked.bw, r.max_bw_mhz, r.taken);

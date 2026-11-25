@@ -248,6 +248,7 @@ class Ar8030Link : public radio::Link, private radio::VideoOut::Source {
             while (!caps_req_.compare_exchange_weak(v, (v + 2) | (live ? 1u : 0u))) {}
         }
         std::atomic<int>  radio_fw;   // ar8030_firmware: 0 stock, 1 Open8030 (bb_only.sh loads it with the radio)
+        std::atomic<int>  link_profile;   // ar8030_link_profile: 0 low latency, 1 balanced, 2 quality (request 0x0c5a0038)
         // ar8030_frame_mode (RADIO > Radio Frame): the TDD frame mode asked of
         // the radio at start and after every link-up, 2 short or 0 standard
         // (set_frame_mode()); frame_mode_changed: the menu changed it, send now.

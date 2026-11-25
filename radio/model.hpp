@@ -91,6 +91,7 @@ public:
         rates_.set_waker(w);
     }
     Ticket set_firmware(int firmware) override;
+    Ticket set_link_profile(int profile) override;
     Ticket set_frame(int mode) override;
     Ticket set_max_mcs(int mcs) override;
     Ticket set_max_bandwidth(int mhz) override;

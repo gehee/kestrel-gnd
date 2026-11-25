@@ -65,6 +65,7 @@ struct Ar8030Config {
     int max_mcs = -1;                // ar8030_max_mcs: Open8030 here, -1 none
     int steady = 0;                  // ar8030_steady: Open8030 here
     int radio_fw = 0;                // ar8030_firmware: 0 stock, 1 Open8030 (bb_only.sh loads it)
+    int link_profile = 1;            // ar8030_link_profile: 0 low latency, 1 balanced, 2 quality (sent live)
     int frame_mode = 2;              // ar8030_frame_mode: 2 short, 0 standard
     int replay_stock_rf = 1;         // replay stock's startup SET sequence verbatim
     // BB socket port carrying the flight controller's MSP stream, or 0 to

@@ -28,6 +28,7 @@ struct Unit : Fake<air::Unit,air::UnitState> {
 };
 struct Ground : Fake<gnd::Radio,gnd::RadioState> {
     Ticket set_firmware(int v) override {return request(v);}
+    Ticket set_link_profile(int v) override {return request(v);}
     Ticket set_frame(int v) override {return request(v);}
     Ticket set_max_mcs(int v) override {return request(v);}
     Ticket set_max_bandwidth(int v) override {return request(v);}

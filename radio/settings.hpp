@@ -30,6 +30,10 @@ inline constexpr Setting<int> ar8030_steady{"ar8030_steady", 0};
 // its TDD frame (2 short, 0 standard): bb_only.sh loads them with the radio.
 inline constexpr Setting<int> ar8030_firmware{"ar8030_firmware", 1};
 inline constexpr Setting<int> ar8030_frame_mode{"ar8030_frame_mode", 2};
+// RADIO > Link Profile, Open8030 on the VRX: the radio config bb_only.sh
+// uploads with it (0 open8030-lowlatency.json, 1 open8030.json, 2
+// open8030-quality.json).
+inline constexpr Setting<int> ar8030_link_profile{"ar8030_link_profile", 1};
 // TX power, mW in stock's encoding (N hold, N+1 auto capped at N).
 inline constexpr Setting<int> tx_power_mw{"tx_power_mw", kArPwrDefaultMw};
 // The last air unit linked to (its radio MAC, as a number).

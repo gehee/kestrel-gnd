@@ -533,6 +533,7 @@ class OSD : public display::VideoListener {
         int menu_ar_maxmcs = 0;    // RADIO > Max MCS: 0 AUTO, n = MCS n-1 (Open8030)
         int menu_ar_steady = 0;    // RADIO > Steady Latency: 0 OFF, 1 ON (Open8030)
         int menu_ar_fw = 0;        // RADIO > VRX Radio Firmware: 0 STOCK, 1 OPEN8030
+        int menu_ar_profile = 1;   // RADIO > Link Profile: 0 LOW LATENCY, 1 BALANCED, 2 QUALITY (Open8030)
         int menu_cam_ev       = 3;  // index into kEvSteps below (3 = 0.0 EV)
         int menu_cam_sat      = 0;
         int menu_cam_contrast = 0;  // 0-15: the config packs it into a nibble

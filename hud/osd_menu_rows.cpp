@@ -39,6 +39,8 @@ std::vector<std::pair<const char*, int>> OSD::ar_rf_items() const {
     // below it; stock: 20 or 40, the radio restarts).
     v.push_back({"Max Bandwidth", 11});
     v.push_back({"VRX Radio Firmware", 13});
+    // Open8030 on the goggle: which of its radio configs it runs.
+    if (link_->radio_fw == 1) v.push_back({"Link Profile", 17});
     // MCS, Bandwidth and LNA Mode were removed rather than left visible.
     // BB_SET_MCS has no direction field, so it can only set our own transmit -
     // the video MCS is the air unit's choice, driven by the policy table in
@@ -386,6 +388,20 @@ const char* OSD::menu_help_text(int tab, int i, const char* fallback) {
                         "the pictures - FOLLOW only for a screen that takes any frame length.";
         }
     }
+    if (tab == 1) {
+        // Link Profile: what the value shown does (Enter applies it live).
+        const auto rf = ar_rf_items();
+        if (i >= 0 && i < (int)rf.size() && rf[i].second == 17) {
+            switch (menu_ar_profile) {
+            case 0:  return "The radio drops its rate at the first errored frames, so few resends and "
+                            "steady latency; indoors the picture can get soft. Enter applies it, no restart.";
+            case 2:  return "The rate follows the signal and resends repair what is lost: the most "
+                            "picture, latency varies more. Enter applies it, no restart.";
+            default: return "The radio drops its rate only at about 5% errored frames, for a short "
+                            "time. The default. Enter applies it, no restart.";
+            }
+        }
+    }
     if (tab == kTabDvr && i == 0) {
         switch (menu_dvr_source) {
         case 1:  return "Records the screen - video and HUD, as you see them - 60 times a second.\n"
@@ -605,6 +621,8 @@ std::vector<OSD::MenuItem> OSD::menu_items(int tab) const {
                     "This VRX's own radio firmware: STOCK, or OPEN8030 (open source) when "
                     "it is installed. The air unit's is not changed. Enter applies it: the "
                     "radio restarts, the picture is back in ~10 s."}); break;
+                case 17: items.push_back({it.first, 1,
+                    "How this VRX's radio trades picture for steady latency."}); break;  // see menu_help_text
                 case 15: items.push_back({it.first, 1,
                     "Each block the air radio has to send again takes the link one MCS "
                     "lower at once, and it climbs back only after 5 s without one: steadier "
@@ -1110,6 +1128,7 @@ void OSD::menu_apply_change(int tab, int index, int dir) {
                case 15: menu_ar_steady = menu_ar_steady ? 0 : 1; break;  // applied on Enter
                case 12: menu_ar_frame = menu_step(menu_ar_frame, dir, kArFrameCount); break;  // applied on Enter
                case 13: menu_ar_fw = menu_step(menu_ar_fw, dir, kArFwCount); break;  // applied on Enter
+               case 17: menu_ar_profile = menu_step(menu_ar_profile, dir, kArProfileCount); break;  // applied on Enter
                default: break;
            }
        }
@@ -1412,6 +1431,9 @@ void OSD::menu_value_text(int tab, int i, char* val_buf, size_t cap) {
                     break;
                 case 13:    // VRX Radio Firmware
                     snprintf(val_buf, cap, "< %s >", kArFwLabels[menu_ar_fw]);
+                    break;
+                case 17:    // Link Profile
+                    snprintf(val_buf, cap, "< %s >", kArProfileLabels[menu_ar_profile]);
                     break;
                 default: break;
             }
