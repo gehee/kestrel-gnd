@@ -25,7 +25,7 @@ are logged once; normal shutdown turns the LED off. A forced process kill may
 leave the last color until the next start. Firmware-update indication is not
 owned by Kestrel and is not implemented here.
 
-The P1 VRX HD board enables its SPI LED chain through device tree. Other P1
+The P1 VRX and P1 goggles enable their SPI LED chain through device tree. Other
 receiver variants do not inherit that node. The driver mirrors the color to
 three physical LEDs using the stock encoding. Application policy does not
 contain board-specific GPIO numbers, SPI devices, or encoding.
