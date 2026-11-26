@@ -1,3 +1,4 @@
+#include "platform/status_led.hpp"
 #include <atomic>
 // Shared native AR9311 composition root: existing radio, software HUD, platform media.
 #include "base/ltrace.hpp"
@@ -214,6 +215,7 @@ Options options(int argc, char **argv) {
 
 display::SessionResult run_session(Options o, Settings& settings, display::ModeTrial& mode) {
     try {
+        platform::StatusLed status_led;
         o.platform.display_height = mode.current.height;
         o.platform.display_hz = mode.current.hz;
         o.platform.display_width = mode.current.width();
@@ -793,6 +795,10 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
             }
             // The bind overlay draws from these; it replaces the menu notices
             // so binding never pops the menu over the video.
+            status_led.set(platform::receiver_status(
+                !recording.error.empty() || !unsupported_video.empty(),
+                state.bind_state == gnd::BIND_RUNNING,
+                model.backend.media.video_fresh(now), recording.recording));
             model.bind_state = state.bind_state;
             model.bind_secs_left = state.bind_secs_left;
             model.bind_peer = state.bind_peer;
