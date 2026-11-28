@@ -1,6 +1,9 @@
 // The keys: the menu, the canopy, the channel page and the gallery.
 #include "hud/osd_detail.hpp"
 
+#include <pthread.h>
+#include <sched.h>
+
 
 void OSD::handle_key(int key) {
     // Flags set under the mutex; acted on AFTER unlock to avoid deadlock.
@@ -468,6 +471,9 @@ void OSD::handle_key(int key) {
                             // Saved; a change restarts the radio with that config.
                             asked_.profile = parts_.radio.set_link_profile(menu_ar_profile);
                             break;
+                        case 18:
+                            analog_enter();
+                            break;
                         case 9:
                             // Bind. Parked for the RX thread - the menu runs on the
                             // OSD thread and must never call into the baseband SDK.
@@ -581,4 +587,32 @@ void OSD::format_card_enter() {
     if (!started.ok) { format_info_ = started; return; }
     formatting_ = true;
     printf("menu: DVR > Format Card: %s\n", started.text.c_str());
+}
+
+// RADIO > Analog Receiver: hands the VRX to AnalogAscention's control script,
+// which stops kestrel-gnd. So it runs in a session of its own and is not
+// waited for: it has to outlive this process, and this process has to be free
+// to exit when S70kestrel tells it to (waiting here, under osd_mutex, would
+// hold that up until the kill -9). Not in the air and not while recording,
+// as Format: the picture goes, and with it the recording.
+void OSD::analog_enter() {
+    if (arm_seen_ == 1) { analog_result_ = "DISARM FIRST"; return; }
+    if (DvrRecorder::instance().is_recording()) { analog_result_ = "STOP RECORDING FIRST"; return; }
+    const std::string command = std::string("setsid ") + kAnalogCtl + " start </dev/null >/dev/null 2>&1 &";
+    // This is the key thread, real-time (SCHED_FIFO 10), and posix_spawn hands
+    // the calling thread's scheduling to the shell and everything it starts:
+    // the receiver's threads would run real-time, into the kernel's real-time
+    // limit, and stall once a second. Ordinary scheduling for the spawn (as
+    // DvrRecorder's OrdinaryScheduling does for a recording), back afterwards;
+    // run_shell does not wait for the detached script.
+    int policy = SCHED_OTHER;
+    struct sched_param was = {};
+    const bool rt = pthread_getschedparam(pthread_self(), &policy, &was) == 0 && policy != SCHED_OTHER;
+    if (rt) {
+        struct sched_param ordinary = {};
+        pthread_setschedparam(pthread_self(), SCHED_OTHER, &ordinary);
+    }
+    analog_result_ = run_shell(command.c_str()) == 0 ? "STARTING" : "COULD NOT START";
+    if (rt) pthread_setschedparam(pthread_self(), policy, &was);
+    printf("menu: RADIO > Analog Receiver: %s\n", analog_result_.c_str());
 }

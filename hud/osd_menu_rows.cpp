@@ -17,6 +17,7 @@ std::vector<std::pair<const char*, int>> OSD::ar_rf_items() const {
         v.push_back({"Bind", 9});
         // Also unlinked: a firmware that does not link is the time to switch.
         v.push_back({"VRX Radio Firmware", 13});
+        if (analog_installed()) v.push_back({"Analog Receiver", 18});
         return v;
     }
     // Channel opens the channel page. Channel Hop (id 7) was the other half of
@@ -39,6 +40,7 @@ std::vector<std::pair<const char*, int>> OSD::ar_rf_items() const {
     // below it; stock: 20 or 40, the radio restarts).
     v.push_back({"Max Bandwidth", 11});
     v.push_back({"VRX Radio Firmware", 13});
+    if (analog_installed()) v.push_back({"Analog Receiver", 18});
     // Open8030 on the goggle: which of its radio configs it runs.
     if (link_->radio_fw == 1) v.push_back({"Link Profile", 17});
     // MCS, Bandwidth and LNA Mode were removed rather than left visible.
@@ -168,6 +170,8 @@ void OSD::menu_action_status(int tab, int i, char* hint, size_t hcap,
                 default: break;
             }
         }
+        if (i < (int)rfi.size() && rfi[i].second == 18)
+            snprintf(status, scap, "%s", analog_result_.c_str());
     }
 }
 
@@ -628,6 +632,12 @@ std::vector<OSD::MenuItem> OSD::menu_items(int tab) const {
                     "Each block the air radio has to send again takes the link one MCS "
                     "lower at once, and it climbs back only after 5 s without one: steadier "
                     "latency, less bitrate. OFF, the default: the MCS follows the signal."}); break;
+                case 18: items.push_back({it.first, 3,
+                    "Turns this VRX into an analog 5.8 GHz receiver (AnalogAscention). Back "
+                    "to HD in its menu returns here, and so does a restart unless its "
+                    "Start-up is REMEMBER. The radio's firmware is not changed: the analog "
+                    "one runs from RAM.",
+                    "ENTER: START"}); break;
                 default: items.push_back({it.first, 1}); break;
             }
         }
