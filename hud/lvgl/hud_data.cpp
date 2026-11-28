@@ -81,8 +81,8 @@ HudData Controller::hud_data(uint64_t now,bool recording_snapshot) const {
     left.detail2 = "\xee\x80\x81   " + (temperature ? number(t.cpu_temperature_x100 / 100.0f, "VRX %.0fC") : "VRX --C");
     left.detail2_alert = temperature ? temperature_alert(t.cpu_temperature_x100 / 100.0f) : 0;
     // Local hardware readings may be absent independently of the RF link.
-    left.detail2_tail = t.fresh(now) && t.voltage_mv > 0 ? "   " + number(t.voltage_mv / 1000.0f, "%.1fV") : std::string();
-    if (t.fresh(now) && t.voltage_mv > 0) {
+    left.detail2_tail = t.local_fresh(now) && t.voltage_mv > 0 ? "   " + number(t.voltage_mv / 1000.0f, "%.1fV") : std::string();
+    if (t.local_fresh(now) && t.voltage_mv > 0) {
         const float volts = t.voltage_mv / 1000.0f;
         left.supply_alert = canopy::cell_alert(volts / canopy::supply_cells(volts));
     }
@@ -141,7 +141,7 @@ HudData Controller::hud_data(uint64_t now,bool recording_snapshot) const {
     auto& video = add(HudMetricId::Mcs, "VIDEO MCS", t.link_valid(now) && t.mcs >= 0, std::to_string(ar_mcs_label(t.mcs)));
     video.metered = true; video.level = right.lower_level;
     add(HudMetricId::FrequencyRaw, t.frequency_mhz > 0 ? "FREQUENCY" : "FREQ RAW", frequency_valid, frequency);
-    add(HudMetricId::ReceiverVoltage, "RX SUPPLY", t.fresh(now) && t.voltage_mv > 0, number(t.voltage_mv / 1000.0f, "%.2f"), "V");
+    add(HudMetricId::ReceiverVoltage, "RX SUPPLY", t.local_fresh(now) && t.voltage_mv > 0, number(t.voltage_mv / 1000.0f, "%.2f"), "V");
     add(HudMetricId::CpuTemperature, "VRX CPU", t.local_fresh(now) && t.cpu_temperature_x100 != Telemetry::unavailable, number(t.cpu_temperature_x100 / 100.0f, "%.0f"), "C");
     add(HudMetricId::RfTemperatureRaw, "RF TEMP RAW", t.fresh(now) && t.rf_temperature_raw != Telemetry::unavailable, std::to_string(t.rf_temperature_raw));
     add(HudMetricId::FlightState, "FC STATE", fresh && f.arm >= 0, f.arm == 1 ? "ARMED" : "DISARMED");

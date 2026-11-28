@@ -360,7 +360,7 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
         // DVR > Format Card: what the firmware would erase, checked again when
         // the DVR tab opens; a first OK arms it, a second within 5 s starts it.
         dvr::format_card::Result format_info=dvr::format_card::check();
-        std::string temperature_path;
+        std::string temperature_path, supply_path;
         uint64_t temperature_next=0,temperature_search=0;
         uint64_t format_armed_until=0,format_armed_at=0;
         int format_armed_tab=-1,format_armed_row=-1;
@@ -577,6 +577,9 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
             auto &telemetry = model.backend.vrx;
             // The receiver's SoC temperature (fpvOS ar9311_temp, hwmon), once
             // a second; looked for again every 10 s while it is not there.
+            // Its supply too, where the board's device tree names the ADC
+            // channel: ar9311_temp's in0_input (Ascent VRX), or vin_hwmon's
+            // (P1 ground units), millivolts; RX SUPPLY on the HUD.
             if(now>=temperature_next) {
                 temperature_next=now+1000000;
                 if(temperature_path.empty() && now>=temperature_search) {
@@ -584,7 +587,14 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
                     std::error_code ec;
                     for(const auto& entry:std::filesystem::directory_iterator("/sys/class/hwmon",ec)) {
                         std::ifstream name(entry.path()/"name");std::string text;
-                        if(std::getline(name,text) && text=="ar9311_temp") {temperature_path=(entry.path()/"temp1_input").string();break;}
+                        if(!std::getline(name,text)) continue;
+                        if(text=="ar9311_temp") {
+                            temperature_path=(entry.path()/"temp1_input").string();
+                            if(supply_path.empty() && std::filesystem::exists(entry.path()/"in0_input",ec))
+                                supply_path=(entry.path()/"in0_input").string();
+                        }
+                        // the P1 ground units: the ADC's own driver, behind its divider (iio-hwmon)
+                        if(text=="vin_hwmon") supply_path=(entry.path()/"in0_input").string();
                     }
                 }
                 long millidegrees=0;
@@ -594,7 +604,12 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
                 } else {
                     telemetry.cpu_temperature_x100=kestrel_ui::Telemetry::unavailable;
                     if(!temperature_path.empty()) temperature_path.clear();
+                    supply_path.clear();
                 }
+                long millivolts=0;
+                std::ifstream supply(supply_path);
+                telemetry.voltage_mv = !supply_path.empty() && (supply>>millivolts) && millivolts>0 && millivolts<60000
+                    ? int(millivolts) : 0;
             }
             telemetry.stamp_us = state.link.last_update_ms * 1000;
             telemetry.connected = state.link.active && state.link.state == gnd::kLinkUp;
