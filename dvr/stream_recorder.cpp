@@ -1,6 +1,7 @@
 #include "stream_recorder.hpp"
 #include "dvr_recover.hpp"
 #include "writer.hpp"
+#include "base/video_pool.hpp"
 #include "third_party/minimp4.h"
 #include <algorithm>
 #include <cerrno>
@@ -52,13 +53,25 @@ void StreamRecorder::stop() {
     std::lock_guard<std::mutex> lock(mutex_);
     if(requested_.exchange(false)) {Item item;item.kind=Item::Stop;queue_.push_back(std::move(item));wake_.notify_one();}
 }
+// The recording is already failing: stale pictures should not pin radio
+// buffers while the SD writer finishes. Keep control messages in order.
+void StreamRecorder::discard_frames_locked() {
+    for(auto it=queue_.begin();it!=queue_.end();) {
+        if(it->kind==Item::Frame) {
+            queued_-=it->size();
+            ++state_.dropped;
+            it=queue_.erase(it);
+        } else ++it;
+    }
+}
 void StreamRecorder::enqueue(Item item) {
     std::lock_guard<std::mutex> lock(mutex_);
     if(shutdown_ || (item.kind==Item::Frame && !requested_)) return;
-    if(item.kind==Item::Frame && (queue_.size()>=60 || queued_+item.size()>(4u<<20))) {
+    if(item.kind==Item::Frame && (queue_.size()>=kFrameQueueCount || item.size()>kFrameQueueBytes || queued_>kFrameQueueBytes-item.size())) {
         ++state_.dropped;
         // Do not silently produce a recording with an unbounded gap.
         state_.error="Recording storage cannot keep up";
+        discard_frames_locked();
         requested_=false; Item stop;stop.kind=Item::Stop;queue_.push_back(std::move(stop));wake_.notify_one();return;
     }
     if(item.kind==Item::Frame)item.telemetry=latest_telemetry_;
@@ -151,7 +164,7 @@ void StreamRecorder::run() {
             std::lock_guard<std::mutex> lock(mutex_);state_.error="Recording storage write failed";
         }
         writer.reset();
-        if(fd>=0) {::close(fd);fd=-1;}
+        if(fd>=0) {::close(fd);fd=-1;video_pool::trim();}
         if(!frames && !file.empty()) unlink(file.c_str());
         {std::lock_guard<std::mutex> lock(mutex_);state_.finishing=false;}
     };
@@ -209,10 +222,11 @@ void StreamRecorder::run() {
                 const std::string name=file.substr(file.find_last_of('/')+1);
                 writer=std::make_unique<DvrWriter>(fd,directory_,name,[this](const char* why) {
                     std::lock_guard<std::mutex> lock(mutex_);
+                    discard_frames_locked();
                     state_.error=std::string("Recording stopped: ")+(std::strcmp(why,"CARD FULL")==0?"card full":"card error");
                     if(requested_.exchange(false)) {Item stop;stop.kind=Item::Stop;queue_.push_back(std::move(stop));}
                     wake_.notify_one();
-                },8u<<20);
+                },kWriterBytes);
                 mux=MP4E_open(0,1,writer.get(),[](int64_t off,const void* p,size_t n,void* w){return static_cast<DvrWriter*>(w)->write(off,p,n);});
                 if(!mux) throw std::runtime_error("Cannot open MP4 writer");
                 MP4E_set_finalize(mux);MP4E_set_full_frame_rate(mux);
@@ -228,7 +242,9 @@ void StreamRecorder::run() {
             have_held=true;
             {std::lock_guard<std::mutex> lock(mutex_);state_.frames=++frames;}
         } catch(const std::exception& e) {
-            requested_=false; close();
+            requested_=false;
+            {std::lock_guard<std::mutex> lock(mutex_);discard_frames_locked();}
+            close();
             // The writer's own reason (card full) when it gave one: the muxer's
             // failure after it says less.
             std::lock_guard<std::mutex> lock(mutex_);if(state_.error.empty())state_.error=e.what();

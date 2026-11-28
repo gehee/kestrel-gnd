@@ -8,6 +8,7 @@
 #include <ctime>
 #include <dirent.h>
 #include <pthread.h>
+#include <stdexcept>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <unistd.h>
@@ -67,6 +68,7 @@ constexpr uint64_t kSpaceCheckUs    = 5000000;
 
 DvrWriter::DvrWriter(int fd, std::string dir, std::string name, std::function<void(const char*)> on_fail, size_t max_queued)
 	: fd_(fd), max_queued_(max_queued), dir_(std::move(dir)), name_(std::move(name)), on_fail_(std::move(on_fail)) {
+	if (!max_queued_) throw std::invalid_argument("DVR writer requires a nonzero memory budget");
 	start_us_ = checked_us_ = get_time_us();
 	t_ = std::thread([this] { run(); });
 }
@@ -88,6 +90,7 @@ bool DvrWriter::finish() {
 		done_ = true;
 	}
 	work_.notify_one();
+	room_.notify_all();
 	if (t_.joinable()) t_.join();
 	return !failed_;
 }
@@ -95,14 +98,20 @@ bool DvrWriter::finish() {
 int DvrWriter::write(int64_t offset, const void* buf, size_t size) {
 	if (failed_) return 1;   // the card stopped taking it: nothing more is queued
 	const uint8_t* p = static_cast<const uint8_t*>(buf);
-	{
-		std::unique_lock<std::mutex> lk(m_);
-		room_.wait(lk, [this] { return queued_ < max_queued_ || failed_ || done_; });
-		if (failed_ || done_) return 1;
-		q_.push_back({offset, std::vector<uint8_t>(p, p + size)});
-		queued_ += size;
+	// Count the worker's in-flight batch too. Split oversized muxer writes
+	// rather than exceeding the budget or waiting for impossible capacity.
+	while (size) {
+		const size_t n = std::min(size, max_queued_);
+		{
+			std::unique_lock<std::mutex> lk(m_);
+			room_.wait(lk, [this, n] { return queued_ <= max_queued_ - n || failed_ || done_; });
+			if (failed_ || done_) return 1;
+			q_.push_back({offset, std::vector<uint8_t>(p, p + n)});
+			queued_ += n;
+		}
+		work_.notify_one();
+		p += n; offset += n; size -= n;
 	}
-	work_.notify_one();
 	return failed_ ? 1 : 0;
 }
 
@@ -116,11 +125,9 @@ void DvrWriter::run() {
 			std::unique_lock<std::mutex> lk(m_);
 			work_.wait_for(lk, std::chrono::milliseconds(250), [this] { return !q_.empty() || done_; });
 			batch.swap(q_);
-			queued_ = 0;
 			done = done_;
 		}
-		room_.notify_all();
-		for (const Chunk& c : batch) {
+		for (Chunk& c : batch) {
 			size_t off = 0;
 			int room_tries = 0;
 			while (off < c.data.size() && !failed_) {
@@ -142,6 +149,13 @@ void DvrWriter::run() {
 				room_.notify_all();
 				if (on_fail_) on_fail_(err == ENOSPC ? "CARD FULL" : "CARD ERROR");
 			}
+			const size_t bytes = c.data.size();
+			std::vector<uint8_t>().swap(c.data);
+			{
+				std::lock_guard<std::mutex> lk(m_);
+				queued_ -= bytes;
+			}
+			room_.notify_all();
 		}
 		// Room on the card, now and then, from the oldest finished recordings:
 		// it was made at REC start only, and once the card was full every
