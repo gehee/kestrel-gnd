@@ -414,6 +414,9 @@ class OSD : public display::VideoListener {
         dvr::format_card::Result format_info_;
         std::string format_result_;
         void        format_card_enter();
+        // RADIO > Analog Receiver (kAnalogCtl): why it did not start, or that it is starting.
+        std::string analog_result_;
+        void        analog_enter();
         // DISPLAY > Screen Mode: 0 is Auto, then the connector's modes as
         // screen_modes() lists them. -1 until first read from screen_mode.
         int  menu_screen_mode = -1;

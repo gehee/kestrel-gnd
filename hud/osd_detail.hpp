@@ -121,6 +121,15 @@ static const int kArFwCount = 2;
 // errored frames.
 static const char* kArProfileLabels[] = { "LOW LATENCY", "BALANCED", "QUALITY" };
 static const int kArProfileCount = 3;
+// RADIO > Analog Receiver: AnalogAscention, an analog 5.8 GHz receiver that
+// runs on this VRX's own radio, when it is installed. Its control script does
+// the switch: it stops kestrel-gnd (S70kestrel stop), loads its radio image
+// into the radio's RAM, and on the way back starts kestrel-gnd again.
+inline constexpr const char* kAnalogCtl = "/usr/sbin/analogascention-ctl";
+static inline bool analog_installed() {
+    static const bool on = access(kAnalogCtl, X_OK) == 0;   // installed with the image, not while running
+    return on;
+}
 // DISPLAY > Refresh Sync's values (display::RefreshSync::mode).
 static inline const char *refresh_sync_label(int v) {
     return v == 2 ? "FOLLOW" : v == 1 ? "NUDGE" : "OFF";
